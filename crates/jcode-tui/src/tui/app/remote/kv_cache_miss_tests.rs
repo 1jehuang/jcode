@@ -289,3 +289,34 @@ fn remote_daily_rollover_corrects_provisional_low_read_in_place() {
         KvCacheMissReason::DailyRollover
     );
 }
+
+#[test]
+fn remote_account_switch_corrects_provisional_zero_read_in_place() {
+    let mut app = create_test_app();
+    app.kv_cache.kv_cache_turn_number = Some(2);
+    app.kv_cache.kv_cache_turn_call_index = 2;
+    app.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+        turn_number: 2,
+        call_index: 2,
+        missed_tokens: 33_096,
+        reason: KvCacheMissReason::ZeroRead,
+    });
+    app.push_display_message(DisplayMessage::system(
+        "ℹ️ KV cache miss [zero read] turn 2 call 2: 0 cached / 33.1K expected tokens",
+    ));
+    let count = app.display_messages.len();
+    let corrected = "KV cache miss [account_switch]: ~33.1K tokens resent (account switched claude-fox -> claude-otter (e.g. failover after a rate limit); prompt caches are per account).";
+    assert!(handle_kv_cache_miss(
+        &mut app,
+        "account_switch",
+        33_096,
+        corrected.into(),
+        true
+    ));
+    assert_eq!(app.display_messages.len(), count, "replaced, not appended");
+    assert_eq!(app.display_messages[count - 1].content, corrected);
+    assert_eq!(
+        app.kv_cache.kv_cache_miss_samples[0].reason,
+        KvCacheMissReason::AccountSwitch
+    );
+}

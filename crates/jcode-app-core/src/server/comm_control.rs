@@ -324,12 +324,14 @@ async fn active_swarm_member(
     members.get(session_id).cloned()
 }
 
+/// Live agent for `session_id`, restoring a headless worker from disk when its
+/// agent is not loaded (for example a worker that failed before a reload).
 async fn task_agent_session(
     session_id: &str,
     sessions: &SessionAgents,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<Arc<Mutex<Agent>>> {
-    let guard = sessions.read().await;
-    guard.get(session_id).cloned()
+    super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await
 }
 
 async fn resolve_assignment_target_session(
@@ -1388,6 +1390,14 @@ async fn handle_comm_assign_task_with_mode(
         coordinators: Arc::clone(swarm_coordinators),
     };
     persist_swarm_state_for(&swarm_id, &swarm_state).await;
+    // Mirror the assignment onto the requesting coordinator's matching todo so
+    // the pinned todo band shows this worker's emoji on that row.
+    super::swarm_todo_link::link_assignment(
+        &req_session_id,
+        &selected_task_id,
+        &content,
+        &target_session,
+    );
 
     broadcast_swarm_plan(
         &swarm_id,
@@ -1440,10 +1450,7 @@ async fn handle_comm_assign_task_with_mode(
     )
     .await;
 
-    let target_agent = {
-        let agent_sessions = sessions.read().await;
-        agent_sessions.get(&target_session).cloned()
-    };
+    let target_agent = task_agent_session(&target_session, sessions, swarm_members).await;
     let _ = queue_soft_interrupt_for_session(
         &target_session,
         queued_task_prompt,
@@ -1761,6 +1768,39 @@ pub(super) async fn handle_comm_task_control(
         return;
     };
 
+    // Workers spawned directly (without a plan) have no task to resume, but
+    // their owner still needs a reliable way to rouse an idle or failed one.
+    // The spawner (any ancestor in the report-back chain) owns its subtree,
+    // exactly like `stop`, so it may wake/resume/retry its own workers even
+    // when it does not hold the swarm coordinator slot. That slot can be lost
+    // across a server reload, which used to strand every worker with
+    // "Only the coordinator can control assigned tasks".
+    if task_id.trim().is_empty()
+        && action_wakes_without_plan(action)
+        && let Some(target) = target_session.as_deref()
+        && let Some(owner_swarm_id) =
+            requester_owns_target(&req_session_id, target, swarm_members).await
+        && !target_has_plan_assignment(&owner_swarm_id, target, swarm_members, swarm_plans).await
+    {
+        wake_session_without_plan(
+            id,
+            &req_session_id,
+            &owner_swarm_id,
+            target,
+            message.as_deref(),
+            client_event_tx,
+            sessions,
+            soft_interrupt_queues,
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        )
+        .await;
+        return;
+    }
+
     let swarm_id = match require_plan_driver_swarm(
         id,
         &req_session_id,
@@ -1775,6 +1815,34 @@ pub(super) async fn handle_comm_task_control(
         Some(swarm_id) => swarm_id,
         None => return,
     };
+
+    // Workers spawned directly (without a plan) have no task to resume, but
+    // the coordinator still needs a reliable way to rouse an idle one. Treat
+    // wake/resume/start on a target session with no plan-assigned task as a
+    // direct session wake instead of failing with "No swarm plan exists".
+    if task_id.trim().is_empty()
+        && action_wakes_without_plan(action)
+        && let Some(target) = target_session.as_deref()
+        && !target_has_plan_assignment(&swarm_id, target, swarm_members, swarm_plans).await
+    {
+        wake_session_without_plan(
+            id,
+            &req_session_id,
+            &swarm_id,
+            target,
+            message.as_deref(),
+            client_event_tx,
+            sessions,
+            soft_interrupt_queues,
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        )
+        .await;
+        return;
+    }
 
     let task_id = if task_id.trim().is_empty() {
         let Some(target_session) = target_session.as_deref() else {
@@ -1879,7 +1947,8 @@ pub(super) async fn handle_comm_task_control(
             // first and only then discover the agent was missing or busy,
             // leaving a live task falsely queued with its run history mangled
             // even though the request was rejected.
-            let Some(agent_arc) = task_agent_session(&assignee, sessions).await else {
+            let Some(agent_arc) = task_agent_session(&assignee, sessions, swarm_members).await
+            else {
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
                     message: format!(
@@ -2107,16 +2176,17 @@ pub(super) async fn handle_comm_task_control(
                 let prior_name = active_swarm_member(&assignee, swarm_members)
                     .await
                     .and_then(|member| member.friendly_name);
-                let summaries =
-                    if let Some(agent_arc) = task_agent_session(&assignee, sessions).await {
-                        if let Ok(agent) = agent_arc.try_lock() {
-                            agent.get_tool_call_summaries(12)
-                        } else {
-                            vec![]
-                        }
+                let summaries = if let Some(agent_arc) =
+                    task_agent_session(&assignee, sessions, swarm_members).await
+                {
+                    if let Ok(agent) = agent_arc.try_lock() {
+                        agent.get_tool_call_summaries(12)
                     } else {
                         vec![]
-                    };
+                    }
+                } else {
+                    vec![]
+                };
                 let mut salvage = format_salvage_message(
                     &assignee,
                     prior_name.as_deref(),
@@ -2242,6 +2312,207 @@ pub(super) fn handle_client_debug_response(
     client_debug_response_tx: &broadcast::Sender<(u64, String)>,
 ) {
     let _ = client_debug_response_tx.send((id, output));
+}
+
+/// Resolve a target given as a session id or unique friendly name within
+/// `swarm_id`.
+async fn resolve_swarm_member_target(
+    swarm_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Result<String, String> {
+    let members = swarm_members.read().await;
+    if let Some(member) = members.get(target) {
+        if member.swarm_id.as_deref() == Some(swarm_id) {
+            return Ok(target.to_string());
+        }
+        return Err(format!("Session '{target}' is not in this swarm."));
+    }
+    let mut matches: Vec<&str> = members
+        .values()
+        .filter(|member| member.swarm_id.as_deref() == Some(swarm_id))
+        .filter(|member| member.friendly_name.as_deref() == Some(target))
+        .map(|member| member.session_id.as_str())
+        .collect();
+    matches.sort_unstable();
+    match matches.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => Err(format!(
+            "Unknown target '{target}' - use an exact session_id or a unique friendly name within the swarm."
+        )),
+        many => Err(format!(
+            "Friendly name '{target}' is ambiguous in swarm. Use an exact session id instead. Matches: {}",
+            many.join(", ")
+        )),
+    }
+}
+
+/// Task-control actions that, on a target with no plan task, mean "wake this
+/// session and let it continue". Retry is included: a spawned worker whose
+/// turn failed has no plan task to re-dispatch, so retrying means waking it.
+fn action_wakes_without_plan(action: TaskControlAction) -> bool {
+    matches!(
+        action,
+        TaskControlAction::Wake
+            | TaskControlAction::Resume
+            | TaskControlAction::Start
+            | TaskControlAction::Retry
+    )
+}
+
+/// When `req_session_id` is a spawner (any ancestor) of `target`, return the
+/// target's swarm id. Ownership follows the report-back chain, the same rule
+/// `stop` uses, so it survives losing the coordinator slot.
+async fn requester_owns_target(
+    req_session_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Option<String> {
+    let members = swarm_members.read().await;
+    let swarm_id = members.get(req_session_id)?.swarm_id.clone()?;
+    let target_id = if members.contains_key(target) {
+        target.to_string()
+    } else {
+        let mut matches = members
+            .values()
+            .filter(|member| member.swarm_id.as_deref() == Some(swarm_id.as_str()))
+            .filter(|member| member.friendly_name.as_deref() == Some(target))
+            .map(|member| member.session_id.clone());
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        first
+    };
+    if target_id == req_session_id {
+        return None;
+    }
+    let target_member = members.get(&target_id)?;
+    if target_member.swarm_id.as_deref() != Some(swarm_id.as_str()) {
+        return None;
+    }
+    super::swarm_is_self_or_ancestor(&members, req_session_id, &target_id).then_some(swarm_id)
+}
+
+/// Whether `target` (session id or friendly name) owns any task in the swarm
+/// plan. Targets without plan tasks are woken directly instead.
+async fn target_has_plan_assignment(
+    swarm_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+) -> bool {
+    let resolved = resolve_swarm_member_target(swarm_id, target, swarm_members)
+        .await
+        .unwrap_or_else(|_| target.to_string());
+    let plans = swarm_plans.read().await;
+    plans.get(swarm_id).is_some_and(|plan| {
+        plan.items.iter().any(|item| {
+            matches!(item.assigned_to.as_deref(), Some(owner) if owner == target || owner == resolved)
+        })
+    })
+}
+
+/// Wake an idle swarm member that has no plan task to resume.
+///
+/// Starts a tracked live turn immediately when the agent is idle. When it is
+/// busy, the message is queued as a soft interrupt, which a running turn
+/// drains at its next safe point.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "direct wake needs the same swarm bookkeeping handles as task control"
+)]
+async fn wake_session_without_plan(
+    id: u64,
+    req_session_id: &str,
+    swarm_id: &str,
+    target: &str,
+    message: Option<&str>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &super::SessionInterruptQueues,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    event_counter: &Arc<std::sync::atomic::AtomicU64>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+) {
+    let session_id = match resolve_swarm_member_target(swarm_id, target, swarm_members).await {
+        Ok(session_id) => session_id,
+        Err(message) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message,
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    if session_id == req_session_id {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Coordinator cannot wake itself.".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    if task_agent_session(&session_id, sessions, swarm_members)
+        .await
+        .is_none()
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!(
+                "Session '{}' has no live agent on the server. Spawn a replacement instead.",
+                session_id
+            ),
+            retry_after_secs: None,
+        });
+        return;
+    }
+
+    let wake_message = match message.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => format!("Coordinator requested you wake and continue.\n\n{text}"),
+        None => "Coordinator requested you wake and continue your assigned work. When finished, report back with swarm action=report.".to_string(),
+    };
+
+    let woke = super::live_turn::run_live_turn_if_idle(
+        &session_id,
+        &wake_message,
+        None,
+        sessions,
+        super::live_turn::LiveTurnSwarmContext::new(
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        ),
+    )
+    .await;
+    let status = if woke {
+        "running"
+    } else {
+        let _ = queue_soft_interrupt_for_session(
+            &session_id,
+            wake_message,
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await;
+        "queued"
+    };
+
+    let _ = client_event_tx.send(ServerEvent::CommTaskControlResponse {
+        id,
+        action: "wake".to_string(),
+        task_id: "(no plan task)".to_string(),
+        target_session: Some(session_id),
+        status: status.to_string(),
+        summary: PlanGraphStatus::empty_for_swarm(swarm_id),
+    });
 }
 
 /// Authorize a session to drive task dispatch for its swarm plan.

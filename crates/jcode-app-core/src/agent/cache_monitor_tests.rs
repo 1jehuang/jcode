@@ -168,3 +168,145 @@ async fn native_compaction_cache_refresh_is_classified_before_compaction_is_anno
         assert_eq!(compaction_seen, !discard_compaction);
     }
 }
+
+/// Replays the 2026-10-19 incident: a 429 on account `claude-fox` failed the
+/// turn over to `claude-otter` with the same model. The new account read 0
+/// cached tokens, which used to be reported as an unexplained zero read.
+#[derive(Clone)]
+struct AccountFailoverProvider {
+    calls: Arc<AtomicUsize>,
+    account: Arc<std::sync::Mutex<String>>,
+}
+
+#[async_trait]
+impl Provider for AccountFailoverProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let (read, write) = if call == 0 { (33_000, 96) } else { (0, 39_721) };
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(StreamEvent::TokenUsage {
+                input_tokens: Some(483),
+                output_tokens: Some(5),
+                cache_read_input_tokens: Some(read),
+                cache_creation_input_tokens: Some(write),
+            }),
+            Ok(StreamEvent::TextDelta("answer".into())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        "claude-opus-5-5".into()
+    }
+
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        Some(jcode_provider_core::ResolvedCredential::Oauth)
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        Some(self.account.lock().unwrap().clone())
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+async fn run_account_turns(switch_account: bool) -> Vec<ServerEvent> {
+    let account = Arc::new(std::sync::Mutex::new("claude-fox".to_string()));
+    let provider: Arc<dyn Provider> = Arc::new(AccountFailoverProvider {
+        calls: Arc::new(AtomicUsize::new(0)),
+        account: account.clone(),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    for (index, text) in ["warm cache", "continue"].into_iter().enumerate() {
+        if index == 1 && switch_account {
+            // Same as an accepted failover route: rebind runtime and session.
+            *account.lock().unwrap() = "claude-otter".into();
+            agent.session.route_api_method = Some("claude-oauth@claude-otter".into());
+        }
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        );
+        agent.run_turn_streaming_mpsc(tx.clone()).await.unwrap();
+    }
+    let mut misses = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, ServerEvent::KvCacheMiss { .. }) {
+            misses.push(event);
+        }
+    }
+    misses
+}
+
+#[tokio::test]
+async fn account_failover_miss_names_both_accounts_with_readable_counts() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let misses = run_account_turns(true).await;
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    let ServerEvent::KvCacheMiss {
+        reason,
+        harness_caused,
+        missed_tokens,
+        expected_tokens,
+        read_tokens,
+        message,
+        ..
+    } = &misses[0]
+    else {
+        unreachable!()
+    };
+    eprintln!("account failover notice: {message}");
+    assert_eq!(reason, "account_switch");
+    assert!(!harness_caused);
+    assert_eq!(
+        (*expected_tokens, *read_tokens, *missed_tokens),
+        (33_096, 0, 33_096)
+    );
+    assert!(message.contains("[account_switch]"), "{message}");
+    assert!(message.contains("claude-fox -> claude-otter"), "{message}");
+    assert!(message.contains("~33.1K tokens resent"), "{message}");
+    assert!(!message.contains("33096"), "raw count leaked: {message}");
+}
+
+#[tokio::test]
+async fn same_account_zero_read_explains_what_was_ruled_out() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let misses = run_account_turns(false).await;
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    let ServerEvent::KvCacheMiss {
+        reason, message, ..
+    } = &misses[0]
+    else {
+        unreachable!()
+    };
+    eprintln!("same-account zero read notice: {message}");
+    assert_eq!(reason, "zero_read");
+    assert!(
+        message.contains("read 0 of the 33.1K-token prefix"),
+        "{message}"
+    );
+    assert!(message.contains("after the previous call"), "{message}");
+    assert!(
+        message.contains("same provider, model, account"),
+        "{message}"
+    );
+}
