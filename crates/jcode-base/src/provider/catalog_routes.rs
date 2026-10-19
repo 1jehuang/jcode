@@ -1175,7 +1175,7 @@ mod tests {
     struct EnvGuard {
         vars: Vec<(&'static str, Option<std::ffi::OsString>)>,
         _temp: tempfile::TempDir,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: crate::storage::TestEnvGuard,
     }
 
     impl EnvGuard {

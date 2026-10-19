@@ -1572,12 +1572,19 @@ pub(crate) fn last_chat_frame() -> Option<Arc<PreparedChatFrame>> {
 #[cfg(test)]
 pub(crate) fn render_state_test_lock() -> RenderStateTestGuard {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    // Global lock order is env lock -> render lock: rendering tests touch env
+    // (config, JCODE_HOME) while holding the render lock, and env-taking tests
+    // render. Acquiring env first removes the AB-BA cycle that hung ui::tests.
+    let env_guard = crate::storage::lock_test_env();
     let guard = LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     RENDER_STATE_LOCK_HELD.with(|held| held.set(true));
-    RenderStateTestGuard { _guard: guard }
+    RenderStateTestGuard {
+        _guard: guard,
+        _env_guard: env_guard,
+    }
 }
 
 /// Guard for [`render_state_test_lock`] that also records ownership on this
@@ -1586,6 +1593,11 @@ pub(crate) fn render_state_test_lock() -> RenderStateTestGuard {
 #[cfg(test)]
 pub(crate) struct RenderStateTestGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
+    // Held for the render guard's whole lifetime: releasing env earlier would
+    // let a sibling take env and wait on render while this thread still holds
+    // render, reopening the AB-BA window. Drops after `_guard` (fields drop in
+    // declaration order), so the LIFO env->render order holds on release too.
+    _env_guard: crate::storage::TestEnvGuard,
 }
 
 #[cfg(test)]

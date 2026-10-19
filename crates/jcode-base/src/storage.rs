@@ -31,10 +31,38 @@ pub fn test_env_lock() -> &'static Mutex<()> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub fn lock_test_env() -> MutexGuard<'static, ()> {
-    test_env_lock()
+thread_local! {
+    /// Whether this thread holds the env lock, so nested `lock_test_env`
+    /// calls on the same thread no-op instead of self-deadlocking.
+    static TEST_ENV_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Reentrant guard for the shared test env lock.
+///
+/// Same-thread nesting returns a no-op guard (`std::sync::Mutex` is not
+/// reentrant); cross-thread callers still serialize on the same mutex.
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestEnvGuard(Option<MutexGuard<'static, ()>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        if self.0.take().is_some() {
+            TEST_ENV_LOCK_HELD.with(|held| held.set(false));
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn lock_test_env() -> TestEnvGuard {
+    if TEST_ENV_LOCK_HELD.with(|held| held.get()) {
+        return TestEnvGuard(None);
+    }
+    let guard = test_env_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    TEST_ENV_LOCK_HELD.with(|held| held.set(true));
+    TestEnvGuard(Some(guard))
 }
 
 #[cfg(test)]
