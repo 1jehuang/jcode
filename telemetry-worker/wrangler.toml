@@ -79,5 +79,9 @@ dataset = "jcode_geo_firehose"
 binding = "FIREHOSE_CONCURRENCY"
 dataset = "jcode_concurrency_firehose"
 
+[[analytics_engine_datasets]]
+binding = "FIREHOSE_USAGE"
+dataset = "jcode_usage_firehose"
+
 [vars]
 ALLOWED_ORIGIN = "*"

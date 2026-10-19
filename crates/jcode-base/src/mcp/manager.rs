@@ -425,6 +425,23 @@ impl McpManager {
         names
     }
 
+    /// Tool definitions for one connected server, or `None` when it is not
+    /// connected. Cheaper than [`Self::all_tools`] when reacting to a single
+    /// server's connection.
+    pub async fn server_tools(&self, server_name: &str) -> Option<Vec<McpToolDef>> {
+        if let Some(handle) = self.pool_handles.read().await.get(server_name)
+            && !handle.is_closed()
+        {
+            return Some(handle.tools());
+        }
+        if let Some(client) = self.owned_clients.read().await.get(server_name)
+            && !client.handle().is_closed()
+        {
+            return Some(client.tools());
+        }
+        None
+    }
+
     /// Get all available tools from all connected servers
     pub async fn all_tools(&self) -> Vec<(String, McpToolDef)> {
         let mut tools = Vec::new();

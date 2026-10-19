@@ -194,7 +194,7 @@ fn test_websocket_continuation_delta_skips_reasoning_items() {
         }),
     ];
 
-    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2);
+    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2, &[]);
 
     assert_eq!(skipped_reasoning, 1);
     assert_eq!(delta.len(), 2);
@@ -206,6 +206,181 @@ fn test_websocket_continuation_delta_skips_reasoning_items() {
     );
     assert_eq!(delta[0]["type"], "function_call_output");
     assert_eq!(delta[1]["type"], "message");
+}
+
+#[test]
+fn websocket_delta_removes_only_matched_previous_response_output() {
+    let output = vec![
+        serde_json::json!({"type":"message", "id":"msg_1", "status":"completed", "role":"assistant", "phase":"commentary", "content":[{"type":"output_text", "text":"Working", "annotations":[]}]}),
+        serde_json::json!({"type":"function_call", "id":"fc_1", "status":"completed", "call_id":"call_1", "name":"read", "arguments":"{ \"path\": \"file\" }"}),
+    ];
+    let replay_text = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"Working"}]});
+    let replay_call = serde_json::json!({"type":"function_call", "call_id":"call_1", "name":"read", "arguments":"{\"path\":\"file\"}"});
+    let callback =
+        serde_json::json!({"type":"function_call_output", "call_id":"call_1", "output":"done"});
+    let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"Client-injected history"}]});
+    let injected_call = serde_json::json!({"type":"function_call", "call_id":"client_call", "name":"read", "arguments":"{}"});
+    let user = serde_json::json!({"type":"message", "role":"user", "content":[{"type":"input_text", "text":"next"}]});
+    let input = vec![
+        user.clone(),
+        replay_text.clone(),
+        replay_call,
+        callback.clone(),
+        injected.clone(),
+        injected_call.clone(),
+        replay_text.clone(),
+        user.clone(),
+    ];
+    let (delta, skipped) = persistent_ws_incremental_items(&input, 1, &output);
+    assert_eq!(skipped, 2);
+    assert_eq!(
+        delta,
+        vec![callback, injected, injected_call, replay_text, user]
+    );
+    assert_eq!(input.len(), 8, "full canonical history must not be mutated");
+    let (without_output, skipped) = persistent_ws_incremental_items(&input, 1, &[]);
+    assert_eq!(without_output, input[1..]);
+    assert_eq!(skipped, 0);
+}
+
+#[test]
+fn websocket_delta_preserves_unmatched_nontext_assistant_content() {
+    let previous = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"previous"}]});
+    let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"different"}]});
+    let (delta, skipped) = persistent_ws_incremental_items(&[injected.clone()], 0, &[previous]);
+    assert_eq!(delta, vec![injected]);
+    assert_eq!(skipped, 0);
+}
+
+#[test]
+fn websocket_delta_does_not_replay_custom_tool_calls_as_functions() {
+    for input in [
+        serde_json::json!("{ \"action\": \"spawn\" }"),
+        serde_json::json!({"action":"spawn"}),
+    ] {
+        let output = serde_json::json!({
+            "type":"custom_tool_call", "id":"ctc_1", "status":"completed",
+            "call_id":"call_1", "name":"swarm", "input":input,
+        });
+        let replay = serde_json::json!({
+            "type":"function_call", "call_id":"call_1", "name":"swarm",
+            "arguments":"{\"action\":\"spawn\"}",
+        });
+        let callback = serde_json::json!({
+            "type":"function_call_output", "call_id":"call_1", "output":"done",
+        });
+        let (delta, skipped) = persistent_ws_incremental_items(
+            &[replay, callback.clone()], 0, &[output],
+        );
+        assert_eq!(delta, vec![callback]);
+        assert_eq!(skipped, 1);
+    }
+}
+
+#[test]
+fn websocket_delta_matches_normalized_empty_tool_arguments() {
+    for arguments in ["", " ", "null", " null "] {
+        let output = serde_json::json!({
+            "type":"function_call", "call_id":"call_1", "name":"read",
+            "arguments":arguments,
+        });
+        let replay = serde_json::json!({
+            "type":"function_call", "call_id":"call_1", "name":"read",
+            "arguments":"{}",
+        });
+        let (delta, skipped) = persistent_ws_incremental_items(&[replay], 0, &[output]);
+        assert!(delta.is_empty());
+        assert_eq!(skipped, 1);
+    }
+}
+
+#[test]
+fn websocket_delta_preserves_modified_custom_tool_calls() {
+    let output = serde_json::json!({
+        "type":"custom_tool_call", "call_id":"call_1", "name":"read",
+        "input":"{\"path\":\"old\"}",
+    });
+    for (id, name, arguments) in [
+        ("call_2", "read", "{\"path\":\"old\"}"),
+        ("call_1", "write", "{\"path\":\"old\"}"),
+        ("call_1", "read", "{\"path\":\"new\"}"),
+    ] {
+        let replay = serde_json::json!({
+            "type":"function_call", "call_id":id, "name":name, "arguments":arguments,
+        });
+        let (delta, skipped) = persistent_ws_incremental_items(
+            &[replay.clone()], 0, std::slice::from_ref(&output),
+        );
+        assert_eq!(delta, vec![replay]);
+        assert_eq!(skipped, 0);
+    }
+}
+
+#[test]
+fn websocket_output_bookkeeping_uses_completed_output_without_duplicates() {
+    let item = serde_json::json!({"type":"function_call", "call_id":"call_1", "name":"read", "arguments":"{}"});
+    let mut output = Vec::new();
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.output_item.done", "item":item}).to_string(),
+        &mut output,
+    );
+    assert_eq!(output, vec![item.clone()]);
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{}}"#,
+        &mut output,
+    );
+    assert_eq!(output, vec![item.clone()]);
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.completed", "response":{"output":[item.clone()]}})
+            .to_string(),
+        &mut output,
+    );
+    assert_eq!(output, vec![item.clone()]);
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+        &mut output,
+    );
+    assert_eq!(output, vec![item]);
+}
+
+#[test]
+fn websocket_empty_terminal_output_preserves_calls_for_next_delta() {
+    let call = serde_json::json!({
+        "type":"function_call", "id":"fc_1", "status":"completed",
+        "call_id":"call_1", "name":"swarm", "arguments":"{\"action\":\"spawn\"}",
+    });
+    let mut output = Vec::new();
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.output_item.done", "item":call.clone()}).to_string(),
+        &mut output,
+    );
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+        &mut output,
+    );
+    let callback = serde_json::json!({
+        "type":"function_call_output", "call_id":"call_1", "output":"spawned",
+    });
+    let (delta, skipped) = persistent_ws_incremental_items(&[call, callback.clone()], 0, &output);
+    assert_eq!(delta, vec![callback], "only the tool result is new to the provider");
+    assert_eq!(skipped, 1);
+}
+
+#[test]
+fn websocket_nonempty_terminal_output_remains_authoritative() {
+    let mut output = vec![serde_json::json!({"type":"message", "id":"old"})];
+    let final_item = serde_json::json!({"type":"message", "id":"final"});
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.completed", "response":{"output":[final_item.clone()]}}).to_string(),
+        &mut output,
+    );
+    assert_eq!(output, vec![final_item]);
+    output.clear();
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+        &mut output,
+    );
+    assert!(output.is_empty(), "no output must not fabricate a prior response");
 }
 
 #[test]
@@ -367,7 +542,7 @@ async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
         "gpt-5.6".to_string(),
         vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
     );
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         provider.set_reasoning_effort(mode).unwrap();
         for (configured, expected) in [
             ("low", "low"),
@@ -400,7 +575,7 @@ async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
         "gpt-5.6".to_string(),
         vec!["none".into(), "low".into(), "max".into()],
     );
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         let effort = provider.api_reasoning_effort_with_swarm_root(Some(mode), Some("none"));
         let request = OpenAIProvider::build_response_request(
             "gpt-5.6",
@@ -438,7 +613,6 @@ fn configured_swarm_root_effort_reads_real_config() {
             ])
             .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
             .env("JCODE_SWARM_ROOT_EFFORT", "low")
-            .env("JCODE_SWARM_DEEP_ROOT_EFFORT", "none")
             .output()
             .expect("run isolated config test");
         assert!(
@@ -461,7 +635,7 @@ fn configured_swarm_root_effort_reads_real_config() {
         "gpt-5.6".into(),
         vec!["none".into(), "low".into(), "max".into()],
     );
-    for (mode, expected) in [("swarm", "low"), ("swarm-deep", "none")] {
+    for (mode, expected) in [("swarm", "low")] {
         provider.set_reasoning_effort(mode).unwrap();
         let effort = provider.api_reasoning_effort(provider.reasoning_effort().as_deref());
         let request = OpenAIProvider::build_response_request(

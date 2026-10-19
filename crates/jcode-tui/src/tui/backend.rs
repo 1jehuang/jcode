@@ -258,6 +258,7 @@ pub struct RemoteConnection {
     #[cfg(test)]
     protocol_bytes_scanned: usize,
     has_loaded_history: bool,
+    last_account_usage_poll: Option<Instant>,
     call_output_tokens_seen: u64,
 }
 
@@ -276,6 +277,10 @@ const READ_BUFFER_SHRINK_THRESHOLD: usize = 256 * 1024;
 /// above typical streaming line sizes so steady-state traffic never causes
 /// grow/shrink thrash.
 const READ_BUFFER_RETAIN_CAPACITY: usize = 64 * 1024;
+
+fn account_usage_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
+    last_poll.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(30))
+}
 
 fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool {
     buffered
@@ -306,7 +311,7 @@ pub(crate) struct ReplayRemoteState {
 impl RemoteConnection {
     /// Connect to the server
     pub async fn connect() -> Result<Self> {
-        Self::connect_with_session(None, None, false, false, None).await
+        Self::connect_with_session(None, None, false, None, false, None).await
     }
 
     /// Connect to the server and optionally resume a specific session.
@@ -317,6 +322,7 @@ impl RemoteConnection {
         resume_session: Option<&str>,
         client_instance_id: Option<&str>,
         client_has_local_history: bool,
+        history_base: Option<crate::protocol::HistoryBase>,
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
@@ -325,6 +331,12 @@ impl RemoteConnection {
         let stream = Stream::connect(server::socket_path()).await?;
         let socket_connect_ms = socket_connect_start.elapsed().as_millis();
         let (reader, writer) = stream.into_split();
+        // Quotas for headed clients belong to this daemon connection. Clear
+        // previous/local snapshots before any startup account rows are drawn.
+        crate::usage::clear_remote_account_usage();
+        if !super::is_ssh_remote() {
+            crate::usage::hydrate_remote_account_usage(&server::socket_path());
+        }
 
         let mut conn = Self {
             reader: BufReader::new(reader),
@@ -343,6 +355,7 @@ impl RemoteConnection {
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
+            last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         };
 
@@ -358,12 +371,14 @@ impl RemoteConnection {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            supports_server_failover: false,
             id: conn.next_request_id,
             working_dir,
             selfdev,
             target_session_id: resume_target.clone(),
             client_instance_id: conn.client_instance_id.clone(),
             client_has_local_history: client_has_local_history && !super::is_ssh_remote(),
+            history_base: history_base.filter(|_| !super::is_ssh_remote()),
             allow_session_takeover,
             crash_on_disconnect: false,
             continue_on_disconnect: super::is_ssh_remote(),
@@ -464,6 +479,7 @@ impl RemoteConnection {
             | Request::GetHistory { id }
             | Request::ResumeSession { id, .. }
             | Request::GetModelCatalog { id, .. }
+            | Request::AccountUsage { id }
             | Request::GetState { id } => Some(*id),
             _ => None,
         };
@@ -690,6 +706,20 @@ impl RemoteConnection {
         })
         .await?;
         Ok(id)
+    }
+
+    /// Request account quotas from the daemon, never from the render thread.
+    /// The daemon shares in-flight fetches and applies provider retry backoff.
+    pub async fn poll_account_usage(&mut self) -> Result<()> {
+        let now = Instant::now();
+        if !account_usage_poll_due(self.last_account_usage_poll, now) {
+            return Ok(());
+        }
+        // Throttle failed sends too, so a slow connection cannot flood retries.
+        self.last_account_usage_poll = Some(now);
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::AccountUsage { id }).await
     }
 
     /// Resume a specific session by ID
@@ -1408,6 +1438,7 @@ impl RemoteConnection {
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
+            last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         }
     }
