@@ -104,7 +104,7 @@ pub(super) async fn spawn_tracked_live_turn(
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
-    let Ok(_admission) = crate::runtime_activity::global().try_enter() else {
+    let Ok(admission) = crate::runtime_activity::global().try_enter() else {
         return false;
     };
     update_member_status(
@@ -122,7 +122,10 @@ pub(super) async fn spawn_tracked_live_turn(
     let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
     let session_id = session_id.to_string();
     let agent_arc = OwnedMutexGuard::mutex(&agent).clone();
-    crate::runtime_activity::spawn(async move {
+    // The task owns the admission, reserved before spawning. A usage-limit
+    // wait releases it so idle runtime upgrades are not deferred meanwhile.
+    tokio::spawn(async move {
+        let mut admission = Some(admission);
         let start_message_index = agent.message_count();
         let resume_reminder = system_reminder.clone();
         let pending_queue = agent.soft_interrupt_queue();
@@ -167,6 +170,8 @@ pub(super) async fn spawn_tracked_live_turn(
                     &event_tx,
                     &swarm,
                     &super::usage_limit_resume::no_wait_hook,
+                    crate::runtime_activity::global(),
+                    &mut admission,
                 )
                 .await
                 {
@@ -246,8 +251,9 @@ pub(super) async fn spawn_tracked_live_turn(
             }
         }
         drop(reservation);
-    })
-    .is_some()
+        drop(admission);
+    });
+    true
 }
 
 /// Run `message` immediately as a tracked turn if the session is live and

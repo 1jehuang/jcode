@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, OwnedRwLockReadGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 
 /// What to do with a server-initiated turn that failed with `error`.
@@ -266,6 +266,9 @@ pub(super) enum ResumeOutcome {
 /// transcript, and repeat until it completes, fails otherwise, or spends
 /// [`MAX_USAGE_LIMIT_RESUMES`]. `held` is the caller's reservation of the
 /// agent; it is released while waiting so the user can use the session.
+/// `admission` is the turn's runtime-activity reservation on `gate`: also
+/// released while waiting, taken again when the resume starts, and left held
+/// for the caller's terminal bookkeeping.
 #[expect(
     clippy::too_many_arguments,
     reason = "the resume needs the agent, its turn inputs, and the swarm status sinks"
@@ -279,6 +282,8 @@ pub(super) async fn resume_turn_after_usage_limit(
     event_tx: &mpsc::UnboundedSender<ServerEvent>,
     swarm: &LiveTurnSwarmContext,
     on_wait: OnUsageLimitWait<'_>,
+    gate: &crate::runtime_activity::ActivityGate,
+    admission: &mut Option<OwnedRwLockReadGuard<()>>,
 ) -> ResumeOutcome {
     let mut error = error;
     let mut held = held;
@@ -338,8 +343,10 @@ pub(super) async fn resume_turn_after_usage_limit(
             retry_after_secs: Some(plan.delay_secs()),
             server_resumes: true,
         });
-        // Let the user use the session while this turn waits.
+        // Let the user use the session while this turn waits, and hold no
+        // runtime admission: an idle upgrade must not wait hours for a reset.
         drop(held.take());
+        drop(admission.take());
 
         if !ticket.wait(plan.delay).await {
             crate::logging::info(&format!(
@@ -347,6 +354,9 @@ pub(super) async fn resume_turn_after_usage_limit(
             ));
             return ResumeOutcome::Superseded;
         }
+        // Admit the resumed turn only now. Like other accepted background
+        // work, it waits out an idle upgrade that is in progress.
+        *admission = Some(gate.enter().await);
         let Ok(mut guard) = Arc::clone(&agent).try_lock_owned() else {
             crate::logging::info(&format!(
                 "Usage-limit resume for {session_id} skipped: another turn is running"

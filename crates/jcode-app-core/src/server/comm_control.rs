@@ -553,7 +553,12 @@ fn spawn_assigned_task_run(
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
-    crate::runtime_activity::spawn(async move {
+    // Reserved before spawning; a usage-limit wait releases it.
+    let Ok(admission) = crate::runtime_activity::global().try_enter() else {
+        return None;
+    };
+    let mut admission = Some(admission);
+    Some(tokio::spawn(async move {
         {
             let now_ms = now_unix_ms();
             let mut plans = swarm_plans.write().await;
@@ -741,6 +746,8 @@ fn spawn_assigned_task_run(
                     &event_tx,
                     &swarm_ctx,
                     &on_wait,
+                    crate::runtime_activity::global(),
+                    &mut admission,
                 )
                 .await
                 {
@@ -957,7 +964,7 @@ fn spawn_assigned_task_run(
                 .await;
             }
         }
-    })
+    }))
 }
 
 fn format_salvage_message(
