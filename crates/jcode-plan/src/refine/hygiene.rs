@@ -153,70 +153,99 @@ pub fn path_matches_leak_glob(path: &str, glob: &str) -> bool {
 }
 
 fn fnmatch_match(pattern: &str, name: &str) -> bool {
-    fn go(p: &[u8], n: &[u8]) -> bool {
-        if p.is_empty() {
-            return n.is_empty();
+    // Operates on Unicode scalar values, not bytes: `?` consumes one
+    // character (Greptile P2), and memoization bounds `*` backtracking
+    // to O(P*N) states instead of exponential retry (Greptile P2).
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let mut memo: std::collections::HashMap<(usize, usize), bool> =
+        std::collections::HashMap::new();
+    fn go(
+        p: &[char],
+        n: &[char],
+        pi: usize,
+        ni: usize,
+        memo: &mut std::collections::HashMap<(usize, usize), bool>,
+    ) -> bool {
+        if let Some(&cached) = memo.get(&(pi, ni)) {
+            return cached;
+        }
+        let out = go_inner(p, n, pi, ni, memo);
+        memo.insert((pi, ni), out);
+        out
+    }
+    fn go_inner(
+        p: &[char],
+        n: &[char],
+        pi: usize,
+        ni: usize,
+        memo: &mut std::collections::HashMap<(usize, usize), bool>,
+    ) -> bool {
+        if pi == p.len() {
+            return ni == n.len();
         }
         // `**/` spans separators (incl. zero dirs); lone `**` spans all.
-        if p.len() >= 2 && p[0] == b'*' && p[1] == b'*' {
-            if p.len() > 2 && p[2] == b'/' {
-                for i in 0..=n.len() {
-                    if go(&p[3..], &n[i..]) {
+        if p[pi] == '*' && pi + 1 < p.len() && p[pi + 1] == '*' {
+            if pi + 2 < p.len() && p[pi + 2] == '/' {
+                for i in ni..=n.len() {
+                    if go(p, n, pi + 3, i, memo) {
                         return true;
                     }
                 }
                 return false;
             }
-            for i in 0..=n.len() {
-                if go(&p[2..], &n[i..]) {
+            for i in ni..=n.len() {
+                if go(p, n, pi + 2, i, memo) {
                     return true;
                 }
             }
             return false;
         }
         // fnmatch `*`: any run, separators included.
-        if p[0] == b'*' {
-            for i in 0..=n.len() {
-                if go(&p[1..], &n[i..]) {
+        if p[pi] == '*' {
+            for i in ni..=n.len() {
+                if go(p, n, pi + 1, i, memo) {
                     return true;
                 }
             }
             return false;
         }
-        // fnmatch `?`: any single char, separator included.
-        if p[0] == b'?' {
-            if n.is_empty() {
+        // fnmatch `?`: any single character.
+        if p[pi] == '?' {
+            if ni == n.len() {
                 return false;
             }
-            return go(&p[1..], &n[1..]);
+            return go(p, n, pi + 1, ni + 1, memo);
         }
-        if p[0] == b'[' {
-            let Some(close) = p.iter().position(|&c| c == b']') else {
+        if p[pi] == '[' {
+            let Some(rel_close) = p[pi..].iter().position(|&c| c == ']') else {
                 // No closing bracket: literal `[`.
-                if n.is_empty() || n[0] != b'[' {
+                if ni == n.len() || n[ni] != '[' {
                     return false;
                 }
-                return go(&p[1..], &n[1..]);
+                return go(p, n, pi + 1, ni + 1, memo);
             };
-            if n.is_empty() {
+            if ni == n.len() {
                 return false;
             }
-            let (mut class, rest) = (&p[1..close], &p[close + 1..]);
+            let close = pi + rel_close;
+            let mut class = &p[pi + 1..close];
+            let rest = close + 1;
             let mut negate = false;
-            if !class.is_empty() && (class[0] == b'!' || class[0] == b'^') {
+            if !class.is_empty() && (class[0] == '!' || class[0] == '^') {
                 negate = true;
                 class = &class[1..];
             }
             let mut hit = false;
             let mut ci = 0;
             while ci < class.len() {
-                if ci + 2 < class.len() && class[ci + 1] == b'-' {
-                    if class[ci] <= n[0] && n[0] <= class[ci + 2] {
+                if ci + 2 < class.len() && class[ci + 1] == '-' {
+                    if class[ci] <= n[ni] && n[ni] <= class[ci + 2] {
                         hit = true;
                     }
                     ci += 3;
                 } else {
-                    if class[ci] == n[0] {
+                    if class[ci] == n[ni] {
                         hit = true;
                     }
                     ci += 1;
@@ -225,17 +254,17 @@ fn fnmatch_match(pattern: &str, name: &str) -> bool {
             if hit == negate {
                 return false;
             }
-            return go(rest, &n[1..]);
+            return go(p, n, rest, ni + 1, memo);
         }
-        if n.is_empty() || p[0] != n[0] {
+        if ni == n.len() || p[pi] != n[ni] {
             return false;
         }
-        go(&p[1..], &n[1..])
+        go(p, n, pi + 1, ni + 1, memo)
     }
-    go(pattern.as_bytes(), name.as_bytes())
+    go(&p, &n, 0, 0, &mut memo)
 }
 
-/// Reject answer-key paths before a context reaches a model.
+// Reject answer-key paths before a context reaches a model.
 /// Mirrors harness2's `assert_no_leak_paths`.
 pub fn assert_no_leak_paths(paths: &[&str], patterns: &[&str]) -> Result<(), String> {
     if patterns.is_empty() {
@@ -361,6 +390,9 @@ mod tests {
         // `?` is exactly one char: `ab` (two) does not fit `a?`.
         assert!(!path_matches_leak_glob("abc.json", "a?.json"));
         assert!(path_matches_leak_glob("a/b", "a?b"));
+        // Greptile P2: one ? per CHARACTER, not per byte.
+        assert!(path_matches_leak_glob("秘果.json", "??.json"));
+        assert!(!path_matches_leak_glob("秘.json", "??.json"));
         // Classes, negation, `**`, and empties under true fnmatch.
         assert!(path_matches_leak_glob("a", "[a-z]"));
         assert!(!path_matches_leak_glob("A", "[a-z]"));
@@ -372,6 +404,26 @@ mod tests {
         assert!(path_matches_leak_glob("", "*"));
         assert!(path_matches_leak_glob("a/b", "a*b"));
         assert!(!path_matches_leak_glob("AXB", "a*b"));
+    }
+
+    #[test]
+    fn wildcard_matching_is_bounded() {
+        // Greptile P2: the adversarial '*a*x40*b' case must finish fast.
+        let pat = "*a".repeat(20) + "b";
+        let name = "a".repeat(48);
+        let t = std::time::Instant::now();
+        let matched = path_matches_leak_glob(&name, &pat);
+        assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+        let _ = matched;
+        // And correctness is preserved on the classic blowup shape.
+        assert!(path_matches_leak_glob(
+            &("a".repeat(40) + "b"),
+            &("*a".repeat(8) + "b")
+        ));
+        assert!(!path_matches_leak_glob(
+            &"a".repeat(40),
+            &("*a".repeat(8) + "b")
+        ));
     }
 
     #[test]

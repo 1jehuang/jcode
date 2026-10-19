@@ -107,28 +107,25 @@ pub fn inventory(surface: &SurfaceSpec, tree: &Tree) -> String {
     let mut plugins = 0;
     let mut hooks = 0;
     for rel in tree.keys() {
-        if rel.starts_with(&skill_prefix) && rel.ends_with("/SKILL.md") {
-            let middle = &rel[skill_prefix.len()..rel.len() - "/SKILL.md".len()];
-            if super::surface::valid_skill_name(middle) {
-                skills += 1;
-                continue;
-            }
+        let skill_hit = super::surface::strip_skill_component(rel, &skill_prefix, "/SKILL.md")
+            .is_some_and(super::surface::valid_skill_name);
+        if skill_hit {
+            skills += 1;
+            continue;
         }
-        if rel.starts_with("sub_agents/") && rel.ends_with("/AGENT.md") {
-            let middle = &rel["sub_agents/".len()..rel.len() - "/AGENT.md".len()];
-            if super::surface::valid_skill_name(middle) {
-                sub_agents += 1;
-                continue;
-            }
+        let sub_hit = super::surface::strip_skill_component(rel, "sub_agents/", "/AGENT.md")
+            .is_some_and(super::surface::valid_skill_name);
+        if sub_hit {
+            sub_agents += 1;
+            continue;
         }
         if super::surface::is_top_script(rel) {
             scripts += 1;
             continue;
         }
         if let Some(prefix) = &plugin_prefix
-            && rel.starts_with(prefix)
-            && rel.ends_with(".ts")
-            && super::surface::valid_skill_name(&rel[prefix.len()..rel.len() - ".ts".len()])
+            && super::surface::strip_skill_component(rel, prefix, ".ts")
+                .is_some_and(super::surface::valid_skill_name)
         {
             plugins += 1;
             continue;
@@ -160,7 +157,7 @@ pub fn inventory(surface: &SurfaceSpec, tree: &Tree) -> String {
     };
     format!(
         "{bits}; {} always-on chars",
-        comma_group(always_on_text(surface, tree).len())
+        comma_group(super::surface::char_count(&always_on_text(surface, tree)))
     )
 }
 

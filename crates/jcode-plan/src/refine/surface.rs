@@ -107,12 +107,30 @@ pub fn normalize_rel(rel: &str) -> Result<String, String> {
     Ok(r)
 }
 
+/// Middle component between a `prefix/` and a `/suffix`, or `None` when
+/// the affixes overlap or the middle is empty or nested. `skills/SKILL.md`
+/// matches prefix `skills/` and suffix `/SKILL.md` but names no component:
+/// slicing `[7..6]` panics, so every call site goes through here.
+pub(crate) fn strip_skill_component<'a>(
+    rel: &'a str,
+    prefix: &str,
+    suffix: &str,
+) -> Option<&'a str> {
+    strip_component(rel, prefix, suffix)
+}
+
+fn strip_component<'a>(rel: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    let rest = rel.strip_prefix(prefix)?;
+    let middle = rest.strip_suffix(suffix)?;
+    if middle.is_empty() || middle.contains('/') {
+        return None;
+    }
+    Some(middle)
+}
+
 fn is_skill_script(surface: &SurfaceSpec, rel: &str) -> bool {
     let prefix = surface.skill_prefix();
-    rel.starts_with(&prefix) && rel.ends_with("/SKILL.md") && {
-        let middle = &rel[prefix.len()..rel.len() - "/SKILL.md".len()];
-        valid_name(middle)
-    }
+    strip_component(rel, &prefix, "/SKILL.md").is_some_and(valid_name)
 }
 
 /// A skill-local helper: `<skill_dir>/<name>/scripts/<file>`.
@@ -151,6 +169,11 @@ fn script_refs(src: &str) -> Vec<String> {
         let base = cursor + rel_p;
         let mut after = &src[base + "python".len()..];
         after = after.strip_prefix('3').unwrap_or(after);
+        // Flags (`-m`, `-c`, `--version`, ...) are not path invocations.
+        if after.starts_with('-') {
+            cursor = base + "python".len();
+            continue;
+        }
         let Some(raw_tail) = after.strip_prefix(' ').or_else(|| after.strip_prefix('\t')) else {
             // Not a `python <path>` invocation; skip past this occurrence.
             cursor = base + "python".len();
@@ -158,11 +181,27 @@ fn script_refs(src: &str) -> Vec<String> {
         };
         // Runs of whitespace between the interpreter and the path are fine.
         let tail: &str = raw_tail.trim_start_matches([' ', '\t']);
-        let token: String = tail
-            .chars()
-            .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\'' && *c != '`')
-            .collect();
-        let token = token.trim_matches(|c| c == '(' || c == ')' || c == ',' || c == ';');
+        // Quoted path: `"scripts/x.py"` / `'scripts/x.py'`.
+        let token: String =
+            if let Some(quoted) = tail.strip_prefix('"').or_else(|| tail.strip_prefix('\'')) {
+                let quote = tail.chars().next().unwrap_or('"');
+                quoted.chars().take_while(|&c| c != quote).collect()
+            } else {
+                tail.chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\'' && *c != '`')
+                    .collect()
+            };
+        // Sentence punctuation and wrapping brackets are not part of the path.
+        let token = token.trim_matches(|c| {
+            c == '('
+                || c == ')'
+                || c == ','
+                || c == ';'
+                || c == '.'
+                || c == ':'
+                || c == '!'
+                || c == '?'
+        });
         if token.contains("scripts/") && token.ends_with(".py") {
             let t = token
                 .trim_start_matches("./")
@@ -280,17 +319,13 @@ fn valid_name(name: &str) -> bool {
 }
 
 fn is_subagent(rel: &str) -> bool {
-    rel.starts_with("sub_agents/") && rel.ends_with("/AGENT.md") && {
-        let middle = &rel["sub_agents/".len()..rel.len() - "/AGENT.md".len()];
-        valid_name(middle)
-    }
+    strip_component(rel, "sub_agents/", "/AGENT.md").is_some_and(valid_name)
 }
 
 fn is_script(rel: &str) -> bool {
-    if !rel.starts_with("scripts/") || !rel.ends_with(".py") {
+    let Some(stem) = strip_component(rel, "scripts/", ".py") else {
         return false;
-    }
-    let stem = &rel["scripts/".len()..rel.len() - ".py".len()];
+    };
     !stem.is_empty()
         && stem
             .chars()
@@ -305,9 +340,7 @@ fn is_plugin(surface: &SurfaceSpec, rel: &str) -> bool {
     match surface.plugin_dir {
         Some(dir) => {
             let prefix = format!("{dir}/");
-            rel.starts_with(&prefix)
-                && rel.ends_with(".ts")
-                && valid_name(&rel[prefix.len()..rel.len() - ".ts".len()])
+            strip_component(rel, &prefix, ".ts").is_some_and(valid_name)
         }
         None => false,
     }
@@ -339,11 +372,10 @@ pub fn skill_names(surface: &SurfaceSpec, tree: &Tree) -> Vec<String> {
     let prefix = surface.skill_prefix();
     let mut out = HashSet::new();
     for rel in tree.keys() {
-        if rel.starts_with(&prefix) && rel.ends_with("/SKILL.md") {
-            let middle = &rel[prefix.len()..rel.len() - "/SKILL.md".len()];
-            if valid_name(middle) {
-                out.insert(middle.to_string());
-            }
+        if let Some(middle) = strip_component(rel, &prefix, "/SKILL.md")
+            && valid_name(middle)
+        {
+            out.insert(middle.to_string());
         }
     }
     let mut v: Vec<String> = out.into_iter().collect();
@@ -354,8 +386,9 @@ pub fn skill_names(surface: &SurfaceSpec, tree: &Tree) -> Vec<String> {
 pub fn subagent_names(tree: &Tree) -> Vec<String> {
     let mut out = HashSet::new();
     for rel in tree.keys() {
-        if is_subagent(rel) {
-            let middle = &rel["sub_agents/".len()..rel.len() - "/AGENT.md".len()];
+        if let Some(middle) = strip_component(rel, "sub_agents/", "/AGENT.md")
+            && valid_name(middle)
+        {
             out.insert(middle.to_string());
         }
     }
@@ -371,6 +404,12 @@ pub fn always_on_text(surface: &SurfaceSpec, tree: &Tree) -> String {
         .filter_map(|a| tree.get(*a).map(String::as_str))
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Character count of a string. Caps and censuses are documented in
+/// characters, so multi-byte text is measured in chars, not UTF-8 bytes.
+pub fn char_count(text: &str) -> usize {
+    text.chars().count()
 }
 
 /// Give every skill a trigger line in always-on text; return repaired names.
@@ -395,7 +434,7 @@ pub fn autotrigger(surface: &SurfaceSpec, tree: &mut Tree) -> Vec<String> {
             "{}when {desc}, load the `{name}` skill.\n",
             surface.trigger_line_prefix
         );
-        if body.len() + line.len() + 2 > surface.always_on_max {
+        if char_count(&body) + char_count(&line) + 2 > surface.always_on_max {
             continue;
         }
         let cur = tree
@@ -432,10 +471,10 @@ pub fn validate(
     let mut errs: Vec<String> = Vec::new();
     let body = always_on_text(surface, tree);
 
-    if body.len() > surface.always_on_max {
+    if char_count(&body) > surface.always_on_max {
         errs.push(format!(
             "always-on content is {} chars, over the {} cap; {}",
-            body.len(),
+            char_count(&body),
             surface.always_on_max,
             surface.always_on_cap_reason
         ));
@@ -569,15 +608,23 @@ pub fn validate(
                 if RESERVED_SCRIPTS.contains(&base) {
                     continue;
                 }
-                // A skill-local ref (`skills/<name>/scripts/f.py`) resolves
-                // against the skill's own helper; anything else must ship
-                // at exactly the referenced rel.
+                // A skill-local ref resolves against the invoking skill's
+                // own helper dir ONLY when the reference is skill-relative
+                // (`scripts/f.py`, or `<name>/scripts/f.py` naming the
+                // invoking skill itself). A fully-qualified `skills/b/...`
+                // path must exist at exactly the path it names: falling back
+                // to another skill's helper would approve a command that
+                // fails at runtime.
                 let mut resolved = reference.clone();
                 if !have.contains(resolved.as_str()) && rel.starts_with(&skill_prefix) {
-                    let skill_name = rel[skill_prefix.len()..].split('/').next().unwrap_or("");
-                    let candidate = format!("{skill_prefix}{skill_name}/scripts/{base}");
-                    if have.contains(candidate.as_str()) {
-                        resolved = candidate;
+                    let invoking = rel[skill_prefix.len()..].split('/').next().unwrap_or("");
+                    let skill_relative = reference.strip_prefix(&skill_prefix).is_none()
+                        || reference.starts_with(&format!("{skill_prefix}{invoking}/"));
+                    if skill_relative {
+                        let candidate = format!("{skill_prefix}{invoking}/scripts/{base}");
+                        if have.contains(candidate.as_str()) {
+                            resolved = candidate;
+                        }
                     }
                 }
                 if !have.contains(resolved.as_str()) {
@@ -591,7 +638,7 @@ pub fn validate(
 
     if errs.is_empty() {
         Ok(TreeCensus {
-            always_on_chars: body.len(),
+            always_on_chars: char_count(&body),
             n_files: tree.len(),
             skills: skills.len(),
             sub_agents: subs.len(),
@@ -634,8 +681,8 @@ pub fn diff_summary(surface: &SurfaceSpec, before: &Tree, after: &Tree) -> TreeD
         added,
         removed,
         modified,
-        always_on_char_delta: always_on_text(surface, after).len() as i64
-            - always_on_text(surface, before).len() as i64,
+        always_on_char_delta: char_count(&always_on_text(surface, after)) as i64
+            - char_count(&always_on_text(surface, before)) as i64,
     }
 }
 
@@ -748,6 +795,30 @@ mod tests {
     }
 
     #[test]
+    fn malformed_component_paths_never_panic() {
+        // Greptile P1: overlapping affixes used to slice [7..6].
+        for rel in [
+            "skills/SKILL.md",
+            "sub_agents/AGENT.md",
+            "skills//SKILL.md",
+            "scripts/.py",
+            "plugin/.ts",
+            "skills/a/SKILL.md/extra",
+        ] {
+            assert!(!is_allowed(&OPENCODE_SURFACE, rel), "{rel}");
+            let mut t = Tree::new();
+            t.insert(rel.to_string(), "x".to_string());
+            // Enumeration + inventory + validation all survive.
+            assert!(skill_names(&OPENCODE_SURFACE, &t).is_empty());
+            assert!(subagent_names(&t).is_empty());
+            let inv = super::super::library::inventory(&OPENCODE_SURFACE, &t);
+            assert!(inv.contains("always-on edits only"), "{inv}");
+        }
+        assert!(!is_subagent("sub_agents/AGENT.md"));
+        assert!(!is_script("scripts/.py"));
+    }
+
+    #[test]
     fn allowed_covers_always_on_skills_scripts() {
         assert!(is_allowed(&OPENCODE_SURFACE, "systemprompt.md"));
         assert!(is_allowed(&OPENCODE_SURFACE, "skills/doc_review/SKILL.md"));
@@ -786,6 +857,22 @@ mod tests {
         let census = validate(&OPENCODE_SURFACE, &t, false).unwrap();
         assert_eq!(census.skills, 1);
         assert_eq!(census.n_files, 2);
+    }
+
+    #[test]
+    fn caps_count_characters_not_bytes() {
+        // Greptile P2: 3000 CJK chars are 3000 chars, not 9000 bytes.
+        let cjk = "\u{4e2d}".repeat(3000);
+        assert_eq!(char_count(&cjk), 3000);
+        let t = tree(&[("systemprompt.md", cjk.as_str())]);
+        validate(&OPENCODE_SURFACE, &t, false).expect("3000 chars fit 24k cap");
+        let over: String = "e".repeat(OPENCODE_SURFACE.always_on_max + 1);
+        let t2 = tree(&[("systemprompt.md", over.as_str())]);
+        assert!(
+            validate(&OPENCODE_SURFACE, &t2, false)
+                .unwrap_err()
+                .contains("over the")
+        );
     }
 
     #[test]
@@ -959,6 +1046,23 @@ mod tests {
         assert!(script_refs("i love python programming").is_empty());
         // Non-script paths are ignored.
         assert!(script_refs("run python notes/readme.txt").is_empty());
+        // Greptile P2: trailing sentence period is not part of the path.
+        assert_eq!(
+            script_refs("Run python scripts/missing.py."),
+            vec!["scripts/missing.py".to_string()]
+        );
+        // Greptile P2: quoted invocations are recognized.
+        assert_eq!(
+            script_refs("run python \"scripts/missing.py\" now"),
+            vec!["scripts/missing.py".to_string()]
+        );
+        assert_eq!(
+            script_refs("run python3 'skills/x/scripts/h.py', then stop"),
+            vec!["skills/x/scripts/h.py".to_string()]
+        );
+        // Flags are not paths.
+        assert!(script_refs("run python -m pytest").is_empty());
+        assert!(script_refs("run python --version").is_empty());
     }
 
     #[test]
@@ -975,6 +1079,25 @@ mod tests {
         ]);
         let err = validate(&OPENCODE_SURFACE, &t, false).unwrap_err();
         assert!(err.contains("invokes `scripts/missing.py`"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_wrong_skill_helper() {
+        // Greptile P2: skills/b/... must exist at its own path; the
+        // invoking skill's helper does not satisfy it.
+        let t = tree(&[
+            (
+                "systemprompt.md",
+                "When reviewing docs, load the `a` skill.",
+            ),
+            (
+                "skills/a/SKILL.md",
+                "---\nname: a\ndescription: review\n---\nrun python skills/b/scripts/helper.py",
+            ),
+            ("skills/a/scripts/helper.py", "print(1)"),
+        ]);
+        let err = validate(&OPENCODE_SURFACE, &t, false).unwrap_err();
+        assert!(err.contains("skills/b/scripts/helper.py"), "{err}");
     }
 
     #[test]

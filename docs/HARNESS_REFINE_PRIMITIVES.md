@@ -36,12 +36,13 @@ prompts name "no deliverable because the model exhausted its output budget on
 reasoning" as the most costly failure mode, which the always-on caps
 (24k OpenCode / 8k Codex) directly guard against.
 
-Tests: 15 unit tests (escape rejection, allowed-surface coverage, skill-name
-rule on both surfaces, untriggered-skill rejection, triggered-skill census,
-cap + non-empty enforcement, hooks-file schema validation, autotrigger
-repair, skill-helper editability + 600-char window, diff + diversity,
-script-ref scanning, missing-script rejection, shipped/skill-local
-acceptance, Jinja-brace rejection).
+Tests: 18 unit tests (malformed-path panic sweep, escape rejection,
+allowed-surface coverage, skill-name rule on both surfaces, untriggered-skill
+rejection, triggered-skill census, char-based caps, hooks-file schema
+validation, autotrigger repair, skill-helper editability + 600-char window,
+diff + diversity, script-ref scanning incl. quoted/period/flag forms,
+missing/wrong-skill script rejection, shipped/skill-local acceptance,
+Jinja-brace rejection).
 
 ### 2. `recursion`: task-level budgets, stage labels, finals-only pool
 Source: `harness2/core/recursion.py` (`run_parallel`, `run_sequential`,
@@ -127,10 +128,11 @@ eval runs, after the published incident where a Codex rollout downloaded its
 own task's `RUBRICS.json` unprompted. (d) `obs_trunc` floor 10_000: below
 that the renderer *fabricates* defects; default 50_000.
 
-Tests: 9 unit tests (prompt-slot words + alias, marker-content tripwire,
+Tests: 10 unit tests (prompt-slot words + alias, marker-content tripwire,
 marker-in-name, suffix case-insensitivity + name-tripwire, unscanned-suffix
 skip, floor rejection, fnmatch glob semantics verified against CPython +
-class/negation/empty edge cases, leak-assert hits, blocklist coverage).
+class/negation/empty/Unicode edge cases, wildcard bounded-time proof,
+leak-assert hits, blocklist coverage).
 
 ## What was deliberately NOT ported
 
@@ -142,7 +144,7 @@ class/negation/empty edge cases, leak-assert hits, blocklist coverage).
 
 ## Validation
 
-- `cargo test -p jcode-plan`: 65 passed, 0 failed (23 pre-existing: 13 plan + 10 mermaid; 42 new: surface 15, recursion 6, selection 7, library 5, hygiene 9).
+- `cargo test -p jcode-plan`: 69 passed, 0 failed (23 pre-existing: 13 plan + 10 mermaid; 46 new: surface 18, recursion 6, selection 7, library 5, hygiene 10).
 - `cargo clippy -p jcode-plan --all-targets`: no warnings from this change.
 - `cargo fmt -p jcode-plan`: clean.
 - `cargo check -p jcode-plan -p jcode-swarm-core -p jcode-protocol`: clean
