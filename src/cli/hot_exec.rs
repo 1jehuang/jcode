@@ -10,6 +10,7 @@ pub fn has_requested_action(run_result: &RunResult) -> bool {
         || run_result.rebuild_session.is_some()
         || run_result.update_session.is_some()
         || run_result.restart_session.is_some()
+        || run_result.hibernate_session.is_some()
 }
 
 pub fn execute_requested_action(run_result: &RunResult) -> Result<()> {
@@ -27,6 +28,13 @@ pub fn execute_requested_action(run_result: &RunResult) -> Result<()> {
 
     if let Some(ref restart_session_id) = run_result.restart_session {
         hot_restart(restart_session_id)?;
+    }
+
+    if let Some(ref session_id) = run_result.hibernate_session {
+        let mut cmd = super::hibernate_wait::waiter_command(session_id)?;
+        crate::logging::info("Hibernating: exec into idle waiter");
+        let err = crate::platform::replace_process(&mut cmd);
+        return Err(anyhow::anyhow!("Failed to exec hibernation waiter: {err}"));
     }
 
     Ok(())
