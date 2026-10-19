@@ -161,6 +161,14 @@ pub use stream_timeout::{
     stream_idle_timeout_for_effort, stream_idle_timeout_multiplier_for_effort,
 };
 
+/// Effective `[provider] request_compression` policy. Unknown values fall back
+/// to `Auto` (the shipped default) rather than silently disabling.
+pub fn request_compression_mode() -> jcode_provider_core::request_compression::CompressionMode {
+    use jcode_provider_core::request_compression::CompressionMode;
+    CompressionMode::parse(&crate::config::config().provider.request_compression)
+        .unwrap_or(CompressionMode::Auto)
+}
+
 /// Whether reasoning deltas should be persisted in session history for later
 /// provider context reconstruction.
 ///
@@ -360,12 +368,12 @@ pub use self::models::{
 };
 pub use self::models::{
     begin_openai_model_catalog_refresh_for_scope, cached_openai_model_ids_for_scope,
-    cached_openai_reasoning_efforts_for_scope, clear_model_unavailable_for_scope,
-    finish_openai_model_catalog_refresh_for_scope, get_best_available_openai_model_for_scope,
-    known_openai_model_ids_for_scope, model_availability_for_scope,
-    openai_catalog_scope_for_credential, persist_openai_model_catalog_for_scope,
-    populate_account_models_for_scope, record_model_unavailable_for_scope,
-    refresh_openai_model_catalog_in_background_for_scope,
+    cached_openai_reasoning_efforts_for_scope, cached_openai_service_tiers_for_scope,
+    clear_model_unavailable_for_scope, finish_openai_model_catalog_refresh_for_scope,
+    get_best_available_openai_model_for_scope, known_openai_model_ids_for_scope,
+    model_availability_for_scope, openai_catalog_scope_for_credential,
+    persist_openai_model_catalog_for_scope, populate_account_models_for_scope,
+    record_model_unavailable_for_scope, refresh_openai_model_catalog_in_background_for_scope,
     should_refresh_openai_model_catalog_for_scope,
 };
 pub use self::selection::DefaultModelSelection;
@@ -416,6 +424,8 @@ pub struct MultiProvider {
     /// switches, catalog display, or auth refresh handling.
     openai_compatible_profiles: RwLock<HashMap<String, Arc<dyn Provider>>>,
     active_openai_compatible_profile: RwLock<Option<String>>,
+    /// Stable application session identity, retained across runtime replacement.
+    session_id: RwLock<Option<String>>,
     active: RwLock<ActiveProvider>,
     /// Notifications generated during provider/account auto-selection.
     /// The TUI should drain and display these on session start.
@@ -445,6 +455,19 @@ pub struct MultiProvider {
 }
 
 impl MultiProvider {
+    fn bound_session_id(&self) -> Option<String> {
+        self.session_id
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn bind_provider_session(&self, provider: &dyn Provider) {
+        if let Some(session_id) = self.bound_session_id() {
+            provider.set_session_id(&session_id);
+        }
+    }
+
     async fn complete_with_failover(
         &self,
         messages: &[Message],
@@ -1760,6 +1783,13 @@ where
 
 #[async_trait]
 impl Provider for MultiProvider {
+    fn set_session_id(&self, session_id: &str) {
+        *self
+            .session_id
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session_id.to_owned());
+    }
+
     fn catalog_sharing_identity(&self) -> Option<String> {
         Some(format!(
             "{:?}",
@@ -1787,6 +1817,7 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
         };
         if let Some(provider) = provider {
+            self.bind_provider_session(provider.as_ref());
             provider.prewarm(tools, system_static).await;
         }
     }
@@ -2446,6 +2477,13 @@ impl Provider for MultiProvider {
         self.fresh_routes_memo_entry().routes
     }
 
+    fn model_capabilities_need_refresh(&self) -> bool {
+        matches!(self.active_provider(), ActiveProvider::OpenAI)
+            && self
+                .openai_provider()
+                .is_some_and(|provider| provider.model_capabilities_need_refresh())
+    }
+
     async fn prefetch_models(&self) -> Result<()> {
         let anthropic = self.anthropic_provider();
         let openai = self.openai_provider();
@@ -3054,19 +3092,29 @@ impl Provider for MultiProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
+        let fork_start = std::time::Instant::now();
         let current_model = self.model();
         let active = self.active_provider();
 
+        let mut lap = std::time::Instant::now();
+        let mut laps: Vec<(&str, u128)> = Vec::new();
+        let mut mark = |name: &'static str, laps: &mut Vec<(&str, u128)>| {
+            laps.push((name, lap.elapsed().as_millis()));
+            lap = std::time::Instant::now();
+        };
+        mark("model_active", &mut laps);
         let anthropic = if self.anthropic_provider().is_some() {
             external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
         } else {
             None
         };
+        mark("anthropic", &mut laps);
         let openai = if self.openai_provider().is_some() {
             external::instantiate_expected_external_provider(external::OPENAI_RUNTIME)
         } else {
             None
         };
+        mark("openai", &mut laps);
         let copilot_api = self
             .copilot_api
             .read()
@@ -3082,6 +3130,7 @@ impl Provider for MultiProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        mark("copy", &mut laps);
         let cursor_provider = if self
             .cursor
             .read()
@@ -3092,6 +3141,7 @@ impl Provider for MultiProvider {
         } else {
             None
         };
+        mark("cursor", &mut laps);
         // Each fork gets independent Claude Code child state (its own
         // process and session), carrying the instance and model over.
         let claude_code_provider = self.claude_code_provider().map(|provider| provider.fork());
@@ -3100,6 +3150,7 @@ impl Provider for MultiProvider {
         } else {
             None
         };
+        mark("bedrock", &mut laps);
         let openrouter = if self
             .openrouter
             .read()
@@ -3111,6 +3162,7 @@ impl Provider for MultiProvider {
             None
         };
 
+        mark("openrouter", &mut laps);
         let provider = Self {
             anthropic: RwLock::new(anthropic),
             openai: RwLock::new(openai),
@@ -3123,6 +3175,7 @@ impl Provider for MultiProvider {
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
+            session_id: RwLock::new(self.bound_session_id()),
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: self.initial_provider,
@@ -3132,8 +3185,12 @@ impl Provider for MultiProvider {
             account_failover: self.account_failover.copy(),
         };
 
+        let runtimes_ms = fork_start.elapsed().as_millis();
+        let catalog_start = std::time::Instant::now();
         provider.spawn_anthropic_catalog_refresh_if_needed();
         provider.spawn_openai_catalog_refresh_if_needed();
+        let catalog_ms = catalog_start.elapsed().as_millis();
+        let set_model_start = std::time::Instant::now();
         let switch_request = self.fork_model_switch_request(active, &current_model);
         let _ = provider.set_model(&switch_request);
         // A fork continues this session, so it keeps this session's accounts.
@@ -3149,6 +3206,17 @@ impl Provider for MultiProvider {
                 ));
             }
         }
+        crate::logging::info(&format!(
+            "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
+            runtimes_ms,
+            laps.iter()
+                .map(|(name, ms)| format!("{name}={ms}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            catalog_ms,
+            set_model_start.elapsed().as_millis(),
+            fork_start.elapsed().as_millis()
+        ));
         Arc::new(provider)
     }
 

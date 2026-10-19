@@ -103,7 +103,10 @@ pub(super) async fn spawn_tracked_live_turn(
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
-) {
+) -> bool {
+    let Ok(_admission) = crate::runtime_activity::global().try_enter() else {
+        return false;
+    };
     let publication = super::swarm::begin_turn_publication(session_id).await;
     publication
         .publish_start(update_member_status(
@@ -121,7 +124,7 @@ pub(super) async fn spawn_tracked_live_turn(
     let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
     let session_id = session_id.to_string();
     let agent_arc = OwnedMutexGuard::mutex(&agent).clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let start_message_index = agent.message_count();
         let resume_reminder = system_reminder.clone();
         let pending_queue = agent.soft_interrupt_queue();
@@ -217,7 +220,8 @@ pub(super) async fn spawn_tracked_live_turn(
         )
         .await;
         drop(reservation);
-    });
+    })
+    .is_some()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -303,8 +307,7 @@ pub(super) async fn run_live_turn_if_idle(
         detail,
         swarm,
     )
-    .await;
-    true
+    .await
 }
 
 pub(super) async fn run_live_system_turn_if_idle(
@@ -326,8 +329,7 @@ pub(super) async fn run_live_system_turn_if_idle(
         detail,
         swarm,
     )
-    .await;
-    true
+    .await
 }
 
 /// Catch only unwind panics. A killed process cannot emit a trustworthy event.

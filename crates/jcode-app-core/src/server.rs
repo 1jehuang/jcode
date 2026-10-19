@@ -1,3 +1,4 @@
+mod account_usage;
 mod available_models_cache;
 mod available_models_dedup;
 mod await_members_state;
@@ -20,7 +21,6 @@ pub(crate) use client_state::provider_oauth_email;
 mod client_writer;
 mod comm_await;
 mod comm_control;
-mod comm_graph;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
@@ -40,6 +40,7 @@ mod debug_swarm_write;
 mod debug_testers;
 mod durable_state;
 mod headless;
+mod idle_hibernation;
 mod jade_relay;
 mod lifecycle;
 mod live_turn;
@@ -51,6 +52,7 @@ mod reload_trace;
 mod runtime;
 mod runtime_commands;
 mod runtime_special_commands;
+mod runtime_upgrade;
 mod socket;
 mod swarm;
 mod swarm_channels;
@@ -58,6 +60,7 @@ mod swarm_labels;
 mod swarm_mutation_state;
 mod swarm_persistence;
 mod swarm_watchdog;
+mod turn_failover;
 mod usage_limit_resume;
 mod util;
 
@@ -1289,6 +1292,13 @@ impl Server {
         tokio::task::JoinHandle<()>,
     ) {
         self.spawn_registry_prewarm();
+        // Every resume History asks whether the session has persisted
+        // background tasks. The first ask after a reload scans the whole task
+        // directory (~250ms) while clients are reconnecting; build the index
+        // now, off the async workers, so the storm only sees cache hits.
+        std::thread::spawn(|| {
+            let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
+        });
         let registry_info = self.build_registry_info();
 
         let runtime = self.runtime();
@@ -1323,6 +1333,9 @@ impl Server {
         server_start_time: Instant,
         temporary_server_policy: Option<lifecycle::TemporaryServerPolicy>,
     ) {
+        // Register before any producer is spawned, not on the monitor's first
+        // poll. Startup reconciliation and resumed awaits may publish at once.
+        let monitor_receiver = Bus::global().subscribe_runtime();
         // Jev memory recall does not need a local embedding model. Optional
         // embedding consumers (such as semantic compaction) load it on demand.
 
@@ -1397,6 +1410,7 @@ impl Server {
         let monitor_swarm_event_tx = self.swarm_event_tx.clone();
         tokio::spawn(async move {
             Self::monitor_bus(
+                monitor_receiver,
                 monitor_file_touch,
                 monitor_swarm_members,
                 monitor_swarms_by_id,
@@ -1511,6 +1525,14 @@ impl Server {
         // This watches the same "running" member signal Waybar surfaces as
         // "N streaming" and toggles a best-effort OS power inhibitor accordingly.
         Self::spawn_power_inhibitor(Arc::clone(&self.swarm_state.members));
+
+        // Unlike the no-client shutdown timer this also reclaims derived
+        // transcript allocations while a connected TUI is idle. It never
+        // suspends the scheduler or replaces the live Agent/session.
+        idle_hibernation::spawn(
+            Arc::clone(&self.sessions),
+            Arc::clone(&self.swarm_state.members),
+        );
 
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {
@@ -2046,6 +2068,7 @@ impl Server {
         reason = "bus monitor needs file state, swarm state, sessions, queues, and event history sinks"
     )]
     async fn monitor_bus(
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::bus::RuntimeBusDelivery>,
         file_touch: FileTouchService,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
         swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -2058,7 +2081,6 @@ impl Server {
         event_counter: Arc<std::sync::atomic::AtomicU64>,
         swarm_event_tx: broadcast::Sender<SwarmEvent>,
     ) {
-        let mut receiver = Bus::global().subscribe();
         let mut last_cleanup = Instant::now();
         const TOUCH_EXPIRY: Duration = Duration::from_secs(30 * 60); // 30 min
         const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 min
@@ -2070,8 +2092,13 @@ impl Server {
                 last_cleanup = Instant::now();
             }
 
-            match receiver.recv().await {
-                Ok(BusEvent::FileTouch(touch)) => {
+            let Some(delivery) = receiver.recv().await else {
+                break;
+            };
+            // Keep the envelope alive through asynchronous queue delivery, not
+            // just receipt. An idle upgrade must include every accepted wake.
+            match delivery.event.clone() {
+                BusEvent::FileTouch(touch) => {
                     let path = touch.path.clone();
                     let session_id = touch.session_id.clone();
 
@@ -2294,7 +2321,7 @@ impl Server {
                         }
                     }
                 }
-                Ok(BusEvent::BackgroundTaskCompleted(task)) => {
+                BusEvent::BackgroundTaskCompleted(task) => {
                     dispatch_background_task_completion(
                         &task,
                         &sessions,
@@ -2307,10 +2334,10 @@ impl Server {
                     )
                     .await;
                 }
-                Ok(BusEvent::BackgroundTaskProgress(task)) => {
+                BusEvent::BackgroundTaskProgress(task) => {
                     dispatch_background_task_progress(&task, &swarm_members).await;
                 }
-                Ok(BusEvent::BackgroundTaskStalled(task)) => {
+                BusEvent::BackgroundTaskStalled(task) => {
                     dispatch_background_task_stalled(
                         &task,
                         &sessions,
@@ -2323,7 +2350,7 @@ impl Server {
                     )
                     .await;
                 }
-                Ok(BusEvent::SwarmAwaitCompleted(event)) => {
+                BusEvent::SwarmAwaitCompleted(event) => {
                     dispatch_swarm_await_completion(
                         &event,
                         &sessions,
@@ -2336,37 +2363,32 @@ impl Server {
                     )
                     .await;
                 }
-                Ok(BusEvent::UiActivity(activity)) => {
+                BusEvent::UiActivity(activity) => {
                     dispatch_ui_activity(&activity, &swarm_members).await;
                 }
-                Ok(BusEvent::ToolUpdated(event)) => {
+                BusEvent::ToolUpdated(event) => {
                     dispatch_swarm_tool_activity(&event, &swarm_members, &swarms_by_id).await;
                 }
-                Ok(BusEvent::SubagentStatus(event)) => {
+                BusEvent::SubagentStatus(event) => {
                     dispatch_swarm_runtime_status(&event, &swarm_members, &swarms_by_id).await;
                 }
-                Ok(BusEvent::BatchProgress(progress)) => {
+                BusEvent::BatchProgress(progress) => {
                     dispatch_swarm_batch_progress(&progress, &swarm_members, &swarms_by_id).await;
                 }
                 // Session todos are private to the session's transcript, but the
                 // Compact todo names and progress are surfaced on the inline
                 // swarm strip so a coordinator can see each managed agent's work.
-                Ok(BusEvent::TodoUpdated(event)) => {
+                BusEvent::TodoUpdated(event) => {
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
                 }
-                Ok(BusEvent::SwarmOutputTail(tail)) => {
+                BusEvent::SwarmOutputTail(tail) => {
                     dispatch_swarm_output_tail(&tail, &swarm_members, &swarms_by_id).await;
                 }
-                Ok(_) => {
+                _ => {
                     // Ignore other events
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    crate::logging::info(&format!("Bus monitor lagged by {} events", n));
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    break;
-                }
             }
+            drop(delivery);
         }
     }
 
@@ -2441,6 +2463,12 @@ impl Server {
             )),
         }
 
+        // Sessions the previous process image owned are about to reconnect.
+        // Parse the large ones in the background before their markers are
+        // pruned, so resume skips the parse on the critical path.
+        crate::session::prewarm::spawn_prewarm(crate::session::prewarm::sessions_owned_by(
+            std::process::id(),
+        ));
         let (pruned_active_pids, failed_active_pids) =
             crate::storage::prune_active_pids_owned_by(std::process::id());
         if pruned_active_pids + failed_active_pids > 0 {
@@ -2452,6 +2480,9 @@ impl Server {
         // Restrict socket files to owner-only so other local users cannot connect.
         let _ = crate::platform::set_permissions_owner_only(&self.socket_path);
         let _ = crate::platform::set_permissions_owner_only(&self.debug_socket_path);
+        // chmod changes the socket's ctime, which is part of the startup hint
+        // generation guard. Capture only after the listener is finalized.
+        account_usage::initialize_startup_snapshot(&self.socket_path, &self.identity.id);
 
         // Set logging context for this server
         crate::logging::set_server(&self.identity.name);
@@ -2549,3 +2580,35 @@ pub use self::client_api::Client;
 
 #[cfg(test)]
 mod tests;
+
+/// Run synchronous, filesystem-heavy work (session loads, agent setup) without
+/// stalling the async worker it is called from. A reload reconnects dozens of
+/// clients at once, and doing this work inline starved the runtime so even
+/// tiny sessions waited seconds for their first History frame. Falls back to
+/// inline execution on a current-thread runtime, where `block_in_place` panics.
+pub(crate) fn run_blocking_io<R>(f: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
+/// CPU time consumed by the calling thread, in milliseconds. Comparing it with
+/// wall time separates real work from waiting (scheduler, disk, locks).
+pub(crate) fn thread_cpu_ms() -> f64 {
+    #[cfg(unix)]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: valid pointer to a timespec; CLOCK_THREAD_CPUTIME_ID is
+        // supported on Linux and macOS.
+        if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0 {
+            return ts.tv_sec as f64 * 1000.0 + ts.tv_nsec as f64 / 1_000_000.0;
+        }
+    }
+    0.0
+}

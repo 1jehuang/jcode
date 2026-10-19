@@ -97,6 +97,10 @@ fn test_remote_session_switch_discards_redirect_images() {
     app.remote_session_id = Some("old_session".to_string());
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
+            provider_oauth_account_label: None,
+            available_service_tiers: None,
             id: 1,
             session_id: "new_session".to_string(),
             messages: vec![],

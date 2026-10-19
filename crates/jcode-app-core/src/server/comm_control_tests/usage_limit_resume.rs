@@ -235,7 +235,10 @@ async fn superseded_usage_limit_worker_status(successor_status: Option<&str>) ->
     assert!(crate::server::usage_limit_resume::cancel_pending_resume(
         worker
     ));
-    task_run.await.expect("assigned task runner finished");
+    task_run
+        .expect("runtime accepted the task run")
+        .await
+        .expect("assigned task runner finished");
 
     let item = |plans: &HashMap<String, VersionedPlan>| {
         plans[swarm_id]

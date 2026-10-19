@@ -38,6 +38,8 @@ use Disposition::{ClientInternal, Covered, Gap};
 ///
 /// Sorted by name so additions produce clean diffs.
 const LEDGER: &[(&str, Disposition)] = &[
+    // The TUI polls per-account usage snapshots for its info widget.
+    ("AccountUsage", ClientInternal),
     ("BackgroundTool", Covered),
     ("Cancel", Covered),
     ("CancelSoftInterrupts", Covered),

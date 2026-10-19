@@ -78,6 +78,7 @@ impl Provider for ClaudeCodeStubRuntime {
 
 fn multi_provider_with_claude_code(tx: NativeToolResultSender) -> MultiProvider {
     MultiProvider {
+        session_id: Default::default(),
         anthropic: RwLock::new(Some(test_anthropic_runtime() as Arc<dyn Provider>)),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),

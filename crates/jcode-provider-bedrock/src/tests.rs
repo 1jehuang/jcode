@@ -1,4 +1,43 @@
 use super::*;
+
+#[cfg(feature = "aws-sdk")]
+#[test]
+fn bedrock_metadata_preserves_disjoint_cache_usage() {
+    for (read, write) in [
+        (Some(400), Some(200)),
+        (Some(0), Some(0)),
+        (None, None),
+        (Some(-1), Some(-2)),
+    ] {
+        let usage = aws_sdk_bedrockruntime::types::TokenUsage::builder()
+            .input_tokens(100)
+            .output_tokens(20)
+            .total_tokens(120)
+            .set_cache_read_input_tokens(read)
+            .set_cache_write_input_tokens(write)
+            .build()
+            .unwrap();
+        let StreamEvent::TokenUsage {
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        } = bedrock_token_usage(&usage)
+        else {
+            panic!("expected token usage");
+        };
+        assert_eq!(input_tokens, Some(100));
+        assert_eq!(output_tokens, Some(20));
+        assert_eq!(
+            cache_read_input_tokens,
+            read.and_then(|v| u64::try_from(v).ok())
+        );
+        assert_eq!(
+            cache_creation_input_tokens,
+            write.and_then(|v| u64::try_from(v).ok())
+        );
+    }
+}
 use std::ffi::{OsStr, OsString};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 

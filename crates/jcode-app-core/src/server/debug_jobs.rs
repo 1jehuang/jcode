@@ -89,7 +89,7 @@ pub(super) async fn maybe_start_async_debug_job(
         let agent = Arc::clone(&agent);
         let msg = msg.to_string();
         let job_id_inner = job_id.clone();
-        tokio::spawn(async move {
+        crate::runtime_activity::spawn(async move {
             mark_job_running(&jobs, &job_id_inner).await;
 
             let result = super::run_swarm_message(agent.clone(), &msg).await;
@@ -118,7 +118,7 @@ pub(super) async fn maybe_start_async_debug_job(
         let agent = Arc::clone(&agent);
         let msg = msg.to_string();
         let job_id_inner = job_id.clone();
-        tokio::spawn(async move {
+        crate::runtime_activity::spawn(async move {
             mark_job_running(&jobs, &job_id_inner).await;
 
             let result = {

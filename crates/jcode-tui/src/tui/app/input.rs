@@ -1586,6 +1586,9 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
 }
 
 pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
+    if app.pending_login.is_some() {
+        return SendAction::Submit;
+    }
     if !app.is_processing {
         return SendAction::Submit;
     }
@@ -2141,6 +2144,9 @@ pub(super) fn is_next_prompt_new_session_hotkey(code: KeyCode, modifiers: KeyMod
 }
 
 fn input_routes_to_new_session(app: &App) -> bool {
+    if app.pending_login.is_some() {
+        return false;
+    }
     if !app.route_next_prompt_to_new_session || app.input.is_empty() {
         return false;
     }
@@ -2180,6 +2186,10 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
 }
 
 pub(super) fn handle_alternate_enter(app: &mut App) {
+    if app.pending_login.is_some() {
+        app.submit_input();
+        return;
+    }
     if try_queue_command(app) {
         return;
     }
@@ -3029,6 +3039,10 @@ pub(super) fn handle_global_control_shortcuts(
 }
 
 pub(super) fn handle_enter(app: &mut App) -> bool {
+    if app.pending_login.is_some() {
+        app.submit_input();
+        return true;
+    }
     promote_dropped_images(app);
     if app.activate_picker_from_preview() {
         return true;
@@ -3249,6 +3263,7 @@ impl App {
     }
 
     pub(super) fn handle_key_press_event(&mut self, event: KeyEvent) -> Result<()> {
+        self.wake_idle_hibernation();
         // Pick up config.toml keybinding edits before this key is matched.
         // The idle tick refreshes too, but it can run as slowly as the 5s
         // deep-idle cadence, which would leave the first keystroke after an
@@ -3514,6 +3529,7 @@ impl App {
     }
 
     pub(super) fn should_redraw_after_resize(&mut self) -> bool {
+        self.wake_idle_hibernation();
         let now = std::time::Instant::now();
         match self.last_resize_redraw {
             Some(last) if now.duration_since(last) < Self::RESIZE_REDRAW_MIN_INTERVAL => {
@@ -3667,6 +3683,7 @@ impl App {
     /// Queue a message to be sent later
     /// Handle bracketed paste: store text content (image URLs are still detected inline)
     pub(super) fn handle_paste(&mut self, text: String) {
+        self.wake_idle_hibernation();
         handle_paste(self, text);
     }
 
@@ -4251,25 +4268,29 @@ impl App {
                     .join(", ")
             ));
         }
+        let model_input = crate::prompt::with_swarm_user_message_reminder(
+            &input,
+            self.provider.reasoning_effort().as_deref(),
+        );
         if images.is_empty() {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
-            self.add_provider_message(Message::user(&input));
+            self.add_provider_message(Message::user(&model_input));
             self.session.add_message(
                 Role::User,
                 vec![ContentBlock::Text {
-                    text: input.clone(),
+                    text: model_input.clone(),
                     cache_control: None,
                 }],
             );
         } else {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
-            self.add_provider_message(Message::user_with_images(&input, images.clone()));
+            self.add_provider_message(Message::user_with_images(&model_input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
                 .map(|(media_type, data)| ContentBlock::Image { media_type, data })
                 .collect();
             blocks.push(ContentBlock::Text {
-                text: input.clone(),
+                text: model_input.clone(),
                 cache_control: None,
             });
             self.session.add_message(Role::User, blocks);
@@ -4350,6 +4371,10 @@ impl App {
         self.current_turn_system_reminder =
             merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
         if has_combined {
+            let combined = crate::prompt::with_swarm_user_message_reminder(
+                &combined,
+                self.provider.reasoning_effort().as_deref(),
+            );
             self.append_queued_user_payload(&combined);
         } else {
             // A discarded user queue must not attach stale images to a later turn.

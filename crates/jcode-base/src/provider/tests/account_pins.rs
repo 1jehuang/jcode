@@ -90,6 +90,7 @@ impl Provider for PinAwareStubRuntime {
 
 fn multi_provider_with_pin_aware_runtimes() -> MultiProvider {
     MultiProvider {
+        session_id: Default::default(),
         anthropic: RwLock::new(Some(
             Arc::new(PinAwareStubRuntime::anthropic()) as Arc<dyn Provider>
         )),

@@ -1512,15 +1512,7 @@ fn direct_deepseek_profile_exposes_max_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     provider
         .set_reasoning_effort("max")
@@ -1574,16 +1566,7 @@ fn openrouter_profile_exposes_unified_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "minimal", "low", "medium", "high", "xhigh", "swarm"]
     );
     provider
         .set_reasoning_effort("minimal")
@@ -1608,16 +1591,7 @@ fn openrouter_with_openrouter_profile_id_exposes_unified_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "minimal", "low", "medium", "high", "xhigh", "swarm"]
     );
     provider
         .set_reasoning_effort("high")
@@ -3261,15 +3235,7 @@ fn compat_profile_serving_deepseek_model_supports_reasoning_effort() {
     provider.set_model("deepseek-v4-flash").unwrap();
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     provider
         .set_reasoning_effort("high")
@@ -3295,15 +3261,7 @@ fn compat_profile_serving_gpt_family_model_supports_reasoning_effort() {
         assert_eq!(
             provider.available_efforts(),
             vec![
-                "none",
-                "minimal",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "swarm",
-                "swarm-deep"
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "swarm"
             ],
             "{model} should expose OpenAI effort vocabulary"
         );
@@ -3350,15 +3308,7 @@ fn named_profile_supports_reasoning_effort_config_override() {
     force_on.set_model("not-a-deepseek-model").unwrap();
     assert_eq!(
         force_on.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     force_on
         .set_reasoning_effort("medium")

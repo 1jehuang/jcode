@@ -80,7 +80,9 @@ pub fn parse_provider_hint(value: &str) -> Option<ActiveProvider> {
         "cursor" => Some(ActiveProvider::Cursor),
         "bedrock" | "aws-bedrock" | "aws_bedrock" => Some(ActiveProvider::Bedrock),
         "openrouter" => Some(ActiveProvider::OpenRouter),
-        "claude-code" | "claude_code" | "claudecode" => Some(ActiveProvider::ClaudeCode),
+        "claude-code" | "claude_code" | "claudecode" | "claude code" => {
+            Some(ActiveProvider::ClaudeCode)
+        }
         _ => None,
     }
 }

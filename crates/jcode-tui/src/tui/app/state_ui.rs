@@ -108,6 +108,7 @@ impl App {
     }
 
     pub(super) fn note_client_interaction(&mut self) {
+        self.wake_idle_hibernation();
         // Every key/mouse/paste event routes through here, which makes this the
         // one place that reliably knows the user is actively driving the UI.
         self.last_user_interaction = Some(std::time::Instant::now());
@@ -197,6 +198,7 @@ impl App {
     /// recompute counters. Callers that have already maintained the cached
     /// counters incrementally (e.g. a single append) use this to stay O(1).
     pub(super) fn bump_display_messages_version_no_stats(&mut self) {
+        self.wake_idle_hibernation();
         self.display_messages_version = self.display_messages_version.wrapping_add(1);
         self.bump_context_revision();
         self.refresh_split_view_if_needed();
@@ -727,6 +729,9 @@ impl App {
         if self.side_panel_user_hidden {
             snapshot.focused_page_id = None;
         }
+        if snapshot != self.side_panel {
+            self.wake_idle_hibernation();
+        }
         let focused_before = self.side_panel.focused_page_id.clone();
         let focused_after = snapshot.focused_page_id.clone();
         let focused_changed = focused_before != focused_after;
@@ -860,6 +865,9 @@ impl App {
     }
 
     fn prewarm_focused_side_panel(&self) {
+        if self.idle_hibernation.frame.is_some() {
+            return;
+        }
         let Ok((terminal_width, terminal_height)) = crossterm::terminal::size() else {
             return;
         };

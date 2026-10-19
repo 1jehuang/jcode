@@ -1,5 +1,7 @@
 #[derive(Debug, Clone)]
 pub(crate) enum PendingLogin {
+    /// Credentials are exchanging asynchronously. Keep input out of AI prompts/history.
+    Exchanging { provider: String },
     /// SSH flow state and sensitive input are held separately, never in local auth.
     Remote,
     /// Choose Jcode's OAuth flow or Claude Code's CLI-managed sign-in.
@@ -69,6 +71,7 @@ pub(crate) enum PendingLogin {
 impl PendingLogin {
     pub(crate) fn telemetry_context(&self) -> Option<(String, String)> {
         match self {
+            Self::Exchanging { provider } => Some((provider.clone(), "oauth".to_string())),
             Self::Remote => None,
             Self::ClaudeMethodChoice => None,
             Self::ClaudeAccount { .. } => Some(("claude".to_string(), "oauth".to_string())),

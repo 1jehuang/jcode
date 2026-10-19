@@ -1859,6 +1859,8 @@ async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode()
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
+    // `applet` is Desktop-only; include it so its schema stays covered.
+    registry.set_desktop_ui_enabled(true).await;
     let defs = registry.definitions(None).await;
     assert!(!defs.is_empty(), "the sweep must not pass vacuously");
 

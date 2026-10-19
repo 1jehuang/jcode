@@ -121,7 +121,10 @@ async fn assigned_resume_reserves_agent_during_bookkeeping(fail_resume: bool) ->
     // heartbeat/plan bookkeeping until the plan write lock above is released.
     let successor_blocked = agent.clone().try_lock_owned().is_err();
     drop(blocked_bookkeeping);
-    runner.await.expect("assigned task runner finished");
+    runner
+        .expect("runtime accepted the task run")
+        .await
+        .expect("assigned task runner finished");
     assert!(
         agent.try_lock().is_ok(),
         "reservation released after bookkeeping"

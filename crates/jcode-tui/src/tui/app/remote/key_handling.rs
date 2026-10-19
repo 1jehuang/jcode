@@ -72,9 +72,13 @@ async fn apply_remote_speed_direction(
     remote: &mut RemoteConnection,
     direction: i8,
 ) -> Result<()> {
-    use jcode_provider_core::service_tier::{speed_tier_ladder, step_speed_tier};
+    use jcode_provider_core::service_tier::{speed_tier_ladder_with_capabilities, step_speed_tier};
     let (provider_name, provider_model) = app.remote_effort_identity();
-    let ladder = speed_tier_ladder(provider_name.as_deref(), provider_model.as_deref());
+    let ladder = speed_tier_ladder_with_capabilities(
+        provider_name.as_deref(),
+        provider_model.as_deref(),
+        app.remote_available_service_tiers.as_deref(),
+    );
     let Some((index, next, at_end)) =
         step_speed_tier(&ladder, app.remote_service_tier.as_deref(), direction)
     else {
@@ -90,9 +94,23 @@ async fn apply_remote_speed_direction(
         ));
         return Ok(());
     }
-    app.set_status_notice(app_mod::speed_tier_notice(next, index, ladder.len(), None));
-    remote.set_service_tier(next).await?;
+    request_remote_service_tier(app, remote, next).await?;
     Ok(())
+}
+
+async fn request_remote_service_tier(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    tier: &str,
+) -> Result<()> {
+    // A transient notice acknowledges input without claiming configuration or
+    // provider acceptance. The server acknowledgement replaces it, so fast
+    // round trips do not add a second transcript message.
+    app.set_status_notice(format!(
+        "Speed: {} requested (waiting for server)",
+        app_mod::service_tier_display_label(tier)
+    ));
+    remote.set_service_tier(tier).await
 }
 
 pub(super) async fn apply_remote_effort_direction(
@@ -207,6 +225,7 @@ async fn handle_remote_key_internal(
     remote: &mut RemoteConnection,
     text_input: Option<String>,
 ) -> Result<()> {
+    app.wake_idle_hibernation();
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
@@ -1422,11 +1441,11 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             match mode.as_str() {
                 "on" => {
                     app_mod::auth::save_openai_fast_setting_local(app, true);
-                    remote.set_service_tier("priority").await?;
+                    request_remote_service_tier(app, remote, "priority").await?;
                 }
                 "off" => {
                     app_mod::auth::save_openai_fast_setting_local(app, false);
-                    remote.set_service_tier("off").await?;
+                    request_remote_service_tier(app, remote, "off").await?;
                 }
                 "status" => {
                     let default_tier = crate::config::Config::load().provider.openai_service_tier;
@@ -1504,7 +1523,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                     return Ok(());
                 }
             };
-            remote.set_service_tier(service_tier).await?;
+            request_remote_service_tier(app, remote, service_tier).await?;
             return Ok(());
         }
 

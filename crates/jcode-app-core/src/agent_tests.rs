@@ -8,6 +8,9 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "agent_tests/cache_session_affinity.rs"]
+mod cache_session_affinity;
+
 #[path = "agent_tests/tool_streaming.rs"]
 mod tool_streaming;
 
@@ -49,8 +52,10 @@ async fn user_response_capability_updates_locked_tool_surface() {
             .any(|d| d.name == "user_response")
     );
     assert!(agent.locked_tools.is_some());
+    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
     agent.set_desktop_response_capability(true).await;
     assert!(agent.locked_tools.is_none());
+    assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
     assert!(
         agent
             .tool_definitions()
@@ -65,6 +70,7 @@ async fn user_response_capability_updates_locked_tool_surface() {
     );
     agent.set_desktop_response_capability(false).await;
     assert!(agent.locked_tools.is_none());
+    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
     assert!(
         !agent
             .tool_definitions()
@@ -1116,6 +1122,93 @@ async fn run_turn_streaming_mpsc_syncs_route_change_when_the_stream_then_fails()
         Some(("glm-5.3".to_string(), Some("prof-b".to_string()))),
         "clients must learn the provider now routes to prof-b even though the turn failed"
     );
+}
+
+struct MidStreamAccountSwitchProvider {
+    switched: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl Provider for MidStreamAccountSwitchProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.switched
+            .store(true, std::sync::atomic::Ordering::Release);
+        MidStreamModelSwitchProvider {
+            model: std::sync::Mutex::new(self.model()),
+            switch_to: self.model(),
+        }
+        .complete(messages, tools, system, resume_session_id)
+        .await
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        "same-model".to_string()
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        Some(
+            if self.switched.load(std::sync::atomic::Ordering::Acquire) {
+                "personal"
+            } else {
+                "work"
+            }
+            .to_string(),
+        )
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            switched: std::sync::atomic::AtomicBool::new(
+                self.switched.load(std::sync::atomic::Ordering::Acquire),
+            ),
+        })
+    }
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamAccountSwitchProvider {
+        switched: std::sync::atomic::AtomicBool::new(false),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+    let mut labels = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::ModelChanged {
+            model,
+            provider_oauth_account_label,
+            provider_oauth_email,
+            error,
+            ..
+        } = event
+        {
+            assert_eq!(model, "same-model");
+            assert!(provider_oauth_email.is_none());
+            assert!(error.is_none());
+            labels.push(provider_oauth_account_label);
+        }
+    }
+    assert_eq!(labels, vec![Some("personal".to_string())]);
 }
 
 #[tokio::test]

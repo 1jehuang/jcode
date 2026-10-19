@@ -343,7 +343,7 @@ pub(super) fn draw_messages(
     area: Rect,
     prepared: Arc<PreparedChatFrame>,
     show_native_scrollbar: bool,
-) -> info_widget::Margins {
+) -> (info_widget::Margins, Option<super::NativeScrollbar>) {
     let (render_area, scrollbar_area) =
         super::split_native_scrollbar_area(area, show_native_scrollbar);
     let left_inset = super::left_aligned_content_inset(render_area.width, app.centered_mode());
@@ -1402,15 +1402,15 @@ pub(super) fn draw_messages(
         );
     }
 
-    if let Some(scrollbar_area) = scrollbar_area {
-        super::render_native_scrollbar(
-            frame,
-            scrollbar_area,
-            scroll,
-            total_lines,
-            visible_height,
-            false,
-        );
+    let chat_scrollbar = scrollbar_area.map(|area| super::NativeScrollbar {
+        area,
+        scroll,
+        total_lines,
+        visible_height,
+        focused: false,
+    });
+    if let Some(scrollbar) = chat_scrollbar {
+        scrollbar.render(frame);
     }
 
     // Derive the dock-gating "reliable" width profile for *new* info widgets:
@@ -1425,7 +1425,7 @@ pub(super) fn draw_messages(
     }
     info_widget::apply_settlement(&mut margins, content_area.width);
 
-    margins
+    (margins, chat_scrollbar)
 }
 
 /// Look-ahead window (in rows) used to compute the "reliable" margin profile that
@@ -1457,8 +1457,8 @@ pub(crate) struct PinnedTodoBand {
     /// Todo rows drawn inside the rounded border. Empty means no box.
     pub(crate) card: Vec<Line<'static>>,
     title: String,
-    /// Index of the `… +N more` row within `card`.
-    more_line: Option<usize>,
+    /// Index of the `… +N more` or `▴ Collapse todos` row within `card`.
+    pub(crate) more_line: Option<usize>,
     tasks: Vec<Line<'static>>,
 }
 
@@ -1566,6 +1566,13 @@ pub(crate) fn pinned_todo_band_lines(
             Style::default().fg(dim_color()),
         )));
     } else {
+        if app.pinned_todos_expanded() {
+            more_line = Some(card.len());
+            card.push(Line::from(Span::styled(
+                "▴ Collapse todos",
+                Style::default().fg(dim_color()),
+            )));
+        }
         card.extend(card_lines);
     }
     PinnedTodoBand {

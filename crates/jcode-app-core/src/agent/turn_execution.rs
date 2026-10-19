@@ -34,12 +34,16 @@ impl Agent {
 
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
+        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
-                text: user_message.to_string(),
+                text: crate::prompt::with_swarm_user_message_reminder(
+                    user_message,
+                    self.provider.reasoning_effort().as_deref(),
+                ),
                 cache_control: None,
             }],
         );
@@ -70,12 +74,16 @@ impl Agent {
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
+        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
-                text: user_message.to_string(),
+                text: crate::prompt::with_swarm_user_message_reminder(
+                    user_message,
+                    self.provider.reasoning_effort().as_deref(),
+                ),
                 cache_control: None,
             }],
             display_role,
@@ -116,6 +124,7 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
+        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
         // Inject any pending notifications before the user message
         let alerts = self.take_alerts();
         if !alerts.is_empty() {
@@ -191,6 +200,29 @@ impl Agent {
         result
     }
 
+    /// Re-run the model loop for the turn already in history, without
+    /// appending a new user message. Used after the server switched routes
+    /// because the previous account hit a usage limit: the failed request is
+    /// retried on the new route exactly as if it had never been sent.
+    pub(crate) async fn continue_turn_after_failover(
+        &mut self,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        if self.is_graceful_shutdown() {
+            return Ok(());
+        }
+        self.current_turn_system_reminder =
+            system_reminder.filter(|value| !value.trim().is_empty());
+        let turn_started_at = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("failover");
+        let result = self.run_turn_streaming_mpsc(event_tx).await;
+        self.current_turn_system_reminder = None;
+        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        result
+    }
+
     /// Append and persist a user message without starting a model turn.
     pub(crate) fn append_user_context_message(
         &mut self,
@@ -213,8 +245,16 @@ impl Agent {
             .into_iter()
             .map(|(media_type, data)| ContentBlock::Image { media_type, data })
             .collect();
+        let text = if continues_turn {
+            user_message.to_string()
+        } else {
+            crate::prompt::with_swarm_user_message_reminder(
+                user_message,
+                self.provider.reasoning_effort().as_deref(),
+            )
+        };
         blocks.push(ContentBlock::Text {
-            text: user_message.to_string(),
+            text,
             cache_control: None,
         });
 
@@ -411,6 +451,7 @@ impl Agent {
     /// `tool_definitions`, this does not pin the tool snapshot or consume the
     /// one-shot late-MCP-discovery check before the first real turn.
     pub(crate) async fn prewarm_provider(&self) {
+        self.provider.set_session_id(&self.session.id);
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
@@ -906,7 +947,7 @@ impl Agent {
             .iter()
             .any(|n| n == "user_response");
         if was_enabled != enabled {
-            self.registry.set_user_response_enabled(enabled).await;
+            self.registry.set_desktop_ui_enabled(enabled).await;
             self.invalidate_sdk_tools();
         }
     }
@@ -1114,9 +1155,47 @@ impl Agent {
         session_id: &str,
         working_dir: Option<&str>,
     ) -> Result<SessionStatus> {
+        self.restore_session_inner(session_id, working_dir, true)
+    }
+
+    /// Restore without persisting. The caller must call
+    /// [`Self::persist_restored_session`] once it is off the latency-critical
+    /// path: for sessions with multi-MB compaction state that save is a full
+    /// snapshot rewrite (0.4-1.6s), and it used to delay the History reply.
+    pub(crate) fn restore_session_deferring_save(
+        &mut self,
+        session_id: &str,
+        working_dir: Option<&str>,
+    ) -> Result<SessionStatus> {
+        self.restore_session_inner(session_id, working_dir, false)
+    }
+
+    /// Persist state recorded by [`Self::restore_session_deferring_save`].
+    pub(crate) fn persist_restored_session(&mut self) {
+        let start = Instant::now();
+        if let Err(err) = self.session.save() {
+            logging::error(&format!(
+                "Failed to persist resumed session state for {}: {}",
+                self.session.id, err
+            ));
+        }
+        logging::info(&format!(
+            "[TIMING] restore_session deferred save: session={}, save={}ms",
+            self.session.id,
+            start.elapsed().as_millis()
+        ));
+    }
+
+    fn restore_session_inner(
+        &mut self,
+        session_id: &str,
+        working_dir: Option<&str>,
+        persist: bool,
+    ) -> Result<SessionStatus> {
         let restore_start = Instant::now();
+        let restore_cpu_start = crate::server::thread_cpu_ms();
         let load_start = Instant::now();
-        let mut session = Session::load(session_id)?;
+        let mut session = Session::load_for_resume(session_id)?;
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
             session.refresh_initial_session_context_message();
@@ -1134,17 +1213,32 @@ impl Agent {
         let assign_start = Instant::now();
         // A failed load must leave the current Agent and its concurrency lease
         // alive. Close it only after the replacement is ready to install.
-        self.mark_closed();
+        self.mark_closed_for_replacement();
+        let close_ms = assign_start.elapsed().as_millis();
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
-        self.session = session;
+        let replaced_session = std::mem::replace(&mut self.session, session);
+        drop(replaced_session);
+        let swap_ms = assign_start.elapsed().as_millis() - close_ms;
+        let lap = Instant::now();
+        self.provider.set_session_id(&self.session.id);
+        let provider_ms = lap.elapsed().as_millis();
+        let lap = Instant::now();
         self.refresh_agents_md_snapshot();
+        let agents_md_ms = lap.elapsed().as_millis();
+        let lap = Instant::now();
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,
             self.allowed_tools.clone(),
             self.disabled_tools.clone(),
         );
+        let policy_ms = lap.elapsed().as_millis();
         let assign_ms = assign_start.elapsed().as_millis();
+        if assign_ms >= 50 {
+            logging::info(&format!(
+                "[TIMING] restore_session assign parts: session={session_id}, close={close_ms}ms, swap={swap_ms}ms, provider={provider_ms}ms, agents_md={agents_md_ms}ms, policy={policy_ms}ms"
+            ));
+        }
 
         let reset_start = Instant::now();
         self.reset_runtime_state_for_session_change();
@@ -1158,7 +1252,8 @@ impl Agent {
         let model_ms = model_start.elapsed().as_millis();
 
         let mark_active_start = Instant::now();
-        self.session.mark_active();
+        // begin_concurrency_tracking writes the presence markers.
+        self.session.mark_active_unregistered();
         self.begin_concurrency_tracking();
         let mark_active_ms = mark_active_start.elapsed().as_millis();
         self.sync_memory_dedup_state_from_session();
@@ -1173,12 +1268,13 @@ impl Agent {
         let compaction_ms = compaction_start.elapsed().as_millis();
 
         let env_snapshot_start = Instant::now();
-        self.log_env_snapshot("resume");
+        // The save just below persists this snapshot too.
+        self.log_env_snapshot_unsaved("resume");
         let env_snapshot_ms = env_snapshot_start.elapsed().as_millis();
         self.fire_session_lifecycle_hook("session_start", "resume");
 
         let save_start = Instant::now();
-        if let Err(err) = self.session.save() {
+        if persist && let Err(err) = self.session.save() {
             logging::error(&format!(
                 "Failed to persist resumed session state for {}: {}",
                 session_id, err
@@ -1187,7 +1283,7 @@ impl Agent {
         let save_ms = save_start.elapsed().as_millis();
 
         logging::info(&format!(
-            "[TIMING] restore_session: session={}, messages={}, restored_soft_interrupts={}, load={}ms, assign={}ms, reset={}ms, model={}ms, mark_active={}ms, compaction={}ms, env_snapshot={}ms, save={}ms, total={}ms",
+            "[TIMING] restore_session: session={}, messages={}, restored_soft_interrupts={}, load={}ms, assign={}ms, reset={}ms, model={}ms, mark_active={}ms, compaction={}ms, env_snapshot={}ms, save={}ms, total={}ms, cpu={:.0}ms",
             session_id,
             self.session.messages.len(),
             restored_soft_interrupts,
@@ -1200,6 +1296,7 @@ impl Agent {
             env_snapshot_ms,
             save_ms,
             restore_start.elapsed().as_millis(),
+            crate::server::thread_cpu_ms() - restore_cpu_start,
         ));
         logging::info(&format!(
             "Session restored: {} messages in session",
@@ -1224,6 +1321,12 @@ impl Agent {
                 tool_data: msg.tool_data,
             })
             .collect()
+    }
+
+    /// Borrow the in-memory session so history assembly need not re-read the
+    /// (possibly tens of MB) persisted snapshot.
+    pub(crate) fn session_for_history(&self) -> &crate::session::Session {
+        &self.session
     }
 
     pub fn get_history_and_rendered_images(

@@ -246,7 +246,7 @@ pub(super) fn handle_input_shell(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let cwd = {
             let agent_guard = agent.lock().await;
             agent_guard.working_dir().map(|dir| dir.to_string())
@@ -359,7 +359,7 @@ pub(super) fn handle_run_subagent(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let description = derive_subagent_description(&prompt);
         let tool_call_id = crate::id::new_id("call");
         let tool_name = "subagent".to_string();
@@ -426,13 +426,16 @@ pub(super) fn handle_run_subagent(
 
         let started = Instant::now();
         let tool_name_for_exec = tool_name.clone();
-        let result = match tokio::spawn(async move {
+        let result = match crate::runtime_activity::spawn(async move {
             registry.execute(&tool_name_for_exec, tool_input, ctx).await
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+        }) {
+            Some(handle) => match handle.await {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+            },
+            None => Err(anyhow::anyhow!(
+                "Tool task was not admitted because the runtime is shutting down"
+            )),
         };
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
@@ -857,6 +860,11 @@ fn clone_split_session_with_feedback(
     child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
+    // Keep the same provider account. Replayed provider-native blocks (Anthropic
+    // web search `encrypted_content`) are bound to the account that produced
+    // them, and another account rejects the whole request with a 400.
+    child.provider_key = parent.provider_key.clone();
+    child.route_api_method = parent.route_api_method.clone();
     crate::session_accounts::AccountInheritance::from_session(&parent).apply_to_session(&mut child);
     if let Some(role) = feedback_role {
         let (target, one_shot) = match role {
@@ -873,7 +881,12 @@ fn clone_split_session_with_feedback(
             config.autojudge.model
         };
         match parent.effective_agent_model(target, global) {
-            Some(model) if model != "inherit" => child.model = Some(model),
+            Some(model) if model != "inherit" => {
+                // A different reviewer model picks its own provider route.
+                child.model = Some(model);
+                child.provider_key = None;
+                child.route_api_method = None;
+            }
             Some(_) => {}
             None if one_shot => {
                 if let Ok(credentials) = crate::auth::codex::load_credentials()
@@ -882,6 +895,7 @@ fn clone_split_session_with_feedback(
                 {
                     child.model = Some("gpt-5.5".to_string());
                     child.provider_key = Some("openai".to_string());
+                    child.route_api_method = None;
                 }
             }
             None => {}
@@ -1284,7 +1298,7 @@ pub(super) fn handle_compact(
 ) {
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         let session_id = agent_guard.session_id().to_string();
         let (message, success) = agent_guard.request_manual_compaction();

@@ -600,6 +600,9 @@ impl App {
                                 }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
+                                        if !text.is_empty() {
+                                            self.usage_reset.openai_quota_rejected = false;
+                                        }
                                         self.status = ProcessingStatus::Streaming;
                                         text_content.push_str(&text);
                                         self.resume_streaming_tps();
@@ -645,6 +648,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        self.usage_reset.openai_quota_rejected = false;
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer
                                         // running until the tool call has finished streaming; actual
@@ -831,6 +835,10 @@ impl App {
                                         if eager_stream_redraw {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
+                                    }
+                                    StreamEvent::ServiceTier { tier, requested } => {
+                                        self.remote_reported_service_tier = Some((requested, tier.clone()));
+                                        self.status_detail = Some(format!("Provider tier: {tier}"));
                                     }
                                     StreamEvent::TextDone => {}
                     StreamEvent::MessageEnd { .. } => {

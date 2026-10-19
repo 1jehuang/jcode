@@ -3,17 +3,11 @@ use super::{cycled_effort_index, named_profile_reasoning_efforts};
 #[test]
 fn default_effort_bar_index_excludes_swarm_without_changing_cycling() {
     assert_eq!(
-        super::default_effort_bar_index(&["low", "high", "swarm", "swarm-deep"]),
+        super::default_effort_bar_index(&["low", "high", "swarm"]),
         Some(1)
     );
-    assert_eq!(
-        super::default_effort_bar_index(&["swarm", "high", "swarm-deep"]),
-        Some(1)
-    );
-    assert_eq!(
-        super::default_effort_bar_index(&["swarm", "swarm-deep"]),
-        Some(1)
-    );
+    assert_eq!(super::default_effort_bar_index(&["swarm", "high"]), Some(1));
+    assert_eq!(super::default_effort_bar_index(&["swarm"]), Some(0));
     assert_eq!(super::default_effort_bar_index(&["high"]), Some(0));
     assert_eq!(super::default_effort_bar_index(&[]), None);
 }
@@ -290,16 +284,9 @@ cycle_case!(
     Some("swarm")
 );
 cycle_case!(
-    cycle_swarm_up_enters_deep_swarm,
+    cycle_swarm_up_wraps_to_minimum,
     OPENAI,
     Some("swarm"),
-    1,
-    Some("swarm-deep")
-);
-cycle_case!(
-    cycle_deep_swarm_up_wraps_to_minimum,
-    OPENAI,
-    Some("swarm-deep"),
     1,
     Some("none")
 );
@@ -309,13 +296,6 @@ cycle_case!(
     Some("swarm"),
     -1,
     Some("max")
-);
-cycle_case!(
-    cycle_deep_swarm_down_returns_to_swarm,
-    OPENAI,
-    Some("swarm-deep"),
-    -1,
-    Some("swarm")
 );
 cycle_case!(
     cycle_reasoning_up_advances_one_rung,
@@ -362,15 +342,15 @@ cycle_case!(
 cycle_case!(cycle_empty_ladder_returns_none, &[], None, 1, None);
 cycle_case!(
     cycle_swarm_only_unknown_uses_last_sentinel,
-    &["swarm", "swarm-deep"],
+    &["swarm"],
     None,
     1,
-    Some("swarm-deep")
+    Some("swarm")
 );
 cycle_case!(
     cycle_swarm_only_last_does_not_wrap,
-    &["swarm", "swarm-deep"],
-    Some("swarm-deep"),
+    &["swarm"],
+    Some("swarm"),
     1,
-    Some("swarm-deep")
+    Some("swarm")
 );

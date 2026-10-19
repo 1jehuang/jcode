@@ -67,6 +67,7 @@ fn spawn_canned_chat_server(
 
 fn billing_failover_test_provider() -> MultiProvider {
     MultiProvider {
+        session_id: Default::default(),
         anthropic: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
