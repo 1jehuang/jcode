@@ -102,7 +102,7 @@ fn default_scope_ignores_runtime_override_for_default_label() {
 }
 
 #[test]
-fn pin_survives_relabel_after_first_account_removed() {
+fn pin_survives_removal_of_an_earlier_account_and_a_legacy_relabel() {
     let _sandbox = AuthTestSandbox::new().expect("sandbox");
     seed_two_claude_accounts();
     seed_two_openai_accounts(FAR_FUTURE_MS);
@@ -111,7 +111,7 @@ fn pin_survives_relabel_after_first_account_removed() {
     assert_eq!(fox.identity.as_deref(), Some("fox@example.com"));
     let ofox = codex::pin_for_label("openai-fox").expect("pin openai fox");
 
-    // Removing otter relabels fox to claude-otter on the next load.
+    // Labels are identities, not positions: removing otter keeps fox's label.
     claude::remove_account("claude-otter").expect("remove otter");
     codex::remove_account("openai-otter").expect("remove openai otter");
     let labels: Vec<String> = claude::list_accounts()
@@ -119,18 +119,32 @@ fn pin_survives_relabel_after_first_account_removed() {
         .into_iter()
         .map(|a| a.label)
         .collect();
-    assert_eq!(labels, vec!["claude-otter".to_string()]);
+    assert_eq!(labels, vec!["claude-fox".to_string()]);
 
-    assert_eq!(claude::resolve_pin(&fox).as_deref(), Some("claude-otter"));
+    assert_eq!(claude::resolve_pin(&fox).as_deref(), Some("claude-fox"));
     let (creds, label) =
         claude::load_credentials_scoped(AccountScope::Pinned(&fox)).expect("scoped fox");
     assert_eq!(creds.access_token, "fox-access");
-    assert_eq!(label.as_deref(), Some("claude-otter"));
+    assert_eq!(label.as_deref(), Some("claude-fox"));
 
-    assert_eq!(codex::resolve_pin(&ofox).as_deref(), Some("openai-otter"));
+    assert_eq!(codex::resolve_pin(&ofox).as_deref(), Some("openai-fox"));
     let (creds, _) =
         codex::load_oauth_credentials_scoped(AccountScope::Pinned(&ofox)).expect("scoped ofox");
     assert_eq!(creds.access_token, "f-access");
+
+    // The relabel that remains, migrating a legacy numbered label, keeps a
+    // pin saved under the old label on the same login through its identity.
+    let mut auth = claude::load_auth_file().expect("load auth");
+    auth.anthropic_accounts[0].label = "claude-7".to_string();
+    auth.active_anthropic_account = Some("claude-7".to_string());
+    claude::save_auth_file(&auth).expect("save legacy label");
+    let legacy = AccountPin::new("claude-7", Some("fox@example.com".to_string()));
+    let migrated = claude::list_accounts().expect("list")[0].label.clone();
+    assert_ne!(migrated, "claude-7", "legacy numbered labels are migrated");
+    assert_eq!(
+        claude::resolve_pin(&legacy).as_deref(),
+        Some(migrated.as_str())
+    );
 
     // A pin whose identity is gone does not silently fall back to its label.
     let ghost = AccountPin::new("claude-otter", Some("gone@example.com".to_string()));
