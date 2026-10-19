@@ -26,7 +26,9 @@ pub use anthropic_reset::{
 };
 use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
-pub use cache::{cached_account_usage_snapshot, cached_account_usage_status_snapshot};
+pub use cache::{
+    account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
+};
 pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
 pub use openai_reset::{

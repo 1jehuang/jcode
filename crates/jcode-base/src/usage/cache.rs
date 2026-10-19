@@ -76,10 +76,146 @@ pub fn cached_account_usage_status_snapshot(
     }
 }
 
+/// Whether a saved account is known to be out of quota right now. Unlike
+/// `cached_account_usage_snapshot`, an old sample still counts while the
+/// exhausted window's reset time is in the future: a weekly limit observed an
+/// hour ago is still binding, and routing a new session or a failover onto it
+/// only wastes a request. Unknown usage is never treated as exhausted.
+/// Never probes, reads credentials, or blocks on a contended cache lock.
+pub fn account_known_exhausted(provider: super::MultiAccountProviderKind, label: &str) -> bool {
+    if let Some(remote) = super::remote_accounts::cached(provider, label) {
+        return remote.is_some_and(|snapshot| {
+            snapshot.exhausted
+                || (provider == super::MultiAccountProviderKind::Anthropic
+                    && [snapshot.five_hour_ratio, snapshot.seven_day_ratio]
+                        .into_iter()
+                        .flatten()
+                        .any(|ratio| ratio >= 0.99)
+                    && reset_in_future(snapshot.resets_at.as_deref()))
+        });
+    }
+    let label = label.trim();
+    if label.is_empty() {
+        return false;
+    }
+    let key = format!("label:{label}");
+    match provider {
+        super::MultiAccountProviderKind::Anthropic => ANTHROPIC_USAGE_CACHE
+            .get()
+            .and_then(|cache| cache.try_lock().ok())
+            .and_then(|map| map.get(&key).map(anthropic_known_exhausted))
+            .unwrap_or(false),
+        super::MultiAccountProviderKind::OpenAI => OPENAI_ACCOUNT_USAGE_CACHE
+            .get()
+            .and_then(|cache| cache.try_lock().ok())
+            .and_then(|map| map.get(&key).map(openai_known_exhausted))
+            .unwrap_or(false),
+    }
+}
+
+fn reset_in_future(reset: Option<&str>) -> bool {
+    reset
+        .and_then(|reset| chrono::DateTime::parse_from_rfc3339(reset).ok())
+        .is_some_and(|reset| reset > chrono::Utc::now())
+}
+
+fn anthropic_known_exhausted(data: &UsageData) -> bool {
+    // The snapshot already discards rolled-over windows and failed probes
+    // without a real last-good sample.
+    let snapshot = anthropic_snapshot_from_usage(String::new(), None, data);
+    let dated = |ratio: Option<f32>, reset: Option<&str>| {
+        ratio.is_some_and(|ratio| ratio >= 0.99) && reset_in_future(reset)
+    };
+    dated(
+        snapshot.five_hour_ratio,
+        data.five_hour_resets_at.as_deref(),
+    ) || dated(
+        snapshot.seven_day_ratio,
+        data.seven_day_resets_at.as_deref(),
+    ) || (!data.is_stale() && snapshot.exhausted)
+}
+
+fn openai_known_exhausted(data: &OpenAIUsageData) -> bool {
+    if !data.is_stale() && data.last_error.is_none() && data.exhausted() {
+        return true;
+    }
+    // OpenAI can round to 100% while still serving, so a stale sample only
+    // counts when the provider also enforced the limit.
+    data.hard_limit_reached
+        && [data.five_hour.as_ref(), data.seven_day.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|window| {
+                window.usage_ratio >= 0.99 && reset_in_future(window.resets_at.as_deref())
+            })
+}
+
 #[cfg(test)]
 mod account_snapshot_tests {
     use super::*;
-    use crate::usage::MultiAccountProviderKind;
+    use crate::usage::{MultiAccountProviderKind, OpenAIUsageWindow};
+
+    #[test]
+    fn stale_samples_stay_exhausted_until_their_window_resets() {
+        let future = (chrono::Utc::now() + chrono::Duration::days(6)).to_rfc3339();
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let old = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(70 * 60))
+            .unwrap();
+        let window = |ratio: f32, reset: &str| OpenAIUsageWindow {
+            name: "7d".into(),
+            usage_ratio: ratio,
+            resets_at: Some(reset.to_string()),
+        };
+        let openai = OpenAIUsageData {
+            seven_day: Some(window(1.0, &future)),
+            hard_limit_reached: true,
+            fetched_at: Some(old),
+            ..Default::default()
+        };
+        assert!(openai.is_stale());
+        assert!(openai_known_exhausted(&openai));
+        // Rolled over, rounded-but-not-enforced, and headroom are not exhausted.
+        let rolled = OpenAIUsageData {
+            seven_day: Some(window(1.0, &past)),
+            ..openai.clone()
+        };
+        assert!(!openai_known_exhausted(&rolled));
+        let soft = OpenAIUsageData {
+            hard_limit_reached: false,
+            ..openai.clone()
+        };
+        assert!(!openai_known_exhausted(&soft));
+        let headroom = OpenAIUsageData {
+            seven_day: Some(window(0.4, &future)),
+            ..openai
+        };
+        assert!(!openai_known_exhausted(&headroom));
+
+        let anthropic = UsageData {
+            five_hour: 1.0,
+            five_hour_resets_at: Some(
+                (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            ),
+            seven_day: 0.2,
+            fetched_at: Some(old),
+            last_success_at: Some(old),
+            ..Default::default()
+        };
+        assert!(anthropic_known_exhausted(&anthropic));
+        // A later failed probe keeps the dated last-good exhaustion.
+        let errored = UsageData {
+            last_error: Some("HTTP 429".into()),
+            ..anthropic.clone()
+        };
+        assert!(anthropic_known_exhausted(&errored));
+        let reset = UsageData {
+            five_hour_resets_at: Some(past),
+            ..anthropic
+        };
+        assert!(!anthropic_known_exhausted(&reset));
+        assert!(!anthropic_known_exhausted(&UsageData::default()));
+    }
 
     #[test]
     fn anthropic_keys_share_saved_identity_without_exposing_token_prefixes() {
