@@ -501,6 +501,47 @@ async fn external_background_task_wake_emits_request_without_starting_turn() {
 }
 
 #[tokio::test]
+async fn idle_live_agent_wakes_restored_headless_member_without_attachments() {
+    // Regression: headless workers restored after a server restart carry a
+    // closed placeholder event channel and no attachments. Wake used to refuse
+    // them and fall back to a soft-interrupt queue an idle agent never drains,
+    // so DM wakes silently did nothing.
+    let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        agent.clone(),
+    )])));
+    let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+    drop(closed_rx);
+    let mut member = attached_swarm_member(&session_id, closed_tx);
+    member.is_headless = true;
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        member.clone(),
+    )])));
+    assert!(
+        super::live_turn::idle_live_agent(&session_id, &sessions, &swarm_members)
+            .await
+            .is_some(),
+        "restored headless member must stay wakeable"
+    );
+
+    // A non-headless member with no live client is still not driven.
+    member.is_headless = false;
+    swarm_members
+        .write()
+        .await
+        .insert(session_id.clone(), member);
+    assert!(
+        super::live_turn::idle_live_agent(&session_id, &sessions, &swarm_members)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn idle_live_agent_reservation_blocks_a_second_wake_until_released() {
     // Regression for #1152: the idle check used to drop its try_lock guard
     // before the turn started, so two concurrent wakes could both succeed.

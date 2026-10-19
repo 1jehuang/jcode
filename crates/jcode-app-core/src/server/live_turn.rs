@@ -73,14 +73,21 @@ pub(super) async fn idle_live_agent(
         guard.get(session_id).cloned()
     }?;
 
-    let has_live_attachments = {
+    // Headless workers never have a client attachment by design, and members
+    // restored from disk after a server restart carry a closed placeholder
+    // channel. Both are still server-drivable, so they must remain wakeable:
+    // otherwise a wake falls back to a soft-interrupt queue that an idle agent
+    // never drains, and the worker silently stays idle.
+    let can_drive = {
         let members = swarm_members.read().await;
         members
             .get(session_id)
-            .map(|member| !member.event_txs.is_empty() || !member.event_tx.is_closed())
+            .map(|member| {
+                member.is_headless || !member.event_txs.is_empty() || !member.event_tx.is_closed()
+            })
             .unwrap_or(false)
     };
-    if !has_live_attachments {
+    if !can_drive {
         return None;
     }
 

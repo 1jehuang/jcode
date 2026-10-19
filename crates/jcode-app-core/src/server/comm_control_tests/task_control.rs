@@ -604,3 +604,84 @@ async fn task_control_retry_re_dispatches_after_recent_identical_retry() {
         "second identical retry must actually re-dispatch the task"
     );
 }
+
+/// Regression: `swarm wake` on a worker spawned without a plan used to fail
+/// with "No swarm plan exists for this swarm", leaving the coordinator with no
+/// way to rouse an idle worker. It must wake the session directly instead.
+#[tokio::test]
+async fn task_control_wake_without_plan_wakes_target_session_by_friendly_name() {
+    let (_env, _runtime) = RuntimeEnvGuard::new();
+    let swarm_id = "swarm-no-plan";
+    let requester = "coord";
+    let worker = "worker-session";
+    let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+    let worker_agent = test_agent().await;
+    // Hold the agent so it reads as busy: the wake must queue, not error.
+    let _busy = worker_agent.clone().lock_owned().await;
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        worker.to_string(),
+        worker_agent,
+    )])));
+    let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        (requester.to_string(), member(requester, swarm_id, "ready")),
+        (worker.to_string(), {
+            let mut member = member(worker, swarm_id, "ready");
+            member.friendly_name = Some("mizaru".to_string());
+            member.is_headless = true;
+            member
+        }),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        HashSet::from([requester.to_string(), worker.to_string()]),
+    )])));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        requester.to_string(),
+    )])));
+    let event_history = Arc::new(RwLock::new(VecDeque::new()));
+    let event_counter = Arc::new(AtomicU64::new(1));
+    let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(32);
+    let mutation_runtime = SwarmMutationRuntime::default();
+
+    handle_comm_task_control(
+        111,
+        requester.to_string(),
+        "wake".to_string(),
+        String::new(),
+        Some("mizaru".to_string()),
+        Some("keep going".to_string()),
+        &client_tx,
+        &sessions,
+        &soft_interrupt_queues,
+        &client_connections,
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_plans,
+        &swarm_coordinators,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+        &mutation_runtime,
+    )
+    .await;
+
+    match client_rx.recv().await.expect("response") {
+        ServerEvent::CommTaskControlResponse {
+            id,
+            action,
+            target_session,
+            status,
+            ..
+        } => {
+            assert_eq!(id, 111);
+            assert_eq!(action, "wake");
+            assert_eq!(target_session.as_deref(), Some(worker));
+            assert_eq!(status, "queued");
+        }
+        other => panic!("expected CommTaskControlResponse, got {other:?}"),
+    }
+}

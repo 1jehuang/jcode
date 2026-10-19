@@ -1776,6 +1776,37 @@ pub(super) async fn handle_comm_task_control(
         None => return,
     };
 
+    // Workers spawned directly (without a plan) have no task to resume, but
+    // the coordinator still needs a reliable way to rouse an idle one. Treat
+    // wake/resume/start on a target session with no plan-assigned task as a
+    // direct session wake instead of failing with "No swarm plan exists".
+    if task_id.trim().is_empty()
+        && matches!(
+            action,
+            TaskControlAction::Wake | TaskControlAction::Resume | TaskControlAction::Start
+        )
+        && let Some(target) = target_session.as_deref()
+        && !target_has_plan_assignment(&swarm_id, target, swarm_members, swarm_plans).await
+    {
+        wake_session_without_plan(
+            id,
+            &req_session_id,
+            &swarm_id,
+            target,
+            message.as_deref(),
+            client_event_tx,
+            sessions,
+            soft_interrupt_queues,
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        )
+        .await;
+        return;
+    }
+
     let task_id = if task_id.trim().is_empty() {
         let Some(target_session) = target_session.as_deref() else {
             let _ = client_event_tx.send(ServerEvent::Error {
@@ -2242,6 +2273,157 @@ pub(super) fn handle_client_debug_response(
     client_debug_response_tx: &broadcast::Sender<(u64, String)>,
 ) {
     let _ = client_debug_response_tx.send((id, output));
+}
+
+/// Resolve a target given as a session id or unique friendly name within
+/// `swarm_id`.
+async fn resolve_swarm_member_target(
+    swarm_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Result<String, String> {
+    let members = swarm_members.read().await;
+    if let Some(member) = members.get(target) {
+        if member.swarm_id.as_deref() == Some(swarm_id) {
+            return Ok(target.to_string());
+        }
+        return Err(format!("Session '{target}' is not in this swarm."));
+    }
+    let mut matches: Vec<&str> = members
+        .values()
+        .filter(|member| member.swarm_id.as_deref() == Some(swarm_id))
+        .filter(|member| member.friendly_name.as_deref() == Some(target))
+        .map(|member| member.session_id.as_str())
+        .collect();
+    matches.sort_unstable();
+    match matches.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => Err(format!(
+            "Unknown target '{target}' - use an exact session_id or a unique friendly name within the swarm."
+        )),
+        many => Err(format!(
+            "Friendly name '{target}' is ambiguous in swarm. Use an exact session id instead. Matches: {}",
+            many.join(", ")
+        )),
+    }
+}
+
+/// Whether `target` (session id or friendly name) owns any task in the swarm
+/// plan. Targets without plan tasks are woken directly instead.
+async fn target_has_plan_assignment(
+    swarm_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+) -> bool {
+    let resolved = resolve_swarm_member_target(swarm_id, target, swarm_members)
+        .await
+        .unwrap_or_else(|_| target.to_string());
+    let plans = swarm_plans.read().await;
+    plans.get(swarm_id).is_some_and(|plan| {
+        plan.items.iter().any(|item| {
+            matches!(item.assigned_to.as_deref(), Some(owner) if owner == target || owner == resolved)
+        })
+    })
+}
+
+/// Wake an idle swarm member that has no plan task to resume.
+///
+/// Starts a tracked live turn immediately when the agent is idle. When it is
+/// busy, the message is queued as a soft interrupt, which a running turn
+/// drains at its next safe point.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "direct wake needs the same swarm bookkeeping handles as task control"
+)]
+async fn wake_session_without_plan(
+    id: u64,
+    req_session_id: &str,
+    swarm_id: &str,
+    target: &str,
+    message: Option<&str>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &super::SessionInterruptQueues,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    event_counter: &Arc<std::sync::atomic::AtomicU64>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+) {
+    let session_id = match resolve_swarm_member_target(swarm_id, target, swarm_members).await {
+        Ok(session_id) => session_id,
+        Err(message) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message,
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    if session_id == req_session_id {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Coordinator cannot wake itself.".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    if task_agent_session(&session_id, sessions).await.is_none() {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!(
+                "Session '{}' has no live agent on the server. Spawn a replacement instead.",
+                session_id
+            ),
+            retry_after_secs: None,
+        });
+        return;
+    }
+
+    let wake_message = match message.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => format!("Coordinator requested you wake and continue.\n\n{text}"),
+        None => "Coordinator requested you wake and continue your assigned work. When finished, report back with swarm action=report.".to_string(),
+    };
+
+    let woke = super::live_turn::run_live_turn_if_idle(
+        &session_id,
+        &wake_message,
+        None,
+        sessions,
+        super::live_turn::LiveTurnSwarmContext::new(
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        ),
+    )
+    .await;
+    let status = if woke {
+        "running"
+    } else {
+        let _ = queue_soft_interrupt_for_session(
+            &session_id,
+            wake_message,
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await;
+        "queued"
+    };
+
+    let _ = client_event_tx.send(ServerEvent::CommTaskControlResponse {
+        id,
+        action: "wake".to_string(),
+        task_id: "(no plan task)".to_string(),
+        target_session: Some(session_id),
+        status: status.to_string(),
+        summary: PlanGraphStatus::empty_for_swarm(swarm_id),
+    });
 }
 
 /// Authorize a session to drive task dispatch for its swarm plan.
