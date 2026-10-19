@@ -89,6 +89,10 @@ pub struct RequestRoute {
     pub provider: String,
     pub model: String,
     pub upstream_provider: Option<String>,
+    /// OAuth account label bound to the request, when the route is account-scoped.
+    /// Provider prompt caches are per account, so a failover to another
+    /// account (for example after a 429) always starts cold.
+    pub account: Option<String>,
     /// Expected cache retention in seconds, when known.
     pub cache_ttl_secs: Option<u64>,
     /// Whether `cache_ttl_secs` is only an estimate (never treat as hard expiry).
@@ -99,6 +103,7 @@ pub struct RequestRoute {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissReason {
     ProviderSwitch,
+    AccountSwitch,
     ModelSwitch,
     UpstreamSwitch,
     Expired,
@@ -116,6 +121,7 @@ impl MissReason {
     pub fn id(self) -> &'static str {
         match self {
             Self::ProviderSwitch => "provider_switch",
+            Self::AccountSwitch => "account_switch",
             Self::ModelSwitch => "model_switch",
             Self::UpstreamSwitch => "upstream_switch",
             Self::Expired => "expired",
@@ -133,6 +139,7 @@ impl MissReason {
     pub fn detail(self) -> &'static str {
         match self {
             Self::ProviderSwitch => "provider changed",
+            Self::AccountSwitch => "account changed; prompt caches are per account",
             Self::ModelSwitch => "model changed",
             Self::UpstreamSwitch => "upstream provider changed",
             Self::Expired => "cache expired",
@@ -171,6 +178,8 @@ pub struct KvCacheMiss {
     pub missed_tokens: u64,
     /// Documented intentional invalidation that explains a harness-caused miss.
     pub documented_cause: Option<String>,
+    /// Specific explanation (what changed, from what to what, timing).
+    pub detail: String,
 }
 
 impl KvCacheMiss {
@@ -179,35 +188,187 @@ impl KvCacheMiss {
         if self.reason == MissReason::Compaction {
             return format!(
                 "KV cache refresh [provider_auto_compaction]: provider compacted the context; rebuilding cache is expected (previous reusable prefix ~{} tokens, cache read {}).",
-                compact_tokens(self.expected_tokens),
-                self.read_tokens
+                format_token_count(self.expected_tokens),
+                format_token_count(self.read_tokens)
             );
         }
-        let tokens = compact_tokens(self.missed_tokens);
+        let tokens = format_token_count(self.missed_tokens);
+        let detail = if self.detail.is_empty() {
+            self.reason.detail()
+        } else {
+            self.detail.as_str()
+        };
         match (&self.documented_cause, self.reason.harness_caused()) {
-            (Some(cause), _) => format!(
-                "KV cache refresh [{cause}]: ~{tokens} tokens resent ({}).",
-                self.reason.detail()
-            ),
+            (Some(cause), _) => {
+                format!("KV cache refresh [{cause}]: ~{tokens} tokens resent ({detail}).")
+            }
             (None, true) => format!(
-                "KV cache miss: ~{tokens} tokens resent ({}). This is likely a harness bug.",
-                self.reason.detail()
+                "KV cache miss [{}]: ~{tokens} tokens resent ({detail}). This is likely a harness bug.",
+                self.reason.id()
             ),
             (None, false) => format!(
-                "KV cache miss: ~{tokens} tokens resent ({}).",
-                self.reason.detail()
+                "KV cache miss [{}]: ~{tokens} tokens resent ({detail}).",
+                self.reason.id()
             ),
         }
     }
 }
 
-fn compact_tokens(value: u64) -> String {
+/// Human-friendly token count: `987`, `4.12K`, `33.1K`, `336K`, `1.25M`.
+pub fn format_token_count(value: u64) -> String {
+    fn trim(text: String) -> String {
+        if text.contains('.') {
+            text.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            text
+        }
+    }
+    let v = value as f64;
     if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
+        format!("{}M", trim(format!("{:.2}", v / 1_000_000.0)))
+    } else if value >= 100_000 {
+        format!("{}K", (v / 1_000.0).round() as u64)
+    } else if value >= 10_000 {
+        format!("{}K", trim(format!("{:.1}", v / 1_000.0)))
     } else if value >= 1_000 {
-        format!("{}K", value / 1_000)
+        format!("{}K", trim(format!("{:.2}", v / 1_000.0)))
     } else {
         value.to_string()
+    }
+}
+
+/// Compact duration for diagnostics: `45s`, `6m 2s`, `1h 5m`.
+pub fn format_duration_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        let (m, s) = (secs / 60, secs % 60);
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m {s}s")
+        }
+    } else {
+        let (h, m) = (secs / 3_600, (secs % 3_600) / 60);
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {m}m")
+        }
+    }
+}
+
+fn or_unknown(value: Option<&str>) -> &str {
+    value.filter(|v| !v.is_empty()).unwrap_or("default")
+}
+
+/// Inputs for a specific, human-readable explanation of one cache miss.
+#[derive(Debug, Clone, Copy)]
+pub struct MissContext<'a> {
+    pub old_provider: &'a str,
+    pub new_provider: &'a str,
+    pub old_model: &'a str,
+    pub new_model: &'a str,
+    pub old_account: Option<&'a str>,
+    pub new_account: Option<&'a str>,
+    pub old_upstream: Option<&'a str>,
+    pub new_upstream: Option<&'a str>,
+    /// Seconds between the previous request completing and this one starting.
+    pub idle_secs: Option<u64>,
+    pub ttl_secs: Option<u64>,
+    pub ttl_is_estimate: bool,
+    pub expected_tokens: u64,
+    pub read_tokens: u64,
+    /// Index of the first previously sent message that changed, when known.
+    pub first_changed_message: Option<usize>,
+}
+
+impl MissContext<'_> {
+    fn timing(&self) -> String {
+        let idle = self
+            .idle_secs
+            .map(|s| format!("{} after the previous call", format_duration_secs(s)));
+        let ttl = self.ttl_secs.map(|t| {
+            format!(
+                "{}TTL {}",
+                if self.ttl_is_estimate {
+                    "estimated "
+                } else {
+                    ""
+                },
+                format_duration_secs(t)
+            )
+        });
+        match (idle, ttl) {
+            (Some(i), Some(t)) => format!("{i}, within {t}"),
+            (Some(i), None) => i,
+            (None, Some(t)) => t,
+            (None, None) => String::new(),
+        }
+    }
+}
+
+/// Specific explanation for a classified miss: what changed, from what to
+/// what, and the timing that rules other causes in or out.
+pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
+    let prefix = format_token_count(ctx.expected_tokens);
+    let read = format_token_count(ctx.read_tokens);
+    match reason {
+        MissReason::ProviderSwitch => format!(
+            "provider switched {} -> {}; caches are not shared across providers",
+            ctx.old_provider, ctx.new_provider
+        ),
+        MissReason::AccountSwitch => format!(
+            "account switched {} -> {} (e.g. failover after a rate limit); prompt caches are per account",
+            or_unknown(ctx.old_account),
+            or_unknown(ctx.new_account)
+        ),
+        MissReason::ModelSwitch => format!(
+            "model switched {} -> {}; caches are per model",
+            ctx.old_model, ctx.new_model
+        ),
+        MissReason::UpstreamSwitch => format!(
+            "upstream route switched {} -> {}; cache lives on the previous upstream",
+            or_unknown(ctx.old_upstream),
+            or_unknown(ctx.new_upstream)
+        ),
+        MissReason::Expired => match (ctx.idle_secs, ctx.ttl_secs) {
+            (Some(idle), Some(ttl)) => format!(
+                "idle {} exceeded the {} cache TTL",
+                format_duration_secs(idle),
+                format_duration_secs(ttl)
+            ),
+            _ => "cache retention elapsed".to_string(),
+        },
+        MissReason::DailyRollover => {
+            "provider resets its prompt cache at 00:00 UTC; not avoidable by the harness"
+                .to_string()
+        }
+        MissReason::SystemChanged => "system prompt changed mid-session".to_string(),
+        MissReason::ToolsChanged => "tool set changed mid-session".to_string(),
+        MissReason::PrefixChanged => match ctx.first_changed_message {
+            Some(index) => {
+                format!("earlier message #{index} was modified, invalidating everything after it")
+            }
+            None => "an earlier message was modified".to_string(),
+        },
+        MissReason::Compaction => "provider automatically compacted the context".to_string(),
+        MissReason::ZeroRead | MissReason::LowRead => {
+            let timing = ctx.timing();
+            let timing = if timing.is_empty() {
+                String::new()
+            } else {
+                format!(" {timing}")
+            };
+            let same = if ctx.old_account.is_some() && ctx.new_account.is_some() {
+                "provider, model, account"
+            } else {
+                "provider, model"
+            };
+            format!(
+                "provider read {read} of the {prefix}-token prefix{timing}; same {same}, system prompt, tools and message prefix, so the provider evicted or rerouted the cache"
+            )
+        }
     }
 }
 
@@ -227,6 +388,7 @@ struct Pending {
     signature: RequestSignature,
     provider_compaction: bool,
     utc_day: i64,
+    started_at: Instant,
 }
 
 /// Per-session miss detector. Reset whenever the provider-facing transcript is
@@ -263,6 +425,7 @@ impl KvCacheMonitor {
             signature,
             provider_compaction: false,
             utc_day,
+            started_at: Instant::now(),
         });
     }
 
@@ -327,12 +490,43 @@ fn classify(
             .flatten()
             .map(|cause| cause.source.to_string())
     };
+    let (old, new) = (&baseline.route, &pending.route);
+    let detail = describe_miss(
+        reason,
+        &MissContext {
+            old_provider: &old.provider,
+            new_provider: &new.provider,
+            old_model: &old.model,
+            new_model: &new.model,
+            old_account: old.account.as_deref(),
+            new_account: new.account.as_deref(),
+            old_upstream: old.upstream_provider.as_deref(),
+            new_upstream: new.upstream_provider.as_deref(),
+            idle_secs: Some(
+                pending
+                    .started_at
+                    .saturating_duration_since(baseline.completed_at)
+                    .as_secs(),
+            ),
+            ttl_secs: old.cache_ttl_secs,
+            ttl_is_estimate: old.ttl_is_estimate,
+            expected_tokens: expected,
+            read_tokens,
+            first_changed_message: pending
+                .signature
+                .message_hashes
+                .iter()
+                .zip(baseline.signature.message_hashes.iter())
+                .position(|(a, b)| a != b),
+        },
+    );
     Some(KvCacheMiss {
         reason,
         expected_tokens: expected,
         read_tokens,
         missed_tokens: missed,
         documented_cause,
+        detail,
     })
 }
 
@@ -340,6 +534,9 @@ fn reason(baseline: &Baseline, pending: &Pending, read: u64) -> Option<MissReaso
     let (old, new) = (&baseline.route, &pending.route);
     if old.provider != new.provider {
         return Some(MissReason::ProviderSwitch);
+    }
+    if old.account.is_some() && new.account.is_some() && old.account != new.account {
+        return Some(MissReason::AccountSwitch);
     }
     if old.model != new.model {
         return Some(MissReason::ModelSwitch);
@@ -393,6 +590,7 @@ mod tests {
             provider: "claude".into(),
             model: "claude-opus".into(),
             upstream_provider: None,
+            account: None,
             cache_ttl_secs: Some(300),
             ttl_is_estimate: false,
         }
@@ -416,6 +614,53 @@ mod tests {
             None,
             "no baseline yet"
         );
+    }
+
+    #[test]
+    fn account_failover_is_an_account_switch_with_from_to_detail() {
+        let mut monitor = KvCacheMonitor::new();
+        let mut fox = route();
+        fox.account = Some("fox".into());
+        monitor.begin_request(fox, sig(&[10, 11]));
+        monitor.finish_request(33_096, Some(33_000));
+        let mut otter = route();
+        otter.account = Some("otter".into());
+        monitor.begin_request(otter, sig(&[10, 11, 12]));
+        let miss = monitor.finish_request(40_204, Some(0)).expect("miss");
+        assert_eq!(miss.reason, MissReason::AccountSwitch);
+        assert!(!miss.reason.harness_caused());
+        let message = miss.message();
+        assert!(message.contains("[account_switch]"), "{message}");
+        assert!(message.contains("fox -> otter"), "{message}");
+        assert!(message.contains("~33.1K tokens"), "{message}");
+    }
+
+    #[test]
+    fn token_counts_are_human_readable() {
+        assert_eq!(format_token_count(987), "987");
+        assert_eq!(format_token_count(1_000), "1K");
+        assert_eq!(format_token_count(4_123), "4.12K");
+        assert_eq!(format_token_count(33_096), "33.1K");
+        assert_eq!(format_token_count(40_000), "40K");
+        assert_eq!(format_token_count(336_400), "336K");
+        assert_eq!(format_token_count(1_250_000), "1.25M");
+        assert_eq!(format_token_count(2_000_000), "2M");
+    }
+
+    #[test]
+    fn zero_read_detail_rules_out_harness_and_reports_timing() {
+        let mut monitor = KvCacheMonitor::new();
+        warm(&mut monitor);
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        let miss = monitor.finish_request(52_000, Some(0)).expect("miss");
+        assert_eq!(miss.reason, MissReason::ZeroRead);
+        assert!(
+            miss.detail.contains("read 0 of the 50K-token prefix"),
+            "{}",
+            miss.detail
+        );
+        assert!(miss.detail.contains("TTL 5m"), "{}", miss.detail);
+        assert!(miss.detail.contains("evicted"), "{}", miss.detail);
     }
 
     #[test]
@@ -444,6 +689,7 @@ mod tests {
             provider: "openai-api".into(),
             model: "gpt-5.4".into(),
             upstream_provider: None,
+            account: None,
             cache_ttl_secs: Some(1800),
             ttl_is_estimate: true,
         }
@@ -566,7 +812,7 @@ mod tests {
         assert!(miss.message().contains("rebuilding cache is expected"));
         assert!(
             miss.message()
-                .contains("previous reusable prefix ~216K tokens")
+                .contains("previous reusable prefix ~217K tokens")
         );
         assert!(!miss.message().contains("tokens resent"));
 

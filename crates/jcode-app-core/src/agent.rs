@@ -151,6 +151,29 @@ impl Agent {
         }
     }
 
+    /// OAuth account serving this request. Prompt caches are per account, so
+    /// a failover between accounts must be attributed, not reported as an
+    /// unexplained provider eviction.
+    fn kv_cache_account_identity(&self) -> Option<String> {
+        if self.provider.active_resolved_credential()
+            != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return None;
+        }
+        // An unbound runtime authenticates with the globally active account.
+        self.provider.oauth_account_label().or_else(|| {
+            match jcode_provider_core::parse_provider_hint(self.provider.name()) {
+                Some(jcode_provider_core::ActiveProvider::Claude) => {
+                    crate::auth::claude::active_account_label()
+                }
+                Some(jcode_provider_core::ActiveProvider::OpenAI) => {
+                    crate::auth::codex::active_account_label()
+                }
+                _ => None,
+            }
+        })
+    }
+
     fn begin_kv_cache_monitor_request(&mut self, event: &ServerEvent, model: &str) {
         let ServerEvent::KvCacheRequest {
             system_static_hash,
@@ -171,6 +194,7 @@ impl Agent {
             provider,
             model: model.to_string(),
             upstream_provider: self.last_upstream_provider.clone(),
+            account: self.kv_cache_account_identity(),
         };
         let signature = crate::kv_cache_monitor::RequestSignature {
             system_static_hash: *system_static_hash,
@@ -209,7 +233,7 @@ impl Agent {
             "KV_CACHE_MISS"
         };
         let diagnostic = format!(
-            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
+            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?} detail={:?}",
             self.session.id,
             miss.reason.id(),
             miss.reason.harness_caused(),
@@ -217,6 +241,7 @@ impl Agent {
             miss.expected_tokens,
             miss.read_tokens,
             miss.documented_cause,
+            miss.detail,
         );
         if expected_refresh {
             logging::info(&diagnostic);

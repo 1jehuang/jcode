@@ -159,6 +159,8 @@ fn handle_kv_cache_miss(
             let authoritative = match reason {
                 "compaction" => Some(KvCacheMissReason::Compaction),
                 "daily_rollover" => Some(KvCacheMissReason::DailyRollover),
+                // The daemon knows the account actually used after a failover.
+                "account_switch" => Some(KvCacheMissReason::AccountSwitch),
                 _ => None,
             };
             if let Some(authoritative) = authoritative
@@ -184,6 +186,7 @@ fn handle_kv_cache_miss(
         let reason = match reason {
             "compaction" => KvCacheMissReason::Compaction,
             "provider_switch" => KvCacheMissReason::ProviderSwitch,
+            "account_switch" => KvCacheMissReason::AccountSwitch,
             "model_switch" => KvCacheMissReason::ModelSwitch,
             "upstream_switch" => KvCacheMissReason::UpstreamSwitch,
             "expired" => KvCacheMissReason::Expired,
