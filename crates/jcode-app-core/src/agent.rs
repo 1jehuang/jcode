@@ -372,6 +372,9 @@ pub struct Agent {
     /// MCP tools to wait for), this is set so the per-turn registry scan stops.
     /// Reset whenever the tool list is intentionally unlocked.
     mcp_late_register_resolved: bool,
+    /// Before/after token counts from the last context-limit auto-recovery,
+    /// consumed when the turn loop announces the compaction to clients.
+    last_recovery_compaction: Option<(u64, u64, usize)>,
     /// Whether `locked_tools` was built for provider-native deferred MCP
     /// loading. A mid-session model/provider switch can change that
     /// capability; the snapshot must then be rebuilt, or the new provider
@@ -517,6 +520,7 @@ impl Agent {
             last_usage: TokenUsage::default(),
             locked_tools: None,
             mcp_late_register_resolved: false,
+            last_recovery_compaction: None,
             locked_tools_native_deferred: false,
             announced_mcp_tools: HashSet::new(),
             announced_mcp_scan_index: 0,
