@@ -70,6 +70,7 @@ pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
 pub(crate) use todos_render::swarm_plan_todos;
 use todos_render::{render_todos_compact, render_todos_expanded, render_todos_widget};
+pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
 use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
@@ -406,6 +407,8 @@ pub struct UsageInfo {
     pub output_tps: Option<f32>,
     /// Whether data was successfully fetched / available to show
     pub available: bool,
+    /// A request was rejected for a usage limit, even without a fresh snapshot.
+    pub limit_reached: bool,
 }
 
 /// Session-level KV cache telemetry for providers that report cache usage.
@@ -502,8 +505,11 @@ impl CacheHitInfo {
 }
 
 impl UsageInfo {
-    /// Return the highest usage percentage across all limit windows (0-100).
+    /// Return the highest usage percentage, treating a rejected request as exhausted.
     pub fn max_usage_pct(&self) -> u8 {
+        if self.limit_reached {
+            return 100;
+        }
         let five_hr = (self.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
         let seven_day = (self.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
         let spark = self
@@ -679,6 +685,12 @@ pub struct InfoWidgetData {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
+    /// Initial remote runtime metadata has not arrived yet. Cleared by the owner
+    /// once the initial snapshot is applied, never inferred from missing values.
+    pub startup_runtime_pending: bool,
+    /// Initial subscription snapshot is pending. Empty authoritative snapshots
+    /// clear this too, so absent quota data never reserves permanent rows.
+    pub startup_usage_pending: bool,
     pub native_compaction_mode: Option<String>,
     pub native_compaction_threshold_tokens: Option<usize>,
     pub session_count: Option<usize>,
@@ -786,11 +798,12 @@ impl InfoWidgetData {
                 if self.queue_mode.is_some() {
                     sections += 1;
                 }
-                if self
-                    .usage_info
-                    .as_ref()
-                    .map(|u| u.available)
-                    .unwrap_or(false)
+                if super::info_widget_overview::startup_usage_pending(self)
+                    || self
+                        .usage_info
+                        .as_ref()
+                        .map(|u| u.available || u.limit_reached)
+                        .unwrap_or(false)
                 {
                     sections += 1;
                 }
@@ -829,11 +842,14 @@ impl InfoWidgetData {
                 .unwrap_or(false),
             WidgetKind::Compaction => self.compaction_info.is_some(),
             WidgetKind::AmbientMode => false,
-            WidgetKind::UsageLimits => self
-                .usage_info
-                .as_ref()
-                .map(|u| u.available)
-                .unwrap_or(false),
+            WidgetKind::UsageLimits => {
+                super::info_widget_overview::startup_usage_pending(self)
+                    || self
+                        .usage_info
+                        .as_ref()
+                        .map(|u| u.available || u.limit_reached)
+                        .unwrap_or(false)
+            }
             WidgetKind::KvCache => self.cache_hit_info.is_some(),
             WidgetKind::ModelInfo => runtime_has_data(self),
             WidgetKind::Tips => false,
@@ -1645,6 +1661,15 @@ fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -
         WidgetKind::BackgroundTasks => render_background_widget(data, inner),
         WidgetKind::Compaction => render_compaction_widget(data, inner),
         WidgetKind::AmbientMode => render_ambient_widget(data, inner),
+        WidgetKind::UsageLimits if super::info_widget_overview::startup_usage_pending(data) => {
+            Framed::body(
+                startup_usage_lines(inner.width)
+                    .into_iter()
+                    .skip(1)
+                    .collect(),
+            )
+            .title(frame::label("OpenAI limits"))
+        }
         WidgetKind::UsageLimits => render_usage_widget(data, inner),
         WidgetKind::KvCache => render_kv_cache_widget(data, inner),
         WidgetKind::ModelInfo => render_model_widget(data, inner),
@@ -1764,7 +1789,7 @@ fn kv_cache_pcts(cache: &CacheHitInfo) -> Option<(u8, Option<u8>, Option<u8>, Co
     ))
 }
 
-/// Border headline: `KV cache 90% yield` (or `priming`).
+/// Border headline: `KV cache 90% yield`, or observed hit rate without a baseline.
 fn render_kv_cache_title(cache: &CacheHitInfo) -> Line<'static> {
     let mut spans = vec![frame::label("KV cache ")];
     match kv_cache_pcts(cache) {
@@ -1775,8 +1800,14 @@ fn render_kv_cache_title(cache: &CacheHitInfo) -> Line<'static> {
             ));
             spans.push(frame::dim(" yield"));
         }
-        Some((_, None, _, color)) => {
-            spans.push(Span::styled("priming", Style::default().fg(color).bold()));
+        Some((lifetime_pct, None, _, color)) => {
+            // Restored sessions lack the historical reusable-prefix denominator.
+            // That is missing telemetry, not evidence the cache is still warming.
+            spans.push(Span::styled(
+                format!("{lifetime_pct}%"),
+                Style::default().fg(color).bold(),
+            ));
+            spans.push(frame::dim(" hit"));
         }
         None => {}
     }
@@ -1842,7 +1873,7 @@ fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
         ));
     } else {
         spans.push(Span::styled(
-            "priming",
+            format!("hit {}%", lifetime_pct),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
     }
@@ -2080,6 +2111,26 @@ fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Li
     }
 }
 
+pub(super) fn compact_usage_rows(
+    info: &UsageInfo,
+    width: u16,
+    display_used: bool,
+) -> Vec<Line<'static>> {
+    render_usage_compact(info, width, display_used)
+}
+
+pub(super) fn startup_usage_lines(width: u16) -> Vec<Line<'static>> {
+    ["OpenAI limits", "Loading…"]
+        .into_iter()
+        .map(|text| {
+            Line::from(Span::styled(
+                truncate_with_ellipsis(text, width as usize),
+                Style::default().fg(rgb(140, 140, 150)),
+            ))
+        })
+        .collect()
+}
+
 fn render_sections(
     data: &InfoWidgetData,
     inner: Rect,
@@ -2118,15 +2169,10 @@ fn render_sections(
     }
 
     // Usage info (subscription limits)
-    if let Some(info) = &data.usage_info
-        && info.available
-    {
-        lines.extend(render_usage_compact(
-            info,
-            inner.width,
-            data.usage_display_used,
-        ));
-    }
+    lines.extend(super::info_widget_overview::render_overview_usage(
+        data,
+        inner.width,
+    ));
 
     if let Some(cache) = data.cache_hit_info.as_ref() {
         lines.push(render_kv_cache_summary_line(cache));
@@ -2143,6 +2189,10 @@ fn render_sections(
 // ---------------------------------------------------------------------------
 // Tips widget - rotating helpful tips and keyboard shortcuts
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "info_widget_startup_tests.rs"]
+mod startup_tests;
 
 #[cfg(test)]
 #[path = "info_widget_tests.rs"]
