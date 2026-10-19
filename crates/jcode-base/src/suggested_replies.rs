@@ -624,13 +624,45 @@ pub fn extract_assistant_options(last_assistant_message: &str) -> Vec<String> {
     options.into_iter().take(6).collect()
 }
 
+fn is_status_report_label(label: &str) -> bool {
+    let lower = label.trim().to_lowercase();
+    lower.contains("(go)")
+        || lower.contains("(no-go)")
+        || lower.contains("conditional go")
+        || matches!(
+            lower.as_str(),
+            "config"
+                | "ui state"
+                | "controls"
+                | "source"
+                | "opengf"
+                | "jev / laya"
+                | "structured context"
+                | "default action"
+                | "scored candidates"
+                | "security"
+                | "architecture"
+                | "performance"
+                | "maintainability"
+                | "bugs & edge cases"
+                | "ux"
+                | "openspec"
+                | "статус"
+                | "итог"
+                | "ограничение"
+                | "ограничение по апстриму"
+        )
+        || lower.starts_with("lens ")
+        || lower.starts_with("линз")
+        || lower.starts_with("встроенная документация")
+        || lower.starts_with("исправлена ")
+        || lower.starts_with("обрезка ")
+        || lower.starts_with("исключение ")
+        || lower.starts_with("защита от ")
+}
+
 fn clean_extracted_option(raw: &str) -> String {
     let raw_trimmed = raw.trim();
-    // Descriptive key-value summary bullets (e.g. `- **Config**: ...`, `1. **Security (GO)**: ...`)
-    // are status report items, not actionable user reply choices.
-    if raw_trimmed.starts_with("**") && raw_trimmed.contains("**:") {
-        return String::new();
-    }
     let without_bold = raw_trimmed.replace("**", "");
     let trimmed = without_bold
         .trim()
@@ -639,8 +671,10 @@ fn clean_extracted_option(raw: &str) -> String {
     let head = if let Some((left, _)) = trimmed.split_once(" — ") {
         left.trim()
     } else if let Some((left, _)) = trimmed.split_once(": ") {
-        if left.chars().count() >= 10 && left.chars().count() <= 80 && !left.contains('(') {
-            left.trim()
+        let left_trimmed = left.trim();
+        let left_chars = left_trimmed.chars().count();
+        if (10..=80).contains(&left_chars) && !is_status_report_label(left_trimmed) {
+            left_trimmed
         } else {
             return String::new();
         }

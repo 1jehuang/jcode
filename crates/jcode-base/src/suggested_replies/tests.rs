@@ -177,10 +177,13 @@ fn parse_open_gf_extracts_json_from_fenced_response() {
     assert_eq!(cands, vec!["cargo test", "git status"]);
 
     // Verify extract_assistant_options ignores descriptive **Key**: value status bullets
-    // and truncated lines while keeping genuine actionable choices.
-    let status_report = "- **Config**: enabled=true, jev_provider=\"auto\"\n- **Security (GO)**: секреты санитизируются\n1. **Architecture (GO)**: сквозная передача флага\n- Обрезанные данные в выводе...\n- Запустить финальные тесты";
+    // and truncated lines while keeping genuine actionable choices (including bold `**Action**: detail`).
+    let status_report = "- **Config**: enabled=true, jev_provider=\"auto\"\n- **Security (GO)**: секреты санитизируются\n1. **Architecture (GO)**: сквозная передача флага\n2. **Run integration tests**: exercise the new endpoint\n- Обрезанные данные в выводе...\n- Запустить финальные тесты";
     let extracted = extract_assistant_options(status_report);
-    assert_eq!(extracted, vec!["Запустить финальные тесты"]);
+    assert_eq!(
+        extracted,
+        vec!["Run integration tests", "Запустить финальные тесты"]
+    );
 
     // Verify truncate_preserving_tail preserves the closing tail without "..." markers.
     let long_text = format!(
