@@ -2026,7 +2026,7 @@ pub(super) fn handle_alternate_enter(app: &mut App) {
         return;
     }
 
-    if app.input.is_empty() {
+    if app.suggested_replies_input_is_empty_or_staged() {
         app.try_submit_suggested_reply_on_empty_input(true);
         return;
     }

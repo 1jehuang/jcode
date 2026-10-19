@@ -224,7 +224,7 @@ impl App {
         &mut self,
         force_default: bool,
     ) -> bool {
-        if self.input.is_empty()
+        if self.suggested_replies_input_is_empty_or_staged()
             && let Some(prompt) = self.take_focused_or_default_suggested_reply(force_default)
         {
             self.submit_suggested_reply_prompt(prompt);
@@ -384,12 +384,49 @@ impl App {
         false
     }
 
+    pub(in crate::tui::app) fn is_remote_review_launch_command(trimmed: &str) -> bool {
+        matches!(
+            trimmed,
+            "/review"
+                | "/review 6"
+                | "/review 6lenses"
+                | "/review lenses"
+                | "/review six"
+                | "/autoreview 6"
+                | "/autoreview 6lenses"
+                | "/autoreview lenses"
+                | "/autoreview six"
+        )
+    }
+
+    pub(in crate::tui::app) fn stage_remote_review_split(&mut self, trimmed: &str) -> &'static str {
+        let (model_override, provider_key_override) =
+            super::super::commands::current_review_model_override(self);
+        let parent_session_id = super::super::commands::current_feedback_target_session_id(self);
+        let (label, startup_msg) =
+            self.build_remote_review_label_and_startup(trimmed, &parent_session_id);
+        super::super::commands::queue_review_spawn_remote(
+            self,
+            label,
+            parent_session_id,
+            startup_msg,
+            model_override,
+            provider_key_override,
+        );
+        label
+    }
+
     pub(in crate::tui::app) fn build_remote_review_label_and_startup(
         &mut self,
         trimmed: &str,
         parent_session_id: &str,
     ) -> (&'static str, String) {
-        if trimmed != "/review" {
+        if trimmed.starts_with("/autoreview") {
+            (
+                "6-Lens Autoreview",
+                build_six_lens_review_startup_message(parent_session_id),
+            )
+        } else if trimmed != "/review" {
             (
                 "6-Lens Review",
                 build_six_lens_review_startup_message(parent_session_id),
@@ -412,7 +449,7 @@ impl App {
         &mut self,
         force_default: bool,
     ) {
-        if self.input.is_empty()
+        if self.suggested_replies_input_is_empty_or_staged()
             && let Some(prompt) = self.take_focused_or_default_suggested_reply(force_default)
         {
             self.input = prompt;

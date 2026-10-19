@@ -545,10 +545,13 @@ fn review_findings_ingest_on_delivery_and_remote_autoreview_tracks_per_turn_edit
     ));
     app.push_display_message(super::super::DisplayMessage::assistant("Сделано."));
 
-    // 1. Launching /review 6 must NOT record a fake launch placeholder finding.
+    // 1. Launching /review 6 or /autoreview 6 must NOT record a fake launch placeholder finding.
     let (label, _startup) =
         app.build_remote_review_label_and_startup("/review 6", "ses_review_test");
     assert_eq!(label, "6-Lens Review");
+    let (auto_label, _auto_startup) =
+        app.build_remote_review_label_and_startup("/autoreview 6", "ses_review_test");
+    assert_eq!(auto_label, "6-Lens Autoreview");
     assert!(app.suggested_replies.pending_six_lens_findings.is_none());
 
     // 2. Delivering a review message with DEFAULT_ACTION ingests the concrete fix and survives refresh.
@@ -655,4 +658,35 @@ fn context_retains_user_language_across_tool_rows_preserves_closing_choices_and_
     app.push_display_message(super::super::DisplayMessage::system("Interrupted"));
     app.trigger_suggested_replies_evaluation(false);
     assert!(app.suggested_replies.current.is_none());
+
+    // Single-target Tab stage-then-send and Ctrl+Enter on staged slash-command suggestion:
+    let mut single_resp = SuggestedRepliesResponse {
+        default_action: Some("/suggestions status".to_string()),
+        secondary_suggestions: Vec::new(),
+        branch: "verification".to_string(),
+        scored_candidates: vec![ScoredSuggestion {
+            text: "/suggestions status".to_string(),
+            confidence: 0.90,
+        }],
+        ..Default::default()
+    };
+    single_resp.populate_goal_categories_with_options(&[], true);
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.apply_suggested_replies_response(single_resp.clone());
+    assert_eq!(app.handle_suggested_replies_tab(), Some(None));
+    assert_eq!(app.input, "/suggestions status");
+    assert_eq!(
+        app.handle_suggested_replies_tab(),
+        Some(Some("/suggestions status".to_string()))
+    );
+    assert!(!app.suggested_replies_visible());
+
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.apply_suggested_replies_response(single_resp);
+    assert!(app.stage_suggested_reply_target(SuggestedReplyFocus::DefaultAction));
+    assert!(app.suggested_replies_has_staged_input());
+    super::super::input::handle_alternate_enter(&mut app);
+    assert!(!app.suggested_replies_visible());
 }

@@ -1430,7 +1430,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 
     let _ = recover_stranded_soft_interrupts(app, remote).await;
 
-    if app.pending_queued_dispatch {
+    if app.pending_queued_dispatch && app.suggested_replies.pending_remote_submit.is_none() {
         note_startup_submit_deferred(app, "pending_queued_dispatch in progress");
         return;
     }

@@ -886,7 +886,9 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if input::is_alternate_enter(code, modifiers) && !app.input.trim().starts_with('/') {
+    if input::is_alternate_enter(code, modifiers)
+        && (!app.input.trim().starts_with('/') || app.suggested_replies_has_staged_input())
+    {
         if app.activate_picker_from_preview() {
             return Ok(());
         }
@@ -938,6 +940,9 @@ async fn handle_remote_key_internal(
 
     if let Some(text) = text_input.or_else(|| input::text_input_for_key(code, modifiers)) {
         input::handle_text_input(app, &text);
+        if app.take_pending_remote_suggested_reply().is_some() {
+            submit_remote_enter_input(app, remote).await?;
+        }
         return Ok(());
     }
 
@@ -970,6 +975,9 @@ async fn handle_remote_key_internal(
     match code {
         KeyCode::Char(c) => {
             handle_remote_char_input(app, c);
+            if app.take_pending_remote_suggested_reply().is_some() {
+                submit_remote_enter_input(app, remote).await?;
+            }
         }
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
@@ -1664,23 +1672,8 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
 
-        if matches!(
-            trimmed,
-            "/review" | "/review 6" | "/review 6lenses" | "/review lenses" | "/autoreview 6"
-        ) {
-            let (model_override, provider_key_override) =
-                app_mod::commands::current_review_model_override(app);
-            let parent_session_id = app_mod::commands::current_feedback_target_session_id(app);
-            let (label, startup_msg) =
-                app.build_remote_review_label_and_startup(trimmed, &parent_session_id);
-            app_mod::commands::queue_review_spawn_remote(
-                app,
-                label,
-                parent_session_id.clone(),
-                startup_msg,
-                model_override,
-                provider_key_override,
-            );
+        if App::is_remote_review_launch_command(trimmed) {
+            let label = app.stage_remote_review_split(trimmed);
             if app.is_processing {
                 app.set_status_notice(format!("{label} queued"));
             } else {
@@ -1721,7 +1714,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
 
         if trimmed.starts_with("/autoreview ") {
             app.push_display_message(DisplayMessage::error(
-                "Usage: /autoreview [on|off|status|now]".to_string(),
+                "Usage: /autoreview [on|off|status|now|6]".to_string(),
             ));
             return Ok(());
         }
@@ -1734,7 +1727,9 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
         }
 
         if trimmed.starts_with("/review ") {
-            app.push_display_message(DisplayMessage::error("Usage: /review".to_string()));
+            app.push_display_message(DisplayMessage::error(
+                "Usage: /review [6|lenses]".to_string(),
+            ));
             return Ok(());
         }
 

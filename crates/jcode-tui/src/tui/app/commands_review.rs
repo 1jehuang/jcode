@@ -1042,7 +1042,9 @@ pub(super) fn handle_autoreview_command_local(app: &mut App, trimmed: &str) -> b
             }
             true
         }
-        "6" | "6lenses" | "lenses" => app.run_six_lens_review_command_local("6-Lens Autoreview"),
+        "6" | "6lenses" | "lenses" | "six" => {
+            app.run_six_lens_review_command_local("6-Lens Autoreview")
+        }
         _ => {
             app.push_display_message(DisplayMessage::error(
                 "Usage: /autoreview [on|off|status|now|6]".to_string(),

@@ -738,7 +738,19 @@ impl App {
     /// Handle `[Tab]` when Suggested Replies are visible.
     /// Cycles focus across `DefaultAction` and `Secondary(0..N)` and fills `self.input`
     /// with the selected suggestion so the user can edit it or press `[Enter]` to send.
+    /// When only one suggestion target exists and is already focused and staged, pressing
+    /// `[Tab]` a second time consumes and submits it.
     pub fn handle_suggested_replies_tab(&mut self) -> Option<Option<String>> {
+        if !self.suggested_replies_visible() {
+            return None;
+        }
+        let targets = self.ordered_suggested_reply_targets();
+        if targets.len() == 1
+            && self.suggested_replies.focus == Some(targets[0])
+            && self.suggested_replies_has_staged_input()
+        {
+            return Some(self.take_suggested_reply_target(targets[0]));
+        }
         if self.step_suggested_replies_focus(1) {
             Some(None)
         } else {

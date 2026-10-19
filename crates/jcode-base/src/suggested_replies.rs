@@ -857,15 +857,10 @@ impl SuggestedRepliesResponse {
     /// Look up the canonical goal-reaching classification category (`"goal"`, `"finish"`, `"plan"`,
     /// `"impl"`, `"verify"`, `"debug"`, `"review"`, `"refactor"`, `"custom"`) for `text`.
     pub fn category_for_text(&self, text: &str) -> &'static str {
-        let finish_enabled = crate::config::config()
-            .suggested_replies
-            .enable_finish_category;
         let lower = text.trim().to_lowercase();
         if let Some(cat) = self.candidate_categories.get(&lower) {
             match cat.as_str() {
-                "finish" | "feature_completion" | "final_completion" => {
-                    return if finish_enabled { "finish" } else { "goal" };
-                }
+                "finish" | "feature_completion" | "final_completion" => return "finish",
                 "goal" => return "goal",
                 "plan" => return "plan",
                 "impl" => return "impl",
@@ -877,6 +872,9 @@ impl SuggestedRepliesResponse {
                 _ => {}
             }
         }
+        let finish_enabled = crate::config::config()
+            .suggested_replies
+            .enable_finish_category;
         classify_suggestion_for_goal_with_options(text, &self.branch, &[], finish_enabled)
     }
 
