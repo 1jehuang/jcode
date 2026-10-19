@@ -187,6 +187,23 @@ impl ResumeTicket {
             _ = tokio::time::sleep(delay) => !self.token.is_cancelled(),
         }
     }
+
+    /// Start the resume: unregister it unless a user message cancelled it
+    /// (or a newer resume replaced it) after the timer fired. Taking the
+    /// registry lock orders this against `cancel_pending_resume`, so a
+    /// message arriving later waits for the resumed turn instead.
+    pub(super) fn claim(self) -> bool {
+        let mut pending = PENDING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = pending
+            .get(&self.session_id)
+            .is_some_and(|(id, _)| *id == self.id);
+        if current {
+            pending.remove(&self.session_id);
+        }
+        current
+    }
 }
 
 impl Drop for ResumeTicket {
@@ -336,7 +353,12 @@ pub(super) async fn resume_turn_after_usage_limit(
             ));
             return ResumeOutcome::Superseded;
         };
-        drop(ticket);
+        if !ticket.claim() {
+            crate::logging::info(&format!(
+                "Usage-limit resume for {session_id} was cancelled after its timer fired"
+            ));
+            return ResumeOutcome::Superseded;
+        }
         resumes_used += 1;
 
         update_member_status(
@@ -474,5 +496,33 @@ mod tests {
         assert!(cancel_pending_resume(session));
         assert!(!ticket.wait(Duration::from_secs(60)).await);
         assert!(!cancel_pending_resume(session));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_after_the_timer_fired_stops_the_resume_before_it_starts() {
+        let session = "usage-limit-resume-unit-cancel-after-timer";
+        let ticket = register_pending_resume(session);
+        assert!(ticket.wait(Duration::from_secs(60)).await, "timer fired");
+        assert!(cancel_pending_resume(session));
+        assert!(
+            !ticket.claim(),
+            "a cancelled resume must not start its turn"
+        );
+
+        let ticket = register_pending_resume(session);
+        assert!(ticket.wait(Duration::from_secs(60)).await);
+        assert!(ticket.claim());
+        assert!(
+            !cancel_pending_resume(session),
+            "a started resume is no longer pending"
+        );
+
+        // A newer resume registered after the timer fired keeps its entry.
+        let stale = register_pending_resume(session);
+        assert!(stale.wait(Duration::from_secs(60)).await);
+        let newer = register_pending_resume(session);
+        assert!(!stale.claim());
+        assert!(has_pending_resume(session));
+        drop(newer);
     }
 }
