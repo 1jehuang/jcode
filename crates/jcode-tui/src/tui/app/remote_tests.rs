@@ -178,6 +178,56 @@ fn client_interaction_restores_focus_so_scroll_redraws_at_full_rate() {
 include!("remote_tests/auth_mapping.rs");
 
 #[test]
+fn dead_server_respawn_waits_for_repeated_failures_and_throttles() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let mut state = RemoteRunState {
+        reconnect_attempts: 2,
+        ..Default::default()
+    };
+    assert!(!reconnect::should_respawn_dead_server(&state, false, now));
+
+    state.reconnect_attempts = 3;
+    assert!(reconnect::should_respawn_dead_server(&state, false, now));
+    assert!(
+        !reconnect::should_respawn_dead_server(&state, true, now),
+        "SSH clients must not spawn a local server"
+    );
+
+    state.server_reload_in_progress = true;
+    assert!(!reconnect::should_respawn_dead_server(&state, false, now));
+    state.server_reload_in_progress = false;
+
+    state.initial_server_start = true;
+    assert!(
+        !reconnect::should_respawn_dead_server(&state, false, now),
+        "a server we just started gets its startup window first"
+    );
+    state.initial_server_start = false;
+
+    state.last_dead_server_respawn = Some(now);
+    assert!(!reconnect::should_respawn_dead_server(
+        &state,
+        false,
+        now + Duration::from_secs(10)
+    ));
+    assert!(reconnect::should_respawn_dead_server(
+        &state,
+        false,
+        now + Duration::from_secs(61)
+    ));
+}
+
+#[test]
+fn long_disconnect_redraws_slowly() {
+    use std::time::Duration;
+    let short = reconnect::disconnected_redraw_period(false, Some(Duration::from_secs(5)));
+    let long = reconnect::disconnected_redraw_period(false, Some(Duration::from_secs(120)));
+    assert_eq!(short, Duration::from_secs(1));
+    assert!(long >= Duration::from_secs(5), "issue #1887: {long:?}");
+}
+
+#[test]
 fn reload_handoff_inactive_without_flag_or_marker() {
     // `reload_handoff_active` falls back to the on-disk reload marker in the
     // runtime dir. Point the runtime dir at an empty tempdir so a real
