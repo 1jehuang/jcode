@@ -975,11 +975,33 @@ pub(super) async fn broadcast_swarm_plan_with_previous(
     let members = swarm_members.read().await;
     let participant_count = participants.len();
     let mut delivered_count = 0usize;
+    // The coordinator's session todos are the user-facing view of this plan;
+    // keep them in sync on every broadcast so all completion paths (turn
+    // end, report, manual status) reach the pinned todo band.
+    let coordinator_ids: Vec<String> = participants
+        .iter()
+        .filter(|sid| {
+            members
+                .get(*sid)
+                .is_some_and(|member| member.role == "coordinator")
+        })
+        .cloned()
+        .collect();
+    let sync_items = match &event {
+        ServerEvent::SwarmPlan { items, .. } if !coordinator_ids.is_empty() => Some(items.clone()),
+        _ => None,
+    };
     for sid in participants {
         if let Some(member) = members.get(&sid)
             && member.event_tx.send(event.clone()).is_ok()
         {
             delivered_count += 1;
+        }
+    }
+    drop(members);
+    if let Some(items) = sync_items {
+        for coordinator in &coordinator_ids {
+            super::swarm_todo_link::sync_plan(coordinator, &items);
         }
     }
     log_swarm_lifecycle(

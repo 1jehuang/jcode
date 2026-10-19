@@ -147,16 +147,31 @@ pub(crate) fn link_assignment(
     });
 }
 
-/// Mirror a plan task's terminal status onto the coordinator's matching todo.
-pub(crate) fn sync_task_status(
-    coordinator_session: &str,
-    task_id: &str,
-    content: &str,
-    plan_status: &str,
-) {
-    update_todos(coordinator_session, |todos| {
-        apply_task_status(todos, task_id, content, plan_status)
-    });
+/// Pure whole-plan reconcile: complete todos whose plan item is done and
+/// record any worker assignment that has not landed yet. Idempotent.
+pub(crate) fn apply_plan(todos: &mut [TodoItem], items: &[PlanItem]) -> bool {
+    let mut changed = false;
+    for item in items {
+        if let Some(worker) = item.assigned_to.as_deref() {
+            let already = find_todo(todos, &item.id, &item.content)
+                .is_some_and(|todo| todo.assigned_to.is_some());
+            if !already {
+                changed |= apply_assignment(todos, &item.id, &item.content, worker);
+            }
+        }
+        changed |= apply_task_status(todos, &item.id, &item.content, &item.status);
+    }
+    changed
+}
+
+/// Reconcile the coordinator's todos with the current plan. Called after
+/// every plan broadcast so every completion path (turn end, `report`,
+/// manual status changes) reaches the todo list without per-path hooks.
+pub(crate) fn sync_plan(coordinator_session: &str, items: &[PlanItem]) {
+    if items.is_empty() {
+        return;
+    }
+    update_todos(coordinator_session, |todos| apply_plan(todos, items));
 }
 
 #[cfg(test)]
@@ -242,5 +257,21 @@ mod tests {
         assert_eq!(todos[0].status, "in_progress");
         assert!(apply_task_status(&mut todos, "a", "", "done"));
         assert_eq!(todos[0].status, "completed");
+    }
+
+    #[test]
+    fn plan_reconcile_links_and_completes_idempotently() {
+        let mut todos = vec![todo("a", "pending", Some(1)), todo("b", "pending", Some(1))];
+        let mut items = plan_items_from_todos(&todos);
+        items[0].assigned_to = Some("session_fox_1".into());
+        items[0].status = "done".into();
+        items[1].assigned_to = Some("session_ox_2".into());
+        items[1].status = "running".into();
+        assert!(apply_plan(&mut todos, &items));
+        assert_eq!(todos[0].status, "completed");
+        assert_eq!(todos[0].assigned_to.as_deref(), Some("session_fox_1"));
+        assert_eq!(todos[1].status, "in_progress");
+        assert_eq!(todos[1].assigned_to.as_deref(), Some("session_ox_2"));
+        assert!(!apply_plan(&mut todos, &items), "second pass is a no-op");
     }
 }

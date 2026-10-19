@@ -725,22 +725,6 @@ fn spawn_assigned_task_run(
                     coordinators: Arc::clone(&swarm_coordinators),
                 };
                 persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                if auto_completed {
-                    let coordinator = swarm_coordinators.read().await.get(&swarm_id).cloned();
-                    let content = previous_items
-                        .iter()
-                        .find(|item| item.id == task_id)
-                        .map(|item| item.content.clone())
-                        .unwrap_or_default();
-                    if let Some(coordinator) = coordinator {
-                        super::swarm_todo_link::sync_task_status(
-                            &coordinator,
-                            &task_id,
-                            &content,
-                            "done",
-                        );
-                    }
-                }
                 let plan_reason = if auto_completed {
                     "task_completed"
                 } else {
