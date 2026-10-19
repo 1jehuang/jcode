@@ -17,6 +17,22 @@ use std::time::{Duration, Instant};
 /// Misses smaller than this are noise (provider cache block granularity).
 pub const MIN_MISSED_TOKENS: u64 = 1_024;
 
+/// OpenAI reports cache reads in 128-token blocks and routinely leaves the
+/// last ~1024 tokens of the previous request uncached, so a byte-identical
+/// append still shows a 1024-1300 token shortfall. Across ~34k verified
+/// prefix-matching websocket continuations, shortfalls cluster just above
+/// 1024; treating them as misses produced constant false alarms.
+pub const OPENAI_MIN_MISSED_TOKENS: u64 = 2_048;
+
+/// Noise floor for a provider identity (`openai`, `openai-api`, `OpenAI`, ...).
+pub fn min_missed_tokens_for_provider(provider: &str) -> u64 {
+    if provider.trim().to_ascii_lowercase().starts_with("openai") {
+        OPENAI_MIN_MISSED_TOKENS
+    } else {
+        MIN_MISSED_TOKENS
+    }
+}
+
 /// Whether a provider drops its conversation prompt cache when the UTC date
 /// changes. Observed on Anthropic: every session whose consecutive requests
 /// straddle 00:00 UTC reads back only the tools/system prefix, even seconds
@@ -296,7 +312,7 @@ fn classify(
         return None;
     }
     let missed = expected.saturating_sub(read_tokens);
-    if missed < MIN_MISSED_TOKENS {
+    if missed < min_missed_tokens_for_provider(&pending.route.provider) {
         return None;
     }
     let reason = reason(baseline, pending, read_tokens)?;
@@ -421,6 +437,57 @@ mod tests {
             .expect("real 1782-token loss");
         assert_eq!(miss.reason, MissReason::LowRead);
         assert_eq!(miss.missed_tokens, 1_782);
+    }
+
+    fn openai_route() -> RequestRoute {
+        RequestRoute {
+            provider: "openai-api".into(),
+            model: "gpt-5.4".into(),
+            upstream_provider: None,
+            cache_ttl_secs: Some(1800),
+            ttl_is_estimate: true,
+        }
+    }
+
+    #[test]
+    fn openai_tail_block_rounding_is_not_a_miss() {
+        // Observed: byte-identical append, 1024-token-block cache read shortfall.
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(openai_route(), sig(&[10]));
+        assert_eq!(monitor.finish_request(74_368, Some(73_344)), None);
+        monitor.begin_request(openai_route(), sig(&[10, 11]));
+        assert_eq!(monitor.finish_request(75_267, Some(73_344)), None);
+        monitor.begin_request(openai_route(), sig(&[10, 11, 12]));
+        assert_eq!(monitor.finish_request(76_900, Some(73_344)), None);
+    }
+
+    #[test]
+    fn openai_real_loss_is_still_reported() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(openai_route(), sig(&[10]));
+        monitor.finish_request(127_199, Some(127_000));
+        monitor.begin_request(openai_route(), sig(&[10, 11]));
+        let miss = monitor
+            .finish_request(128_870, Some(110_208))
+            .expect("16991-token loss");
+        assert_eq!(miss.reason, MissReason::LowRead);
+    }
+
+    #[test]
+    fn noise_floor_is_provider_specific() {
+        assert_eq!(
+            min_missed_tokens_for_provider("openai"),
+            OPENAI_MIN_MISSED_TOKENS
+        );
+        assert_eq!(
+            min_missed_tokens_for_provider("OpenAI"),
+            OPENAI_MIN_MISSED_TOKENS
+        );
+        assert_eq!(
+            min_missed_tokens_for_provider("openai-oauth"),
+            OPENAI_MIN_MISSED_TOKENS
+        );
+        assert_eq!(min_missed_tokens_for_provider("claude"), MIN_MISSED_TOKENS);
     }
 
     #[test]

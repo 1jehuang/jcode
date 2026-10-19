@@ -1921,7 +1921,9 @@ impl App {
     const INPUT_UNDO_LIMIT: usize = 128;
     const CLIENT_FOCUS_RECORD_DEBOUNCE: Duration = Duration::from_secs(2);
     const KV_CACHE_OPTIMAL_OK_PCT: u8 = 85;
-    const KV_CACHE_MIN_MISSED_TOKENS: u64 = 1_024;
+    fn kv_cache_min_missed_tokens(provider: &str) -> u64 {
+        crate::kv_cache_monitor::min_missed_tokens_for_provider(provider)
+    }
     const KV_CACHE_MAX_MISS_SAMPLES: usize = 12;
 
     pub(super) fn begin_kv_cache_request(
@@ -2533,7 +2535,7 @@ impl App {
             return;
         };
         let missed_tokens = expected_tokens.saturating_sub(read_tokens);
-        if missed_tokens < Self::KV_CACHE_MIN_MISSED_TOKENS {
+        if missed_tokens < Self::kv_cache_min_missed_tokens(&request.provider) {
             return;
         }
 
@@ -2714,7 +2716,8 @@ impl App {
             return KvCacheMissReason::ZeroRead;
         }
         if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT
-            || baseline.input_tokens.saturating_sub(read_tokens) >= Self::KV_CACHE_MIN_MISSED_TOKENS
+            || baseline.input_tokens.saturating_sub(read_tokens)
+                >= Self::kv_cache_min_missed_tokens(&request.provider)
         {
             return KvCacheMissReason::LowRead;
         }

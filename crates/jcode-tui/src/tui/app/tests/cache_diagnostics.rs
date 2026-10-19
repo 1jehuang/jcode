@@ -210,3 +210,12 @@ fn kv_cache_utc_midnight_straddle_is_daily_rollover_for_anthropic_only() {
         KvCacheMissReason::HarnessPrefixChanged
     );
 }
+
+#[test]
+fn kv_cache_openai_tail_rounding_is_below_miss_threshold() {
+    // OpenAI routinely leaves ~1024 tokens of the previous request uncached
+    // even on a byte-identical append, so its noise floor is higher.
+    assert_eq!(App::kv_cache_min_missed_tokens("openai-oauth"), 2_048);
+    assert_eq!(App::kv_cache_min_missed_tokens("openai-api"), 2_048);
+    assert_eq!(App::kv_cache_min_missed_tokens("anthropic"), 1_024);
+}
