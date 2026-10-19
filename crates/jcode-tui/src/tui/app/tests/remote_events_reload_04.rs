@@ -25,11 +25,13 @@ fn test_remote_fast_status_tracks_history_tier_including_explicit_off() {
             .expect("history fixture");
             app.handle_server_event(history, &mut remote);
             assert_eq!(app.remote_service_tier.as_deref(), tier);
+            // Until the provider reports the applied tier, the widget is honest
+            // that the requested tier is unconfirmed.
             assert_eq!(
                 crate::tui::TuiState::info_widget_data(&app)
                     .service_tier
                     .as_deref(),
-                tier
+                tier.map(|_| "Fast requested (unconfirmed)")
             );
 
             app.input = "/fast status".to_string();
@@ -2519,6 +2521,7 @@ fn test_remote_model_changed_updates_resolved_credential() {
             provider_name: Some("Claude".to_string()),
             error: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: Some(jcode_provider_core::ResolvedCredential::ApiKey),
             reasoning_effort: None,
         },
@@ -2547,6 +2550,7 @@ fn model_changed_event(
         provider_name: Some("OpenAI".to_string()),
         error: error.map(str::to_string),
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         resolved_credential: None,
         reasoning_effort: reasoning_effort.map(str::to_string),
     }
@@ -2613,6 +2617,7 @@ fn test_remote_model_changed_for_same_model_adopts_window_silently() {
             error,
             resolved_credential,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             reasoning_effort,
         },
         &mut remote,

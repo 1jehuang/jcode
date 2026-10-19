@@ -327,6 +327,7 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn set_input_for_test(&mut self, input: impl Into<String>) {
+        self.wake_idle_hibernation();
         self.input = input.into();
         self.cursor_pos = self.input.len();
     }
@@ -841,15 +842,7 @@ impl App {
 
         if prefix.starts_with("/effort ") {
             let efforts = [
-                "none",
-                "minimal",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "swarm",
-                "swarm-deep",
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "swarm",
             ];
             return self.rank_suggestions(
                 input,

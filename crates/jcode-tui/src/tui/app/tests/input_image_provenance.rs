@@ -36,7 +36,8 @@ fn image_provenance_image_only_skill_sends_png_on_its_own_turn() {
     let png = paste_selection_test_png(&mut app, 94);
     let before = app.session.messages.len();
     app.submit_input();
-    assert_eq!(app.session.messages.len(), before + 1, "image-only skill must send a turn");
+    // Activation records a hidden skill reminder before the image turn.
+    assert_eq!(app.session.messages.len(), before + 2, "image-only skill must send a turn");
     assert_eq!(app.active_skill.as_deref(), Some("provenance-skill"));
     assert!(app.pending_images.is_empty());
     let first = app.session.messages.last().unwrap();
@@ -48,7 +49,7 @@ fn image_provenance_image_only_skill_sends_png_on_its_own_turn() {
     app.pending_turn = false;
     super::input::insert_input_text(&mut app, "later unrelated prompt");
     app.submit_input();
-    assert_eq!(app.session.messages.len(), before + 2);
+    assert_eq!(app.session.messages.len(), before + 3);
     assert!(app.session.messages.last().unwrap().content.iter().all(|block|
         !matches!(block, crate::message::ContentBlock::Image { .. })));
     app.is_processing = false;
@@ -56,7 +57,7 @@ fn image_provenance_image_only_skill_sends_png_on_its_own_turn() {
     let before_bare = app.session.messages.len();
     super::input::insert_input_text(&mut app, "/provenance-skill");
     app.submit_input();
-    assert_eq!(app.session.messages.len(), before_bare, "bare skill stays activation-only");
+    assert_eq!(app.session.messages.len(), before_bare + 1, "bare skill stays activation-only");
     assert!(!app.is_processing);
 }
 
