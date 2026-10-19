@@ -145,6 +145,10 @@ impl App {
     }
 
     pub(super) fn set_todos_view_enabled(&mut self, enabled: bool, focus: bool) {
+        if enabled && focus {
+            self.side_panel_user_hidden = false;
+            self.side_panel_explicit_hidden = false;
+        }
         self.todos_view_enabled = enabled;
         if enabled {
             self.refresh_todos_view_cache(true);

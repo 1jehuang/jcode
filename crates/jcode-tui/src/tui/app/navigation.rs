@@ -559,8 +559,11 @@ impl App {
         }
     }
 
+    /// Mirrors the renderer: a File diff pane is only drawn once an edit exists.
     pub(super) fn diff_pane_visible(&self) -> bool {
-        self.diff_mode.has_side_pane() || self.side_panel.focused_page().is_some()
+        !crate::tui::TuiState::swarm_panel_full_page(self)
+            && (self.side_panel.focused_page().is_some()
+                || (self.diff_mode.is_file() && self.display_edit_tool_message_count > 0))
     }
 
     pub(super) fn set_diff_pane_focus(&mut self, focus: bool) {
