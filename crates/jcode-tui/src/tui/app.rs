@@ -1059,6 +1059,13 @@ pub struct App {
     pending_reload_reconnect_status: Option<PendingReloadReconnectStatus>,
     // Current status
     status: ProcessingStatus,
+    // Last OSC 9 status emitted to stdout, so we only re-emit on transitions.
+    last_osc_state: Option<&'static str>,
+    // When the TUI is blocked on a user decision (e.g. a permission prompt that
+    // needs the user to act), set this so `agent_osc_state` emits "blocked"
+    // instead of "working"/"idle". This lets herdr distinguish "agent is busy"
+    // from "agent is waiting for the human" even inside the main TUI process.
+    osc_blocked: bool,
     // Subagent status (shown during Task tool execution)
     subagent_status: Option<String>,
     // Batch progress (shown during batch tool execution)

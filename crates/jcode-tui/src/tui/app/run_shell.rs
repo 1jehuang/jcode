@@ -558,6 +558,10 @@ impl StatusSpinnerRenderer {
         // sees the keystroke when the frame reaches the terminal, so anything
         // before the flush would understate the latency they feel.
         crate::tui::ui::note_frame_painted();
+
+        // Emit OSC 9 progress with current agent status so terminal
+        // multiplexers (herdr) can detect working/idle without screen-scraping.
+        app.emit_agent_status_osc();
         Ok(())
     }
 

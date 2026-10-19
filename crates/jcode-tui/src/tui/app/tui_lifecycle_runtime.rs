@@ -126,6 +126,68 @@ impl App {
         self.set_terminal_title_base(session_id, window_title);
     }
 
+    /// Compute the current agent status tag for OSC emission.
+    ///
+    /// Returns `Some("working"|"blocked"|"idle")` when the state has changed
+    /// since the last call, or `None` when suppressed (replay/title-off) or
+    /// unchanged (dedup). The OSC byte sequence is built from the returned
+    /// value.
+    ///
+    /// The three states mean:
+    /// - `working` — the agent is actively processing a turn.
+    /// - `blocked` — the TUI is paused waiting for the user to act (e.g. a
+    ///   permission prompt). herdr can show "needs human" instead of "busy".
+    /// - `idle` — the agent finished and is waiting for new input.
+    fn agent_osc_state(&mut self) -> Option<&'static str> {
+        if !crate::config::config().terminal_status_osc9 || self.is_replay {
+            return None;
+        }
+        let state: &'static str = if self.osc_blocked || self.lifecycle_osc_blocked() {
+            "blocked"
+        } else if self.is_processing() {
+            "working"
+        } else {
+            "idle"
+        };
+        if self.last_osc_state == Some(state) {
+            return None;
+        }
+        self.last_osc_state = Some(state);
+        Some(state)
+    }
+
+    /// Whether the main TUI is currently waiting for a user decision rather than
+    /// doing autonomous work. This wires the blocked OSC state to concrete
+    /// lifecycle state instead of leaving the manual `osc_blocked` hook dormant.
+    fn lifecycle_osc_blocked(&self) -> bool {
+        self.pending_login.is_some()
+            || self.pending_account_input.is_some()
+            || self.pending_ssh_remote_name.is_some()
+            || self.pending_fallback_offer.is_some()
+            || self.pending_merge_offer.is_some()
+            || self.pending_local_transfer.is_some()
+            || self.pending_split_request
+            || self.pending_transfer_request
+    }
+
+    /// Emit an OSC 9 progress sequence carrying a stable agent-status tag.
+    ///
+    /// Terminal multiplexers and status-bar integrations (e.g. herdr) capture
+    /// OSC 9 payloads as a structured side-channel that does not depend on
+    /// screen-scraping. The payload format is `jcode:<state>` so detection
+    /// manifests can match on a version-independent string.
+    ///
+    /// Only emits when the state has actually changed since the last call,
+    /// so it is safe to call on every redraw without flooding the terminal.
+    /// The actual escape format lives in [`jcode_core::console::emit_osc9_status`]
+    /// so the main TUI and the permissions viewer cannot drift apart.
+    pub(super) fn emit_agent_status_osc(&mut self) {
+        let Some(state) = self.agent_osc_state() else {
+            return;
+        };
+        jcode_core::console::emit_osc9_status_ignored(state);
+    }
+
     pub(super) fn reconnect_target_session_id(&self) -> Option<String> {
         self.remote_session_id
             .clone()
@@ -785,4 +847,174 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::Provider;
+    use std::sync::Arc;
+
+    struct MockProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for MockProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            Err(anyhow::anyhow!("mock"))
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+
+    fn create_test_app() -> App {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        App::new_for_test_harness(provider, registry)
+    }
+
+    #[test]
+    fn osc_state_idle_when_not_processing() {
+        let mut app = create_test_app();
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        let state = app.agent_osc_state();
+        assert_eq!(state, Some("idle"));
+        assert_eq!(app.last_osc_state, Some("idle"));
+    }
+
+    #[test]
+    fn osc_state_working_when_processing() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        let state = app.agent_osc_state();
+        assert_eq!(state, Some("working"));
+        assert_eq!(app.last_osc_state, Some("working"));
+    }
+
+    #[test]
+    fn osc_state_dedup_skips_repeated_same_state() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        let first = app.agent_osc_state();
+        let second = app.agent_osc_state();
+        assert_eq!(first, Some("working"));
+        assert_eq!(
+            second, None,
+            "second call with same state should be deduped"
+        );
+    }
+
+    #[test]
+    fn osc_state_emits_on_transition() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        assert_eq!(app.agent_osc_state(), Some("working"));
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        assert_eq!(app.agent_osc_state(), Some("idle"));
+        app.is_processing = true;
+        app.status = ProcessingStatus::Thinking(Instant::now());
+        assert_eq!(app.agent_osc_state(), Some("working"));
+    }
+
+    #[test]
+    fn osc_state_suppressed_in_replay() {
+        let mut app = create_test_app();
+        app.is_replay = true;
+        app.is_processing = true;
+        assert_eq!(
+            app.agent_osc_state(),
+            None,
+            "replay mode should suppress OSC"
+        );
+        assert_eq!(
+            app.last_osc_state, None,
+            "replay should not set last_osc_state"
+        );
+    }
+
+    #[test]
+    fn osc_state_not_suppressed_when_title_updates_off() {
+        let mut app = create_test_app();
+        app.suppress_terminal_title_updates = true;
+        app.is_processing = true;
+        assert_eq!(
+            app.agent_osc_state(),
+            Some("working"),
+            "terminal title suppression should not disable the dedicated OSC9 status channel"
+        );
+    }
+
+    #[test]
+    fn osc_state_blocked_wins_over_processing() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.osc_blocked = true;
+        assert_eq!(
+            app.agent_osc_state(),
+            Some("blocked"),
+            "blocked should take priority over working"
+        );
+    }
+
+    #[test]
+    fn osc_state_blocked_wins_over_idle() {
+        let mut app = create_test_app();
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        app.osc_blocked = true;
+        assert_eq!(
+            app.agent_osc_state(),
+            Some("blocked"),
+            "blocked should take priority over idle"
+        );
+    }
+
+    #[test]
+    fn osc_state_blocked_then_unblocked_returns_to_idle() {
+        let mut app = create_test_app();
+        app.osc_blocked = true;
+        assert_eq!(app.agent_osc_state(), Some("blocked"));
+        app.osc_blocked = false;
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        assert_eq!(app.agent_osc_state(), Some("idle"));
+    }
+
+    #[test]
+    fn osc_state_blocked_then_processing() {
+        let mut app = create_test_app();
+        app.osc_blocked = true;
+        assert_eq!(app.agent_osc_state(), Some("blocked"));
+        app.osc_blocked = false;
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        assert_eq!(app.agent_osc_state(), Some("working"));
+    }
+
+    #[test]
+    fn osc_state_lifecycle_blocked_then_unblocked_returns_to_idle() {
+        let mut app = create_test_app();
+        app.pending_ssh_remote_name = Some("prod".to_string());
+        assert_eq!(app.agent_osc_state(), Some("blocked"));
+        app.pending_ssh_remote_name = None;
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        assert_eq!(app.agent_osc_state(), Some("idle"));
+    }
 }
