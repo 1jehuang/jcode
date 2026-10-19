@@ -1044,7 +1044,20 @@ pub fn render_swarm_strip_vertical(
         let mut used = head_w;
         spans.push(Span::styled(head, style));
 
-        if let Some(task) = m.task.as_deref().filter(|t| !t.trim().is_empty()) {
+        // What the agent is doing right now beats what it was spawned for:
+        // working agents show their active todo step, falling back to the
+        // spawn-derived task label when they keep no todo list (or are done).
+        let activity = if is_active_status(&m.status) {
+            m.todo_items
+                .iter()
+                .find(|t| t.status == "in_progress")
+                .map(|t| t.content.as_str())
+                .filter(|t| !t.trim().is_empty())
+        } else {
+            None
+        }
+        .or(m.task.as_deref());
+        if let Some(task) = activity.filter(|t| !t.trim().is_empty()) {
             let avail = body_budget.saturating_sub(used + todo_w + disp_w(" · "));
             if avail >= CHIP_TASK_MIN_W {
                 let label = truncate_label(task, avail);

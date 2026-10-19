@@ -44,6 +44,10 @@ impl App {
     }
 
     pub(super) fn set_observe_mode_enabled(&mut self, enabled: bool, focus: bool) {
+        if enabled && focus {
+            self.side_panel_user_hidden = false;
+            self.side_panel_explicit_hidden = false;
+        }
         self.observe_mode_enabled = enabled;
         let mut snapshot = self.snapshot_without_observe();
         if enabled {

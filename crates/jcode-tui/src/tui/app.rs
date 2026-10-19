@@ -57,6 +57,7 @@ pub enum AppRuntimeMode {
 mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
+mod cache_diagnostics;
 mod catchup;
 mod commands;
 mod commit_log;
@@ -80,6 +81,7 @@ pub(crate) mod helpers;
 mod hotkey_feedback;
 pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
+mod idle_hibernation;
 mod inline_interactive;
 mod input;
 mod input_help;
@@ -231,22 +233,32 @@ struct KvCacheBaseline {
     /// is only the uncached remainder of that one request.
     input_tokens: u64,
     completed_at: Instant,
+    /// UTC day the baseline request was sent. Anthropic drops conversation
+    /// caches at 00:00 UTC, so a straddling miss is attributed, not alarmed.
+    utc_day: i64,
     /// Retention selected when the request started, not the current preference.
     cache_ttl_secs: Option<u64>,
     provider: String,
     model: String,
     upstream_provider: Option<String>,
+    /// OAuth account that served the request (caches are per account).
+    account: Option<String>,
     signature: Option<KvCacheRequestSignature>,
 }
 
 #[derive(Debug, Clone)]
 struct PendingKvCacheRequest {
+    /// None when usage arrived without a matching request-start event.
+    started_at: Option<Instant>,
+    /// UTC day the request was sent.
+    utc_day: i64,
     cache_ttl_secs: Option<u64>,
     turn_number: usize,
     call_index: u16,
     provider: String,
     model: String,
     upstream_provider: Option<String>,
+    account: Option<String>,
     signature: Option<KvCacheRequestSignature>,
     baseline_messages_prefix_matches: Option<bool>,
     baseline: Option<KvCacheBaseline>,
@@ -255,10 +267,13 @@ struct PendingKvCacheRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KvCacheMissReason {
+    Compaction,
     ProviderSwitch,
+    AccountSwitch,
     ModelSwitch,
     UpstreamSwitch,
     Expired,
+    DailyRollover,
     HarnessSystemChanged,
     HarnessToolsChanged,
     HarnessPrefixChanged,
@@ -270,10 +285,13 @@ enum KvCacheMissReason {
 impl KvCacheMissReason {
     fn label(self) -> &'static str {
         match self {
+            Self::Compaction => "compaction refresh",
             Self::ProviderSwitch => "provider switch",
+            Self::AccountSwitch => "account switch",
             Self::ModelSwitch => "model switch",
             Self::UpstreamSwitch => "upstream switch",
             Self::Expired => "expired",
+            Self::DailyRollover => "daily rollover",
             Self::HarnessSystemChanged => "harness: system changed",
             Self::HarnessToolsChanged => "harness: tools changed",
             Self::HarnessPrefixChanged => "harness: prefix changed",
@@ -301,11 +319,43 @@ struct PendingSessionPickerLoad {
     >,
 }
 
+/// Session id, display messages, and rendered images from the fast-start thread.
+type StartupTranscript = (
+    String,
+    Vec<DisplayMessage>,
+    Vec<crate::session::RenderedImage>,
+);
+
 struct PendingModelPickerLoad {
     request_id: u64,
     signature: ModelPickerCacheSignature,
+    #[allow(dead_code)] // kept for picker load timing diagnostics
     picker_started: Instant,
     receiver: mpsc::Receiver<anyhow::Result<ModelPickerRoutesResult>>,
+    /// Write the normalized routes back into `remote_model_options` when the
+    /// background build lands (remote hot path).
+    store_remote_routes: bool,
+}
+
+/// App-state snapshot the picker entry builder needs off the UI thread.
+#[derive(Debug, Clone)]
+struct ModelPickerBuildContext {
+    is_remote: bool,
+    current_model: String,
+    current_provider: String,
+    remote_provider_name: Option<String>,
+    current_api_method: Option<String>,
+    current_effort: Option<String>,
+    recent_authenticated_provider: Option<String>,
+}
+
+enum ModelPickerBuildOutcome {
+    Empty,
+    Built {
+        entries: Vec<super::PickerEntry>,
+        model_count: usize,
+        routes: Vec<crate::provider::ModelRoute>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,8 +387,7 @@ struct ModelPickerCache {
 }
 
 struct ModelPickerRoutesResult {
-    routes: Vec<crate::provider::ModelRoute>,
-    routes_ms: u128,
+    outcome: ModelPickerBuildOutcome,
 }
 
 #[derive(Debug, Clone)]
@@ -575,6 +624,8 @@ pub struct RunResult {
     pub update_session: Option<String>,
     /// Session ID to restart (exec into current binary, no build)
     pub restart_session: Option<String>,
+    /// Idle hibernation exited the client: wait for a key, then resume this session
+    pub hibernate_session: Option<String>,
     /// After `/cloud` or `/local`: exec into the session at its new location.
     pub cloud_handoff: Option<CloudHandoff>,
     /// Exit code to use (for canary wrapper communication)
@@ -895,6 +946,16 @@ struct CostState {
 
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 /// TUI Application state
+/// See [`App::advertised_history_base`].
+pub(crate) struct AdvertisedHistoryBase {
+    pub(crate) session_id: String,
+    pub(crate) base: crate::protocol::HistoryBase,
+    pub(crate) prefix: Option<Vec<DisplayMessage>>,
+    /// Images rendered with `prefix`, reused when History says
+    /// `images_unchanged`.
+    pub(crate) images: Option<Vec<crate::session::RenderedImage>>,
+}
+
 pub struct App {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -922,6 +983,7 @@ pub struct App {
     /// it applied it. See `jcode_tui_messages::anchor`.
     pending_resize_anchor: Option<PendingResizeAnchor>,
     input: String,
+    reset_hint_seen: RefCell<Option<(String, Instant)>>,
     command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
     /// Per-input memo for `command_suggestions()`; see
     /// [`CommandSuggestionsCache`].
@@ -946,7 +1008,6 @@ pub struct App {
     /// a turn was running. They run as real commands once the turn ends.
     queued_commands: Vec<String>,
     hidden_queued_system_messages: Vec<String>,
-    current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)
     upstream_provider: Option<String>,
     // Active stream connection type (websocket/https/etc.)
@@ -1146,6 +1207,8 @@ pub struct App {
     pending_background_client_reload: Option<(String, crate::bus::ClientMaintenanceAction)>,
     // Restart: if set, exec into current binary with this session ID (no build)
     restart_requested: Option<String>,
+    // Exit-mode idle hibernation: quit and leave a waiter that resumes this session
+    hibernate_exit_requested: Option<String>,
     // `/cloud` or `/local` finished: reattach at the new location on quit.
     cloud_handoff_requested: Option<CloudHandoff>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
@@ -1252,6 +1315,8 @@ pub struct App {
     /// re-deriving it from the provider name.
     remote_resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
     remote_provider_oauth_email: Option<crate::protocol::ProviderOAuthEmail>,
+    /// Daemon-selected saved account identity, independent of telemetry/email sharing.
+    remote_provider_oauth_account_label: Option<String>,
     oauth_notice_displayed_at: Option<Instant>,
     /// Remote model/provider/context/effort/credential were seeded from the
     /// last launch's `remote_header_hint` and have not yet been confirmed by
@@ -1259,8 +1324,30 @@ pub struct App {
     remote_session_facts_provisional: bool,
     remote_startup_phase: Option<RemoteStartupPhase>,
     remote_startup_phase_started: Option<Instant>,
+    /// Local transcript rendered off-thread during a reload fast start, so
+    /// the conversation appears without waiting for the server's History.
+    /// Send GetModelCatalog once bootstrap History has arrived.
+    model_catalog_after_history: bool,
+    pending_startup_transcript: Option<std::sync::mpsc::Receiver<StartupTranscript>>,
+    /// Fingerprint of the locally rendered startup transcript, delivered by
+    /// the startup transcript thread before display conversion so the
+    /// reconnect can advertise it as `history_base` in Subscribe.
+    pending_history_base: Option<std::sync::mpsc::Receiver<(String, crate::protocol::HistoryBase)>>,
+    /// The base advertised in the last Subscribe, plus the exact display
+    /// prefix it describes, kept until History arrives so a delta History can
+    /// be reconstructed even if the visible transcript changed meanwhile.
+    advertised_history_base: Option<AdvertisedHistoryBase>,
+    /// Unmodified startup transcript, kept only while a base is pending.
+    startup_display_snapshot: Option<(
+        String,
+        Vec<DisplayMessage>,
+        Vec<crate::session::RenderedImage>,
+    )>,
     remote_reasoning_effort: Option<String>,
     remote_service_tier: Option<String>,
+    remote_available_service_tiers: Option<Vec<String>>,
+    remote_reported_service_tier: Option<(Option<String>, String)>,
+    remote_service_tier_confirmation_pending: bool,
     remote_transport: Option<String>,
     remote_compaction_mode: Option<crate::config::CompactionMode>,
     remote_available_entries: Vec<String>,
@@ -1670,6 +1757,7 @@ pub struct App {
     runtime_memory_log: Option<RuntimeMemoryLogController>,
     // Once-per-idle-period retained-heap trim state (see idle_heap_release.rs).
     idle_heap_release: idle_heap_release::IdleHeapRelease,
+    idle_hibernation: idle_hibernation::IdleHibernation,
     // Binary modification time when client started (for smart reload detection)
     client_binary_mtime: Option<std::time::SystemTime>,
     // Rate limit state: when rate limit resets (if rate limited)
@@ -1838,7 +1926,9 @@ impl App {
     const INPUT_UNDO_LIMIT: usize = 128;
     const CLIENT_FOCUS_RECORD_DEBOUNCE: Duration = Duration::from_secs(2);
     const KV_CACHE_OPTIMAL_OK_PCT: u8 = 85;
-    const KV_CACHE_MIN_MISSED_TOKENS: u64 = 1_024;
+    fn kv_cache_min_missed_tokens(provider: &str) -> u64 {
+        crate::kv_cache_monitor::min_missed_tokens_for_provider(provider)
+    }
     const KV_CACHE_MAX_MISS_SAMPLES: usize = 12;
 
     pub(super) fn begin_kv_cache_request(
@@ -1883,6 +1973,8 @@ impl App {
         self.mark_stream_usage_call_boundary();
 
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
+            started_at: Some(Instant::now()),
+            utc_day: crate::kv_cache_monitor::utc_day_now(),
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
             cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
@@ -1892,6 +1984,7 @@ impl App {
             provider: self.kv_cache_provider_name(),
             model: self.kv_cache_provider_model(),
             upstream_provider: self.upstream_provider.clone(),
+            account: self.kv_cache_account(),
             signature: Some(signature),
             baseline_messages_prefix_matches,
             baseline,
@@ -1934,6 +2027,8 @@ impl App {
         self.kv_cache.current_api_usage_recorded = false;
         self.mark_stream_usage_call_boundary();
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
+            started_at: Some(Instant::now()),
+            utc_day: crate::kv_cache_monitor::utc_day_now(),
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
             cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
@@ -1943,6 +2038,7 @@ impl App {
             provider: self.kv_cache_provider_name(),
             model: self.kv_cache_provider_model(),
             upstream_provider: self.upstream_provider.clone(),
+            account: self.kv_cache_account(),
             signature: Some(signature),
             baseline_messages_prefix_matches,
             baseline,
@@ -2099,6 +2195,12 @@ impl App {
     }
 
     pub(super) fn record_completed_stream_cache_usage(&mut self) -> bool {
+        // A request boundary intentionally retains the last context counters
+        // until fresh usage arrives. Cancellation before that first report
+        // must not bill or compare those previous-request counters again.
+        if self.streaming.streaming_usage_call_reset_pending {
+            return false;
+        }
         let has_cache_telemetry = self.streaming.streaming_cache_read_tokens.is_some()
             || self.streaming.streaming_cache_creation_tokens.is_some();
         if self.kv_cache.current_api_usage_recorded {
@@ -2112,17 +2214,21 @@ impl App {
         }
 
         let optimal_input_tokens = self.token_accounting.cache_next_optimal_input_tokens;
-        // Stash the *effective* prompt size for this request so the next request's
-        // cache-read can be compared against everything that just became cacheable.
-        // For split-accounting providers (Anthropic) bare `input` is only the
-        // uncached remainder, so the reusable prefix is input + read + creation.
+        // Context size includes the uncached tail, but the next cache-read
+        // expectation must stop at the boundary actually read or written.
         let effective_prompt_tokens = crate::tui::info_widget::effective_prompt_tokens(
             &self.kv_cache_provider_name(),
             self.streaming.streaming_input_tokens,
             self.streaming.streaming_cache_read_tokens.unwrap_or(0),
             self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
         );
-        self.token_accounting.cache_next_optimal_input_tokens = Some(effective_prompt_tokens);
+        let reusable_tokens = crate::compaction::reusable_cache_tokens_from_usage(
+            &self.kv_cache_provider_name(),
+            self.streaming.streaming_input_tokens,
+            self.streaming.streaming_cache_read_tokens,
+            self.streaming.streaming_cache_creation_tokens,
+        );
+        self.token_accounting.cache_next_optimal_input_tokens = Some(reusable_tokens);
 
         let request = self
             .kv_cache
@@ -2136,15 +2242,22 @@ impl App {
         let baseline_session_id = self.kv_cache_session_id();
 
         if !has_cache_telemetry {
+            self.log_kv_cache_usage_summary(
+                &request,
+                optimal_input_tokens,
+                effective_prompt_tokens,
+            );
             self.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
                 session_id: baseline_session_id,
                 cache_generation: request.cache_generation,
                 input_tokens: self.streaming.streaming_input_tokens,
                 completed_at: Instant::now(),
+                utc_day: request.utc_day,
                 cache_ttl_secs: request.cache_ttl_secs,
                 provider: request.provider,
                 model: request.model,
                 upstream_provider: request.upstream_provider,
+                account: request.account,
                 signature: request.signature,
             });
             return true;
@@ -2180,17 +2293,19 @@ impl App {
             self.streaming.streaming_cache_creation_tokens;
         self.token_accounting.last_cache_optimal_input_tokens = optimal_input_tokens;
 
-        self.log_kv_cache_usage_summary(&request, optimal_input_tokens);
+        self.log_kv_cache_usage_summary(&request, optimal_input_tokens, effective_prompt_tokens);
 
         self.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
             session_id: baseline_session_id,
             cache_generation: request.cache_generation,
-            input_tokens: effective_prompt_tokens,
+            input_tokens: reusable_tokens,
             completed_at: Instant::now(),
+            utc_day: request.utc_day,
             cache_ttl_secs: request.cache_ttl_secs,
             provider: request.provider,
             model: request.model,
             upstream_provider: request.upstream_provider,
+            account: request.account,
             signature: request.signature,
         });
         true
@@ -2200,14 +2315,11 @@ impl App {
         &self,
         request: &PendingKvCacheRequest,
         optimal_input_tokens: Option<u64>,
+        prompt_tokens: u64,
     ) {
         let input_tokens = self.streaming.streaming_input_tokens;
         let read_tokens = self.streaming.streaming_cache_read_tokens.unwrap_or(0);
         let creation_tokens = self.streaming.streaming_cache_creation_tokens.unwrap_or(0);
-        let prompt_tokens = self
-            .token_accounting
-            .last_cache_prompt_tokens
-            .unwrap_or(input_tokens);
         let read_pct = ratio_pct(read_tokens, prompt_tokens);
         let creation_pct = ratio_pct(creation_tokens, prompt_tokens);
         let optimal_read_pct = optimal_input_tokens.map(|optimal| ratio_pct(read_tokens, optimal));
@@ -2330,7 +2442,7 @@ impl App {
              system_chars={:?} baseline_system_chars={:?} tools_json_chars={:?} baseline_tools_json_chars={:?} \
              messages_json_chars={:?} baseline_messages_json_chars={:?} ephemeral_chars={:?} baseline_ephemeral_chars={:?} \
              ephemeral_message_count={:?} baseline_ephemeral_message_count={:?} message_hashes_present={} baseline_message_hashes_present={} \
-             connection={:?} status_detail={:?}",
+             connection={:?} status_detail={:?} {}",
             request.turn_number,
             request.call_index,
             request.provider,
@@ -2386,11 +2498,14 @@ impl App {
             baseline_hashes_present,
             self.connection_type.as_deref(),
             self.status_detail.as_deref(),
+            self.kv_cache_diagnostic_fields(request, prompt_tokens),
         ));
     }
 
     fn fallback_pending_kv_cache_request(&self) -> PendingKvCacheRequest {
         PendingKvCacheRequest {
+            started_at: None,
+            utc_day: crate::kv_cache_monitor::utc_day_now(),
             turn_number: self
                 .display_messages
                 .iter()
@@ -2405,6 +2520,7 @@ impl App {
             provider: self.kv_cache_provider_name(),
             model: self.kv_cache_provider_model(),
             upstream_provider: self.upstream_provider.clone(),
+            account: self.kv_cache_account(),
             signature: None,
             baseline_messages_prefix_matches: None,
             baseline: self.kv_cache_baseline_for_current_session(),
@@ -2413,6 +2529,8 @@ impl App {
     }
 
     fn record_kv_cache_miss_sample(&mut self, request: &PendingKvCacheRequest) {
+        // A first fill without a reusable-prefix baseline is not a proven
+        // cache loss, even with an explicit zero read. Do not label it a miss.
         let Some(baseline) = request.baseline.as_ref() else {
             return;
         };
@@ -2427,27 +2545,16 @@ impl App {
             return;
         };
         let missed_tokens = expected_tokens.saturating_sub(read_tokens);
-        if missed_tokens < Self::KV_CACHE_MIN_MISSED_TOKENS {
+        if missed_tokens < Self::kv_cache_min_missed_tokens(&request.provider) {
             return;
         }
 
         let optimal_pct = ratio_pct(read_tokens, expected_tokens);
         let reason =
             self.classify_kv_cache_miss_reason(request, baseline, read_tokens, optimal_pct);
-        if optimal_pct >= Self::KV_CACHE_OPTIMAL_OK_PCT
-            && !matches!(
-                reason,
-                KvCacheMissReason::ProviderSwitch
-                    | KvCacheMissReason::ModelSwitch
-                    | KvCacheMissReason::UpstreamSwitch
-                    | KvCacheMissReason::Expired
-                    | KvCacheMissReason::HarnessSystemChanged
-                    | KvCacheMissReason::HarnessToolsChanged
-                    | KvCacheMissReason::HarnessPrefixChanged
-            )
-        {
-            return;
-        }
+        // Compare the previous reusable prefix, not the current prompt's new
+        // tail. Keep the absolute tolerance for provider block rounding, but
+        // do not hide substantial losses merely because a large cache is >85% warm.
 
         self.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
             turn_number: request.turn_number,
@@ -2462,69 +2569,144 @@ impl App {
         }
 
         self.maybe_push_kv_cache_miss_notice(
-            request.turn_number,
+            request,
             reason,
             missed_tokens,
+            read_tokens,
+            expected_tokens,
             baseline.completed_at,
         );
     }
 
-    /// Surface a loud in-chat alarm when a request missed the KV cache for a
-    /// harness-caused (avoidable) reason. Provider/model/upstream switches and
-    /// TTL expiry are legitimate and intentionally excluded — those are user- or
-    /// time-driven, not harness bugs. The harness should essentially never
-    /// invalidate the prefix cache on its own, so when it does we want it to be
-    /// visible immediately rather than buried in logs.
-    ///
-    /// Some harness actions do legitimately change the prompt mid-session
-    /// (config reloads, skill reloads). Those sites document the invalidation
-    /// in `cache_invalidation` when it happens; if a documented cause is found
-    /// between the baseline and this request, the notice attributes the miss
-    /// to it (informational) instead of raising the unexplained-bust alarm.
+    /// Surface explicit, meaningful cache loss as soon as usage is known.
+    /// Expected route changes and expiry are informational, not harness blame.
+    /// Documented harness invalidations are attributed to their source.
     fn maybe_push_kv_cache_miss_notice(
         &mut self,
-        turn_number: usize,
+        request: &PendingKvCacheRequest,
         reason: KvCacheMissReason,
         missed_tokens: u64,
+        read_tokens: u64,
+        expected_tokens: u64,
         baseline_completed_at: Instant,
     ) {
         if !crate::config::config().features.kv_cache_miss_notices {
             return;
         }
-        let detail = match reason {
-            KvCacheMissReason::HarnessSystemChanged => "system prompt changed mid-session",
-            KvCacheMissReason::HarnessToolsChanged => "tool set changed mid-session",
-            KvCacheMissReason::HarnessPrefixChanged => "an earlier message was modified",
-            // Not harness-caused: provider/model/upstream switch, TTL expiry,
-            // and the soft zero/low-read diagnostics. Skip the alarm for these.
-            _ => return,
-        };
+        let detail = Self::kv_cache_miss_detail(
+            request,
+            reason,
+            expected_tokens,
+            read_tokens,
+            baseline_completed_at,
+        );
+        let detail = detail.as_str();
 
-        let token_label = if missed_tokens >= 1_000_000 {
-            format!("{:.1}M", missed_tokens as f64 / 1_000_000.0)
-        } else if missed_tokens >= 1_000 {
-            format!("{}K", missed_tokens / 1_000)
-        } else {
-            missed_tokens.to_string()
-        };
+        let token_label = crate::kv_cache_monitor::format_token_count(missed_tokens);
 
         // Documented invalidation between the baseline and now: expected
         // resend, attribute instead of alarm.
-        if let Some(cause) = crate::cache_invalidation::most_recent_since(baseline_completed_at) {
-            self.push_display_message(DisplayMessage::system(format!(
-                "ℹ️ KV cache refresh [{}] turn {}: ~{} tokens resent ({}).",
-                cause.source, turn_number, token_label, detail,
-            )));
+        let harness_change = matches!(
+            reason,
+            KvCacheMissReason::HarnessSystemChanged
+                | KvCacheMissReason::HarnessToolsChanged
+                | KvCacheMissReason::HarnessPrefixChanged
+        );
+        let usage = format!(
+            "turn {} call {}: {} cached / {} expected tokens",
+            request.turn_number,
+            request.call_index,
+            crate::kv_cache_monitor::format_token_count(read_tokens),
+            crate::kv_cache_monitor::format_token_count(expected_tokens)
+        );
+        if harness_change
+            && let Some(cause) = crate::cache_invalidation::most_recent_since(baseline_completed_at)
+        {
+            self.push_kv_cache_notice(format!(
+                "ℹ️ KV cache refresh [{}] {}: ~{} tokens resent ({}).",
+                cause.source, usage, token_label, detail,
+            ));
             return;
         }
 
-        self.push_display_message(DisplayMessage::system(format!(
-            "⚠️ KV cache miss [{}] turn {}: ~{} tokens resent ({}). See KV_CACHE_USAGE in logs.",
+        self.push_kv_cache_notice(format!(
+            "{} KV cache miss [{}] {}: ~{} tokens resent ({}). See KV_CACHE_USAGE in logs.",
+            if harness_change { "⚠️" } else { "ℹ️" },
             reason.label(),
-            turn_number,
+            usage,
             token_label,
             detail,
-        )));
+        ));
+    }
+
+    /// Specific, human-readable cause: what changed (from -> to) and the
+    /// timing evidence. Shares wording with the daemon-side monitor.
+    fn kv_cache_miss_detail(
+        request: &PendingKvCacheRequest,
+        reason: KvCacheMissReason,
+        expected_tokens: u64,
+        read_tokens: u64,
+        baseline_completed_at: Instant,
+    ) -> String {
+        use crate::kv_cache_monitor::MissReason as M;
+        let shared = match reason {
+            KvCacheMissReason::Compaction => {
+                return "context was compacted; rebuilding the cache is expected".to_string();
+            }
+            KvCacheMissReason::Unknown => {
+                return "provider reused less of the previous prefix; cache read telemetry was incomplete"
+                    .to_string();
+            }
+            KvCacheMissReason::ProviderSwitch => M::ProviderSwitch,
+            KvCacheMissReason::AccountSwitch => M::AccountSwitch,
+            KvCacheMissReason::ModelSwitch => M::ModelSwitch,
+            KvCacheMissReason::UpstreamSwitch => M::UpstreamSwitch,
+            KvCacheMissReason::Expired => M::Expired,
+            KvCacheMissReason::DailyRollover => M::DailyRollover,
+            KvCacheMissReason::HarnessSystemChanged => M::SystemChanged,
+            KvCacheMissReason::HarnessToolsChanged => M::ToolsChanged,
+            KvCacheMissReason::HarnessPrefixChanged => M::PrefixChanged,
+            KvCacheMissReason::ZeroRead => M::ZeroRead,
+            KvCacheMissReason::LowRead => M::LowRead,
+        };
+        let baseline = request.baseline.as_ref();
+        let first_changed_message = baseline
+            .and_then(|baseline| baseline.signature.as_ref())
+            .zip(request.signature.as_ref())
+            .and_then(|(previous, current)| {
+                let common = Self::kv_cache_common_prefix_messages(current, previous);
+                (common < previous.message_count).then_some(common)
+            });
+        let ttl_is_estimate = baseline
+            .is_some_and(|baseline| crate::provider::cache_ttl_is_estimate(&baseline.provider));
+        crate::kv_cache_monitor::describe_miss(
+            shared,
+            &crate::kv_cache_monitor::MissContext {
+                old_provider: baseline.map_or("?", |b| b.provider.as_str()),
+                new_provider: &request.provider,
+                old_model: baseline.map_or("?", |b| b.model.as_str()),
+                new_model: &request.model,
+                old_account: baseline.and_then(|b| b.account.as_deref()),
+                new_account: request.account.as_deref(),
+                old_upstream: baseline.and_then(|b| b.upstream_provider.as_deref()),
+                new_upstream: request.upstream_provider.as_deref(),
+                idle_secs: request
+                    .started_at
+                    .and_then(|start| start.checked_duration_since(baseline_completed_at))
+                    .map(|idle| idle.as_secs()),
+                ttl_secs: baseline.and_then(|b| b.cache_ttl_secs),
+                ttl_is_estimate,
+                expected_tokens,
+                read_tokens,
+                first_changed_message,
+            },
+        )
+    }
+
+    /// Push a cache diagnostic after committing any buffered streaming text.
+    pub(super) fn push_kv_cache_notice(&mut self, message: String) {
+        self.commit_pending_streaming_assistant_message();
+        self.push_display_message(DisplayMessage::system(message));
     }
 
     fn classify_kv_cache_miss_reason(
@@ -2536,6 +2718,12 @@ impl App {
     ) -> KvCacheMissReason {
         if baseline.provider != request.provider {
             return KvCacheMissReason::ProviderSwitch;
+        }
+        if baseline.account.is_some()
+            && request.account.is_some()
+            && baseline.account != request.account
+        {
+            return KvCacheMissReason::AccountSwitch;
         }
         if baseline.model != request.model {
             return KvCacheMissReason::ModelSwitch;
@@ -2549,7 +2737,10 @@ impl App {
 
         if let Some(ttl_secs) = baseline.cache_ttl_secs
             && !crate::provider::cache_ttl_is_estimate(&baseline.provider)
-            && baseline.completed_at.elapsed() >= Duration::from_secs(ttl_secs)
+            && request
+                .started_at
+                .and_then(|start| start.checked_duration_since(baseline.completed_at))
+                .is_some_and(|age| age >= Duration::from_secs(ttl_secs))
         {
             return KvCacheMissReason::Expired;
         }
@@ -2569,13 +2760,22 @@ impl App {
             return KvCacheMissReason::HarnessPrefixChanged;
         }
 
+        if baseline.utc_day != request.utc_day
+            && crate::kv_cache_monitor::provider_rolls_cache_daily(&request.provider)
+        {
+            return KvCacheMissReason::DailyRollover;
+        }
+
         if self.streaming.streaming_cache_read_tokens.is_none() {
             return KvCacheMissReason::Unknown;
         }
         if read_tokens == 0 {
             return KvCacheMissReason::ZeroRead;
         }
-        if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT {
+        if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT
+            || baseline.input_tokens.saturating_sub(read_tokens)
+                >= Self::kv_cache_min_missed_tokens(&request.provider)
+        {
             return KvCacheMissReason::LowRead;
         }
         KvCacheMissReason::Unknown
@@ -2615,6 +2815,19 @@ impl App {
         }
     }
 
+    /// OAuth account serving requests, so an account failover (e.g. after a
+    /// 429) is attributed instead of looking like an unexplained eviction.
+    fn kv_cache_account(&self) -> Option<String> {
+        if self.is_remote
+            && let Some(label) = self.remote_provider_oauth_account_label.as_deref()
+            && !label.is_empty()
+        {
+            return Some(label.to_string());
+        }
+        let method = self.current_route_api_method()?;
+        jcode_provider_core::oauth_account_label(&method).map(str::to_string)
+    }
+
     fn kv_cache_provider_model(&self) -> String {
         if self.uses_server_or_replay_metadata() {
             self.remote_provider_model
@@ -2632,8 +2845,16 @@ impl App {
         system_dynamic: &str,
     ) -> KvCacheRequestSignature {
         let dynamic_trimmed = system_dynamic.trim();
+        // The dynamic block precedes the transcript, so it is part of the
+        // cached prefix. Hash it with the static block so a change is
+        // attributed to the harness rather than reported as a plain low read.
+        let system_hash = if dynamic_trimmed.is_empty() {
+            stable_hash_str(system_static)
+        } else {
+            stable_hash_str(&format!("{system_static}\n\n{dynamic_trimmed}"))
+        };
         KvCacheRequestSignature {
-            system_static_hash: stable_hash_str(system_static),
+            system_static_hash: system_hash,
             tools_hash: stable_hash_json(tools),
             messages_hash: stable_hash_json(&cache_relevant_messages(messages)),
             message_hashes: message_hashes(messages),
