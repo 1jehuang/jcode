@@ -61,6 +61,7 @@ mod swarm_persistence;
 mod swarm_watchdog;
 mod turn_failover;
 mod util;
+mod worker_revive;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
 use self::background_tasks::{
@@ -1278,6 +1279,13 @@ impl Server {
         tokio::task::JoinHandle<()>,
     ) {
         self.spawn_registry_prewarm();
+        worker_revive::register_context(worker_revive::WorkerReviveContext {
+            provider: Arc::clone(&self.provider),
+            sessions: Arc::clone(&self.sessions),
+            mcp_pool: Arc::clone(&self.mcp_pool),
+            shutdown_signals: Arc::clone(&self.shutdown_signals),
+            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+        });
         // Every resume History asks whether the session has persisted
         // background tasks. The first ask after a reload scans the whole task
         // directory (~250ms) while clients are reconnecting; build the index

@@ -685,3 +685,121 @@ async fn task_control_wake_without_plan_wakes_target_session_by_friendly_name() 
         other => panic!("expected CommTaskControlResponse, got {other:?}"),
     }
 }
+
+/// Regression: after a server reload the spawning TUI session lost the swarm
+/// coordinator slot (a headless worker captured it), and `retry`/`resume` on
+/// its own failed workers returned "Only the coordinator can control assigned
+/// tasks". The spawner owns its workers regardless of the slot, and `retry` on
+/// a worker with no plan task means waking it.
+#[tokio::test]
+async fn spawner_can_retry_its_worker_without_coordinator_slot_or_plan() {
+    let (_env, _runtime) = RuntimeEnvGuard::new();
+    let swarm_id = "swarm-lost-slot";
+    let owner = "owner";
+    let worker = "worker-session";
+    let usurper = "usurper";
+    let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+    let worker_agent = test_agent().await;
+    let _busy = worker_agent.clone().lock_owned().await;
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        worker.to_string(),
+        worker_agent,
+    )])));
+    let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        (owner.to_string(), member(owner, swarm_id, "ready")),
+        (worker.to_string(), {
+            let mut member = member(worker, swarm_id, "failed");
+            member.is_headless = true;
+            member.report_back_to_session_id = Some(owner.to_string());
+            member
+        }),
+        (usurper.to_string(), {
+            let mut member = member(usurper, swarm_id, "failed");
+            member.is_headless = true;
+            member
+        }),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        HashSet::from([owner.to_string(), worker.to_string(), usurper.to_string()]),
+    )])));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        usurper.to_string(),
+    )])));
+    let event_history = Arc::new(RwLock::new(VecDeque::new()));
+    let event_counter = Arc::new(AtomicU64::new(1));
+    let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(32);
+    let mutation_runtime = SwarmMutationRuntime::default();
+
+    handle_comm_task_control(
+        112,
+        owner.to_string(),
+        "retry".to_string(),
+        String::new(),
+        Some(worker.to_string()),
+        None,
+        &client_tx,
+        &sessions,
+        &soft_interrupt_queues,
+        &client_connections,
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_plans,
+        &swarm_coordinators,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+        &mutation_runtime,
+    )
+    .await;
+
+    match client_rx.recv().await.expect("response") {
+        ServerEvent::CommTaskControlResponse {
+            id,
+            target_session,
+            status,
+            ..
+        } => {
+            assert_eq!(id, 112);
+            assert_eq!(target_session.as_deref(), Some(worker));
+            assert_eq!(status, "queued");
+        }
+        other => panic!("expected CommTaskControlResponse, got {other:?}"),
+    }
+
+    // A non-owner, non-coordinator peer still cannot drive someone else's worker.
+    handle_comm_task_control(
+        113,
+        usurper.to_string(),
+        "retry".to_string(),
+        String::new(),
+        Some(owner.to_string()),
+        None,
+        &client_tx,
+        &sessions,
+        &soft_interrupt_queues,
+        &client_connections,
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_plans,
+        &swarm_coordinators,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+        &mutation_runtime,
+    )
+    .await;
+    match client_rx.recv().await.expect("response") {
+        ServerEvent::CommTaskControlResponse { target_session, .. } => {
+            // The usurper holds the slot, so it may wake members, but it is
+            // the owner it targets, which has no live agent here.
+            panic!("unexpected success targeting {target_session:?}")
+        }
+        ServerEvent::Error { id, .. } => assert_eq!(id, 113),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}

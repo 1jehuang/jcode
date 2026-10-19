@@ -1217,7 +1217,15 @@ pub(super) async fn remove_session_from_swarm(
         }
     };
     let mut reparented: Vec<String> = Vec::new();
-    {
+    // With no live fallback, keep the children pointing at their departing
+    // spawner. The common cause is a TUI owner dropping off during a server
+    // reload: promoting its workers to roots let one of them (a headless
+    // worker) claim the coordinator slot, and the owner could no longer
+    // resume, retry or wake its own workers when it reconnected moments
+    // later. A dangling report-back edge is harmless: the ancestor walk stops
+    // at a missing member and report-back delivery already tolerates an
+    // absent recipient.
+    if fallback_parent.is_some() {
         let mut members = swarm_members.write().await;
         for member in members.values_mut() {
             if member.swarm_id.as_deref() == Some(swarm_id)
@@ -2714,6 +2722,50 @@ mod tests {
                 .and_then(|member| member.report_back_to_session_id.as_deref()),
             Some("coord")
         );
+    }
+
+    #[tokio::test]
+    async fn departing_sole_owner_keeps_its_workers_owned() {
+        // A TUI owner briefly drops off during a server reload. With no live
+        // fallback parent, its workers must keep pointing at it so it can still
+        // resume them, and none of them may inherit the coordinator slot.
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            "swarm-1".to_string(),
+            HashSet::from(["owner".to_string(), "worker".to_string()]),
+        )])));
+        let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+            "swarm-1".to_string(),
+            "owner".to_string(),
+        )])));
+        let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+        let (owner, _owner_rx) = swarm_member("owner", "coordinator", false);
+        let (mut worker, _worker_rx) = swarm_member("worker", "agent", true);
+        worker.report_back_to_session_id = Some("owner".to_string());
+        {
+            let mut members = swarm_members.write().await;
+            members.insert("owner".to_string(), owner);
+            members.insert("worker".to_string(), worker);
+        }
+
+        remove_session_from_swarm(
+            "owner",
+            "swarm-1",
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_coordinators,
+            &swarm_plans,
+        )
+        .await;
+
+        let members = swarm_members.read().await;
+        assert_eq!(
+            members
+                .get("worker")
+                .and_then(|member| member.report_back_to_session_id.as_deref()),
+            Some("owner")
+        );
+        assert!(swarm_coordinators.read().await.get("swarm-1").is_none());
     }
 
     #[tokio::test]

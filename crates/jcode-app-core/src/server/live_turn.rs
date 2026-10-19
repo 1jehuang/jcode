@@ -68,10 +68,8 @@ pub(super) async fn idle_live_agent(
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<OwnedMutexGuard<Agent>> {
-    let agent = {
-        let guard = sessions.read().await;
-        guard.get(session_id).cloned()
-    }?;
+    let agent =
+        super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await?;
 
     // Headless workers never have a client attachment by design, and members
     // restored from disk after a server restart carry a closed placeholder
