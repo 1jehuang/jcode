@@ -102,6 +102,29 @@ fn kv_cache_widget_shows_session_hit_ratio() {
 }
 
 #[test]
+fn kv_cache_without_reuse_baseline_shows_observed_hit_rate() {
+    let cache = CacheHitInfo {
+        prompt_tokens: Some(100_000),
+        read_tokens: 4_000,
+        last_prompt_tokens: Some(100_000),
+        last_read_tokens: Some(4_000),
+        ..Default::default()
+    };
+    let data = InfoWidgetData {
+        cache_hit_info: Some(cache.clone()),
+        ..Default::default()
+    };
+    let framed = render_kv_cache_widget(&data, Rect::new(0, 0, 50, 5));
+    let text = lines_text_concat(&framed.all_lines());
+    assert!(text.contains("4% hit"), "{text}");
+    assert!(!text.contains("priming"), "{text}");
+    let compact = lines_text_concat(&[super::render_kv_cache_summary_line(&cache)]);
+    assert!(compact.contains("hit 4%"), "{compact}");
+    assert!(compact.contains("last 4%"), "{compact}");
+    assert!(!compact.contains("priming"), "{compact}");
+}
+
+#[test]
 fn todos_widgets_show_item_and_aggregate_confidence() {
     let data = InfoWidgetData {
         todos: vec![
@@ -467,7 +490,7 @@ fn loop_suffix_renders_safely_at_tiny_sizes() {
 
 #[test]
 fn swarm_plan_gate_items_render_like_normal_items() {
-    // Deep-mode critique gates share the plan item shape; only the id differs.
+    // Gate-style ids from older plans share the plan item shape.
     let mut gate = plan_item("explore-root::gate", "queued");
     gate.content = "Critique the work of 'explore-root' adversarially.".to_string();
     gate.blocked_by = vec!["explore-root".to_string()];
@@ -513,6 +536,65 @@ fn swarm_plan_todos_render_safely_at_extreme_sizes() {
         let _ = render_todos_widget(&data, rect);
         let _ = render_todos_expanded(&data, rect);
         let _ = render_todos_compact(&data, rect);
+    }
+}
+
+#[test]
+fn openai_limit_reached_overrides_nonexhausted_usage_windows() {
+    let usage = UsageInfo {
+        provider: UsageProvider::OpenAI,
+        primary_limit_label: Some("5-hour".to_string()),
+        five_hour: 0.18,
+        secondary_limit_label: Some("Weekly".to_string()),
+        seven_day: 0.03,
+        available: true,
+        limit_reached: true,
+        ..Default::default()
+    };
+    assert_usage_limit_warning(usage);
+}
+
+#[test]
+fn openai_limit_reached_without_snapshot_or_windows_is_visible() {
+    let usage = UsageInfo {
+        provider: UsageProvider::OpenAI,
+        limit_reached: true,
+        ..Default::default()
+    };
+    assert!(!usage.available);
+    assert_usage_limit_warning(usage);
+}
+
+#[test]
+fn usage_limit_reached_defaults_to_false() {
+    assert!(!UsageInfo::default().limit_reached);
+}
+
+fn assert_usage_limit_warning(usage: UsageInfo) {
+    assert_eq!(usage.max_usage_pct(), 100);
+    let data = InfoWidgetData {
+        usage_info: Some(usage.clone()),
+        ..Default::default()
+    };
+    assert!(data.has_data_for(WidgetKind::UsageLimits));
+    for display_used in [false, true] {
+        let data = InfoWidgetData {
+            usage_display_used: display_used,
+            ..data.clone()
+        };
+        let expanded = render_usage_widget(&data, Rect::new(0, 0, 40, 4));
+        let compact = render_usage_compact(&usage, 40, display_used);
+        let overview = super::render_sections(&data, Rect::new(0, 0, 40, 10), None);
+        for text in [
+            lines_text(&expanded.all_lines()),
+            lines_text(&compact),
+            lines_text(&overview),
+        ] {
+            assert!(text.contains("Usage limit reached"), "{text}");
+            assert!(!text.contains('%'), "{text}");
+            assert!(!text.contains('▰') && !text.contains('▱'), "{text}");
+            assert!(!text.contains("Usage unavailable"), "{text}");
+        }
     }
 }
 

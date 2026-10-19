@@ -176,3 +176,52 @@ fn load_save_roundtrip_via_temp_home() {
         std::env::remove_var("JCODE_HOME");
     }
 }
+
+/// Every session reports each shared server's connection. Only the first
+/// report of a catalog should touch the file; identical repeats must be free,
+/// and an external rewrite of the file must not be masked by the memo.
+#[test]
+fn sync_server_writes_once_skips_repeats_and_notices_external_edits() {
+    let _guard = crate::storage::lock_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("JCODE_HOME", tmp.path());
+    }
+    let config = cfg("node", &["sync.js"]);
+    let tools = vec![tool("alpha"), tool("beta")];
+
+    assert!(McpSchemaCache::sync_server("sync-srv", &config, &tools));
+    assert!(
+        !McpSchemaCache::sync_server("sync-srv", &config, &tools),
+        "identical repeat must not rewrite"
+    );
+
+    // Another process wipes the cache: the next report must restore it.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    McpSchemaCache::default().save();
+    assert!(
+        McpSchemaCache::load()
+            .tools_for("sync-srv", &config)
+            .is_none()
+    );
+    McpSchemaCache::sync_server("sync-srv", &config, &tools);
+    let restored = McpSchemaCache::load();
+    assert_eq!(
+        restored.tools_for("sync-srv", &config).map(|t| t.len()),
+        Some(2),
+        "external edit must not be masked by the in-process memo"
+    );
+
+    // A changed catalog is written.
+    let fewer = vec![tool("alpha")];
+    assert!(McpSchemaCache::sync_server("sync-srv", &config, &fewer));
+    assert_eq!(
+        McpSchemaCache::load()
+            .tools_for("sync-srv", &config)
+            .map(|t| t.len()),
+        Some(1)
+    );
+    unsafe {
+        std::env::remove_var("JCODE_HOME");
+    }
+}

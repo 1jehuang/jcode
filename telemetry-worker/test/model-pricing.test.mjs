@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import {
-  UPSERT_PRICE_SQL, buildPriceIndex, normalizeLabel, resolvePriceRows, syncModelPrices,
+  UPSERT_PRICE_SQL, buildPriceIndex, normalizeLabel, resolvePriceRows, syncModelPrices, usageLabelsSql,
 } from "../src/model-pricing.js";
 
 const opus = { input: 4, output: 20, cache_read: 0.2, cache_write: 5 };
@@ -42,6 +42,38 @@ test("opaque router aliases stay unpriced rather than guessed", () => {
     assert.equal(priceOf(label).kind, "unpriced", label);
   }
   assert.ok(!normalizeLabel("tommy-jcode:latest").includes("latest"));
+});
+
+test("unknown and subscription routes do not masquerade as free inference", () => {
+  for (const label of [
+    "unknown", "default", "auto", "auto/router", "pool", "pool12",
+    "mystery:cloud", "ollama/mystery:cloud", "vendor-coding-plan/mystery",
+    "mystery-token-plan",
+  ]) {
+    const row = priceOf(label);
+    assert.equal(row.kind, "unpriced", label);
+    assert.equal(row.input, null, label);
+  }
+  assert.equal(priceOf("vendor-coding-plan/claude-opus-5-5").input, 4,
+    "subscription-backed inference retains its underlying model's list price");
+  for (const label of ["mock", "free", "openrouter/free", "model:free", "ollama/local-model"]) {
+    assert.equal(priceOf(label).kind, "free", label);
+  }
+});
+
+test("upsert repairs obsolete free classifications without erasing catalog rates", () => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(readFileSync(new URL("../migrations/0023_model_prices.sql", import.meta.url), "utf8"));
+  const put = (kind, input) => db.prepare(UPSERT_PRICE_SQL)
+    .run("unknown", null, null, input, null, null, null, 0, kind);
+  const get = () => db.prepare("SELECT price_kind, input_usd_per_mtok AS i FROM model_prices WHERE model='unknown'").get();
+  put("free", 0);
+  put("unpriced", null);
+  assert.deepEqual({ ...get() }, { price_kind: "unpriced", i: null });
+  put("catalog", 4);
+  put("unpriced", null);
+  assert.deepEqual({ ...get() }, { price_kind: "catalog", i: 4 });
+  db.close();
 });
 
 test("upsert never downgrades a known price to unpriced", () => {
@@ -93,6 +125,7 @@ test("syncModelPrices prices recent labels and batches the upserts", async () =>
   const big = { anthropic: { models: { ...catalog.anthropic.models } } };
   for (let i = 0; i < 150; i++) big.anthropic.models[`filler-${i}`] = { cost: { input: 1 } };
   const batches = [];
+  const usageTables = [];
   let boundDays;
   const env = {
     DB: {
@@ -102,8 +135,10 @@ test("syncModelPrices prices recent labels and batches the upserts", async () =>
           bind(...args) {
             if (sql.includes("FROM events")) boundDays = args[0];
             if (sql.includes("daily_model_usage")) {
+              const canonical = sql.includes("daily_model_usage_v2");
+              usageTables.push(canonical ? "v2" : "v1");
               return { all: async () => ({ results: [
-                { model: "claude-opus-5-5", provider: "anthropic", tokens: 7 },
+                { model: canonical ? "v2-only/claude-opus-5-5" : "claude-opus-5-5", provider: "anthropic", tokens: 7 },
               ] }) };
             }
             return { sql, args, all: async () => ({ results: [
@@ -120,10 +155,36 @@ test("syncModelPrices prices recent labels and batches the upserts", async () =>
     fetchImpl: async () => ({ ok: true, json: async () => big }),
   });
   assert.equal(boundDays, "-2 days");
-  assert.deepEqual(result, { labels: 3, priced: 2 });
+  assert.deepEqual(result, { labels: 4, priced: 3 });
+  assert.deepEqual(usageTables, ["v1", "v2"]);
   const opusRow = batches.flat().find((s) => s.args[0] === "cc/claude-opus-5-5(high)");
   assert.equal(opusRow.args[3], 4);
   assert.equal(opusRow.args[7], 1, "openrouter reports cache reads inside input");
+});
+
+test("usage price discovery includes delayed reports updated today", () => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(readFileSync(new URL("../migrations/0027_daily_model_usage.sql", import.meta.url), "utf8"));
+  db.prepare(`INSERT INTO daily_model_usage
+    (usage_date, source, provider, model, responses, total_tokens)
+    VALUES (date('now','-6 days'), 'sidecar', 'anthropic', 'new-model', 1, 100)`)
+    .run();
+  const rows = db.prepare(usageLabelsSql()).all("-2 days", "-2 days");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].model, "new-model");
+  db.close();
+});
+
+test("price discovery never hides an overloaded usage store", async () => {
+  const big = { anthropic: { models: {} } };
+  for (let i = 0; i < 150; i++) big.anthropic.models[`filler-${i}`] = { cost: { input: 1 } };
+  const env = { DB: { prepare(sql) { return { bind() { return { async all() {
+    if (sql.includes("daily_model_usage")) throw new Error("D1 DB is overloaded");
+    return { results: [] };
+  } }; } }; } } };
+  await assert.rejects(syncModelPrices(env, {
+    fetchImpl: async () => ({ ok: true, json: async () => big }),
+  }), /D1 DB is overloaded/);
 });
 
 test("syncModelPrices refuses a truncated catalog", async () => {

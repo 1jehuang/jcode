@@ -36,6 +36,42 @@ impl MultiProvider {
         if !saved {
             return Ok(());
         }
+        // A freshly spawned session inherits the process-wide account. If that
+        // login is known to be spent (local cooldown, no network IO), start on
+        // the next ready pool member instead of failing the first request.
+        let label = match models::provider_unavailability_detail_for_account_label(
+            Self::provider_key(target),
+            Some(&label),
+        ) {
+            Some(reason) if same_provider_account_failover_enabled() => {
+                match account_failover::same_provider_account_candidates(target)
+                    .into_iter()
+                    .next()
+                {
+                    Some(next) => {
+                        crate::logging::info(&format!(
+                            "{} account '{}' unavailable ({}), routing new request to '{}'",
+                            Self::provider_label(target),
+                            label,
+                            reason,
+                            next
+                        ));
+                        self.startup_notices
+                            .write()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .push(format!(
+                                "⚡ Routed {} account: **{}** -> **{}** (previous account unavailable)",
+                                Self::provider_label(target),
+                                label,
+                                next
+                            ));
+                        next
+                    }
+                    None => label,
+                }
+            }
+            _ => label,
+        };
         let replacement = runtime.fork();
         replacement.set_oauth_account(Some(&label))?;
         replacement.set_credential_mode(CredentialMode::OAuth)?;

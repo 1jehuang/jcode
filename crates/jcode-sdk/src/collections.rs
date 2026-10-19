@@ -310,12 +310,11 @@ fn write(path: &Path, store: &Collections) -> Result<()> {
         fs::rename(&temporary, path)?;
         anyhow::Ok(())
     })();
-    if result.is_err() {
-        if let Err(cleanup_error) = fs::remove_file(&temporary)
-            && cleanup_error.kind() != std::io::ErrorKind::NotFound
-        {
-            eprintln!("Could not remove unsaved collection temporary file: {cleanup_error}");
-        }
+    if result.is_err()
+        && let Err(cleanup_error) = fs::remove_file(&temporary)
+        && cleanup_error.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("Could not remove unsaved collection temporary file: {cleanup_error}");
     }
     result.context("Could not save collections")
 }

@@ -137,8 +137,6 @@ async fn assign_task_does_not_stack_on_busy_worker() {
             version: 1,
             participants: HashSet::from([requester.to_string(), busy_worker.to_string()]),
             task_progress: HashMap::new(),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(

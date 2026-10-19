@@ -90,6 +90,9 @@ impl App {
         context_limit: u64,
         strategy: &str,
     ) -> String {
+        if event.pre_tokens.is_none() && event.post_tokens.is_none() {
+            return format!("📦 Compacted ({strategy}): token counts unavailable");
+        }
         let usage = |tokens: Option<u64>| match tokens {
             Some(tokens) if context_limit > 0 => format!(
                 "~{} tokens ({:.1}%)",
@@ -97,7 +100,7 @@ impl App {
                 tokens as f64 / context_limit as f64 * 100.0,
             ),
             Some(tokens) => format!("~{} tokens", Self::format_compaction_number(tokens)),
-            None => "unknown".to_string(),
+            None => "token count unavailable".to_string(),
         };
         format!(
             "📦 Compacted ({strategy}): {} → {}",
@@ -296,6 +299,7 @@ impl App {
     }
 
     pub(super) fn handle_compaction_event(&mut self, event: CompactionEvent) {
+        self.commit_pending_streaming_assistant_message();
         self.invalidate_kv_cache_after_compaction();
         if let Err(err) = self.session.save() {
             crate::logging::warn(&format!(
@@ -321,6 +325,7 @@ impl App {
         // pre-compaction request that completes later cannot restore stale state.
         self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
         self.kv_cache.kv_cache_baseline = None;
+        self.token_accounting.cache_next_optimal_input_tokens = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
@@ -870,7 +875,18 @@ mod tests {
         event.post_tokens = None;
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): unknown → unknown"
+            "📦 Compacted (emergency): token counts unavailable"
+        );
+        event.post_tokens = Some(40_000);
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 200_000),
+            "📦 Compacted (emergency): token count unavailable → ~40,000 tokens (20.0%)"
+        );
+        event.pre_tokens = Some(180_000);
+        event.post_tokens = None;
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 200_000),
+            "📦 Compacted (emergency): ~180,000 tokens (90.0%) → token count unavailable"
         );
         event.pre_tokens = Some(0);
         event.post_tokens = Some(0);
