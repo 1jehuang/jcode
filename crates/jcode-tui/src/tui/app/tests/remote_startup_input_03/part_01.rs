@@ -559,17 +559,32 @@ fn test_restore_session_with_selfdev_reload_tool_result_queues_continuation() {
 }
 
 #[test]
-fn test_system_reminder_is_added_to_system_prompt_not_user_messages() {
+fn test_system_reminder_goes_to_transcript_not_system_prompt() {
     let mut app = create_test_app();
-    app.current_turn_system_reminder = Some(
+    let before = app.build_system_prompt_split(None);
+    app.append_turn_system_reminder(Some(
         "Your session was interrupted by a server reload. Continue where you left off.".to_string(),
+    ));
+
+    let after = app.build_system_prompt_split(None);
+    assert_eq!(before.static_part, after.static_part);
+    assert_eq!(before.dynamic_part, after.dynamic_part);
+    let last = app.session.messages.last().expect("reminder message");
+    assert_eq!(
+        last.display_role,
+        Some(crate::session::StoredDisplayRole::System)
     );
+    let text = match &last.content[0] {
+        ContentBlock::Text { text, .. } => text.clone(),
+        other => panic!("unexpected block {other:?}"),
+    };
+    assert!(text.starts_with("<system-reminder>"));
+    assert!(text.contains("Continue where you left off."));
 
-    let split = app.build_system_prompt_split(None);
-
-    assert!(split.dynamic_part.contains("# System Reminder"));
-    assert!(split.dynamic_part.contains("Continue where you left off."));
-    assert!(app.messages.is_empty());
+    let count = app.session.messages.len();
+    app.append_turn_system_reminder(Some("   ".to_string()));
+    app.append_turn_system_reminder(None);
+    assert_eq!(app.session.messages.len(), count);
 }
 
 #[test]

@@ -1,5 +1,10 @@
 use super::*;
 
+/// Errors where no HTTP response arrived and retrying the same request may succeed.
+fn is_transient_transport_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout() || error.is_request()
+}
+
 pub(super) fn usage_percent_from_used_limit(used: f64, limit: f64) -> f32 {
     if !used.is_finite() || !limit.is_finite() || limit <= 0.0 {
         return 0.0;
@@ -220,21 +225,44 @@ pub(super) async fn fetch_openai_usage_for_account(
 
     let probe_started = Instant::now();
     let client = crate::provider::shared_http_client();
-    let mut builder = client
-        .get(OPENAI_USAGE_URL)
-        .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {}", creds.access_token));
+    let request = || {
+        let mut builder = client
+            .get(OPENAI_USAGE_URL)
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {}", creds.access_token));
+        if let Some(ref account_id) = creds.account_id {
+            builder = builder.header("chatgpt-account-id", account_id);
+        }
+        builder
+    };
 
-    if let Some(ref account_id) = creds.account_id {
-        builder = builder.header("chatgpt-account-id", account_id);
+    // Flaky networks (captive portals, wifi roaming) drop single requests.
+    // Retry transport failures briefly before reporting usage as unavailable.
+    let mut sent = request().send().await;
+    for delay_ms in TRANSIENT_RETRY_DELAYS_MS {
+        match &sent {
+            Err(e) if is_transient_transport_error(e) => {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                sent = request().send().await;
+            }
+            _ => break,
+        }
     }
 
-    let response = match builder.send().await {
+    let response = match sent {
         Ok(response) => response,
         Err(e) => {
+            // Keep showing recent real limits through a network blip. The
+            // stale entry is left in place so the next poll retries promptly.
+            if let Some(last_good) = recent_good_openai_usage(&cache_key) {
+                crate::logging::info(&format!(
+                    "OpenAI usage fetch transport error, keeping last-good snapshot: {e}"
+                ));
+                return provider_report_from_openai_usage_data(display_name, &last_good);
+            }
             let report = ProviderUsage {
                 provider_name: display_name,
-                error: Some(format!("Failed to fetch: {}", e)),
+                error: Some(format!("{TRANSPORT_ERROR_PREFIX}{}", e)),
                 ..Default::default()
             };
             store_openai_usage_for_generation(

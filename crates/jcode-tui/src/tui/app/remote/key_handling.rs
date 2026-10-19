@@ -238,14 +238,8 @@ async fn handle_remote_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
-    if app.pending_provider_failover.is_some() && !app.is_processing {
-        if code == KeyCode::Esc {
-            app.cancel_pending_provider_failover("Provider auto-switch canceled");
-            return Ok(());
-        }
-        if !input::is_scroll_only_key(app, code, modifiers) {
-            app.cancel_pending_provider_failover("Provider auto-switch canceled");
-        }
+    if app.handle_key_during_provider_failover(code) {
+        return Ok(());
     }
 
     if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {

@@ -160,8 +160,6 @@ impl Agent {
                 false,
             ),
         };
-        self.current_turn_system_reminder = system_reminder;
-
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         self.append_user_context_message_with_display_role(
@@ -170,12 +168,19 @@ impl Agent {
             display_role,
             continues_turn,
         )?;
+        // The per-turn reminder (swarm DM wake, mission continuation, ...) goes
+        // into the transcript after the prompt, never into the system prompt.
+        // The system prompt precedes every message, so changing it for one turn
+        // invalidated the whole cached conversation on that turn and again on
+        // the next turn when it disappeared.
+        if let Some(reminder) = system_reminder {
+            self.append_turn_system_reminder(&reminder)?;
+        }
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("chat");
         let result = self.run_turn_streaming_mpsc(event_tx).await;
-        self.current_turn_system_reminder = None;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         result
     }
@@ -192,15 +197,33 @@ impl Agent {
         if self.is_graceful_shutdown() {
             return Ok(());
         }
-        self.current_turn_system_reminder =
-            system_reminder.filter(|value| !value.trim().is_empty());
+        // The original attempt already persisted the turn's reminder in the
+        // transcript, so the retried request carries it unchanged.
+        let _ = system_reminder;
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("failover");
         let result = self.run_turn_streaming_mpsc(event_tx).await;
-        self.current_turn_system_reminder = None;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         result
+    }
+
+    /// Persist a hidden, model-visible `<system-reminder>` message at the tail
+    /// of the transcript so it does not disturb the cached prompt prefix.
+    fn append_turn_system_reminder(&mut self, reminder: &str) -> Result<()> {
+        let reminder = reminder.trim();
+        if reminder.is_empty() {
+            return Ok(());
+        }
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("<system-reminder>\n{reminder}\n</system-reminder>"),
+                cache_control: None,
+            }],
+            Some(crate::session::StoredDisplayRole::System),
+        );
+        self.session.save()
     }
 
     /// Append and persist a user message without starting a model turn.
@@ -1414,6 +1437,7 @@ impl Agent {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);
                     self.active_skill = Some(invocation.name.to_string());
+                    self.announce_active_skill();
                     if let Some(prompt) = invocation.prompt {
                         if let Err(e) = self.run_once(prompt).await {
                             eprintln!("\nError: {}\n", e);

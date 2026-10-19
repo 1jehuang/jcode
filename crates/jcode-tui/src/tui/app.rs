@@ -234,11 +234,16 @@ struct KvCacheBaseline {
     /// is only the uncached remainder of that one request.
     input_tokens: u64,
     completed_at: Instant,
+    /// UTC day the baseline request was sent. Anthropic drops conversation
+    /// caches at 00:00 UTC, so a straddling miss is attributed, not alarmed.
+    utc_day: i64,
     /// Retention selected when the request started, not the current preference.
     cache_ttl_secs: Option<u64>,
     provider: String,
     model: String,
     upstream_provider: Option<String>,
+    /// OAuth account that served the request (caches are per account).
+    account: Option<String>,
     signature: Option<KvCacheRequestSignature>,
 }
 
@@ -246,12 +251,15 @@ struct KvCacheBaseline {
 struct PendingKvCacheRequest {
     /// None when usage arrived without a matching request-start event.
     started_at: Option<Instant>,
+    /// UTC day the request was sent.
+    utc_day: i64,
     cache_ttl_secs: Option<u64>,
     turn_number: usize,
     call_index: u16,
     provider: String,
     model: String,
     upstream_provider: Option<String>,
+    account: Option<String>,
     signature: Option<KvCacheRequestSignature>,
     baseline_messages_prefix_matches: Option<bool>,
     baseline: Option<KvCacheBaseline>,
@@ -262,9 +270,11 @@ struct PendingKvCacheRequest {
 enum KvCacheMissReason {
     Compaction,
     ProviderSwitch,
+    AccountSwitch,
     ModelSwitch,
     UpstreamSwitch,
     Expired,
+    DailyRollover,
     HarnessSystemChanged,
     HarnessToolsChanged,
     HarnessPrefixChanged,
@@ -278,9 +288,11 @@ impl KvCacheMissReason {
         match self {
             Self::Compaction => "compaction refresh",
             Self::ProviderSwitch => "provider switch",
+            Self::AccountSwitch => "account switch",
             Self::ModelSwitch => "model switch",
             Self::UpstreamSwitch => "upstream switch",
             Self::Expired => "expired",
+            Self::DailyRollover => "daily rollover",
             Self::HarnessSystemChanged => "harness: system changed",
             Self::HarnessToolsChanged => "harness: tools changed",
             Self::HarnessPrefixChanged => "harness: prefix changed",
@@ -997,7 +1009,6 @@ pub struct App {
     /// a turn was running. They run as real commands once the turn ends.
     queued_commands: Vec<String>,
     hidden_queued_system_messages: Vec<String>,
-    current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)
     upstream_provider: Option<String>,
     // Active stream connection type (websocket/https/etc.)
@@ -1915,7 +1926,9 @@ impl App {
     const INPUT_UNDO_LIMIT: usize = 128;
     const CLIENT_FOCUS_RECORD_DEBOUNCE: Duration = Duration::from_secs(2);
     const KV_CACHE_OPTIMAL_OK_PCT: u8 = 85;
-    const KV_CACHE_MIN_MISSED_TOKENS: u64 = 1_024;
+    fn kv_cache_min_missed_tokens(provider: &str) -> u64 {
+        crate::kv_cache_monitor::min_missed_tokens_for_provider(provider)
+    }
     const KV_CACHE_MAX_MISS_SAMPLES: usize = 12;
 
     pub(super) fn begin_kv_cache_request(
@@ -1961,6 +1974,7 @@ impl App {
 
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             started_at: Some(Instant::now()),
+            utc_day: crate::kv_cache_monitor::utc_day_now(),
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
             cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
@@ -1970,6 +1984,7 @@ impl App {
             provider: self.kv_cache_provider_name(),
             model: self.kv_cache_provider_model(),
             upstream_provider: self.upstream_provider.clone(),
+            account: self.kv_cache_account(),
             signature: Some(signature),
             baseline_messages_prefix_matches,
             baseline,
@@ -2013,6 +2028,7 @@ impl App {
         self.mark_stream_usage_call_boundary();
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             started_at: Some(Instant::now()),
+            utc_day: crate::kv_cache_monitor::utc_day_now(),
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
             cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
@@ -2022,6 +2038,7 @@ impl App {
             provider: self.kv_cache_provider_name(),
             model: self.kv_cache_provider_model(),
             upstream_provider: self.upstream_provider.clone(),
+            account: self.kv_cache_account(),
             signature: Some(signature),
             baseline_messages_prefix_matches,
             baseline,
@@ -2235,10 +2252,12 @@ impl App {
                 cache_generation: request.cache_generation,
                 input_tokens: self.streaming.streaming_input_tokens,
                 completed_at: Instant::now(),
+                utc_day: request.utc_day,
                 cache_ttl_secs: request.cache_ttl_secs,
                 provider: request.provider,
                 model: request.model,
                 upstream_provider: request.upstream_provider,
+                account: request.account,
                 signature: request.signature,
             });
             return true;
@@ -2281,10 +2300,12 @@ impl App {
             cache_generation: request.cache_generation,
             input_tokens: reusable_tokens,
             completed_at: Instant::now(),
+            utc_day: request.utc_day,
             cache_ttl_secs: request.cache_ttl_secs,
             provider: request.provider,
             model: request.model,
             upstream_provider: request.upstream_provider,
+            account: request.account,
             signature: request.signature,
         });
         true
@@ -2484,6 +2505,7 @@ impl App {
     fn fallback_pending_kv_cache_request(&self) -> PendingKvCacheRequest {
         PendingKvCacheRequest {
             started_at: None,
+            utc_day: crate::kv_cache_monitor::utc_day_now(),
             turn_number: self
                 .display_messages
                 .iter()
@@ -2498,6 +2520,7 @@ impl App {
             provider: self.kv_cache_provider_name(),
             model: self.kv_cache_provider_model(),
             upstream_provider: self.upstream_provider.clone(),
+            account: self.kv_cache_account(),
             signature: None,
             baseline_messages_prefix_matches: None,
             baseline: self.kv_cache_baseline_for_current_session(),
@@ -2522,7 +2545,7 @@ impl App {
             return;
         };
         let missed_tokens = expected_tokens.saturating_sub(read_tokens);
-        if missed_tokens < Self::KV_CACHE_MIN_MISSED_TOKENS {
+        if missed_tokens < Self::kv_cache_min_missed_tokens(&request.provider) {
             return;
         }
 
@@ -2570,38 +2593,16 @@ impl App {
         if !crate::config::config().features.kv_cache_miss_notices {
             return;
         }
-        let detail = match reason {
-            KvCacheMissReason::Compaction => {
-                "context was compacted; rebuilding the cache is expected"
-            }
-            KvCacheMissReason::HarnessSystemChanged => "system prompt changed mid-session",
-            KvCacheMissReason::HarnessToolsChanged => "tool set changed mid-session",
-            KvCacheMissReason::HarnessPrefixChanged => "an earlier message was modified",
-            KvCacheMissReason::ProviderSwitch => {
-                "provider changed; cache reuse is not guaranteed across providers"
-            }
-            KvCacheMissReason::ModelSwitch => {
-                "model changed; cache reuse is not guaranteed across models"
-            }
-            KvCacheMissReason::UpstreamSwitch => {
-                "upstream route changed; cache may be on another server"
-            }
-            KvCacheMissReason::Expired => "cache retention elapsed",
-            KvCacheMissReason::ZeroRead => {
-                "provider reported no cached prefix; eviction or routing may explain this"
-            }
-            KvCacheMissReason::LowRead | KvCacheMissReason::Unknown => {
-                "provider reused less of the previous prefix; cause not established"
-            }
-        };
+        let detail = Self::kv_cache_miss_detail(
+            request,
+            reason,
+            expected_tokens,
+            read_tokens,
+            baseline_completed_at,
+        );
+        let detail = detail.as_str();
 
-        let token_label = if missed_tokens >= 1_000_000 {
-            format!("{:.1}M", missed_tokens as f64 / 1_000_000.0)
-        } else if missed_tokens >= 1_000 {
-            format!("{}K", missed_tokens / 1_000)
-        } else {
-            missed_tokens.to_string()
-        };
+        let token_label = crate::kv_cache_monitor::format_token_count(missed_tokens);
 
         // Documented invalidation between the baseline and now: expected
         // resend, attribute instead of alarm.
@@ -2613,7 +2614,10 @@ impl App {
         );
         let usage = format!(
             "turn {} call {}: {} cached / {} expected tokens",
-            request.turn_number, request.call_index, read_tokens, expected_tokens
+            request.turn_number,
+            request.call_index,
+            crate::kv_cache_monitor::format_token_count(read_tokens),
+            crate::kv_cache_monitor::format_token_count(expected_tokens)
         );
         if harness_change
             && let Some(cause) = crate::cache_invalidation::most_recent_since(baseline_completed_at)
@@ -2635,8 +2639,71 @@ impl App {
         ));
     }
 
-    /// Usage arrives at the end of the affected request. Commit its buffered
-    /// text first so the diagnostic cannot appear before the output it describes.
+    /// Specific, human-readable cause: what changed (from -> to) and the
+    /// timing evidence. Shares wording with the daemon-side monitor.
+    fn kv_cache_miss_detail(
+        request: &PendingKvCacheRequest,
+        reason: KvCacheMissReason,
+        expected_tokens: u64,
+        read_tokens: u64,
+        baseline_completed_at: Instant,
+    ) -> String {
+        use crate::kv_cache_monitor::MissReason as M;
+        let shared = match reason {
+            KvCacheMissReason::Compaction => {
+                return "context was compacted; rebuilding the cache is expected".to_string();
+            }
+            KvCacheMissReason::Unknown => {
+                return "provider reused less of the previous prefix; cache read telemetry was incomplete"
+                    .to_string();
+            }
+            KvCacheMissReason::ProviderSwitch => M::ProviderSwitch,
+            KvCacheMissReason::AccountSwitch => M::AccountSwitch,
+            KvCacheMissReason::ModelSwitch => M::ModelSwitch,
+            KvCacheMissReason::UpstreamSwitch => M::UpstreamSwitch,
+            KvCacheMissReason::Expired => M::Expired,
+            KvCacheMissReason::DailyRollover => M::DailyRollover,
+            KvCacheMissReason::HarnessSystemChanged => M::SystemChanged,
+            KvCacheMissReason::HarnessToolsChanged => M::ToolsChanged,
+            KvCacheMissReason::HarnessPrefixChanged => M::PrefixChanged,
+            KvCacheMissReason::ZeroRead => M::ZeroRead,
+            KvCacheMissReason::LowRead => M::LowRead,
+        };
+        let baseline = request.baseline.as_ref();
+        let first_changed_message = baseline
+            .and_then(|baseline| baseline.signature.as_ref())
+            .zip(request.signature.as_ref())
+            .and_then(|(previous, current)| {
+                let common = Self::kv_cache_common_prefix_messages(current, previous);
+                (common < previous.message_count).then_some(common)
+            });
+        let ttl_is_estimate = baseline
+            .is_some_and(|baseline| crate::provider::cache_ttl_is_estimate(&baseline.provider));
+        crate::kv_cache_monitor::describe_miss(
+            shared,
+            &crate::kv_cache_monitor::MissContext {
+                old_provider: baseline.map_or("?", |b| b.provider.as_str()),
+                new_provider: &request.provider,
+                old_model: baseline.map_or("?", |b| b.model.as_str()),
+                new_model: &request.model,
+                old_account: baseline.and_then(|b| b.account.as_deref()),
+                new_account: request.account.as_deref(),
+                old_upstream: baseline.and_then(|b| b.upstream_provider.as_deref()),
+                new_upstream: request.upstream_provider.as_deref(),
+                idle_secs: request
+                    .started_at
+                    .and_then(|start| start.checked_duration_since(baseline_completed_at))
+                    .map(|idle| idle.as_secs()),
+                ttl_secs: baseline.and_then(|b| b.cache_ttl_secs),
+                ttl_is_estimate,
+                expected_tokens,
+                read_tokens,
+                first_changed_message,
+            },
+        )
+    }
+
+    /// Push a cache diagnostic after committing any buffered streaming text.
     pub(super) fn push_kv_cache_notice(&mut self, message: String) {
         self.commit_pending_streaming_assistant_message();
         self.push_display_message(DisplayMessage::system(message));
@@ -2651,6 +2718,12 @@ impl App {
     ) -> KvCacheMissReason {
         if baseline.provider != request.provider {
             return KvCacheMissReason::ProviderSwitch;
+        }
+        if baseline.account.is_some()
+            && request.account.is_some()
+            && baseline.account != request.account
+        {
+            return KvCacheMissReason::AccountSwitch;
         }
         if baseline.model != request.model {
             return KvCacheMissReason::ModelSwitch;
@@ -2687,6 +2760,12 @@ impl App {
             return KvCacheMissReason::HarnessPrefixChanged;
         }
 
+        if baseline.utc_day != request.utc_day
+            && crate::kv_cache_monitor::provider_rolls_cache_daily(&request.provider)
+        {
+            return KvCacheMissReason::DailyRollover;
+        }
+
         if self.streaming.streaming_cache_read_tokens.is_none() {
             return KvCacheMissReason::Unknown;
         }
@@ -2694,7 +2773,8 @@ impl App {
             return KvCacheMissReason::ZeroRead;
         }
         if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT
-            || baseline.input_tokens.saturating_sub(read_tokens) >= Self::KV_CACHE_MIN_MISSED_TOKENS
+            || baseline.input_tokens.saturating_sub(read_tokens)
+                >= Self::kv_cache_min_missed_tokens(&request.provider)
         {
             return KvCacheMissReason::LowRead;
         }
@@ -2735,6 +2815,19 @@ impl App {
         }
     }
 
+    /// OAuth account serving requests, so an account failover (e.g. after a
+    /// 429) is attributed instead of looking like an unexplained eviction.
+    fn kv_cache_account(&self) -> Option<String> {
+        if self.is_remote
+            && let Some(label) = self.remote_provider_oauth_account_label.as_deref()
+            && !label.is_empty()
+        {
+            return Some(label.to_string());
+        }
+        let method = self.current_route_api_method()?;
+        jcode_provider_core::oauth_account_label(&method).map(str::to_string)
+    }
+
     fn kv_cache_provider_model(&self) -> String {
         if self.uses_server_or_replay_metadata() {
             self.remote_provider_model
@@ -2752,8 +2845,16 @@ impl App {
         system_dynamic: &str,
     ) -> KvCacheRequestSignature {
         let dynamic_trimmed = system_dynamic.trim();
+        // The dynamic block precedes the transcript, so it is part of the
+        // cached prefix. Hash it with the static block so a change is
+        // attributed to the harness rather than reported as a plain low read.
+        let system_hash = if dynamic_trimmed.is_empty() {
+            stable_hash_str(system_static)
+        } else {
+            stable_hash_str(&format!("{system_static}\n\n{dynamic_trimmed}"))
+        };
         KvCacheRequestSignature {
-            system_static_hash: stable_hash_str(system_static),
+            system_static_hash: system_hash,
             tools_hash: stable_hash_json(tools),
             messages_hash: stable_hash_json(&cache_relevant_messages(messages)),
             message_hashes: message_hashes(messages),

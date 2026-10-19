@@ -1,9 +1,9 @@
 use super::ClientConnectionInfo;
-use super::client_lifecycle::process_message_streaming_mpsc;
 use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
 };
+use super::turn_failover::process_server_initiated_message;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     append_swarm_completion_report_instructions, broadcast_swarm_plan, broadcast_swarm_status,
@@ -844,7 +844,7 @@ pub(super) async fn spawn_swarm_agent(
                     let agent = agent_arc.lock().await;
                     agent.message_count()
                 };
-                let result = process_message_streaming_mpsc(
+                let result = process_server_initiated_message(
                     Arc::clone(&agent_arc),
                     &initial_msg,
                     vec![],

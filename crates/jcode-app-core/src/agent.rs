@@ -151,6 +151,29 @@ impl Agent {
         }
     }
 
+    /// OAuth account serving this request. Prompt caches are per account, so
+    /// a failover between accounts must be attributed, not reported as an
+    /// unexplained provider eviction.
+    fn kv_cache_account_identity(&self) -> Option<String> {
+        if self.provider.active_resolved_credential()
+            != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return None;
+        }
+        // An unbound runtime authenticates with the globally active account.
+        self.provider.oauth_account_label().or_else(|| {
+            match jcode_provider_core::parse_provider_hint(self.provider.name()) {
+                Some(jcode_provider_core::ActiveProvider::Claude) => {
+                    crate::auth::claude::active_account_label()
+                }
+                Some(jcode_provider_core::ActiveProvider::OpenAI) => {
+                    crate::auth::codex::active_account_label()
+                }
+                _ => None,
+            }
+        })
+    }
+
     fn begin_kv_cache_monitor_request(&mut self, event: &ServerEvent, model: &str) {
         let ServerEvent::KvCacheRequest {
             system_static_hash,
@@ -171,6 +194,7 @@ impl Agent {
             provider,
             model: model.to_string(),
             upstream_provider: self.last_upstream_provider.clone(),
+            account: self.kv_cache_account_identity(),
         };
         let signature = crate::kv_cache_monitor::RequestSignature {
             system_static_hash: *system_static_hash,
@@ -198,14 +222,18 @@ impl Agent {
             cache_creation,
         );
         let miss = self.kv_cache_monitor.finish_request(reusable, cache_read)?;
-        let expected_refresh = miss.reason == crate::kv_cache_monitor::MissReason::Compaction;
+        let expected_refresh = matches!(
+            miss.reason,
+            crate::kv_cache_monitor::MissReason::Compaction
+                | crate::kv_cache_monitor::MissReason::DailyRollover
+        );
         let label = if expected_refresh {
             "KV_CACHE_REFRESH"
         } else {
             "KV_CACHE_MISS"
         };
         let diagnostic = format!(
-            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
+            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?} detail={:?}",
             self.session.id,
             miss.reason.id(),
             miss.reason.harness_caused(),
@@ -213,6 +241,7 @@ impl Agent {
             miss.expected_tokens,
             miss.read_tokens,
             miss.documented_cause,
+            miss.detail,
         );
         if expected_refresh {
             logging::info(&diagnostic);
@@ -309,9 +338,6 @@ pub struct Agent {
     last_status_detail: Option<String>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
-    /// Transient reminder injected into provider requests for the current turn only.
-    /// Not persisted to session history.
-    current_turn_system_reminder: Option<String>,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -480,7 +506,6 @@ impl Agent {
             last_connection_type: None,
             last_status_detail: None,
             pending_alerts: Vec::new(),
-            current_turn_system_reminder: None,
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
@@ -813,7 +838,6 @@ impl Agent {
         self.last_connection_type = None;
         self.last_status_detail = None;
         self.pending_alerts.clear();
-        self.current_turn_system_reminder = None;
         self.reset_tool_output_tracking();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             queue.clear();
@@ -835,8 +859,37 @@ impl Agent {
         let recognized = active_skill
             .as_ref()
             .is_none_or(|name| skills.get(name).is_some());
-        self.active_skill = active_skill.filter(|name| skills.get(name).is_some());
+        let next = active_skill.filter(|name| skills.get(name).is_some());
+        if next != self.active_skill {
+            self.active_skill = next;
+            self.announce_active_skill();
+        }
         recognized
+    }
+
+    /// Record the newly active skill's instructions as a hidden transcript
+    /// message. The system prompt stays byte-identical across skill changes.
+    pub(crate) fn announce_active_skill(&mut self) {
+        let Some(name) = self.active_skill.clone() else {
+            return;
+        };
+        let skills = self.current_skills_snapshot();
+        let Some(skill) = skills.get(&name) else {
+            return;
+        };
+        let text = format!(
+            "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
+            skill.get_prompt().trim()
+        );
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        self.persist_session_best_effort("active skill announcement");
     }
 
     fn sync_session_compaction_state_from_manager(

@@ -669,7 +669,7 @@ fn spawn_assigned_task_run(
             let agent = agent_arc.lock().await;
             agent.message_count()
         };
-        let result = super::client_lifecycle::process_message_streaming_mpsc(
+        let result = super::turn_failover::process_server_initiated_message(
             Arc::clone(&agent_arc),
             &assignment_text,
             vec![],

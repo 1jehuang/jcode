@@ -13,7 +13,7 @@
 //! `Done`/`Error` event (id 0) so attached clients can settle the externally
 //! started turn in their UI.
 
-use super::client_lifecycle::process_locked_message_streaming_mpsc;
+use super::turn_failover::process_locked_message_with_server_failover;
 use super::{
     SwarmEvent, SwarmMember, session_event_fanout_sender, truncate_detail, update_member_status,
     update_member_status_with_report,
@@ -135,7 +135,7 @@ pub(super) async fn spawn_tracked_live_turn(
                     )
                     .await
             } else {
-                process_locked_message_streaming_mpsc(
+                process_locked_message_with_server_failover(
                     &mut agent,
                     &message,
                     vec![],
