@@ -700,8 +700,8 @@ async fn named_profile_honors_custom_auth_header_extra_body_and_laya_fixed_selec
                 "expected custom auth header in request: {req}"
             );
             assert!(
-                req.contains("\"custom_flag\":true"),
-                "expected extra_body field in request: {req}"
+                req.contains("\"custom_flag\":true") && req.contains("\"store\":false"),
+                "expected extra_body field and store:false in request: {req}"
             );
             let body = r#"{"choices":[{"message":{"content":"{\"branch\":\"verification\",\"candidates\":[\"Run cargo test\"]}"}}]}"#;
             let resp = format!(
@@ -717,7 +717,7 @@ async fn named_profile_honors_custom_auth_header_extra_body_and_laya_fixed_selec
         base_url: format!("http://{addr}/v1"),
         auth: crate::config::NamedProviderAuth::Header,
         auth_header: Some("X-Custom-Key".to_string()),
-        api_key: Some("sk-custom-header-token".to_string()),
+        api_key: Some("  \"sk-custom-header-token\"  ".to_string()),
         extra_body: Some(json!({ "custom_flag": true })),
         ..Default::default()
     };

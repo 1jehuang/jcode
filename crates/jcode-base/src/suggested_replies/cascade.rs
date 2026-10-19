@@ -145,7 +145,7 @@ pub(super) async fn complete_via_named_openai_compatible(
     let key = profile
         .api_key
         .as_deref()
-        .map(str::trim)
+        .map(jcode_provider_env::sanitize_secret_value)
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .or_else(|| {
@@ -154,7 +154,8 @@ pub(super) async fn complete_via_named_openai_compatible(
                 return None;
             }
             if env_key.starts_with("sk-") {
-                return Some(env_key.to_string());
+                let sanitized = jcode_provider_env::sanitize_secret_value(env_key);
+                return (!sanitized.is_empty()).then(|| sanitized.to_string());
             }
             if let Some(env_file) = profile
                 .env_file
@@ -170,7 +171,10 @@ pub(super) async fn complete_via_named_openai_compatible(
                 }
             }
             match std::env::var(env_key) {
-                Ok(v) => Some(v.trim().to_string()).filter(|v| !v.is_empty()),
+                Ok(v) => {
+                    let sanitized = jcode_provider_env::sanitize_secret_value(&v);
+                    (!sanitized.is_empty()).then(|| sanitized.to_string())
+                }
                 Err(_) => None,
             }
         });
@@ -197,7 +201,8 @@ pub(super) async fn complete_via_named_openai_compatible(
         ],
         "max_tokens": 1200,
         "temperature": 0.2,
-        "stream": false
+        "stream": false,
+        "store": false
     });
     if let Some(extra) = &profile.extra_body {
         let extra_obj = extra
@@ -313,17 +318,31 @@ async fn complete_open_gf_prompt(system: &str, user_msg: &str) -> Result<(String
             ensure!(!raw.trim().is_empty(), "{label} returned empty output");
             return Ok((raw, label));
         }
-        let sidecar = crate::sidecar::Sidecar::new();
-        let expected_backend = match lower.as_str() {
-            "openai" | "codex" => Some("openai"),
-            "claude" | "anthropic" => Some("claude"),
-            _ => None,
+        let configured_model = cfg
+            .agents
+            .memory_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let sidecar = match lower.as_str() {
+            "openai" | "codex" => {
+                let model = configured_model
+                    .filter(|m| crate::provider::provider_for_model(m) == Some("openai"))
+                    .unwrap_or(crate::sidecar::SIDECAR_OPENAI_MODEL);
+                crate::sidecar::Sidecar::with_openai_model(model, None)
+            }
+            "claude" | "anthropic" => {
+                let model = configured_model
+                    .filter(|m| crate::provider::provider_for_model(m) == Some("claude"))
+                    .unwrap_or("claude-haiku-4-5-20251001");
+                crate::sidecar::Sidecar::with_claude_model(model)
+            }
+            _ => {
+                anyhow::bail!(
+                    "selected default_provider '{default_prov}' is not a supported OpenGF route"
+                );
+            }
         };
-        ensure!(
-            expected_backend.is_some_and(|b| sidecar.backend_name() == b),
-            "selected default_provider '{default_prov}' does not match available Sidecar backend '{}'",
-            sidecar.backend_name()
-        );
         let sidecar_label = format!(
             "sidecar:{}:{}",
             sidecar.backend_name(),
