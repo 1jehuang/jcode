@@ -2647,7 +2647,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let total_start = Instant::now();
     reset_frame_perf_stats();
     begin_frame_resource_sample();
-
     clear_copy_viewport_snapshot();
 
     // Clear full frame to prevent stale cells from prior layouts.
