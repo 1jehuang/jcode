@@ -1180,7 +1180,7 @@ impl Server {
                     session_id.clone(),
                     Arc::clone(&recover_swarm_members),
                 );
-                let result = self::client_lifecycle::process_message_streaming_mpsc(
+                let result = self::turn_failover::process_server_initiated_message(
                     Arc::clone(&agent),
                     "",
                     vec![],
