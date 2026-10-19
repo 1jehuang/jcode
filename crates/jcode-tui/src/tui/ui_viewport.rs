@@ -1418,12 +1418,30 @@ pub(crate) fn pinned_todo_band_lines(
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
+    pinned_todo_band_lines_for_payload(
+        app.pinned_todos_payload(),
+        app.pinned_todos_expanded(),
+        app.diff_mode(),
+        width,
+        viewport_height,
+    )
+}
+
+/// Pinned todo band for an arbitrary todo payload. Shared by the live chat
+/// viewport and the `/resume` preview so both render the band identically.
+pub(crate) fn pinned_todo_band_lines_for_payload(
+    payload: Option<&str>,
+    expanded: bool,
+    diff_mode: crate::config::DiffDisplayMode,
+    width: u16,
+    viewport_height: u16,
+) -> (Vec<Line<'static>>, Option<usize>) {
     if width < 16 || viewport_height < 3 {
         return (Vec::new(), None);
     }
 
     let card_lines = if crate::config::config().display.pin_todos {
-        app.pinned_todos_payload()
+        payload
             .map(|payload| {
                 // Distinct title keeps the line cache from sharing entries with
                 // the width-capped inline transcript card.
@@ -1432,7 +1450,7 @@ pub(crate) fn pinned_todo_band_lines(
                 super::messages::get_cached_message_lines(
                     &msg,
                     width,
-                    app.diff_mode(),
+                    diff_mode,
                     super::messages::render_pinned_todos_message,
                 )
             })
@@ -1448,7 +1466,7 @@ pub(crate) fn pinned_todo_band_lines(
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
     let content_budget = budget.max(2);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let has_more = card_lines.len() > content_budget && !app.pinned_todos_expanded();
+    let has_more = card_lines.len() > content_budget && !expanded;
     let mut more_line = None;
     if has_more {
         let shown = content_budget.saturating_sub(1);
@@ -1460,7 +1478,7 @@ pub(crate) fn pinned_todo_band_lines(
             Style::default().fg(dim_color()),
         )));
     } else {
-        if app.pinned_todos_expanded() {
+        if expanded {
             more_line = Some(lines.len());
             lines.push(Line::from(Span::styled(
                 "  ▴ Collapse todos",

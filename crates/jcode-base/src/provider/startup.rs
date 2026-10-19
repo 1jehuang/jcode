@@ -479,8 +479,7 @@ impl MultiProvider {
                         Some(label),
                     )
                     .is_some()
-                        || crate::usage::cached_account_usage_snapshot(kind, label)
-                            .is_some_and(|snapshot| snapshot.exhausted);
+                        || crate::usage::account_known_exhausted(kind, label);
                     if !pool.is_member(
                         &crate::auth::account_pool::account_key(provider, Some(label)),
                         true,

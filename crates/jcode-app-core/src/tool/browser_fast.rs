@@ -78,7 +78,7 @@ pub(super) async fn handoff(
             ),
             &[],
             &Value::Null,
-            "typesafe/jev-1.13",
+            &crate::jev::browser_jev_model_label(),
             Some("direct_actions"),
         )),
     }

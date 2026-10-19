@@ -460,6 +460,7 @@ fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
     app.queued_messages
         .push(super::commands::build_poke_message(&[
             crate::todo::TodoItem {
+                wave: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "keep going".to_string(),

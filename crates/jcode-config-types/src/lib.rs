@@ -590,10 +590,16 @@ pub struct AgentsConfig {
     /// as chips on a single row.
     #[serde(default)]
     pub swarm_strip_layout: SwarmStripLayout,
-    /// Jev Decisions provider for recall: auto, openrouter, typesafe, aimlapi,
-    /// or jcode. Auto uses a provider-specific BYOK credential before Jcode.
+    /// Jev Decisions provider for recall: auto, openrouter, typesafe, laya,
+    /// aimlapi, or jcode. Auto uses a provider-specific BYOK credential before Jcode.
     #[serde(default = "default_memory_jev_provider")]
     pub memory_jev_provider: String,
+    /// Optional model override for memory Jev Decisions.
+    pub memory_jev_model: Option<String>,
+    /// Optional model override for browser Jev Decisions.
+    pub browser_jev_model: Option<String>,
+    /// Optional model override for voice Jev Decisions.
+    pub voice_jev_model: Option<String>,
     /// Minimum Jev relevance probability. Invalid values fail closed.
     #[serde(default = "default_memory_jev_threshold")]
     pub memory_jev_threshold: f32,
@@ -695,6 +701,9 @@ impl Default for AgentsConfig {
             swarm_gallery_max_pct: None,
             swarm_strip_layout: SwarmStripLayout::default(),
             memory_jev_provider: default_memory_jev_provider(),
+            memory_jev_model: None,
+            browser_jev_model: None,
+            voice_jev_model: None,
             memory_jev_threshold: default_memory_jev_threshold(),
             memory_model: None,
             memory_sidecar_enabled: default_memory_sidecar_enabled(),

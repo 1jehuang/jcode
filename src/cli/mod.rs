@@ -5,6 +5,7 @@ pub mod auth_import;
 pub mod auth_test;
 pub mod cloud_move;
 pub mod commands;
+pub mod compatible_runtime;
 pub mod debug;
 pub mod dispatch;
 pub mod hibernate_wait;

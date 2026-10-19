@@ -59,7 +59,9 @@ impl App {
             (None, _, _) => "no_baseline",
             (_, None, _) => "usage_not_reported",
             (_, _, Some(0)) => "no_shortfall",
-            (_, _, Some(n)) if n < Self::KV_CACHE_MIN_MISSED_TOKENS => "below_miss_threshold",
+            (_, _, Some(n)) if n < Self::kv_cache_min_missed_tokens(&request.provider) => {
+                "below_miss_threshold"
+            }
             _ if generation_matches == Some(false) => "cache_generation_changed",
             _ if route_matches == Some(false) => "route_metadata_changed",
             _ if static_prefix_matches == Some(false)

@@ -1,5 +1,8 @@
 use super::display::{format_reset_time, usage_reset_passed};
-use super::{ANTHROPIC_CACHE_DURATION, CACHE_DURATION, ERROR_BACKOFF, RATE_LIMIT_BACKOFF};
+use super::{
+    ANTHROPIC_CACHE_DURATION, CACHE_DURATION, ERROR_BACKOFF, RATE_LIMIT_BACKOFF,
+    TRANSPORT_ERROR_BACKOFF, TRANSPORT_ERROR_PREFIX,
+};
 use serde::Deserialize;
 use std::time::Instant;
 
@@ -329,6 +332,8 @@ impl OpenAIUsageData {
             Some(t) => {
                 let ttl = if self.is_rate_limited() {
                     RATE_LIMIT_BACKOFF
+                } else if self.is_transport_error() {
+                    TRANSPORT_ERROR_BACKOFF
                 } else if self.last_error.is_some() {
                     ERROR_BACKOFF
                 } else {
@@ -345,6 +350,13 @@ impl OpenAIUsageData {
             .as_ref()
             .map(|e| e.contains("429") || e.contains("rate limit") || e.contains("Rate limited"))
             .unwrap_or(false)
+    }
+
+    /// The request never received an HTTP response (DNS, connect, TLS, reset).
+    pub(crate) fn is_transport_error(&self) -> bool {
+        self.last_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with(TRANSPORT_ERROR_PREFIX))
     }
 
     pub fn has_limits(&self) -> bool {

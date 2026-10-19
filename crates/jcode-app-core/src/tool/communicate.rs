@@ -691,6 +691,33 @@ fn try_claim_run_plan_driver(
     })
 }
 
+/// Seed an empty swarm plan from the caller's session todos.
+///
+/// Only runs when the plan has no items, so an explicit `propose_plan` always
+/// wins. Returns quietly when there are no open todos.
+async fn seed_plan_from_todos_if_empty(ctx: &ToolContext) -> Result<()> {
+    if fetch_plan_status(&ctx.session_id)
+        .await
+        .is_ok_and(|summary| summary.item_count > 0)
+    {
+        return Ok(());
+    }
+    let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
+    let items = crate::server::swarm_todo_link::plan_items_from_todos(&todos);
+    if items.is_empty() {
+        return Ok(());
+    }
+    let request = Request::CommProposePlan {
+        id: REQUEST_ID,
+        session_id: ctx.session_id.clone(),
+        items,
+    };
+    let response = send_request(request)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to seed swarm plan from todos: {}", e))?;
+    ensure_success(&response)
+}
+
 /// Drive `run_plan` as a managed background task and return immediately.
 ///
 /// The coordinating agent stays responsive: the plan loop runs inside the
@@ -1951,6 +1978,7 @@ impl Tool for CommunicateTool {
                 },
                 "plan_items": {
                     "type": "array",
+                    "description": "Plan items for propose_plan. run_plan with no plan uses your todo list instead: same-wave todos run in parallel, later waves wait.",
                     "items": {
                         "type": "object",
                         "additionalProperties": true
@@ -2855,6 +2883,10 @@ impl Tool for CommunicateTool {
             }
 
             "run_plan" => {
+                // No swarm plan yet: use the coordinator's own todo list as the
+                // plan. Waves become stages, so parallel todos fan out to
+                // workers and later waves wait, without the model writing ids.
+                seed_plan_from_todos_if_empty(&ctx).await?;
                 // Background-by-default: the plan driver runs as a managed
                 // background task (progress card, bg tool, notify/wake) so the
                 // coordinating agent stays responsive. Pass background=false

@@ -24,6 +24,33 @@ pub(in crate::tui::app) struct RemoteRunState {
     pub server_reload_in_progress: bool,
     pub reload_recovery_attempted: bool,
     pub last_reload_pid: Option<u32>,
+    /// When this client last tried to start a replacement for a server that
+    /// vanished outside a reload. Throttles respawns (issue #1887).
+    pub last_dead_server_respawn: Option<Instant>,
+}
+
+/// Failed attempts before a client concludes the server is gone, not restarting.
+const DEAD_SERVER_RESPAWN_MIN_ATTEMPTS: u32 = 3;
+/// Minimum spacing between replacement-server spawns from one client.
+const DEAD_SERVER_RESPAWN_INTERVAL: Duration = Duration::from_secs(60);
+/// After this long disconnected, redraw much less often. Nothing on screen
+/// changes between attempts except spinners, and a large transcript makes each
+/// full redraw expensive enough to hold a core when it runs forever (#1887).
+const LONG_DISCONNECT_THRESHOLD: Duration = Duration::from_secs(30);
+const LONG_DISCONNECT_REDRAW: Duration = Duration::from_secs(5);
+
+pub(in crate::tui::app) fn should_respawn_dead_server(
+    state: &RemoteRunState,
+    ssh_remote: bool,
+    now: Instant,
+) -> bool {
+    !ssh_remote
+        && !state.initial_server_start
+        && !state.server_reload_in_progress
+        && state.reconnect_attempts >= DEAD_SERVER_RESPAWN_MIN_ATTEMPTS
+        && state
+            .last_dead_server_respawn
+            .is_none_or(|at| now.duration_since(at) >= DEAD_SERVER_RESPAWN_INTERVAL)
 }
 
 #[expect(
@@ -188,12 +215,27 @@ fn set_disconnect_status_message(app: &mut App, state: &mut RemoteRunState, cont
     }
 }
 
-fn disconnected_redraw_interval(initial_connect: bool) -> tokio::time::Interval {
-    let period = if initial_connect {
+pub(in crate::tui::app) fn disconnected_redraw_period(
+    initial_connect: bool,
+    disconnected_for: Option<Duration>,
+) -> Duration {
+    if initial_connect {
         crate::tui::REDRAW_REMOTE_STARTUP
+    } else if disconnected_for.is_some_and(|elapsed| elapsed >= LONG_DISCONNECT_THRESHOLD) {
+        LONG_DISCONNECT_REDRAW
     } else {
         Duration::from_millis(1000)
-    };
+    }
+}
+
+fn disconnected_redraw_interval(
+    initial_connect: bool,
+    state: &RemoteRunState,
+) -> tokio::time::Interval {
+    let period = disconnected_redraw_period(
+        initial_connect,
+        state.disconnect_start.map(|start| start.elapsed()),
+    );
     let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     interval
@@ -309,7 +351,7 @@ async fn wait_for_reload_handoff_before_reconnect(
             ));
             let wait = crate::server::wait_for_reload_handoff_event(pid, &socket_path);
             tokio::pin!(wait);
-            let mut redraw = disconnected_redraw_interval(false);
+            let mut redraw = disconnected_redraw_interval(false, state);
             loop {
                 tokio::select! {
                     _ = &mut wait => break,
@@ -380,6 +422,57 @@ async fn recover_reloading_server(
     }
 }
 
+/// Start a replacement when the server disappeared outside a reload.
+///
+/// Without this, a client whose daemon crashed or idle-exited (or whose
+/// registry/pipe state went stale on Windows) retried forever against nothing
+/// (issue #1887). Only spawns when no listener answers on the socket, so a slow
+/// but live server is never duplicated.
+async fn respawn_dead_server(
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
+    state: &mut RemoteRunState,
+) -> Result<bool> {
+    if !should_respawn_dead_server(state, crate::tui::is_ssh_remote(), Instant::now())
+        || reload_handoff_active(state)
+        || crate::server_spawn::is_running().await
+    {
+        return Ok(false);
+    }
+    state.last_dead_server_respawn = Some(Instant::now());
+
+    let detail = "server is not running; starting a replacement server";
+    set_disconnect_status_message(app, state, reconnect_status_message(app, state, detail));
+    terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+    crate::logging::warn(&format!(
+        "Reconnect: no live server after {} attempts; spawning a replacement shared server",
+        state.reconnect_attempts
+    ));
+
+    let socket_path = crate::server::socket_path();
+    if crate::server::reap_stale_socket_if_dead(&socket_path).await {
+        crate::logging::info("Reconnect: reaped stale socket before respawn");
+    }
+
+    match crate::server_spawn::spawn_default_server().await {
+        Ok(()) => {
+            state.initial_server_start = true;
+            state.last_disconnect_reason =
+                Some("replacement server started; reconnecting".to_string());
+            crate::logging::info("Replacement shared server started after server loss");
+            Ok(true)
+        }
+        Err(error) => {
+            state.last_disconnect_reason =
+                Some(format!("failed to start a replacement server: {error}"));
+            crate::logging::error(&format!(
+                "Failed to start replacement server after server loss: {error}"
+            ));
+            Ok(false)
+        }
+    }
+}
+
 pub(in crate::tui::app) async fn connect_with_retry(
     app: &mut App,
     terminal: &mut DefaultTerminal,
@@ -418,7 +511,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
         allow_session_takeover,
     ));
     tokio::pin!(connect);
-    let mut redraw = disconnected_redraw_interval(state.reconnect_attempts == 0);
+    let mut redraw = disconnected_redraw_interval(state.reconnect_attempts == 0, state);
 
     match loop {
         tokio::select! {
@@ -450,6 +543,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
             state.last_disconnect_reason = None;
             state.reload_recovery_attempted = false;
             state.last_reload_pid = None;
+            state.last_dead_server_respawn = None;
             Ok(ConnectOutcome::Connected(remote))
         }
         Err(e) => {
@@ -549,7 +643,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
                         ));
                         let wait = crate::server::wait_for_reload_handoff_event(pid, &socket_path);
                         tokio::pin!(wait);
-                        let mut redraw = disconnected_redraw_interval(false);
+                        let mut redraw = disconnected_redraw_interval(false, state);
                         loop {
                             tokio::select! {
                                 _ = &mut wait => break,
@@ -570,6 +664,8 @@ pub(in crate::tui::app) async fn connect_with_retry(
                         return Ok(ConnectOutcome::Retry);
                     }
                 }
+            } else if respawn_dead_server(app, terminal, state).await? {
+                return Ok(ConnectOutcome::Retry);
             }
 
             let backoff = if (state.initial_server_start && state.reconnect_attempts <= 20)
@@ -584,7 +680,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
             };
             let sleep = tokio::time::sleep(backoff);
             tokio::pin!(sleep);
-            let mut redraw = disconnected_redraw_interval(false);
+            let mut redraw = disconnected_redraw_interval(false, state);
             loop {
                 tokio::select! {
                     _ = &mut sleep => break,
