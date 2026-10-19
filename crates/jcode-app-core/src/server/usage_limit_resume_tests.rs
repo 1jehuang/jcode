@@ -409,3 +409,53 @@ async fn a_second_limit_replaces_the_pending_resume() {
     );
     drop(second);
 }
+
+/// A turn waiting for a usage reset holds no runtime admission, so an idle
+/// runtime upgrade is not deferred meanwhile; the resumed turn takes it again
+/// and keeps it for the caller's terminal bookkeeping.
+#[tokio::test(start_paused = true)]
+async fn a_waiting_resume_holds_no_runtime_admission() {
+    let provider = UsageLimitedProvider::new(0, None);
+    let fx = Fixture::new(&provider).await;
+    let ctx = fx.ctx();
+    let gate = crate::runtime_activity::ActivityGate::default();
+    let mut admission = Some(gate.try_enter().expect("idle gate admits"));
+    let (event_tx, mut events) = mpsc::unbounded_channel();
+    let held = fx.agent.clone().lock_owned().await;
+    let resume = usage_limit_resume::resume_turn_after_usage_limit(
+        fx.agent.clone(),
+        Some(held),
+        &fx.session_id,
+        usage_limit_error(Some(Duration::from_secs(600))),
+        None,
+        &event_tx,
+        &ctx,
+        &usage_limit_resume::no_wait_hook,
+        &gate,
+        &mut admission,
+    );
+    let probe = async {
+        // Sent right before the wait starts.
+        while !matches!(
+            events.recv().await,
+            Some(ServerEvent::Error {
+                server_resumes: true,
+                ..
+            })
+        ) {}
+        assert!(
+            gate.try_idle().is_some(),
+            "a waiting resume must not defer an idle runtime upgrade"
+        );
+    };
+    let (outcome, ()) = tokio::join!(resume, probe);
+    assert!(matches!(
+        outcome,
+        usage_limit_resume::ResumeOutcome::Completed { .. }
+    ));
+    assert_eq!(provider.calls(), 1, "the resumed turn ran");
+    assert!(
+        admission.is_some() && gate.try_idle().is_none(),
+        "the resumed turn holds admission through its bookkeeping"
+    );
+}
