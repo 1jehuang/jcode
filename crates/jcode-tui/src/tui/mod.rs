@@ -694,6 +694,14 @@ pub(crate) fn hash_rendered_image_signature_fields(
 /// selection, onboarding, misc). See `docs/TUISTATE_TRAIT_DECOMPOSITION.md` for
 /// the incremental plan to split these into composable sub-traits.
 pub trait TuiState {
+    /// Bounded last frame while derived caches are released. Source transcripts
+    /// remain resident, but the renderer must not re-materialize them at idle.
+    fn hibernation_frame(&self) -> Option<&ratatui::buffer::Buffer> {
+        None
+    }
+    fn hibernation_notice(&self) -> Option<&str> {
+        None
+    }
     // ---- Transcript ----
     fn display_messages(&self) -> &[DisplayMessage];
     fn display_user_message_count(&self) -> usize;
@@ -737,6 +745,10 @@ pub trait TuiState {
     }
 
     // ---- Input ----
+    /// Authentication input is never an AI prompt, including async exchanges.
+    fn login_input_hint(&self) -> Option<&'static str> {
+        None
+    }
     fn input(&self) -> &str;
     fn cursor_pos(&self) -> usize;
     fn is_processing(&self) -> bool;
@@ -809,6 +821,11 @@ pub trait TuiState {
         &self,
         _provider: jcode_provider_core::ActiveProvider,
     ) -> Option<crate::auth::ActiveCredential> {
+        None
+    }
+
+    /// Session-bound OAuth account for the current provider, when known.
+    fn startup_oauth_account_label(&self) -> Option<String> {
         None
     }
 
@@ -1164,6 +1181,10 @@ pub trait TuiState {
     fn suggestion_prompts(&self) -> Vec<(String, String)>;
     /// Cache TTL status - shows whether the prompt cache is warm/cold based on idle time
     fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
+    /// Keep a reset offer visible briefly without rearming on usage refresh.
+    fn reset_hint_visible(&self, _key: &str) -> bool {
+        true
+    }
     /// Read-only reset guidance for the active OpenAI OAuth account.
     fn openai_reset_hint(&self) -> Option<String> {
         // SSH sessions may use a different login on the remote host. Local
@@ -1177,11 +1198,16 @@ pub trait TuiState {
         }
         let usage = crate::usage::get_openai_usage_sync();
         let account_label = crate::auth::codex::active_account_label();
-        crate::tui::ui::input_ui::openai_reset_status_hint(
+        let hint = crate::tui::ui::input_ui::openai_reset_status_hint(
             auth_method,
             &usage,
             account_label.as_deref(),
-        )
+        )?;
+        let credits = usage.openai_reset_credits.as_ref()?;
+        // Stable across polling and countdown changes. A different account or
+        // number of credits is a new offer worth showing again.
+        let key = format!("{:?}:{}", account_label, credits.available_count);
+        self.reset_hint_visible(&key).then_some(hint)
     }
     /// Whether the notification line has content to show
     fn has_notification(&self) -> bool {

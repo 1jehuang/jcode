@@ -313,12 +313,21 @@ async fn set_service_tier_does_not_wait_for_busy_agent_lock() {
 
     timeout(
         Duration::from_millis(100),
-        handle_set_service_tier(9, "priority".to_string(), &agent, &client_event_tx),
+        handle_set_service_tier(9, "priority".to_string(), &agent, None, &client_event_tx),
     )
     .await
     .expect("service tier changes must not wait for a busy agent mutex");
 
-    assert!(client_event_rx.try_recv().is_err());
+    assert!(matches!(
+        client_event_rx.try_recv(),
+        Ok(ServerEvent::ServiceTierChanged {
+            id: 9,
+            pending: true,
+            service_tier: None,
+            error: None,
+        })
+    ));
+    assert_eq!(provider.service_tier(), None);
 
     drop(busy_agent_lock);
 
@@ -330,8 +339,99 @@ async fn set_service_tier_does_not_wait_for_busy_agent_lock() {
         event,
         Some(ServerEvent::ServiceTierChanged {
             id: 9,
+            pending: false,
             service_tier: Some(service_tier),
             error: None,
         }) if service_tier == "priority"
     ));
+}
+
+#[tokio::test]
+async fn set_service_tier_configures_busy_session_immediately_with_one_confirmation() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let (provider, agent, tx, mut rx) = test_agent("session_busy_ultrafast_control").await;
+    let locked = agent.lock().await;
+    let control = super::super::state::SessionControlHandle::new(
+        "session_busy_ultrafast_control",
+        locked.soft_interrupt_queue(),
+        locked.background_tool_signal(),
+        locked.graceful_shutdown_signal(),
+    )
+    .with_provider(locked.provider_handle());
+    // Busy reattachment uses the same session's registered provider, never the
+    // creator connection's provisional provider or a different session's tier.
+    let reattached = super::super::state::SessionControlHandle::cancel_only(
+        "session_busy_ultrafast_control",
+        locked.soft_interrupt_queue(),
+        locked.graceful_shutdown_signal(),
+    );
+    assert!(control.provider_handle().is_some());
+    for (id, tier) in [(10, "priority"), (11, "ultrafast"), (12, "off")] {
+        timeout(
+            Duration::from_millis(100),
+            handle_set_service_tier(
+                id,
+                tier.to_string(),
+                &agent,
+                reattached.provider_handle(),
+                &tx,
+            ),
+        )
+        .await
+        .expect("configuration must not wait for the turn to finish");
+        assert_eq!(provider.service_tier().as_deref(), Some(tier));
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::ServiceTierChanged {
+            id: actual_id, pending: false, service_tier: Some(actual), error: None,
+        }) if actual_id == id && actual == tier));
+        assert!(
+            rx.try_recv().is_err(),
+            "instant changes emit one response only"
+        );
+    }
+    drop(locked);
+    super::super::state::remove_background_tool_signal("session_busy_ultrafast_control");
+}
+
+#[tokio::test]
+async fn service_tier_control_provider_registry_tracks_rebind_and_session_lifecycle() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let (original, agent, _, _) = test_agent("tier_registry_original").await;
+    let locked = agent.lock().await;
+    let control = super::super::state::SessionControlHandle::new(
+        "tier_registry_original",
+        locked.soft_interrupt_queue(),
+        locked.background_tool_signal(),
+        locked.graceful_shutdown_signal(),
+    )
+    .with_provider(locked.provider_handle());
+    let other = super::super::state::SessionControlHandle::cancel_only(
+        "tier_registry_other",
+        locked.soft_interrupt_queue(),
+        locked.graceful_shutdown_signal(),
+    );
+    assert!(
+        other.provider_handle().is_none(),
+        "never borrow another session's provider"
+    );
+    let replacement: Arc<dyn Provider> = Arc::new(TestEffortProvider::default());
+    let control = control.with_provider(replacement.clone());
+    assert!(Arc::ptr_eq(
+        &control.provider_handle().unwrap(),
+        &replacement
+    ));
+    assert_eq!(original.service_tier(), None);
+    super::super::state::rename_background_tool_signal(
+        "tier_registry_original",
+        "tier_registry_other",
+    );
+    assert!(control.provider_handle().is_none());
+    assert!(Arc::ptr_eq(&other.provider_handle().unwrap(), &replacement));
+    drop(replacement);
+    assert!(
+        other.provider_handle().is_none(),
+        "registry must not retain providers"
+    );
+    super::super::state::remove_background_tool_signal("tier_registry_other");
 }

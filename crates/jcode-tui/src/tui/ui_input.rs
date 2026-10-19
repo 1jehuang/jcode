@@ -288,6 +288,9 @@ pub(crate) fn dim_command_color(color: Option<Color>) -> Color {
 }
 
 pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
+    if app.login_input_hint().is_some() {
+        return 1;
+    }
     // Command suggestions render as an overlay (see
     // `draw_command_suggestions_overlay`) and intentionally reserve no layout
     // height: opening the palette must not move the transcript or footer.
@@ -309,6 +312,9 @@ pub(super) fn send_mode_reserved_width(app: &dyn TuiState) -> usize {
 }
 
 pub(super) fn input_prompt(app: &dyn TuiState) -> (&'static str, Color) {
+    if app.login_input_hint().is_some() {
+        return (" login> ", accent_color());
+    }
     let mode = composer_mode(app.input(), app.is_remote_mode());
     if mode.is_shell() {
         ("$ ", shell_mode_color())
@@ -1070,10 +1076,7 @@ mod tests {
         };
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
-            Some(
-                "2 resets available · expiry unknown (2 resets) · /reset usage limits openai"
-                    .to_owned()
-            )
+            Some("2 resets available · expiry unknown · /reset".to_owned())
         );
         for auth in [
             AuthMethod::OpenAIApiKey,
@@ -1126,14 +1129,17 @@ mod tests {
         };
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
-            "4 resets available · expires 2099-05-01 00:30 UTC, expires 2099-06-01 00:00 UTC, expiry unknown (2 resets) · /reset usage limits openai"
+            format!(
+                "4 resets available · expires in {} · /reset",
+                crate::usage::format_reset_time("2099-05-01T00:30:00Z")
+            )
         );
         let credits = usage.openai_reset_credits.as_mut().unwrap();
         credits.available_count = 1;
         credits.available_expirations = vec![None];
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
-            "1 reset available · expiry unknown (1 reset) · /reset usage limits openai"
+            "1 reset available · expiry unknown · /reset"
         );
         usage.openai_reset_credits.as_mut().unwrap().available_count = 0;
         assert!(openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).is_none());
@@ -1141,12 +1147,10 @@ mod tests {
 
     #[test]
     fn swarm_effort_model_status_uses_shared_label() {
-        for mode in ["swarm", "swarm-deep"] {
-            assert_eq!(
-                overscroll_short_reasoning(mode),
-                Some(crate::tui::app::effort_display_label(mode))
-            );
-        }
+        assert_eq!(
+            overscroll_short_reasoning("swarm"),
+            Some(crate::tui::app::effort_display_label("swarm"))
+        );
         assert_eq!(overscroll_short_reasoning(" high "), Some("high"));
         assert_eq!(overscroll_short_reasoning(" "), None);
     }
@@ -1787,8 +1791,7 @@ pub(crate) fn openai_reset_status_hint(
     let credits = usage.openai_reset_credits.as_ref()?;
     let count = credits.available_count;
     let noun = if count == 1 { "reset" } else { "resets" };
-    let mut details = Vec::new();
-    let mut unknown = count;
+    let mut expiries = Vec::new();
     for expiry in credits
         .available_expirations
         .iter()
@@ -1798,25 +1801,19 @@ pub(crate) fn openai_reset_status_hint(
             .as_deref()
             .and_then(|expiry| chrono::DateTime::parse_from_rfc3339(expiry).ok())
         {
-            details.push(format!(
-                "expires {}",
-                expiry
-                    .with_timezone(&chrono::Utc)
-                    .format("%Y-%m-%d %H:%M UTC")
-            ));
-            unknown -= 1;
+            expiries.push(expiry);
         }
     }
-    if unknown > 0 {
-        details.push(format!(
-            "expiry unknown ({unknown} {})",
-            if unknown == 1 { "reset" } else { "resets" }
-        ));
-    }
-    Some(format!(
-        "{count} {noun} available · {} · /reset usage limits openai",
-        details.join(", ")
-    ))
+    let detail = expiries.into_iter().min().map_or_else(
+        || "expiry unknown".to_string(),
+        |expiry| {
+            format!(
+                "expires in {}",
+                crate::usage::format_reset_time(&expiry.to_rfc3339())
+            )
+        },
+    );
+    Some(format!("{count} {noun} available · {detail} · /reset"))
 }
 
 fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
@@ -1825,12 +1822,8 @@ fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         return Vec::new();
     }
     let line = Line::from(spans);
-    // Keep existing one-line notices unchanged, but never clip reset expiries.
-    let lines = if app.openai_reset_hint().is_some() {
-        super::markdown::wrap_line(line, usize::from(width))
-    } else {
-        vec![line]
-    };
+    // Notifications must never occupy a second row on narrow terminals.
+    let lines = vec![line];
     lines
         .into_iter()
         .map(|line| {
@@ -2276,7 +2269,7 @@ fn overscroll_short_reasoning(effort: &str) -> Option<&str> {
         return None;
     }
     Some(match effort {
-        "swarm" | "swarm-deep" => crate::tui::app::effort_display_label(effort),
+        "swarm" => crate::tui::app::effort_display_label(effort),
         "max" => "max",
         "xhigh" => "xhigh",
         "high" => "high",
@@ -2398,7 +2391,14 @@ pub(super) fn draw_input(
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
-    if has_suggestions {
+    if let Some(hint) = app.login_input_hint() {
+        hint_shown = true;
+        hint_line = Some(hint.to_string());
+        lines.push(Line::from(Span::styled(
+            hint,
+            Style::default().fg(accent_color()),
+        )));
+    } else if has_suggestions {
         // Overlay pass owns the palette rows; no inline hint line competes
         // with it.
     } else if let Some(shell_hint) = shell_mode_hint(mode) {

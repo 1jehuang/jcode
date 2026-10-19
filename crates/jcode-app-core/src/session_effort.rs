@@ -1,16 +1,11 @@
 //! Process-global, deadlock-free registry of each session's current reasoning
 //! effort.
 //!
-//! The swarm task-graph seed handler runs on the server socket thread while the
-//! *seeding* agent is blocked inside its `swarm` tool call holding its own agent
-//! lock. That means the handler cannot read the seeder's effort via the agent
-//! mutex without deadlocking. This tiny side-table is updated whenever an agent's
-//! effort changes (cheap string writes) so server handlers can learn a session's
-//! effort by id without taking any agent lock.
-//!
-//! This is what lets `swarm-deep` *reliably* engage deep mode: if a deep-effort
-//! agent seeds a graph but forgets to pass `mode:"deep"`, the server can still
-//! default the plan to deep instead of silently downgrading to light.
+//! Server handlers often run while the target agent is blocked holding its own
+//! agent lock, so they cannot read its effort via the agent mutex without
+//! deadlocking. This tiny side-table is updated whenever an agent's effort
+//! changes (cheap string writes) so handlers can learn a session's effort by id
+//! without taking any agent lock.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
@@ -56,8 +51,8 @@ mod tests {
         forget_session_effort(sid);
         assert_eq!(session_effort(sid), None);
 
-        record_session_effort(sid, Some("swarm-deep"));
-        assert_eq!(session_effort(sid).as_deref(), Some("swarm-deep"));
+        record_session_effort(sid, Some("swarm"));
+        assert_eq!(session_effort(sid).as_deref(), Some("swarm"));
 
         // Overwrite with a new value.
         record_session_effort(sid, Some("high"));
