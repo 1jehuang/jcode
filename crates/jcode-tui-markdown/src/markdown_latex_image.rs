@@ -113,19 +113,32 @@ fn deferred_sender() -> &'static mpsc::Sender<DeferredLatexTask> {
 }
 
 fn deferred_worker(rx: mpsc::Receiver<DeferredLatexTask>) {
-    for task in rx {
-        let toolchain = Toolchain::from_environment();
-        if let Err(error) = render_artifact(&task.source, task.display, task.dpi, &toolchain) {
-            remember_render_failure(task.key, &error);
-            report_error(&error);
-        }
-        if let Ok(mut pending) = PENDING_RENDERS.lock() {
-            pending.remove(&task.key);
-        }
+    loop {
+        let Ok(task) = rx.recv() else {
+            return;
+        };
+        render_latex_task(task);
         // Reuse the deferred-render epoch so every markdown/body cache layer
         // that already invalidates on completed mermaid renders also picks up
-        // completed formulas.
+        // completed formulas. Drain tasks queued while this one rendered
+        // first, and bump once for the whole batch: each bump invalidates
+        // prepared-body caches, so N queued formulas must not force N full
+        // transcript rebuilds in quick succession.
+        for next in rx.try_iter() {
+            render_latex_task(next);
+        }
         super::mermaid::notify_deferred_render_completed();
+    }
+}
+
+fn render_latex_task(task: DeferredLatexTask) {
+    let toolchain = Toolchain::from_environment();
+    if let Err(error) = render_artifact(&task.source, task.display, task.dpi, &toolchain) {
+        remember_render_failure(task.key, &error);
+        report_error(&error);
+    }
+    if let Ok(mut pending) = PENDING_RENDERS.lock() {
+        pending.remove(&task.key);
     }
 }
 

@@ -626,6 +626,7 @@ pub(super) fn prepare_messages(
         inline_images_visible: app.inline_images_visible(),
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
+        latex_rendering: crate::config::config().display.latex_rendering,
     };
 
     super::note_full_prep_request();
@@ -1078,6 +1079,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         images_signature: app.side_pane_images_signature(),
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
+        latex_rendering: crate::config::config().display.latex_rendering,
     };
     let msg_count = app.display_messages().len();
     let cache_lookup_start = Instant::now();

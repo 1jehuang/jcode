@@ -3031,6 +3031,46 @@ fn handle_show_agentgrep_output_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = slash_command_rest(trimmed, "/latex") else {
+        return false;
+    };
+    let arg = rest.trim();
+
+    let current = crate::config::config().display.latex_rendering;
+    if arg.is_empty() || arg.eq_ignore_ascii_case("status") {
+        app.push_display_message(DisplayMessage::system(format!(
+            "LaTeX rendering: {} (use /latex [none|unicode|image])\n\n  none    - keep raw $...$ source\n  unicode - terminal-friendly text math\n  image   - typeset PNG per formula (needs latex+dvipng or pdflatex+pdftocairo)",
+            current.as_str()
+        )));
+        return true;
+    }
+
+    let Some(mode) = crate::config::LatexRenderingMode::parse(arg) else {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /latex [none|unicode|image]".to_string(),
+        ));
+        return true;
+    };
+
+    match crate::config::Config::set_latex_rendering(mode) {
+        Ok(()) => {
+            app.set_status_notice(format!("LaTeX rendering: {}", mode.as_str()));
+            app.push_display_message(DisplayMessage::system(format!(
+                "Saved LaTeX rendering: {}. New messages render with it immediately; older ones pick it up on the next re-render.",
+                mode.as_str()
+            )))
+        }
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Failed to set LaTeX rendering to {}: {}. Nothing changed; the session keeps {}.",
+            mode.as_str(),
+            error,
+            crate::config::config().display.latex_rendering.as_str()
+        ))),
+    }
+    true
+}
+
 fn parse_agents_target(raw: &str) -> Option<crate::tui::AgentModelTarget> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "swarm" | "agent" | "agents" | "subagent" | "subagents" => {
