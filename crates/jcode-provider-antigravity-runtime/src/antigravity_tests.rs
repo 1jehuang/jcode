@@ -237,6 +237,10 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
         provider.resolve_model_for_request("gemini-4-argon-low"),
         "gemini-4-argon-low"
     );
+    assert_eq!(
+        provider.resolve_model_for_request("gemini-3.8-flash"),
+        "gemini-3.8-flash-medium"
+    );
 }
 
 #[test]
@@ -248,6 +252,10 @@ fn remap_unsupported_model_only_touches_broken_pro_high_and_bare_argon_alias() {
     assert_eq!(
         remap_unsupported_model("gemini-4-argon"),
         "gemini-4-argon-medium"
+    );
+    assert_eq!(
+        remap_unsupported_model("gemini-3.8-flash"),
+        "gemini-3.8-flash-medium"
     );
     for model in [
         "gemini-4-argon-medium",
@@ -266,6 +274,9 @@ fn remap_unsupported_model_only_touches_broken_pro_high_and_bare_argon_alias() {
         assert_eq!(remap_unsupported_model(model), model);
     }
     assert!(jcode_provider_antigravity::is_known_model("gemini-4-argon"));
+    assert!(jcode_provider_antigravity::is_known_model(
+        "gemini-3.8-flash"
+    ));
     assert!(jcode_provider_antigravity::is_known_model(
         "gemini-4-argon-medium"
     ));

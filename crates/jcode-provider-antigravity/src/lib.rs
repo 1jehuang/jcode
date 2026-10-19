@@ -38,7 +38,7 @@ pub const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// environments that need a different Cloud Code host.
 pub const ENDPOINT_ENV: &str = "JCODE_ANTIGRAVITY_ENDPOINT";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-pub const ANTIGRAVITY_VERSION: &str = "1.3.5";
+pub const ANTIGRAVITY_VERSION: &str = "1.4.2";
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
 
@@ -560,6 +560,7 @@ pub fn remap_unsupported_model(model: &str) -> &str {
     match model {
         "gemini-3.1-pro-high" => "gemini-pro-agent",
         "gemini-4-argon" => "gemini-4-argon-medium",
+        "gemini-3.8-flash" => "gemini-3.8-flash-medium",
         other => other,
     }
 }
@@ -916,21 +917,35 @@ mod endpoint_tests {
     #[test]
     fn antigravity_user_agent_normalizes_custom_and_cli_prefixed_overrides() {
         let _guard = VersionEnvGuard::acquire();
-        let expected_ua = format!("antigravity/cli/1.4.2 {}", expected_platform_suffix());
-        for raw in ["1.4.2", "  1.4.2  ", "cli/1.4.2", "  cli/1.4.2  "] {
-            unsafe {
-                std::env::set_var(VERSION_ENV, raw);
+        for (expected_ver, raw_variants) in [
+            (
+                "1.4.0",
+                ["1.4.0", "  1.4.0  ", "cli/1.4.0", "  cli/1.4.0  "],
+            ),
+            (
+                "1.5.0",
+                ["1.5.0", "  1.5.0  ", "cli/1.5.0", "  cli/1.5.0  "],
+            ),
+        ] {
+            let expected_ua = format!(
+                "antigravity/cli/{expected_ver} {}",
+                expected_platform_suffix()
+            );
+            for raw in raw_variants {
+                unsafe {
+                    std::env::set_var(VERSION_ENV, raw);
+                }
+                assert_eq!(
+                    antigravity_version(),
+                    expected_ver,
+                    "override {raw:?} must normalize to bare version"
+                );
+                assert_eq!(
+                    antigravity_user_agent(),
+                    expected_ua,
+                    "override {raw:?} must produce exact cli-prefixed User-Agent without double prefix"
+                );
             }
-            assert_eq!(
-                antigravity_version(),
-                "1.4.2",
-                "override {raw:?} must normalize to bare version"
-            );
-            assert_eq!(
-                antigravity_user_agent(),
-                expected_ua,
-                "override {raw:?} must produce exact cli-prefixed User-Agent without double prefix"
-            );
         }
     }
 }
