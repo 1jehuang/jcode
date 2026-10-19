@@ -7,12 +7,12 @@
 mod presence;
 
 use super::color_support::rgb;
-use jcode_tui_style::theme;
 use crate::session::{CrashedSessionsInfo, Session};
 use crate::tui::{DisplayMessage, markdown};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use jcode_session_types::SessionStatus;
+use jcode_tui_style::theme;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -1847,10 +1847,7 @@ impl SessionPicker {
                 continue;
             }
 
-            if !lines.is_empty()
-                && msg.role != "tool"
-                && msg.role != "meta"
-                && msg.role != "swarm"
+            if !lines.is_empty() && msg.role != "tool" && msg.role != "meta" && msg.role != "swarm"
             {
                 lines.push(Line::from("").alignment(align));
             }
@@ -1893,7 +1890,10 @@ impl SessionPicker {
                     for (line_idx, content_line) in normalized.split('\n').enumerate() {
                         let mut spans = if line_idx == 0 {
                             vec![
-                                Span::styled(num_str.clone(), Style::default().fg(num_color).bg(bg)),
+                                Span::styled(
+                                    num_str.clone(),
+                                    Style::default().fg(num_color).bg(bg),
+                                ),
                                 Span::styled("› ", Style::default().fg(user_color).bg(bg)),
                             ]
                         } else {

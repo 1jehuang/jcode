@@ -1011,8 +1011,8 @@ async fn handle_remote_key_internal(
             app.cursor_pos = app.input.len();
         }
         KeyCode::Tab => {
-            if app.handle_suggested_replies_tab().is_none() {
-                app.autocomplete();
+            if app.handle_suggested_replies_tab_remote() {
+                submit_remote_enter_input(app, remote).await?;
             }
         }
         KeyCode::Enter => {

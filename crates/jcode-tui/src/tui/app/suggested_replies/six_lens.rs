@@ -420,6 +420,21 @@ impl App {
         }
     }
 
+    pub(in crate::tui::app) fn handle_suggested_replies_tab_remote(&mut self) -> bool {
+        match self.handle_suggested_replies_tab() {
+            Some(Some(prompt)) => {
+                self.input = prompt;
+                self.cursor_pos = self.input.len();
+                true
+            }
+            Some(None) => false,
+            None => {
+                self.autocomplete();
+                false
+            }
+        }
+    }
+
     pub(in crate::tui::app) fn clear_failed_remote_split_launch(
         &mut self,
         kind: &str,

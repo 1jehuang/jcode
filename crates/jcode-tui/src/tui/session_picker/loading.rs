@@ -1654,7 +1654,9 @@ pub(super) fn build_messages_preview(session: &Session) -> Vec<PreviewMessage> {
 
 /// Trailing preview messages plus the number of user prompts dropped from the
 /// head, so the preview can number prompts globally like the live chat.
-pub(super) fn build_messages_preview_with_offset(session: &Session) -> (Vec<PreviewMessage>, usize) {
+pub(super) fn build_messages_preview_with_offset(
+    session: &Session,
+) -> (Vec<PreviewMessage>, usize) {
     let rendered = session::render_messages(session);
     let skip = rendered.len().saturating_sub(PREVIEW_MESSAGE_LIMIT);
     let hidden_prompts = rendered[..skip]
