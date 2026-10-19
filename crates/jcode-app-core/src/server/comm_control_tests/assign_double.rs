@@ -157,8 +157,6 @@ fn double_assign_fixture(
             version: 1,
             participants: HashSet::from([requester.to_string(), holder.to_string()]),
             task_progress: HashMap::from([(task_id, progress)]),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(

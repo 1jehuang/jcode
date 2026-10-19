@@ -170,7 +170,7 @@ fn spawn_deferred_agent_mutation<F>(
     F: FnOnce(&mut Agent, &mpsc::UnboundedSender<ServerEvent>) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         log_provider_control_lock_acquired(operation, id, queued_at);
         apply(&mut agent_guard, &client_event_tx);
@@ -188,7 +188,7 @@ fn spawn_deferred_provider_operation<F>(
     F: FnOnce(Arc<dyn Provider>, &mpsc::UnboundedSender<ServerEvent>) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let provider = {
             let agent_guard = agent.lock().await;
             log_provider_control_lock_acquired(operation, id, queued_at);
@@ -257,7 +257,7 @@ async fn auth_refresh_targets(
 
 fn spawn_deferred_auth_refreshes(agents: Vec<Arc<Mutex<Agent>>>) {
     for agent in agents {
-        tokio::spawn(async move {
+        crate::runtime_activity::spawn(async move {
             let provider = {
                 let agent_guard = agent.lock().await;
                 agent_guard.provider_handle()
@@ -468,6 +468,7 @@ fn send_model_changed_result(
                 error: None,
                 resolved_credential,
                 provider_oauth_email: super::provider_oauth_email(agent.provider_handle().as_ref()),
+                provider_oauth_account_label: agent.provider_handle().oauth_account_label(),
                 reasoning_effort,
             });
         }
@@ -488,6 +489,7 @@ fn send_model_changed_result(
                 error: Some(error.to_string()),
                 resolved_credential: None,
                 provider_oauth_email: None,
+                provider_oauth_account_label: None,
                 reasoning_effort: None,
             });
         }
@@ -510,6 +512,7 @@ fn apply_cycle_model(
             error: Some("Model switching is not available for this provider.".to_string()),
             resolved_credential: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             reasoning_effort: None,
         });
         return;
@@ -659,7 +662,7 @@ fn apply_set_model(
     send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
-fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
+pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
     let provider = agent.provider_handle();
     let name = provider.name().to_ascii_lowercase();
     let name = match name.as_str() {
@@ -670,7 +673,15 @@ fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
     };
     let key = match (name, provider.active_resolved_credential()) {
         ("claude" | "openai", Some(jcode_provider_core::ResolvedCredential::Oauth)) => {
-            let Some(label) = provider.oauth_account_label() else {
+            // Unpinned sessions run on the global active login, which is
+            // exactly the account the router just proposed leaving.
+            let Some(label) = provider.oauth_account_label().or_else(|| {
+                if name == "openai" {
+                    crate::auth::codex::active_account_label()
+                } else {
+                    crate::auth::claude::active_account_label()
+                }
+            }) else {
                 return false;
             };
             let exists = if name == "openai" {
@@ -736,18 +747,25 @@ fn apply_set_route(
 
     let current = agent.provider_model();
     let result = {
-        let result = if automatic_failover
-            && (crate::config::Config::load()
-                .provider
-                .cross_provider_failover
-                != crate::config::CrossProviderFailoverMode::Countdown
-                || !automatic_failover_source_is_pool_member(agent)
-                || !crate::provider::MultiProvider::is_failover_route_pool_approved(
-                    &selection.routed_model_spec(),
-                )) {
-            Err(anyhow::anyhow!(
-                "Auto-switch canceled: target account is no longer eligible in your auto-switch group."
-            ))
+        let ineligible = if !automatic_failover {
+            None
+        } else if crate::config::Config::load()
+            .provider
+            .cross_provider_failover
+            != crate::config::CrossProviderFailoverMode::Countdown
+        {
+            Some("countdown auto-switch is disabled")
+        } else if !automatic_failover_source_is_pool_member(agent) {
+            Some("source account is not in the auto-switch group")
+        } else if !crate::provider::MultiProvider::is_failover_route_pool_approved(
+            &selection.routed_model_spec(),
+        ) {
+            Some("target account is not eligible in the auto-switch group")
+        } else {
+            None
+        };
+        let result = if let Some(why) = ineligible {
+            Err(anyhow::anyhow!("Auto-switch canceled: {why}."))
         } else {
             agent.set_route_selection(&selection)
         };
@@ -830,7 +848,7 @@ pub(super) async fn handle_refresh_models(
     let provider_clone = provider.clone();
     let agent_clone = agent.clone();
     let client_event_tx_clone = client_event_tx.clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         send_catalog_activity(
             &client_event_tx_clone,
             &crate::message::format_model_refresh_progress_markdown(
@@ -966,7 +984,7 @@ fn spawn_deferred_reasoning_effort_change(
     client_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) {
     let queued_at = log_provider_control_deferred("set_reasoning_effort", id);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
         let result = agent_guard.set_reasoning_effort(&effort);
@@ -985,6 +1003,7 @@ pub(super) async fn handle_set_service_tier(
     id: u64,
     service_tier: String,
     agent: &Arc<Mutex<Agent>>,
+    provider: Option<Arc<dyn Provider>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let apply = move |provider: Arc<dyn Provider>,
@@ -993,6 +1012,7 @@ pub(super) async fn handle_set_service_tier(
             Ok(()) => {
                 let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
                     id,
+                    pending: false,
                     service_tier: provider.service_tier(),
                     error: None,
                 });
@@ -1000,6 +1020,7 @@ pub(super) async fn handle_set_service_tier(
             Err(e) => {
                 let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
                     id,
+                    pending: false,
                     service_tier: None,
                     error: Some(e.to_string()),
                 });
@@ -1007,9 +1028,19 @@ pub(super) async fn handle_set_service_tier(
         }
     };
 
-    if let Ok(agent_guard) = agent.try_lock() {
+    if let Some(provider) = provider {
+        // Configures the next provider request, even while the turn owns Agent.
+        // The provider cannot rewrite a request already accepted upstream.
+        apply(provider, client_event_tx);
+    } else if let Ok(agent_guard) = agent.try_lock() {
         apply(agent_guard.provider_handle(), client_event_tx);
     } else {
+        let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+            id,
+            pending: true,
+            service_tier: None,
+            error: None,
+        });
         spawn_deferred_provider_operation(
             "set_service_tier",
             id,
@@ -1114,7 +1145,7 @@ fn spawn_deferred_set_compaction_mode(
     client_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) {
     let queued_at = log_provider_control_deferred("set_compaction_mode", id);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let registry = {
             let agent_guard = agent.lock().await;
             log_provider_control_lock_acquired("set_compaction_mode", id, queued_at);
@@ -1173,7 +1204,7 @@ pub(super) async fn handle_notify_auth_changed(
     let targets = auth_refresh_targets(provider_template, provider, agent, sessions).await;
     let client_event_tx_clone = client_event_tx.clone();
     let agent_clone = agent.clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         if !auth_refresh_is_current(&session_id, auth_refresh_generation) {
             return;
         }
@@ -1781,7 +1812,7 @@ fn spawn_account_switch_refresh(
         }
         _ => {}
     }
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let started = Instant::now();
         crate::logging::event_info(
             "SERVER_PROVIDER_CONTROL_ACCOUNT_SWITCH",

@@ -102,7 +102,35 @@ impl McpSchemaCache {
         let Some(path) = cache_path() else {
             return Self::default();
         };
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        // Every session parses this (~1MB) file at spawn and again after each
+        // of its MCP connections, so a reload storm parsed it hundreds of times.
+        // Reuse the parsed copy while the file is unchanged.
+        type Memo = Option<(PathBuf, std::time::SystemTime, u64, McpSchemaCache)>;
+        static MEMO: std::sync::LazyLock<std::sync::Mutex<Memo>> =
+            std::sync::LazyLock::new(Default::default);
+        let stamp = std::fs::metadata(&path)
+            .ok()
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        if let Some((mtime, len)) = stamp
+            && let Ok(memo) = MEMO.lock()
+            && let Some((memo_path, memo_mtime, memo_len, cache)) = memo.as_ref()
+            && *memo_path == path
+            && *memo_mtime == mtime
+            && *memo_len == len
+        {
+            return cache.clone();
+        }
+        let loaded = Self::load_uncached(&path);
+        if let Some((mtime, len)) = stamp
+            && let Ok(mut memo) = MEMO.lock()
+        {
+            *memo = Some((path, mtime, len, loaded.clone()));
+        }
+        loaded
+    }
+
+    fn load_uncached(path: &std::path::Path) -> Self {
+        let Ok(content) = std::fs::read_to_string(path) else {
             return Self::default();
         };
         match serde_json::from_str::<Self>(&content) {
@@ -122,6 +150,52 @@ impl McpSchemaCache {
         } else {
             None
         }
+    }
+
+    /// Persist `tools` for `server` unless this process already recorded the
+    /// identical catalog under the same config. Each session reports every
+    /// shared server's connection, so without this a reload storm cloned,
+    /// compared, and rewrote the whole cache hundreds of times (~30ms CPU each).
+    /// Returns true when the file was written.
+    pub fn sync_server(server: &str, config: &McpServerConfig, tools: &[McpToolDef]) -> bool {
+        use std::hash::{Hash, Hasher};
+        static SEEN: std::sync::LazyLock<std::sync::Mutex<BTreeMap<String, u64>>> =
+            std::sync::LazyLock::new(Default::default);
+        let mut catalog = std::collections::hash_map::DefaultHasher::new();
+        fingerprint_config(config).hash(&mut catalog);
+        for tool in tools {
+            tool.name.hash(&mut catalog);
+            tool.description.hash(&mut catalog);
+            tool.input_schema.to_string().hash(&mut catalog);
+        }
+        let catalog = catalog.finish();
+        // Include the file's identity so an external edit (another process,
+        // a manual reset) is never masked by the in-process memo.
+        let digest = || {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            catalog.hash(&mut hasher);
+            if let Some(path) = cache_path()
+                && let Ok(meta) = std::fs::metadata(&path)
+            {
+                meta.len().hash(&mut hasher);
+                meta.modified().ok().hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        if let Ok(seen) = SEEN.lock()
+            && seen.get(server) == Some(&digest())
+        {
+            return false;
+        }
+        let mut cache = Self::load();
+        let written = cache.update(server, config, tools.to_vec());
+        if written {
+            cache.save();
+        }
+        if let Ok(mut seen) = SEEN.lock() {
+            seen.insert(server.to_string(), digest());
+        }
+        written
     }
 
     /// Insert/replace the cached schemas for a server. Returns true if the entry

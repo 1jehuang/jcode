@@ -1,9 +1,9 @@
 use super::ClientConnectionInfo;
-use super::client_lifecycle::process_message_streaming_mpsc;
 use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
 };
+use super::turn_failover::process_server_initiated_message;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     append_swarm_completion_report_instructions, broadcast_swarm_plan, broadcast_swarm_status,
@@ -836,7 +836,7 @@ pub(super) async fn spawn_swarm_agent(
             let event_history2 = Arc::clone(event_history);
             let event_counter2 = Arc::clone(event_counter);
             let swarm_event_tx2 = swarm_event_tx.clone();
-            tokio::spawn(async move {
+            crate::runtime_activity::spawn(async move {
                 update_member_status(
                     &sid_clone,
                     "running",
@@ -856,7 +856,7 @@ pub(super) async fn spawn_swarm_agent(
                     let agent = agent_arc.lock().await;
                     agent.message_count()
                 };
-                let result = process_message_streaming_mpsc(
+                let result = process_server_initiated_message(
                     Arc::clone(&agent_arc),
                     &initial_msg,
                     vec![],
@@ -1403,25 +1403,18 @@ async fn ensure_spawn_coordinator_swarm(
         return None;
     };
 
-    // Light and ad hoc swarms are deliberately one-level fan-out: only the root
-    // session may create workers. Recursive spawning is an explicit deep-swarm
-    // capability, keyed from the root's effort rather than the requesting
-    // child's effort so a worker cannot opt itself into unbounded growth.
+    // Swarms are deliberately one-level fan-out: only the root session may
+    // create workers.
     if !is_root {
-        let root_is_deep = crate::session_effort::session_effort(&root_session_id)
-            .as_deref()
-            .is_some_and(crate::prompt::is_deep_swarm_effort);
-        if !root_is_deep {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "Recursive swarm spawning is disabled for light and ad hoc swarms. Only the root session ({root_session_id}) may spawn agents unless that root is running in swarm-deep mode."
-                ),
-                retry_after_secs: None,
-                server_resumes: false,
-            });
-            return None;
-        }
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!(
+                "Recursive swarm spawning is disabled. Only the root session ({root_session_id}) may spawn agents."
+            ),
+            retry_after_secs: None,
+            server_resumes: false,
+        });
+        return None;
     }
 
     // Keep an absolute hard ceiling even when the configurable limit is disabled.
@@ -1459,8 +1452,6 @@ async fn ensure_spawn_coordinator_swarm(
     // Coordinator-slot election is now only about the swarm-level coordinator used
     // for shared plan operations (propose/approve/assign). Only a root session
     // (depth 0, no spawner) claims it, and only when the slot is empty or stale.
-    // Authorized deep-swarm descendants coordinate their own subtree via
-    // report-back ownership and never disturb the swarm-level coordinator slot.
     if is_root && coordinator_id.as_deref() != Some(req_session_id) {
         let should_claim = coordinator_id.is_none() || coordinator_is_stale;
         if should_claim {

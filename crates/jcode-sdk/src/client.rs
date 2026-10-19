@@ -129,9 +129,10 @@ impl Transport for UnixTransport {
         }
         #[cfg(windows)]
         {
-            // Closing the reader and writer handles interrupts named-pipe I/O.
-            // They are owned by the client and dropped during shutdown.
-            None
+            let pipe = self.0.try_clone().ok()?;
+            Some(Arc::new(move || {
+                let _ = pipe.shutdown(std::net::Shutdown::Both);
+            }))
         }
     }
 
@@ -1045,12 +1046,10 @@ impl JcodeClient {
         command: jcode_harness_api::RuntimeCommand,
         args: Vec<String>,
     ) -> Result<jcode_harness_api::RuntimeCommandOutput> {
-        if !self.supports("runtime_commands") {
-            return Err(Error::new(
-                ErrorKind::Harness(jcode_harness_api::ErrorCode::UnknownRequest),
-                "This runtime does not support structured commands. Update and restart the daemon and bridge.",
-            ));
-        }
+        // Hello capabilities describe a point-in-time probe. A busy daemon may
+        // omit this capability temporarily, and an updated bridge can recheck
+        // it without disturbing the attached session. Send the typed request
+        // once and let the bridge enforce support before forwarding it.
         match self
             .request_ok(ApiRequest::RuntimeCommand {
                 session_id: session_id.into(),

@@ -1847,7 +1847,7 @@ fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
 fn configured_swarm_root_effort_controls_adaptive_and_manual_thinking() {
     let mut provider = AnthropicProvider::new();
     provider.max_tokens_override = Some(32_768);
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         *provider.reasoning_effort.write().unwrap() = Some(mode.to_string());
         for (effort, budget) in [
             ("minimal", 1_024),
@@ -1918,7 +1918,6 @@ fn configured_swarm_root_effort_reads_real_config() {
             ])
             .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
             .env("JCODE_SWARM_ROOT_EFFORT", "low")
-            .env("JCODE_SWARM_DEEP_ROOT_EFFORT", "none")
             .output()
             .expect("run isolated config test");
         assert!(
@@ -1931,7 +1930,7 @@ fn configured_swarm_root_effort_reads_real_config() {
     }
     let mut provider = AnthropicProvider::new();
     provider.max_tokens_override = Some(32_768);
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         *provider.reasoning_effort.write().unwrap() = Some(mode.into());
         for model in ["claude-opus-4-8", "claude-opus-4-5"] {
             let (thinking, output, temperature) =

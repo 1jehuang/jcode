@@ -25,10 +25,8 @@ fn status_age_secs(last_status_change: Instant) -> u64 {
 
 /// Maximum number of live members (agents) in a single swarm. Re-exported from
 /// `jcode_swarm_core` so the server, tools, and prompts all agree on the one
-/// runaway-prevention cap for the task-graph model. Normal and light swarms are
-/// root-only, one-level fan-out. Deep-swarm roots may create recursive trees with
-/// no depth limit, but both the configurable live-worker budget and this absolute
-/// cap still apply.
+/// runaway-prevention cap. Swarms are root-only, one-level fan-out, and both
+/// the configurable live-worker budget and this absolute cap apply.
 pub(super) use jcode_swarm_core::MAX_SWARM_MEMBERS;
 
 /// Walk the `report_back_to_session_id` chain upward from `session_id`,
@@ -2294,8 +2292,6 @@ mod tests {
                 version: 2,
                 participants: HashSet::from(["worker".to_string()]),
                 task_progress: HashMap::new(),
-                mode: "light".to_string(),
-                node_meta: HashMap::new(),
             },
         )])));
         let (worker, mut worker_rx) = swarm_member("worker", "agent", false);
@@ -2383,8 +2379,6 @@ mod tests {
                 // fallback path, which is where we deterministically park it.
                 participants: HashSet::new(),
                 task_progress: HashMap::new(),
-                mode: "light".to_string(),
-                node_meta: HashMap::new(),
             },
         )])));
         let (worker, mut worker_rx) = swarm_member("worker", "agent", false);
@@ -2564,8 +2558,6 @@ mod tests {
                 // no longer exists in this server process.
                 participants: HashSet::from(["ghost".to_string()]),
                 task_progress: HashMap::new(),
-                mode: "light".to_string(),
-                node_meta: HashMap::new(),
             },
         )])));
         // Ghost member as produced by swarm_persistence restore: present in
@@ -2630,8 +2622,6 @@ mod tests {
                 version: 1,
                 participants: HashSet::from(["coord".to_string()]),
                 task_progress: HashMap::new(),
-                mode: "light".to_string(),
-                node_meta: HashMap::new(),
             },
         )])));
 
@@ -3178,8 +3168,6 @@ mod tests {
                         ..Default::default()
                     },
                 )]),
-                mode: "light".to_string(),
-                node_meta: HashMap::new(),
             },
         )])));
         let (worker, _worker_rx) = swarm_member("worker", "agent", true);
@@ -3270,8 +3258,6 @@ mod tests {
                         ..Default::default()
                     },
                 )]),
-                mode: "light".to_string(),
-                node_meta: HashMap::new(),
             },
         )])))
     }

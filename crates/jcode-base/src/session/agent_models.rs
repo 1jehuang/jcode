@@ -38,6 +38,15 @@ fn read_saved(path: &std::path::Path) -> Option<AgentModelOverrides> {
 }
 
 impl Session {
+    /// Read a session's saved overrides from the sidecar file only, without
+    /// parsing the (possibly huge) transcript snapshot.
+    pub fn read_agent_model_overrides(id: &str) -> AgentModelOverrides {
+        path(id)
+            .ok()
+            .and_then(|path| read_saved(&path))
+            .unwrap_or_default()
+    }
+
     /// Reload lock-independent routing metadata, including explicit clears.
     pub fn refresh_agent_model_overrides(&mut self) -> Result<()> {
         if let Some(saved) = read_saved(&path(&self.id)?) {

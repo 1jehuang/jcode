@@ -30,6 +30,8 @@ const STATUS_SPINNER_FPS: f32 = 12.5;
 /// construction, so this mostly costs nothing; it is capped so a pathological
 /// repo never delays first paint noticeably.
 const FIRST_FRAME_GIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
+/// Tick cadence while the reload fast-start transcript is still rendering.
+const STARTUP_TRANSCRIPT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
 
 pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
@@ -475,6 +477,7 @@ impl StatusSpinnerRenderer {
         app.refresh_terminal_title_metrics();
         app.sync_herdr_agent_state();
         app.poll_oauth_account_telemetry();
+        app.enter_idle_hibernation(self.last_frame.as_ref());
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the
@@ -539,6 +542,7 @@ impl StatusSpinnerRenderer {
             crate::tui::ui::note_idle_animation_full_repaint();
         }
         self.last_frame = Some(completed_buffer);
+        app.finish_idle_hibernation_frame();
         self.last_full_frame_at = Some(Instant::now());
         // A full frame rewrote the whole surface, so ratatui's working buffer no
         // longer matches `last_frame` outside the animated rows. Force the next
@@ -769,6 +773,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            hibernate_session: self.hibernate_exit_requested.take(),
             cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: Some(self.session.id.clone()),
@@ -882,7 +887,18 @@ impl App {
             // Main event loop
             loop {
                 self.sync_sleep_guard();
-                let desired_redraw = crate::tui::redraw_interval(&self);
+                // The reload fast-start transcript is rendered off-thread. Show
+                // it as soon as it is ready instead of on the next tick: during
+                // remote startup ticks are 1s apart, which held a ready
+                // transcript back 0.5-0.7s until server History landed anyway.
+                needs_redraw |= self.poll_pending_startup_transcript();
+                let desired_redraw = if self.pending_startup_transcript.is_some() {
+                    // Nothing wakes the loop when the transcript thread
+                    // finishes, so poll briefly until it does (~tens of ms).
+                    STARTUP_TRANSCRIPT_POLL
+                } else {
+                    crate::tui::redraw_interval(&self)
+                };
                 if desired_redraw != redraw_period {
                     redraw_period = desired_redraw;
                     redraw_interval = redraw_timer(redraw_period);
@@ -1011,6 +1027,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            hibernate_session: self.hibernate_exit_requested.take(),
             cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: if self.is_remote {
