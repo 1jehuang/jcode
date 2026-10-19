@@ -91,6 +91,12 @@ struct DaemonSession {
     active_prompt_id: Mutex<Option<u64>>,
     prompt_running: AtomicBool,
     ui_state: Mutex<SessionUiState>,
+    /// Workspace root reported by the ACP client, used to compose the
+    /// project-local skill overlay for slash-skill resolution.
+    working_dir: Option<PathBuf>,
+    /// Sticky skill selection, resent with every prompt. The daemon treats a
+    /// missing `active_skill` as "clear the selection", mirroring the TUI.
+    active_skill: Mutex<Option<String>>,
 }
 
 /// Session-scoped provider/model state used to surface ACP `configOptions`
@@ -208,7 +214,23 @@ impl DaemonSession {
             active_prompt_id: Mutex::new(None),
             prompt_running: AtomicBool::new(false),
             ui_state: Mutex::new(SessionUiState::default()),
+            working_dir: None,
+            active_skill: Mutex::new(None),
         }
+    }
+
+    fn with_working_dir(self, working_dir: PathBuf) -> Self {
+        Self {
+            working_dir: Some(working_dir),
+            ..self
+        }
+    }
+
+    /// Effective skills for this session: global skills plus the workspace's
+    /// project-local overlay, loaded fresh so newly installed skills resolve.
+    fn skills(&self) -> crate::skill::SkillRegistry {
+        crate::skill::SkillRegistry::load_for_working_dir(self.working_dir.as_deref())
+            .unwrap_or_default()
     }
 
     fn with_ui_state(self, state: SessionUiState) -> Self {
@@ -485,6 +507,7 @@ impl AcpRuntime {
                 return Ok(());
             }
         };
+        let explicit_skill = explicit_skill_from_params(&message.params);
         let (text, images) = match prompt_from_params(&message.params) {
             Ok(prompt) => prompt,
             Err(err) => {
@@ -523,7 +546,9 @@ impl AcpRuntime {
 
         let runtime = self.clone();
         tokio::spawn(async move {
-            let result = runtime.run_prompt(id.clone(), session, text, images).await;
+            let result = runtime
+                .run_prompt(id.clone(), session, text, images, explicit_skill)
+                .await;
             if let Err(err) = result {
                 let _ = runtime
                     .write_error_value(
@@ -728,13 +753,20 @@ impl AcpRuntime {
     }
 
     async fn write_available_commands(&self, session_id: &str) -> Result<()> {
+        let skills = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(session_id).map(|session| session.skills())
+        }
+        .unwrap_or_default();
+        let mut commands = acp_available_commands();
+        commands.extend(acp_skill_commands(&skills));
         self.write_notification(
             "session/update",
             json!({
                 "sessionId": session_id,
                 "update": {
                     "sessionUpdate": "available_commands_update",
-                    "availableCommands": acp_available_commands(),
+                    "availableCommands": commands,
                 }
             }),
         )
@@ -809,7 +841,8 @@ impl AcpRuntime {
             session.writer.into_inner(),
             session.next_request_id.load(Ordering::Relaxed),
         )
-        .with_ui_state(ui_state))
+        .with_ui_state(ui_state)
+        .with_working_dir(cwd))
     }
 
     async fn attach_existing_session(
@@ -886,7 +919,8 @@ impl AcpRuntime {
             session.writer.into_inner(),
             session.next_request_id.load(Ordering::Relaxed),
         )
-        .with_ui_state(ui_state))
+        .with_ui_state(ui_state)
+        .with_working_dir(cwd))
     }
 
     async fn replay_history(
@@ -924,6 +958,7 @@ impl AcpRuntime {
         session: Arc<DaemonSession>,
         text: String,
         images: Vec<(String, String)>,
+        explicit_skill: Option<String>,
     ) -> Result<()> {
         if let Some(command) = parse_acp_slash_command(&text) {
             let response = match command {
@@ -945,6 +980,53 @@ impl AcpRuntime {
             return Ok(());
         }
 
+        // Explicit client metadata wins. Otherwise resolve `/skill [prompt]`
+        // (or `$skill [prompt]`, as some ACP hosts serialize command names)
+        // against the session's registry. Unknown or path-like slash text is
+        // passed through to the model unchanged.
+        let mut text = text;
+        let skills = session.skills();
+        let selected_skill = match explicit_skill {
+            Some(name) => Some(name),
+            None => match resolve_acp_skill_invocation(&skills, &text) {
+                Some((name, prompt)) => {
+                    text = prompt.unwrap_or_default();
+                    Some(name)
+                }
+                None => None,
+            },
+        };
+        if let Some(name) = selected_skill {
+            let Some(skill) = skills.get(&name) else {
+                cleanup_prompt_state(&session).await;
+                self.write_error_value(
+                    rpc_id,
+                    JSONRPC_INVALID_PARAMS,
+                    format!("Unknown skill: {name}"),
+                )
+                .await?;
+                return Ok(());
+            };
+            let notice = format!("Activated skill: {} - {}", skill.name, skill.description);
+            *session.active_skill.lock().await = Some(name);
+            self.write_notification(
+                "session/update",
+                json!({
+                    "sessionId": session.session_id,
+                    "update": agent_message_chunk(format!("{notice}\n\n")),
+                }),
+            )
+            .await?;
+            if text.trim().is_empty() && images.is_empty() {
+                // Bare `/skill`: select it for the following prompts, like the TUI.
+                cleanup_prompt_state(&session).await;
+                self.write_result(rpc_id, prompt_response("end_turn", &TurnUsage::default()))
+                    .await?;
+                return Ok(());
+            }
+        }
+        let active_skill = session.active_skill.lock().await.clone();
+
         let prompt_id = session.next_id();
         {
             let mut active = session.active_prompt_id.lock().await;
@@ -957,7 +1039,7 @@ impl AcpRuntime {
                 content: text,
                 images,
                 system_reminder: None,
-                active_skill: None,
+                active_skill,
                 no_reply: false,
             })
             .await;
@@ -1609,6 +1691,68 @@ fn validate_acp_mcp_servers(params: &Value) -> std::result::Result<(), String> {
     }
 }
 
+/// Read an explicit skill selection from ACP prompt metadata. Accepts
+/// `_meta.jcode.skill`, `_meta.jcode.activeSkill`, `_meta.skill`, and
+/// `_meta.activeSkill`.
+fn explicit_skill_from_params(params: &Value) -> Option<String> {
+    let meta = params.get("_meta")?;
+    [meta.get("jcode"), Some(meta)]
+        .into_iter()
+        .flatten()
+        .flat_map(|object| ["skill", "activeSkill", "active_skill"].map(|key| object.get(key)))
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|name| name.trim().trim_start_matches(['/', '$']).trim())
+        .find(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve `/name [prompt]` or `$name [prompt]` to a registered skill. Returns
+/// `None` for unknown names and path-like text so it reaches the model as-is.
+fn resolve_acp_skill_invocation(
+    skills: &crate::skill::SkillRegistry,
+    text: &str,
+) -> Option<(String, Option<String>)> {
+    let trimmed = text.trim_end();
+    // Like built-in commands, a leading space escapes skill interpretation.
+    let normalized = if let Some(rest) = trimmed.strip_prefix('$') {
+        format!("/{rest}")
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        return None;
+    };
+    let invocation = skills.resolve_invocation(&normalized)?;
+    skills.get(invocation.name)?;
+    Some((
+        invocation.name.to_string(),
+        invocation.prompt.map(str::to_string),
+    ))
+}
+
+/// ACP `availableCommands` entries for installed skills. Skills whose names
+/// contain whitespace or shadow built-in commands are not advertised (they can
+/// still be invoked by typing the slash command).
+fn acp_skill_commands(skills: &crate::skill::SkillRegistry) -> Vec<Value> {
+    const BUILTIN: [&str; 3] = ["model", "models", "effort"];
+    skills
+        .list()
+        .into_iter()
+        .filter(|skill| {
+            !skill.name.is_empty()
+                && !skill.name.contains(char::is_whitespace)
+                && !BUILTIN.contains(&skill.name.as_str())
+        })
+        .map(|skill| {
+            json!({
+                "name": skill.name,
+                "description": skill.description,
+                "input": { "hint": "request for this skill (optional)" },
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum AcpSlashCommand {
     Model(Option<String>),
@@ -1961,6 +2105,82 @@ mod tests {
         assert!(parse_acp_slash_command("/not-advertised").is_none());
         assert!(parse_acp_slash_command(" /model literal").is_none());
         assert!(parse_acp_slash_command("ordinary prompt").is_none());
+    }
+
+    fn project_skills(names: &[&str]) -> (tempfile::TempDir, crate::skill::SkillRegistry) {
+        let dir = tempfile::tempdir().unwrap();
+        for name in names {
+            let skill_dir = dir.path().join(".jcode/skills").join(name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Test {name}\n---\nDo {name}.\n"),
+            )
+            .unwrap();
+        }
+        let registry = crate::skill::SkillRegistry::load_project_overlay(Some(dir.path())).unwrap();
+        (dir, registry)
+    }
+
+    #[test]
+    fn slash_and_dollar_skill_invocations_resolve_with_trailing_prompt() {
+        let (_dir, skills) = project_skills(&["interrogate"]);
+        assert_eq!(
+            resolve_acp_skill_invocation(&skills, "/interrogate"),
+            Some(("interrogate".to_string(), None))
+        );
+        assert_eq!(
+            resolve_acp_skill_invocation(&skills, "/interrogate the auth flow\n"),
+            Some(("interrogate".to_string(), Some("the auth flow".to_string())))
+        );
+        assert_eq!(
+            resolve_acp_skill_invocation(&skills, "$interrogate why"),
+            Some(("interrogate".to_string(), Some("why".to_string())))
+        );
+    }
+
+    #[test]
+    fn unknown_escaped_and_path_like_slash_text_is_untouched() {
+        let (_dir, skills) = project_skills(&["interrogate"]);
+        for text in [
+            "/unknown do things",
+            "/home/user/file.rs explain",
+            " /interrogate escaped",
+            "please /interrogate",
+            "$HOME is set",
+            "ordinary prompt",
+        ] {
+            assert_eq!(resolve_acp_skill_invocation(&skills, text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn explicit_skill_metadata_is_read_from_prompt_meta() {
+        assert_eq!(
+            explicit_skill_from_params(&json!({"_meta": {"jcode": {"skill": "/interrogate"}}})),
+            Some("interrogate".to_string())
+        );
+        assert_eq!(
+            explicit_skill_from_params(&json!({"_meta": {"activeSkill": "$review"}})),
+            Some("review".to_string())
+        );
+        assert_eq!(
+            explicit_skill_from_params(&json!({"_meta": {"skill": " "}})),
+            None
+        );
+        assert_eq!(explicit_skill_from_params(&json!({})), None);
+    }
+
+    #[test]
+    fn skill_commands_advertise_installed_skills_without_shadowing_builtins() {
+        let (_dir, skills) = project_skills(&["interrogate", "model"]);
+        let commands = acp_skill_commands(&skills);
+        let names: Vec<&str> = commands
+            .iter()
+            .map(|command| command["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["interrogate"]);
+        assert_eq!(commands[0]["description"], "Test interrogate");
     }
 
     #[test]

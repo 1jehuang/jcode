@@ -238,6 +238,9 @@ struct KvCacheBaseline {
     /// is only the uncached remainder of that one request.
     input_tokens: u64,
     completed_at: Instant,
+    /// UTC day the baseline request was sent. Anthropic drops conversation
+    /// caches at 00:00 UTC, so a straddling miss is attributed, not alarmed.
+    utc_day: i64,
     /// Retention selected when the request started, not the current preference.
     cache_ttl_secs: Option<u64>,
     provider: String,
@@ -250,6 +253,8 @@ struct KvCacheBaseline {
 struct PendingKvCacheRequest {
     /// None when usage arrived without a matching request-start event.
     started_at: Option<Instant>,
+    /// UTC day the request was sent.
+    utc_day: i64,
     cache_ttl_secs: Option<u64>,
     turn_number: usize,
     call_index: u16,
@@ -269,6 +274,7 @@ enum KvCacheMissReason {
     ModelSwitch,
     UpstreamSwitch,
     Expired,
+    DailyRollover,
     HarnessSystemChanged,
     HarnessToolsChanged,
     HarnessPrefixChanged,
@@ -285,6 +291,7 @@ impl KvCacheMissReason {
             Self::ModelSwitch => "model switch",
             Self::UpstreamSwitch => "upstream switch",
             Self::Expired => "expired",
+            Self::DailyRollover => "daily rollover",
             Self::HarnessSystemChanged => "harness: system changed",
             Self::HarnessToolsChanged => "harness: tools changed",
             Self::HarnessPrefixChanged => "harness: prefix changed",
@@ -1072,7 +1079,6 @@ pub struct App {
     /// a turn was running. They run as real commands once the turn ends.
     queued_commands: Vec<String>,
     hidden_queued_system_messages: Vec<String>,
-    current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)
     upstream_provider: Option<String>,
     // Active stream connection type (websocket/https/etc.)
@@ -1995,7 +2001,9 @@ impl App {
     const INPUT_UNDO_LIMIT: usize = 128;
     const CLIENT_FOCUS_RECORD_DEBOUNCE: Duration = Duration::from_secs(2);
     const KV_CACHE_OPTIMAL_OK_PCT: u8 = 85;
-    const KV_CACHE_MIN_MISSED_TOKENS: u64 = 1_024;
+    fn kv_cache_min_missed_tokens(provider: &str) -> u64 {
+        crate::kv_cache_monitor::min_missed_tokens_for_provider(provider)
+    }
     const KV_CACHE_MAX_MISS_SAMPLES: usize = 12;
 
     pub(super) fn begin_kv_cache_request(
@@ -2041,6 +2049,7 @@ impl App {
 
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             started_at: Some(Instant::now()),
+            utc_day: crate::kv_cache_monitor::utc_day_now(),
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
             cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
@@ -2093,6 +2102,7 @@ impl App {
         self.begin_api_call_accounting();
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             started_at: Some(Instant::now()),
+            utc_day: crate::kv_cache_monitor::utc_day_now(),
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
             cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
@@ -2315,6 +2325,7 @@ impl App {
                 cache_generation: request.cache_generation,
                 input_tokens: self.streaming.streaming_input_tokens,
                 completed_at: Instant::now(),
+                utc_day: request.utc_day,
                 cache_ttl_secs: request.cache_ttl_secs,
                 provider: request.provider,
                 model: request.model,
@@ -2361,6 +2372,7 @@ impl App {
             cache_generation: request.cache_generation,
             input_tokens: reusable_tokens,
             completed_at: Instant::now(),
+            utc_day: request.utc_day,
             cache_ttl_secs: request.cache_ttl_secs,
             provider: request.provider,
             model: request.model,
@@ -2564,6 +2576,7 @@ impl App {
     fn fallback_pending_kv_cache_request(&self) -> PendingKvCacheRequest {
         PendingKvCacheRequest {
             started_at: None,
+            utc_day: crate::kv_cache_monitor::utc_day_now(),
             turn_number: self
                 .display_messages
                 .iter()
@@ -2602,7 +2615,7 @@ impl App {
             return;
         };
         let missed_tokens = expected_tokens.saturating_sub(read_tokens);
-        if missed_tokens < Self::KV_CACHE_MIN_MISSED_TOKENS {
+        if missed_tokens < Self::kv_cache_min_missed_tokens(&request.provider) {
             return;
         }
 
@@ -2667,6 +2680,9 @@ impl App {
                 "upstream route changed; cache may be on another server"
             }
             KvCacheMissReason::Expired => "cache retention elapsed",
+            KvCacheMissReason::DailyRollover => {
+                "provider resets its prompt cache at 00:00 UTC; not avoidable by the harness"
+            }
             KvCacheMissReason::ZeroRead => {
                 "provider reported no cached prefix; eviction or routing may explain this"
             }
@@ -2767,6 +2783,12 @@ impl App {
             return KvCacheMissReason::HarnessPrefixChanged;
         }
 
+        if baseline.utc_day != request.utc_day
+            && crate::kv_cache_monitor::provider_rolls_cache_daily(&request.provider)
+        {
+            return KvCacheMissReason::DailyRollover;
+        }
+
         if self.streaming.streaming_cache_read_tokens.is_none() {
             return KvCacheMissReason::Unknown;
         }
@@ -2774,7 +2796,8 @@ impl App {
             return KvCacheMissReason::ZeroRead;
         }
         if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT
-            || baseline.input_tokens.saturating_sub(read_tokens) >= Self::KV_CACHE_MIN_MISSED_TOKENS
+            || baseline.input_tokens.saturating_sub(read_tokens)
+                >= Self::kv_cache_min_missed_tokens(&request.provider)
         {
             return KvCacheMissReason::LowRead;
         }
@@ -2832,8 +2855,16 @@ impl App {
         system_dynamic: &str,
     ) -> KvCacheRequestSignature {
         let dynamic_trimmed = system_dynamic.trim();
+        // The dynamic block precedes the transcript, so it is part of the
+        // cached prefix. Hash it with the static block so a change is
+        // attributed to the harness rather than reported as a plain low read.
+        let system_hash = if dynamic_trimmed.is_empty() {
+            stable_hash_str(system_static)
+        } else {
+            stable_hash_str(&format!("{system_static}\n\n{dynamic_trimmed}"))
+        };
         KvCacheRequestSignature {
-            system_static_hash: stable_hash_str(system_static),
+            system_static_hash: system_hash,
             tools_hash: stable_hash_json(tools),
             messages_hash: stable_hash_json(&cache_relevant_messages(messages)),
             message_hashes: message_hashes(messages),

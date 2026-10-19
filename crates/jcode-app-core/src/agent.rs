@@ -198,7 +198,11 @@ impl Agent {
             cache_creation,
         );
         let miss = self.kv_cache_monitor.finish_request(reusable, cache_read)?;
-        let expected_refresh = miss.reason == crate::kv_cache_monitor::MissReason::Compaction;
+        let expected_refresh = matches!(
+            miss.reason,
+            crate::kv_cache_monitor::MissReason::Compaction
+                | crate::kv_cache_monitor::MissReason::DailyRollover
+        );
         let label = if expected_refresh {
             "KV_CACHE_REFRESH"
         } else {
@@ -309,9 +313,6 @@ pub struct Agent {
     last_status_detail: Option<String>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
-    /// Transient reminder injected into provider requests for the current turn only.
-    /// Not persisted to session history.
-    current_turn_system_reminder: Option<String>,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -480,7 +481,6 @@ impl Agent {
             last_connection_type: None,
             last_status_detail: None,
             pending_alerts: Vec::new(),
-            current_turn_system_reminder: None,
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
@@ -813,7 +813,6 @@ impl Agent {
         self.last_connection_type = None;
         self.last_status_detail = None;
         self.pending_alerts.clear();
-        self.current_turn_system_reminder = None;
         self.reset_tool_output_tracking();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             queue.clear();
@@ -835,8 +834,37 @@ impl Agent {
         let recognized = active_skill
             .as_ref()
             .is_none_or(|name| skills.get(name).is_some());
-        self.active_skill = active_skill.filter(|name| skills.get(name).is_some());
+        let next = active_skill.filter(|name| skills.get(name).is_some());
+        if next != self.active_skill {
+            self.active_skill = next;
+            self.announce_active_skill();
+        }
         recognized
+    }
+
+    /// Record the newly active skill's instructions as a hidden transcript
+    /// message. The system prompt stays byte-identical across skill changes.
+    pub(crate) fn announce_active_skill(&mut self) {
+        let Some(name) = self.active_skill.clone() else {
+            return;
+        };
+        let skills = self.current_skills_snapshot();
+        let Some(skill) = skills.get(&name) else {
+            return;
+        };
+        let text = format!(
+            "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
+            skill.get_prompt().trim()
+        );
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        self.persist_session_best_effort("active skill announcement");
     }
 
     fn sync_session_compaction_state_from_manager(

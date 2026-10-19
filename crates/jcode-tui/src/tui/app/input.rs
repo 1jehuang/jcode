@@ -4010,6 +4010,12 @@ impl App {
 
             if let Some(skill) = skill {
                 self.active_skill = Some(skill_name.clone());
+                if !self.is_remote {
+                    self.append_turn_system_reminder(Some(format!(
+                        "# Active Skill\n\n{}",
+                        skill.get_prompt().trim()
+                    )));
+                }
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("Activated skill: {} - {}", skill.name, skill.description),
@@ -4094,7 +4100,6 @@ impl App {
             self.provider.reasoning_effort().as_deref(),
         );
         if images.is_empty() {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
             self.add_provider_message(Message::user(&model_input));
             self.session.add_message(
                 Role::User,
@@ -4104,7 +4109,6 @@ impl App {
                 }],
             );
         } else {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
             self.add_provider_message(Message::user_with_images(&model_input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
@@ -4116,6 +4120,7 @@ impl App {
             });
             self.session.add_message(Role::User, blocks);
         }
+        self.append_turn_system_reminder(mission_turn_reminder(&self.session.id));
         crate::telemetry::record_turn();
         self.session_save_pending = true;
 
@@ -4185,7 +4190,7 @@ impl App {
                 }
             }
 
-            self.current_turn_system_reminder =
+            let turn_reminder =
                 merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
 
             if has_combined {
@@ -4202,6 +4207,7 @@ impl App {
                     }],
                 );
             }
+            self.append_turn_system_reminder(turn_reminder);
             self.session_save_pending = true;
             self.clear_streaming_render_state();
             self.stream_buffer.clear();
@@ -4264,7 +4270,6 @@ impl App {
                     }
                 }
             }
-            self.current_turn_system_reminder = None;
             // Loop will check if more messages were queued during this turn
         }
     }

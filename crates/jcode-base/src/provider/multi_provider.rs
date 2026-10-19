@@ -29,6 +29,17 @@ impl MultiProvider {
                 || !saved_account_can_serve_model(provider, label, model)
                 || models::provider_unavailability_detail_for_account_label(provider, Some(label))
                     .is_some()
+                // The runtime cooldown expires after minutes, but a quota
+                // window can stay spent for days. Skip straight past logins
+                // whose last known usage is still exhausted.
+                || crate::usage::account_known_exhausted(
+                    if provider == "claude" {
+                        crate::usage::MultiAccountProviderKind::Anthropic
+                    } else {
+                        crate::usage::MultiAccountProviderKind::OpenAI
+                    },
+                    label,
+                )
             {
                 return false;
             }

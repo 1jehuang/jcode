@@ -36,18 +36,44 @@ pub(crate) fn parse_openai_compatible_models_response(raw_body: &str) -> Result<
 
 pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
     let object = value.as_object()?;
+    // Native Muse subscription catalog hides non-user-facing entries via
+    // `metadata["muse-code"].is_hidden`. The field only appears on the native
+    // shape; ordinary providers never set it, so filtering here cannot regress
+    // them. Source: observed schema gh api repos/danzilberdan/opencode-muse/contents/src/oauth.ts
+    if is_muse_hidden_model(object) {
+        return None;
+    }
+    // Muse native entries that do not emit text (e.g. image-only output) are
+    // not chat-completable and are hidden from the picker. The check only
+    // applies when the native `metadata["muse-code"].modalities.output` array
+    // is present; ordinary providers never set it.
+    if is_muse_non_text_output(object) {
+        return None;
+    }
     let id = object
         .get("id")
         .and_then(Value::as_str)
         .or_else(|| object.get("name").and_then(Value::as_str))?
         .to_string();
-    let name = object
-        .get("name")
+    // The native shape puts the display label in `metadata["muse-code"].name`
+    // rather than a top-level `name`/`display_name`. Preserve it.
+    let muse_display_name = object
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("muse-code"))
+        .and_then(Value::as_object)
+        .and_then(|mc| mc.get("name"))
         .and_then(Value::as_str)
-        .or_else(|| object.get("display_name").and_then(Value::as_str))
-        .or_else(|| object.get("displayName").and_then(Value::as_str))
-        .unwrap_or("")
-        .to_string();
+        .map(str::to_string);
+    let name = muse_display_name.unwrap_or_else(|| {
+        object
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| object.get("display_name").and_then(Value::as_str))
+            .or_else(|| object.get("displayName").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string()
+    });
 
     Some(ModelInfo {
         id,
@@ -65,6 +91,11 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
                 "trainingContextLength",
             ],
         )
+        // Native Muse shape nests the live window in
+        // `metadata["muse-code"].limit.context` (and .output). Preserve it
+        // verbatim; no fallback to `output` and no guessed default like
+        // Wonder/Full (1_007_997) is synthesized here.
+        .or_else(|| parse_muse_context_limit(object))
         // llama.cpp's /v1/models reports the serving context only inside
         // `meta` (`n_ctx`, with `n_ctx_train` as the trained maximum). Without
         // this, local llama.cpp models fall back to the generic 200K default
@@ -81,19 +112,76 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
     })
 }
 
+fn is_muse_hidden_model(object: &serde_json::Map<String, Value>) -> bool {
+    object
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("muse-code"))
+        .and_then(Value::as_object)
+        .and_then(|mc| mc.get("is_hidden"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn is_muse_non_text_output(object: &serde_json::Map<String, Value>) -> bool {
+    let Some(outputs) = object
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("muse-code"))
+        .and_then(Value::as_object)
+        .and_then(|mc| mc.get("modalities"))
+        .and_then(Value::as_object)
+        .and_then(|m| m.get("output"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    if outputs.is_empty() {
+        return false;
+    }
+    !outputs.iter().any(|value| {
+        value
+            .as_str()
+            .map(|text| text.trim().eq_ignore_ascii_case("text"))
+            .unwrap_or(false)
+    })
+}
+
+fn parse_muse_context_limit(object: &serde_json::Map<String, Value>) -> Option<u64> {
+    let mc = object
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("muse-code"))
+        .and_then(Value::as_object)?;
+    let limit = mc.get("limit")?.as_object()?;
+    value_as_u64(limit.get("context")?)
+}
+
 /// Read the modalities a catalog entry declares for its input.
 ///
 /// OpenRouter nests them under `architecture.input_modalities`; other
 /// gateways that speak `/v1/models` use a flat `input_modalities` or `input`
-/// key. Anything else yields an empty list, which callers treat as "not
-/// declared" so a missing field never becomes a capability claim.
+/// key. The native Muse shape uses `metadata["muse-code"].modalities.input`
+/// and `.output` (arrays of strings such as "text", "image"). Anything else
+/// yields an empty list, which callers treat as "not declared" so a missing
+/// field never becomes a capability claim.
 pub(crate) fn parse_input_modalities(object: &serde_json::Map<String, Value>) -> Vec<String> {
     let declared = object
         .get("architecture")
         .and_then(Value::as_object)
         .and_then(|architecture| architecture.get("input_modalities"))
         .or_else(|| object.get("input_modalities"))
-        .or_else(|| object.get("input"));
+        .or_else(|| object.get("input"))
+        .or_else(|| {
+            object
+                .get("metadata")
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("muse-code"))
+                .and_then(Value::as_object)
+                .and_then(|mc| mc.get("modalities"))
+                .and_then(Value::as_object)
+                .and_then(|m| m.get("input"))
+        });
 
     let Some(Value::Array(items)) = declared else {
         return Vec::new();
@@ -183,5 +271,151 @@ mod tests {
         assert_eq!(models[0].pricing.prompt.as_deref(), Some("0.1"));
         assert_eq!(models[0].pricing.completion.as_deref(), Some("0.2"));
         assert_eq!(models[0].pricing.input_cache_read.as_deref(), Some("0.01"));
+    }
+
+    #[test]
+    fn muse_native_shape_preserves_nested_context_and_filters_hidden() {
+        // Source: GH api repos/danzilberdan/opencode-muse/contents/src/oauth.ts
+        // data[] { id, metadata: { "muse-code": { name, is_hidden, modalities:{input,output}, limit:{context,output}, tool_call, ... } } }
+        let models = parse_openai_compatible_models_response(
+            r#"{
+                "data": [
+                    {"id":"muse-spark-1.3","metadata":{"muse-code":{"name":"Muse Spark 1.3","is_hidden":false,"modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":1048576,"output":65536},"tool_call":true}}},
+                    {"id":"muse-spark-contrib","metadata":{"muse-code":{"name":"Hidden","is_hidden":true,"modalities":{"input":["text"],"output":["text"]},"limit":{"context":1048576,"output":65536}}}},
+                    {"id":"muse-wonder-1.0","metadata":{"muse-code":{"name":"Muse Wonder 1.0","is_hidden":false,"modalities":{"input":["text"],"output":["text"]},"limit":{"context":1007997,"output":65536}}}}
+                ]
+            }"#,
+        )
+        .expect("Muse native catalog should parse");
+        // Hidden entry filtered.
+        assert_eq!(models.len(), 2, "is_hidden models must be dropped");
+        assert!(!models.iter().any(|m| m.id == "muse-spark-contrib"));
+        // Nested limit.context preserved verbatim, not guessed Wonder Full 1_007_997.
+        let spark = models.iter().find(|m| m.id == "muse-spark-1.3").unwrap();
+        assert_eq!(spark.name, "Muse Spark 1.3");
+        assert_eq!(spark.context_length, Some(1_048_576));
+        assert!(spark.input.contains(&"text".to_string()));
+        assert!(spark.input.contains(&"image".to_string()));
+        let wonder = models.iter().find(|m| m.id == "muse-wonder-1.0").unwrap();
+        assert_eq!(wonder.context_length, Some(1_007_997));
+        // Top-level context_length would win over nested one; no synthesis when absent.
+    }
+
+    #[test]
+    fn muse_native_missing_context_is_none_not_synthesized() {
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"muse-wonder-1.0","metadata":{"muse-code":{"name":"Muse Wonder","is_hidden":false,"modalities":{"input":["text"],"output":["text"]},"limit":{"output":65536}}}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            models[0].context_length, None,
+            "must not synthesize a Wonder Full id when context absent"
+        );
+    }
+
+    #[test]
+    fn ordinary_provider_without_muse_metadata_not_filtered() {
+        // Regression guard: providers without metadata["muse-code"] must not be dropped.
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"novita/zai-org-glm-5.3","context_size":1048576}]}"#,
+        )
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].context_length, Some(1_048_576));
+    }
+
+    #[test]
+    fn muse_native_non_text_output_is_filtered() {
+        // Image-only or other non-text output entries are not chat
+        // completable and must be dropped; ordinary providers without
+        // muse-code metadata must not be affected (regression guard below).
+        let models = parse_openai_compatible_models_response(
+            r#"{
+                "data": [
+                    {"id":"muse-text","metadata":{"muse-code":{"name":"Text","is_hidden":false,"modalities":{"input":["text"],"output":["text"]},"limit":{"context":1024,"output":256}}}},
+                    {"id":"muse-image-only","metadata":{"muse-code":{"name":"Image","is_hidden":false,"modalities":{"input":["text"],"output":["image"]},"limit":{"context":1024,"output":256}}}},
+                    {"id":"muse-mixed","metadata":{"muse-code":{"name":"Mixed","is_hidden":false,"modalities":{"input":["text"],"output":["text","image"]},"limit":{"context":1024,"output":256}}}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(models.len(), 2, "image-only output must be filtered");
+        assert!(models.iter().any(|m| m.id == "muse-text"));
+        assert!(models.iter().any(|m| m.id == "muse-mixed"));
+        assert!(!models.iter().any(|m| m.id == "muse-image-only"));
+    }
+
+    #[test]
+    fn muse_native_no_output_field_means_not_filtered() {
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"muse-no-output","metadata":{"muse-code":{"name":"No output","is_hidden":false,"modalities":{"input":["text"]},"limit":{"context":1024,"output":256}}}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "muse-no-output");
+    }
+
+    #[test]
+    fn ordinary_provider_image_without_native_metadata_not_filtered() {
+        // Ordinary catalogs never carry muse-code; they must not be dropped
+        // even if they look image-ish. The native filter is scoped to
+        // metadata["muse-code"].modalities.output only.
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[
+                {"id":"openai/dall-e-3","name":"DALL-E 3"},
+                {"id":"novita/zai-org-glm-5.3","context_size":1048576}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(models.len(), 2);
+    }
+
+    #[test]
+    fn muse_native_human_name_prefers_metadata_name() {
+        // Native name lives in metadata; top-level display_name must not win.
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"muse-spark-1.3","display_name":"Wrong","metadata":{"muse-code":{"name":"Muse Spark 1.3","is_hidden":false,"modalities":{"input":["text"],"output":["text"]},"limit":{"context":1024,"output":256}}}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(models[0].name, "Muse Spark 1.3");
+    }
+
+    #[test]
+    fn muse_native_top_level_context_wins_over_nested() {
+        // When both exist, the generic top-level window is preserved first.
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"muse-spark-1.3","context_length":999,"metadata":{"muse-code":{"name":"Muse Spark","is_hidden":false,"modalities":{"input":["text"],"output":["text"]},"limit":{"context":1048576,"output":256}}}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(models[0].context_length, Some(999));
+    }
+
+    #[test]
+    fn muse_catalog_fixture_matches_observed_schema() {
+        // Local fixture approximating the observed opencode-muse oauth.ts shape;
+        // exercises hidden + text-only + nested limit + name in one pass.
+        // No network, no credentials.
+        let fixture = r#"{
+            "data": [
+                {"id":"muse-spark-1.3","metadata":{"muse-code":{"name":"Muse Spark 1.3","is_hidden":false,"modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":1048576,"output":65536},"tool_call":true}}},
+                {"id":"muse-spark-internal","metadata":{"muse-code":{"name":"Internal","is_hidden":true,"modalities":{"input":["text"],"output":["text"]},"limit":{"context":1048576,"output":65536}}}},
+                {"id":"muse-image-gen","metadata":{"muse-code":{"name":"ImageGen","is_hidden":false,"modalities":{"input":["text"],"output":["image"]},"limit":{"context":1048576,"output":65536}}}},
+                {"id":"muse-wonder-1.0","metadata":{"muse-code":{"name":"Muse Wonder 1.0","is_hidden":false,"modalities":{"input":["text"],"output":["text"]},"limit":{"context":1007997,"output":65536}}}}
+            ]
+        }"#;
+        let models = parse_openai_compatible_models_response(fixture).unwrap();
+        // hidden + non-text filtered -> 2 chat models
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().any(|m| m.id == "muse-spark-1.3"));
+        assert!(models.iter().any(|m| m.id == "muse-wonder-1.0"));
+        // Wonder context is verbatim 1_007_997, not a guessed Wonder Full id.
+        assert_eq!(
+            models
+                .iter()
+                .find(|m| m.id == "muse-wonder-1.0")
+                .unwrap()
+                .context_length,
+            Some(1_007_997)
+        );
     }
 }

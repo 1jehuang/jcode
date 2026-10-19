@@ -154,8 +154,17 @@ fn handle_kv_cache_miss(
             // TokenUsage can arrive before the daemon's native-compaction
             // attribution. Correct that provisional local notice in place,
             // rather than deduplicating away the more authoritative cause.
-            if reason == "compaction" && sample.reason != KvCacheMissReason::Compaction {
-                sample.reason = KvCacheMissReason::Compaction;
+            // Daily rollover is attributed by the daemon from its own request
+            // clock, so it likewise corrects a provisional local low-read.
+            let authoritative = match reason {
+                "compaction" => Some(KvCacheMissReason::Compaction),
+                "daily_rollover" => Some(KvCacheMissReason::DailyRollover),
+                _ => None,
+            };
+            if let Some(authoritative) = authoritative
+                && sample.reason != authoritative
+            {
+                sample.reason = authoritative;
                 sample.missed_tokens = missed_tokens;
                 if notices_enabled {
                     let marker = format!("turn {turn_number} call {call_index}:");
@@ -178,6 +187,7 @@ fn handle_kv_cache_miss(
             "model_switch" => KvCacheMissReason::ModelSwitch,
             "upstream_switch" => KvCacheMissReason::UpstreamSwitch,
             "expired" => KvCacheMissReason::Expired,
+            "daily_rollover" => KvCacheMissReason::DailyRollover,
             "system_changed" => KvCacheMissReason::HarnessSystemChanged,
             "tools_changed" => KvCacheMissReason::HarnessToolsChanged,
             "prefix_changed" => KvCacheMissReason::HarnessPrefixChanged,

@@ -97,9 +97,19 @@ pub(super) fn enqueue_api_key_usage_tasks(
     }
 
     for profile in crate::provider_catalog::openai_compatible_profiles() {
-        if !profile.requires_api_key
-            || configured_key(profile.api_key_env, profile.env_file).is_none()
-        {
+        if !profile.requires_api_key {
+            continue;
+        }
+        // The native Muse subscription keeps its credential in its own store
+        // rather than an env file, so the env-based check cannot see it. Without
+        // this the profile falls through to the generic activity-ledger report,
+        // which knows nothing about the account snapshot.
+        let configured = if profile.id == crate::auth::muse::PROFILE_ID {
+            crate::auth::muse::has_cached_auth()
+        } else {
+            configured_key(profile.api_key_env, profile.env_file).is_some()
+        };
+        if !configured {
             continue;
         }
 
@@ -265,6 +275,31 @@ async fn fetch_compatible_profile_report(
                 }
             }
         }
+        "muse-subscription" => {
+            // Native subscription: the account snapshot comes from the key mint,
+            // which reports a plan tier but no numeric quota windows. Show what
+            // exists and state plainly that remaining quota is unknown, rather
+            // than implying headroom we cannot actually see.
+            match crate::auth::muse::load_credentials() {
+                Ok(credentials) => {
+                    if let Some(tier) = credentials
+                        .subs_usage
+                        .as_ref()
+                        .and_then(|usage| usage.tier.as_deref())
+                    {
+                        extra_info.push(("Plan".to_string(), tier.to_string()));
+                    }
+                    extra_info.push((
+                        "Quota".to_string(),
+                        "unknown (the account mint reports no usage windows)".to_string(),
+                    ));
+                }
+                Err(_) => extra_info.push((
+                    "Quota".to_string(),
+                    "unavailable (no stored account snapshot)".to_string(),
+                )),
+            }
+        }
         _ => {
             // No provider-specific balance API: do a free `GET /models` probe
             // against the profile's own endpoint so the key status is real
@@ -278,8 +313,11 @@ async fn fetch_compatible_profile_report(
     }
 
     // Local pay-as-you-go spend is meaningless next to a flat-rate plan
-    // quota (Kimi, or a Z.ai Coding Plan key that returned windows).
-    let plan_quota_shown = profile.id == "kimi" || (profile.id == "zai" && !limits.is_empty());
+    // quota (Kimi, a Z.ai Coding Plan key that returned windows, or a Muse
+    // subscription, which is a flat-rate plan and not metered per token here).
+    let plan_quota_shown = profile.id == "kimi"
+        || profile.id == "muse-subscription"
+        || (profile.id == "zai" && !limits.is_empty());
     if !plan_quota_shown {
         push_local_spend(&mut extra_info, &source_key);
     }

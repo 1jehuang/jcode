@@ -249,12 +249,25 @@ impl Agent {
                 crate::server::provider_oauth_email(provider.as_ref());
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
+            // Hash the whole system prompt, not only the static block.
+            // Providers place the dynamic block ahead of the transcript (in
+            // the system param or right after the latest user prompt), so a
+            // change there is a harness-caused miss and must be attributed.
+            let system_signature_text = if split_prompt.dynamic_part.is_empty() {
+                std::borrow::Cow::Borrowed(split_prompt.static_part.as_str())
+            } else {
+                std::borrow::Cow::Owned(format!(
+                    "{}\n\n{}",
+                    split_prompt.static_part, split_prompt.dynamic_part
+                ))
+            };
             let kv_request = kv_cache_request_event(
                 &cache_signature_messages,
                 &tools,
-                &split_prompt.static_part,
+                &system_signature_text,
                 &ephemeral_signature_messages,
             );
+            drop(system_signature_text);
             self.begin_kv_cache_monitor_request(&kv_request, &model_at_request_start);
             let _ = event_tx.send(kv_request);
             // These vectors are only needed to build the cache telemetry event.
