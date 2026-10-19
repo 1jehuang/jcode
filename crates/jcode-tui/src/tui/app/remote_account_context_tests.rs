@@ -35,6 +35,7 @@ fn authoritative_context_event(provider: &str, window: u64) -> ServerEvent {
         error: None,
         resolved_credential: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         reasoning_effort: None,
     }
 }

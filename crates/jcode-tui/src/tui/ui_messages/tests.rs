@@ -1,10 +1,282 @@
 use super::*;
 
+#[test]
+fn oauth_login_progress_renderer_keeps_short_link_and_hides_full_details() {
+    let url =
+        "https://example.invalid/authorize?state=private-state&code_challenge=private-challenge";
+    let summary = format!(
+        "✓ Sign-in link ready\n◌ Waiting for browser approval\n[Open OpenAI sign-in]({url})\nPaste callback URL here · /cancel"
+    );
+    let mut msg = DisplayMessage::system(jcode_tui_messages::encode_collapsible_swarm_content(
+        "Sign-in details",
+        &format!(
+            "{summary}\n\n<!-- oauth-details -->\n\nFull sign-in URL:\n{url}\n\nManual fallback details"
+        ),
+    ));
+    msg.title = Some("OpenAI login".to_string());
+    for width in [40, 80, 120] {
+        let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        let text = lines
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Sign-in link ready"));
+        assert!(text.contains("Waiting for browser approval"));
+        assert!(text.contains("Open OpenAI sign-in"));
+        assert!(text.contains(SWARM_EXPAND_BADGE));
+        assert!(!text.contains("private-state"));
+        assert!(!text.contains("Manual fallback details"));
+        assert!(lines.iter().all(|line| line.width() <= width as usize));
+    }
+    msg.content = jcode_tui_messages::toggle_collapsible_swarm_content(&msg.content).unwrap();
+    let lines = render_system_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let text = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("private-state"));
+    assert!(text.contains("Manual fallback details"));
+    assert!(text.contains(SWARM_COLLAPSE_BADGE));
+}
+
 fn extract_line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>()
+}
+
+#[test]
+fn usage_card_fits_content_on_wide_terminals() {
+    let msg =
+        DisplayMessage::system("# Updated\n+ OpenAI - available\n  Banked resets: 12 available");
+    let render = |width| render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
+    let lines = render(240);
+    assert_eq!(lines, render(120));
+    assert_eq!(lines, render(160));
+    assert_eq!(
+        lines[0].width(),
+        "  Banked resets: 12 available".width() + 4
+    );
+    assert!(lines.iter().all(|line| line.width() == lines[0].width()));
+    assert!(extract_line_text(&lines[0]).contains("Usage"));
+    assert!(extract_line_text(lines.last().unwrap()).starts_with('╰'));
+}
+
+#[test]
+fn usage_card_compacts_padded_labels_in_narrow_terminals() {
+    let msg = DisplayMessage::system(
+        "  7-day window              : ████████░░░░░░  59% · resets in 5d 4h",
+    );
+    let lines = render_usage_message(&msg, 36, crate::config::DiffDisplayMode::Off);
+    let rows: Vec<_> = lines.iter().map(extract_line_text).collect();
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("7-day window:") && row.contains("59%")),
+        "{rows:#?}"
+    );
+    assert!(rows.iter().any(|row| row.contains("resets in 5d 4h")));
+    assert!(lines.iter().all(|line| line.width() <= 36));
+}
+
+#[test]
+fn usage_card_never_overflows_even_tiny_terminals() {
+    let mut msg = DisplayMessage::system(
+        "# Usage updated\n+ 工作账户 e\u{301} - available\n  Weekly: █████░░░░░ 50% · resets in 2h 5m\n  Session resets: 1 available\n\n! Claude - error\n  error: unavailable",
+    );
+    msg.title = Some("使用情况 with a very long title".into());
+    for width in 0..=120 {
+        let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.is_empty(), width == 0, "width {width}");
+        for line in &lines {
+            assert!(
+                line.width() <= usize::from(width),
+                "width {width}: {line:?}"
+            );
+        }
+        if width >= 10 {
+            assert!(lines.iter().all(|line| line.width() == lines[0].width()));
+        }
+    }
+}
+
+#[test]
+fn usage_card_preserves_unicode_and_wrapped_metadata() {
+    let msg = DisplayMessage::system(
+        "+ 工作账户 e\u{301} - available\n  Weekly: █████░░░░░ 50% · resets in 2h 5m\n  Session resets: 1 available",
+    );
+    for width in [10, 18, 20, 32, 40, 60, 120] {
+        let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        let body: String = lines[1..lines.len() - 1]
+            .iter()
+            .map(|line| {
+                let text = extract_line_text(line);
+                text.strip_prefix("│ ")
+                    .unwrap()
+                    .strip_suffix(" │")
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        let body = without_whitespace(&body);
+        for expected in [
+            "工作账户e\u{301}",
+            "available",
+            "50%",
+            "resetsin2h5m",
+            "Sessionresets:1available",
+        ] {
+            assert!(body.contains(expected), "width {width}: {body}");
+        }
+    }
+    assert_eq!(
+        msg.content.matches(" - available").count(),
+        1,
+        "report protocol is unchanged"
+    );
+}
+
+#[test]
+fn usage_card_styles_heading_and_account_statuses() {
+    use ratatui::style::Modifier;
+    let msg = DisplayMessage::system(
+        "# Updated\n+ OpenAI - available\n~ Work - 70% used\n! Claude - hard limit\n! Other - error\nProvider - no data",
+    );
+    let lines = render_usage_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+    for name in ["Updated", "OpenAI", "Work", "Claude", "Other"] {
+        let span = spans.iter().find(|span| span.content == name).unwrap();
+        assert_eq!(span.style.fg, Some(Color::White));
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+    }
+    for (status, color) in [
+        (" · available", rgb(100, 220, 170)),
+        (" · 70% used", rgb(255, 200, 100)),
+        (" · hard limit", Color::Red),
+        (" · error", Color::Red),
+    ] {
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.content == status && span.style.fg == Some(color))
+        );
+    }
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.content == "Provider - no data" && span.style.fg == Some(dim_color()))
+    );
+}
+
+#[test]
+fn usage_card_keeps_narrow_gauges_and_words_together() {
+    let msg = DisplayMessage::system(
+        "+ OpenAI - available\n  5-hour window: ███████░░░░░░░ 50% · resets in 2h 5m\n\n~ Claude - 70% used",
+    );
+    for width in [20, 40, 60] {
+        let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        let texts: Vec<_> = lines.iter().map(extract_line_text).collect();
+        let gauges: Vec<_> = texts.iter().filter(|text| text.contains('█')).collect();
+        assert_eq!(gauges.len(), 1, "width {width}: {texts:?}");
+        assert!(gauges[0].contains("50%"), "width {width}: {texts:?}");
+        assert!(texts.iter().any(|text| text.contains("available")));
+        assert!(texts.iter().any(|text| text.contains("resets")));
+        assert!(texts.iter().any(|text| text.contains("──────")));
+        if width == 40 {
+            assert!(!gauges[0].contains("resets"));
+        }
+    }
+}
+
+#[test]
+fn usage_card_compacts_long_summary_without_mutating_report() {
+    let report =
+        "# Showing cached usage while refreshing all connected accounts\n+ OpenAI - available";
+    let msg = DisplayMessage::system(report);
+    let lines = render_usage_message(&msg, 20, crate::config::DiffDisplayMode::Off);
+    assert!(extract_line_text(&lines[1]).contains('…'));
+    assert!(extract_line_text(&lines[2]).contains("OpenAI"));
+    assert_eq!(msg.content, report);
+}
+
+#[test]
+fn usage_card_colors_utilization_and_dims_empty_bars_and_countdowns() {
+    use ratatui::style::Modifier;
+    for (percent, color) in [
+        (0, rgb(100, 220, 170)),
+        (69, rgb(100, 220, 170)),
+        (70, rgb(255, 200, 100)),
+        (89, rgb(255, 200, 100)),
+        (90, Color::Red),
+        (100, Color::Red),
+    ] {
+        let bar = if percent == 0 {
+            "░░░░"
+        } else {
+            "██░░"
+        };
+        let msg = DisplayMessage::system(format!("  Weekly: {bar} {percent}% · resets in 2h"));
+        let lines = render_usage_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+        let value = spans
+            .iter()
+            .find(|span| span.content == format!(" {percent}%"))
+            .unwrap();
+        assert_eq!(value.style.fg, Some(color));
+        assert!(value.style.add_modifier.contains(Modifier::BOLD));
+        for span in spans
+            .iter()
+            .filter(|span| span.content.contains('░') || span.content.contains("resets in"))
+        {
+            assert_eq!(span.style.fg, Some(dim_color()));
+        }
+        if percent > 0 {
+            assert!(
+                spans
+                    .iter()
+                    .any(|span| span.content == "██" && span.style.fg == Some(color))
+            );
+        }
+    }
+}
+
+#[test]
+fn usage_card_highlights_reset_counts_and_handles_empty_reports() {
+    use ratatui::style::Modifier;
+    for label in ["Banked", "Session"] {
+        for count in [0_u64, 1, 12, u64::MAX] {
+            let msg =
+                DisplayMessage::system(format!("  {label} resets: {count} available · next in 2d"));
+            let lines = render_usage_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+            let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+            let number = spans
+                .iter()
+                .find(|span| span.content == count.to_string())
+                .unwrap();
+            assert!(number.style.add_modifier.contains(Modifier::BOLD));
+            assert_eq!(
+                number.style.fg,
+                Some(if count == 0 {
+                    dim_color()
+                } else {
+                    rgb(100, 220, 170)
+                })
+            );
+            assert!(
+                spans.iter().any(|span| span.content.contains("next in 2d")
+                    && span.style.fg == Some(dim_color()))
+            );
+        }
+    }
+    for content in ["", "\n", "x"] {
+        let mut msg = DisplayMessage::system(content);
+        msg.title = Some("U".into());
+        let lines = render_usage_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        assert!(!lines.is_empty());
+        assert!(lines.iter().all(|line| line.width() == lines[0].width()));
+    }
 }
 
 fn without_whitespace(text: &str) -> String {
@@ -54,6 +326,127 @@ fn transient_system_notices_are_single_line_without_changing_content() {
         extract_line_text(&lines[0]).trim(),
         "Server reloaded; resuming interrupted work."
     );
+}
+
+#[test]
+fn ordinary_multiline_and_markdown_notices_are_one_terminal_row() {
+    let saved = markdown::center_code_blocks();
+    for centered in [false, true] {
+        markdown::set_center_code_blocks(centered);
+        for content in [
+            "Header line\n  indented detail\n\nNext block",
+            "**Status updated**\n- 工作账户 e\u{301} reconnected\n- More detail that must not wrap",
+            "Using `some/very/long/path.rs` with **formatting** and a long status message",
+            "\u{1b}[35mUpdated\u{1b}[0m\n\tMore details",
+        ] {
+            let msg = DisplayMessage::system(content);
+            for width in 0..=120 {
+                let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                assert_eq!(
+                    lines.len(),
+                    usize::from(width != 0),
+                    "{content:?} at {width}"
+                );
+                for line in &lines {
+                    assert!(line.width() <= width as usize, "{line:?} at {width}");
+                    assert!(!extract_line_text(line).contains(['\n', '\t', '\u{1b}']));
+                }
+                assert_eq!(
+                    msg.content, content,
+                    "display must not rewrite stored content"
+                );
+            }
+        }
+    }
+    markdown::set_center_code_blocks(saved);
+}
+
+#[test]
+fn file_activity_is_neutral_and_one_row_including_legacy_titles() {
+    let saved = markdown::center_code_blocks();
+    let content = jcode_tui_messages::encode_collapsible_swarm_content(
+        "…/src/工作账户/e\u{301}.rs · Edited lines 323-348 (1 occurrence)",
+        "Intent: fix the parser\n\n```text\n323- old line\n323+ new line\n```",
+    );
+    for centered in [false, true] {
+        markdown::set_center_code_blocks(centered);
+        for title in ["File activity · moss", "File activity"] {
+            let msg = DisplayMessage::swarm(title, &content);
+            for width in 0..=120 {
+                let lines = render_swarm_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                assert_eq!(lines.len(), usize::from(width != 0), "{title} at {width}");
+                for line in &lines {
+                    assert!(line.width() <= width as usize, "{line:?} at {width}");
+                    let text = extract_line_text(line);
+                    assert!(!text.contains("Intent:"));
+                    assert!(!text.contains("old line"));
+                    for span in &line.spans {
+                        if !span.content.trim().is_empty() {
+                            assert_eq!(span.style.fg, Some(dim_color()), "{span:?}");
+                        }
+                    }
+                    if width >= 80 {
+                        assert!(text.contains(SWARM_DIFF_EXPAND_BADGE));
+                        assert!(text.trim_end().ends_with(SWARM_DIFF_EXPAND_BADGE));
+                    }
+                }
+            }
+        }
+    }
+    markdown::set_center_code_blocks(saved);
+}
+
+#[test]
+fn file_activity_explicit_expansion_preserves_diff_details() {
+    let content = jcode_tui_messages::encode_collapsible_swarm_content(
+        "src/parser.rs · Edited lines 323-348",
+        "Intent: fix the parser\n\n```text\n323- old line\n323+ new line\n```",
+    );
+    let expanded = jcode_tui_messages::toggle_collapsible_swarm_content(&content).unwrap();
+    let msg = DisplayMessage::swarm("File activity · moss", expanded);
+    let lines = render_swarm_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let text = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(lines.len() > 1);
+    assert!(text.contains(SWARM_DIFF_COLLAPSE_BADGE));
+    assert!(text.contains("Intent: fix the parser"));
+    assert!(text.contains("323- old line"));
+    assert!(text.contains("323+ new line"));
+}
+
+#[test]
+fn raw_file_activity_system_notice_is_neutral_without_rewriting_content() {
+    let content = "⚠️ File activity: /home/jeremy/jcode/src/parser.rs - moss previously read this file: read lines 1-1000\nMore details";
+    let msg = DisplayMessage::system(content);
+    let lines = render_system_message(&msg, 60, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].width() <= 60);
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style.fg == Some(dim_color()))
+    );
+    assert_eq!(msg.content, content);
+}
+
+#[test]
+fn interactive_login_prompt_keeps_instructions_visible() {
+    let msg = DisplayMessage::system(
+        "Azure OpenAI Login\n\nEnter your endpoint below.\nType /cancel to abort.",
+    );
+    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let text = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(lines.len() > 1);
+    assert!(text.contains("Enter your endpoint below."));
+    assert!(text.contains("/cancel"));
 }
 
 #[test]
@@ -197,14 +590,19 @@ fn render_system_message_renders_markdown_formatting() {
         "**bold** and `code` and # heading\n- bullet item\n[link](http://example.com)",
     );
 
-    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let lines = render_system_message(&msg, 200, crate::config::DiffDisplayMode::Off);
     let plain = lines
         .iter()
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
 
-    // System messages now render markdown: the inline markers are consumed and
+    assert_eq!(
+        lines.len(),
+        1,
+        "ordinary markdown notices must stay compact"
+    );
+    // System messages render markdown: the inline markers are consumed and
     // the underlying text survives. Bold/code markers should no longer appear
     // literally, while the text content and a bullet glyph remain.
     assert!(plain.contains("bold"), "keeps bold text: {plain:?}");
@@ -234,8 +632,9 @@ fn render_system_message_renders_markdown_formatting() {
 }
 
 #[test]
-fn render_system_message_preserves_indentation_and_newlines() {
-    let msg = DisplayMessage::system("Header line\n  indented detail\n\nNext block");
+fn explicit_system_report_preserves_indentation_and_newlines() {
+    let msg = DisplayMessage::system("Header line\n  indented detail\n\nNext block")
+        .with_title("Context");
 
     let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered = lines.iter().map(extract_line_text).collect::<Vec<_>>();
@@ -563,9 +962,23 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
         todo("2", "Render the card", "in_progress", Some("todo card")),
         todo("3", "Unrelated cleanup", "pending", None),
     ];
-    let msg = DisplayMessage::todos(serde_json::to_string(&todos).unwrap());
+    let msg = DisplayMessage::todos(
+        serde_json::json!({
+            "todos": todos,
+            "plan": {
+                "user_intention": "Keep overall progress visible",
+                "understands_user_intent": "clear"
+            }
+        })
+        .to_string(),
+    );
 
     let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let intent_row = lines
+        .iter()
+        .position(|line| extract_line_text(line).contains("Keep overall progress visible"))
+        .unwrap();
+    assert_eq!(extract_line_text(&lines[intent_row + 1]).trim(), "●●○");
     let plain = lines
         .iter()
         .map(extract_line_text)
@@ -1586,6 +1999,7 @@ fn render_background_task_messages_prefer_display_name() {
 
 #[test]
 fn render_system_message_uses_scheduled_task_card() {
+    let _guard = system_glyph_env_lock();
     let msg = DisplayMessage::system(
         "[Scheduled task]\nA scheduled task for this session is now due.\n\nTask: Follow up on the scheduler test\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nBranch: master\n\nBackground: Verify the scheduled task card styling\nSuccess criteria: The due task renders clearly\nScheduled by session: session_test",
     );
@@ -1610,6 +2024,7 @@ fn render_system_message_uses_scheduled_task_card() {
 
 #[test]
 fn render_tool_message_uses_scheduled_card() {
+    let _guard = system_glyph_env_lock();
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content: "Scheduled task 'Follow up on the scheduler test' for in 1m (id: sched_abc123)\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nTarget: resume session session_test".to_string(),

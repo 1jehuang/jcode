@@ -167,6 +167,7 @@ impl ServerRuntime {
                 };
                 match accepted {
                     Ok((stream, _)) => {
+                        crate::logging::info("[TIMING] main accept: connection accepted");
                         runtime.increment_client_count().await;
                         if !runtime
                             .spawn_client_task(stream, "Client error", true)

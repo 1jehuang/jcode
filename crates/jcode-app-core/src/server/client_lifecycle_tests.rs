@@ -851,12 +851,14 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_server_failover: false,
         id: 1,
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
         target_session_id: None,
         client_instance_id: None,
         client_has_local_history: false,
+        history_base: None,
         allow_session_takeover: false,
         crash_on_disconnect: false,
         continue_on_disconnect: false,
@@ -1001,6 +1003,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 images: Vec::new(),
                 system_reminder: None,
                 active_skill: None,
+                server_failover: false,
             },
             "session_guard",
             &mut ProcessingState {
@@ -1102,6 +1105,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             images: Vec::new(),
             system_reminder: None,
             active_skill: None,
+            server_failover: false,
         },
         session_id,
         &mut ProcessingState {
@@ -1227,6 +1231,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: None,
+                server_failover: false,
             },
             session_id,
             &mut ProcessingState {
@@ -1327,6 +1332,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     images: Vec::new(),
                     system_reminder: None,
                     active_skill: None,
+                    server_failover: false,
                 },
                 session_id,
                 &mut ProcessingState {
@@ -1838,7 +1844,11 @@ async fn sdk_socket_workflow(response_only: bool) {
     let mut other_session =
         crate::session::Session::create_with_id("sdk_other_session".into(), None, None);
     other_session.working_dir = Some(home._home.path().to_string_lossy().into_owned());
+    // An existing session, not an empty panel: empty untitled sessions are
+    // never written to disk and get a 30s reconnect grace on disconnect.
+    other_session.title = Some("sdk other session".into());
     other_session.save().unwrap();
+    assert!(crate::session::session_exists("sdk_other_session"));
     let other_registry = Registry::new(provider_template.clone()).await;
     sessions.write().await.insert(
         "sdk_other_session".into(),

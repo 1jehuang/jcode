@@ -250,11 +250,13 @@ impl App {
         for step in &script.steps {
             let step_result = match step {
                 TestStep::Message { content } => {
+                    self.note_client_interaction();
                     self.input = content.clone();
                     self.submit_input();
                     format!("message: {}", content)
                 }
                 TestStep::SetInput { text } => {
+                    self.note_client_interaction();
                     self.input = text.clone();
                     self.cursor_pos = self.input.len();
                     format!("set_input: {}", text)
@@ -389,6 +391,14 @@ impl App {
         let trimmed = step.trim();
         if trimmed.is_empty() {
             return "ERR: empty step".to_string();
+        }
+        if trimmed.starts_with("set_input:")
+            || trimmed.starts_with("message:")
+            || trimmed.starts_with("scroll:")
+            || trimmed == "submit"
+            || trimmed == "reload"
+        {
+            self.note_client_interaction();
         }
         if trimmed.starts_with("keys:") {
             let keys_str = trimmed.strip_prefix("keys:").unwrap_or("");

@@ -53,6 +53,7 @@ pub(super) async fn create_headless_session(
     report_back_to_session_id: Option<String>,
     memory_scope: HeadlessMemoryScope,
 ) -> Result<String> {
+    let _runtime_activity = crate::runtime_activity::global().try_enter()?;
     let memory_enabled = crate::config::config().features.memory;
     let swarm_enabled = crate::config::config().features.swarm;
 
