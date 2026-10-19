@@ -1300,15 +1300,29 @@ impl App {
     async fn onboarding_run_model_validation(
         provider: std::sync::Arc<dyn crate::provider::Provider>,
     ) -> anyhow::Result<()> {
-        let reply = tokio::time::timeout(
+        let (reply, usage) = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            provider.complete_simple(
+            provider.complete_simple_with_usage(
                 "Reply with exactly: OK",
                 "You are validating connectivity. Reply with exactly: OK",
             ),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("timed out after 30s"))??;
+        .map_err(|_| anyhow::anyhow!("timed out after 30s"))?
+        .inspect_err(|error| {
+            crate::telemetry::record_simple_completion_failure_usage(
+                None,
+                crate::telemetry::UsageSource::Sidecar,
+                error,
+            );
+        })?;
+        crate::telemetry::record_simple_completion_usage(
+            None,
+            provider.name(),
+            &provider.model(),
+            crate::telemetry::UsageSource::Sidecar,
+            usage,
+        );
         if reply.trim().is_empty() {
             anyhow::bail!("empty response");
         }

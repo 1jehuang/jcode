@@ -96,6 +96,7 @@ fn multi_provider_with_pin_aware_runtimes() -> MultiProvider {
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
+        session_id: RwLock::new(None),
         active: RwLock::new(ActiveProvider::Claude),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,

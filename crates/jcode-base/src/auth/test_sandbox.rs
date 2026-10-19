@@ -102,6 +102,7 @@ fn reset_global_auth_state() {
 fn tracked_env_vars() -> Vec<String> {
     let mut keys = [
         "JCODE_HOME",
+        "JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION",
         "XDG_CONFIG_HOME",
         "JCODE_OPENROUTER_API_BASE",
         "JCODE_OPENROUTER_API_KEY_NAME",

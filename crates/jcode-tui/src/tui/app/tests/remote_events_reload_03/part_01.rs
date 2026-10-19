@@ -7,15 +7,17 @@ fn test_handle_server_event_service_tier_changed_mentions_next_request_when_stre
 
     app.is_processing = true;
 
-    app.handle_server_event(
+    let redraw = app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierChanged {
             id: 7,
+            pending: false,
             service_tier: Some("priority".to_string()),
             error: None,
         },
         &mut remote,
     );
 
+    assert!(redraw, "tier configuration acknowledgement must redraw immediately");
     assert_eq!(app.remote_service_tier, Some("priority".to_string()));
     assert_eq!(
         app.status_notice(),
@@ -25,7 +27,73 @@ fn test_handle_server_event_service_tier_changed_mentions_next_request_when_stre
     let last = app.display_messages().last().expect("missing response");
     assert_eq!(
         last.content,
-        "✓ Fast mode on (Fast)\nApplies to the next request/turn. The current in-flight request keeps its existing tier."
+        "✓ Fast mode configured on (Fast)\nRequested for the next provider request, including later in this turn. The current in-flight request is unchanged. Provider acceptance is not yet confirmed."
+    );
+}
+
+#[test]
+fn test_service_tier_pending_keeps_configured_tier_until_confirmation() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_service_tier = Some("priority".to_string());
+    let before = app.display_messages().len();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierChanged {
+            id: 8,
+            pending: true,
+            service_tier: None,
+            error: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(app.remote_service_tier.as_deref(), Some("priority"));
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert_eq!(
+        app.status_notice().as_deref(),
+        Some("Speed: change requested (waiting)")
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierChanged {
+            id: 8,
+            pending: false,
+            service_tier: Some("ultrafast".to_string()),
+            error: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
+    assert_eq!(app.display_messages().len(), before + 2);
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("configured on (Ultrafast)")
+    );
+}
+
+#[test]
+fn test_service_tier_old_protocol_response_is_single_configuration_confirmation() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let event = serde_json::from_value(serde_json::json!({
+        "type": "service_tier_changed", "id": 9, "service_tier": "ultrafast"
+    }))
+    .expect("old server tier event must deserialize");
+    let before = app.display_messages().len();
+    app.handle_server_event(event, &mut remote);
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Provider acceptance is not yet confirmed")
     );
 }
 
@@ -131,6 +199,8 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "ses_test_123".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -166,10 +236,12 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
             account_labels: Vec::new(),
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -209,6 +281,8 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     let event = crate::protocol::ServerEvent::History {
+        messages_base_count: None,
+        images_unchanged: false,
         id: 1,
         session_id: "ses_server_owned_reload".to_string(),
         messages: vec![crate::protocol::HistoryMessage {
@@ -247,10 +321,12 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         status_detail: None,
         upstream_provider: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         resolved_credential: None,
         reasoning_effort: None,
         service_tier: None,
         account_labels: Vec::new(),
+        available_service_tiers: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -295,6 +371,8 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "ses_test_456".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -330,10 +408,12 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
             account_labels: Vec::new(),
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -363,6 +443,8 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "ses_reload_done".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -398,10 +480,12 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
             account_labels: Vec::new(),
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -679,6 +763,8 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             id: 1,
             session_id: "ses_side_panel_history".to_string(),
             messages: vec![],
+            messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -705,10 +791,12 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
             account_labels: Vec::new(),
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: side_panel.clone(),
@@ -740,6 +828,8 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
             id: 1,
             session_id: "ses_resume_active".to_string(),
             messages: vec![],
+            messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("openai".to_string()),
             provider_model: Some("gpt-5.4".to_string()),
@@ -766,10 +856,12 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
             account_labels: Vec::new(),
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: Some(crate::protocol::SessionActivitySnapshot {
                 is_processing: true,

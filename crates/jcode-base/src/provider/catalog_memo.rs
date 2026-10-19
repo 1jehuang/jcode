@@ -89,6 +89,10 @@ impl MultiProvider {
     /// annotations in the catalog; the configured-provider bitmap matters
     /// because each configured runtime contributes its own route family.
     pub(super) fn routes_memo_key(&self) -> String {
+        self.routes_memo_key_with_scope(Some(self.catalog_scope))
+    }
+
+    fn routes_memo_key_with_scope(&self, catalog_scope: Option<u64>) -> String {
         let active = self.active_provider();
         let credential_mode = self.credential_mode();
         let profile = self
@@ -125,7 +129,7 @@ impl MultiProvider {
             "{:?}",
             (
                 (
-                    self.catalog_scope,
+                    catalog_scope,
                     CATALOG_CLOCK.elapsed().as_secs() / 60,
                     match crate::storage::jcode_dir() {
                         Ok(path) => Some(path.into_os_string().into_encoded_bytes()),
