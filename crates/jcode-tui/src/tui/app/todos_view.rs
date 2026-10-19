@@ -405,6 +405,19 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+/// Pinned-todo-band payload for any session, read from disk. Used by the
+/// `/resume` preview so it shows the same band as the live chat. `None` when the
+/// session has no todos.
+pub(crate) fn pinned_todos_payload_for_session(session_id: &str) -> Option<String> {
+    let todos = load_current_session_todos(Some(session_id));
+    if todos.is_empty() {
+        return None;
+    }
+    let goals = load_current_session_goals(Some(session_id));
+    let plan = load_current_session_plan(Some(session_id));
+    Some(todo_card_payload_json(&todos, &plan, &goals))
+}
+
 fn load_current_session_todos(session_id: Option<&str>) -> Vec<TodoItem> {
     let Some(session_id) = session_id else {
         return Vec::new();

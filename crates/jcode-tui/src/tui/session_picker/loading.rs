@@ -26,6 +26,11 @@ use super::{ResumeTarget, SessionSource};
 #[cfg(test)]
 const TRANSCRIPT_SEARCH_CHUNK_BYTES: usize = 64 * 1024;
 
+/// Maximum number of trailing transcript messages loaded into the `/resume`
+/// preview. Large enough that the preview scrolls back through a long session
+/// like the live chat does, while bounding the one-off render on selection.
+pub(super) const PREVIEW_MESSAGE_LIMIT: usize = 400;
+
 fn session_scan_limit() -> usize {
     std::env::var("JCODE_SESSION_PICKER_MAX_SESSIONS")
         .ok()
@@ -789,7 +794,7 @@ fn collect_recent_files_recursive(root: &Path, extension: &str, limit: usize) ->
 ///
 /// 512 KiB comfortably covers far more than 20 messages for normal transcripts
 /// while bounding the worst case.
-const EXTERNAL_PREVIEW_TAIL_BYTES: u64 = 512 * 1024;
+const EXTERNAL_PREVIEW_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Read the trailing portion of a file as UTF-8 text, capped at
 /// [`EXTERNAL_PREVIEW_TAIL_BYTES`]. When the file is larger than the cap we seek
@@ -822,8 +827,8 @@ fn push_preview_message(preview: &mut Vec<PreviewMessage>, role: &str, content: 
         tool_data: None,
         timestamp: None,
     });
-    if preview.len() > 20 {
-        let drop_count = preview.len().saturating_sub(20);
+    if preview.len() > PREVIEW_MESSAGE_LIMIT {
+        let drop_count = preview.len().saturating_sub(PREVIEW_MESSAGE_LIMIT);
         preview.drain(0..drop_count);
     }
 }
@@ -1644,11 +1649,21 @@ fn load_session_summary(path: &Path) -> Result<SessionSummary> {
 }
 
 pub(super) fn build_messages_preview(session: &Session) -> Vec<PreviewMessage> {
-    session::render_messages(session)
+    build_messages_preview_with_offset(session).0
+}
+
+/// Trailing preview messages plus the number of user prompts dropped from the
+/// head, so the preview can number prompts globally like the live chat.
+pub(super) fn build_messages_preview_with_offset(session: &Session) -> (Vec<PreviewMessage>, usize) {
+    let rendered = session::render_messages(session);
+    let skip = rendered.len().saturating_sub(PREVIEW_MESSAGE_LIMIT);
+    let hidden_prompts = rendered[..skip]
+        .iter()
+        .filter(|msg| msg.role == "user" && !msg.content.trim().is_empty())
+        .count();
+    let preview = rendered
         .into_iter()
-        .rev()
-        .take(20)
-        .rev()
+        .skip(skip)
         .map(|msg| PreviewMessage {
             role: msg.role,
             content: msg.content,
@@ -1656,7 +1671,8 @@ pub(super) fn build_messages_preview(session: &Session) -> Vec<PreviewMessage> {
             tool_data: msg.tool_data,
             timestamp: None,
         })
-        .collect()
+        .collect();
+    (preview, hidden_prompts)
 }
 
 pub(super) fn crashed_sessions_from_all_sessions(
