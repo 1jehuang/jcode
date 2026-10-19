@@ -17,6 +17,10 @@ pub(super) fn auto_scriptable_flow_reason(
             | LoginProviderTarget::Antigravity
             | LoginProviderTarget::Google
             | LoginProviderTarget::Copilot
+    ) || matches!(
+        provider.target,
+        LoginProviderTarget::OpenAiCompatible(profile)
+            if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id
     );
     if !supports_scriptable {
         return None;
@@ -248,9 +252,37 @@ pub(super) async fn start_scriptable_login(
                 current_time_ms() + (device_resp.expires_in as i64 * 1000),
             )
         }
+        LoginProviderTarget::OpenAiCompatible(profile)
+            if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
+        {
+            crate::auth::muse::ensure_enabled()?;
+            if !options.json {
+                eprintln!("{}", crate::auth::muse::experimental_warning_message());
+            }
+            let client = crate::auth::muse::http_client()?;
+            let challenge = crate::auth::muse::begin_login(&client).await?;
+            let auth_url = challenge
+                .verification_uri_complete
+                .clone()
+                .unwrap_or_else(|| challenge.verification_uri.clone());
+            let interval = u64::try_from(challenge.interval).unwrap_or(5).max(1);
+            let expires_in_ms = i64::try_from(challenge.expires_in).unwrap_or(1800).max(60) * 1000;
+            (
+                PendingScriptableLogin::MuseSubscription {
+                    device_code: challenge.device_code.clone(),
+                    user_code: challenge.user_code.clone(),
+                    verification_uri: challenge.verification_uri.clone(),
+                    interval,
+                },
+                auth_url,
+                "complete",
+                Some(challenge.user_code),
+                current_time_ms() + expires_in_ms,
+            )
+        }
         _ => {
             anyhow::bail!(
-                "`--print-auth-url` is currently supported for: claude, openai, gemini, antigravity, google, copilot."
+                "`--print-auth-url` is currently supported for: claude, openai, gemini, antigravity, google, copilot, muse-subscription."
             )
         }
     };
@@ -336,8 +368,21 @@ pub(super) async fn complete_scriptable_login(
             }
             complete_scriptable_copilot_login(provider.id, options).await
         }
+        LoginProviderTarget::OpenAiCompatible(profile)
+            if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
+        {
+            if input.is_some() {
+                anyhow::bail!(
+                    "Muse subscription completion uses `--complete` and does not accept --callback-url or --auth-code."
+                )
+            }
+            if !options.complete {
+                anyhow::bail!("Muse subscription completion requires `--complete`.")
+            }
+            complete_scriptable_muse_subscription_login(provider.id, options).await
+        }
         _ => anyhow::bail!(
-            "Scriptable completion is currently supported for: claude, openai, gemini, antigravity, google, copilot."
+            "Scriptable completion is currently supported for: claude, openai, gemini, antigravity, google, copilot, muse-subscription."
         ),
     }
 }
@@ -611,6 +656,53 @@ pub(super) async fn complete_scriptable_google_login(
     Ok(LoginFlowOutcome::Completed)
 }
 
+pub(super) async fn complete_scriptable_muse_subscription_login(
+    provider_id: &str,
+    options: &LoginOptions,
+) -> Result<LoginFlowOutcome> {
+    auth::muse::ensure_enabled()?;
+    let pending_path = pending_login_path("muse-subscription", options.flow_id.as_deref())?;
+    let PendingScriptableLogin::MuseSubscription {
+        device_code,
+        interval,
+        ..
+    } = load_pending_login(&pending_path, "muse-subscription")?
+    else {
+        anyhow::bail!("Pending Muse subscription login state is invalid.");
+    };
+
+    let client = crate::auth::muse::http_client()?;
+    let credentials = super::device_login::poll_muse_subscription_until_decided_by_code(
+        &client,
+        &device_code,
+        interval,
+    )
+    .await?;
+
+    let _lock = lock_pending_login(&pending_path)?;
+    confirm_live_muse_subscription_flow(&pending_path, &device_code)?;
+    auth::muse::save_credentials(&credentials)?;
+    clear_pending_login(&pending_path);
+    drop(_lock);
+
+    crate::telemetry::record_auth_success(provider_id, "oauth_device_code");
+    emit_scriptable_auth_success(
+        options.json,
+        ScriptableAuthSuccess {
+            status: "authenticated",
+            provider: provider_id.to_string(),
+            account_label: None,
+            credentials_path: Some(auth::muse::credentials_path()?.display().to_string()),
+            email: None,
+        },
+    )?;
+    if !options.json {
+        eprintln!("Muse subscription login complete.");
+        eprintln!("Saved at {}", auth::muse::credentials_path()?.display());
+    }
+    Ok(LoginFlowOutcome::Completed)
+}
+
 pub(super) async fn complete_scriptable_copilot_login(
     provider_id: &str,
     options: &LoginOptions,
@@ -662,7 +754,13 @@ pub(super) fn pending_login_path_in(
     anyhow::ensure!(
         matches!(
             key,
-            "claude" | "openai" | "gemini" | "antigravity" | "google" | "copilot"
+            "claude"
+                | "openai"
+                | "gemini"
+                | "antigravity"
+                | "google"
+                | "copilot"
+                | "muse-subscription"
         ),
         "Unsupported scriptable login provider."
     );
@@ -691,6 +789,11 @@ pub(super) fn cancel_scriptable_login(
         LoginProviderTarget::Antigravity => "antigravity",
         LoginProviderTarget::Google => "google",
         LoginProviderTarget::Copilot => "copilot",
+        LoginProviderTarget::OpenAiCompatible(profile)
+            if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
+        {
+            "muse-subscription"
+        }
         _ => anyhow::bail!("This provider does not support scriptable login cancellation."),
     };
     let path = pending_login_path(key, Some(flow_id))?;
@@ -719,7 +822,7 @@ pub(super) fn cancel_pending_login(path: &Path) -> Result<()> {
 
 const CANCELLED_FLOW_TTL_MS: i64 = 30 * 60 * 1000;
 
-fn lock_pending_login(path: &Path) -> Result<std::fs::File> {
+pub(super) fn lock_pending_login(path: &Path) -> Result<std::fs::File> {
     let parent = path.parent().context("Pending login path has no parent")?;
     crate::storage::ensure_dir(parent)?;
     let lock_path = path.with_extension("lock");
@@ -739,6 +842,43 @@ fn lock_pending_login(path: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
+pub(super) fn check_cancellation_marker(path: &Path) -> Result<()> {
+    let marker = path.with_extension("cancelled");
+    match std::fs::read_to_string(&marker) {
+        Ok(data) => {
+            let expires_at_ms: i64 =
+                serde_json::from_str(&data).context("Invalid pending login cancellation marker")?;
+            if expires_at_ms > current_time_ms() {
+                anyhow::bail!("This login flow was cancelled. Start a new login.");
+            }
+            std::fs::remove_file(&marker).context("Failed to expire login cancellation marker")?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("Failed to read login cancellation marker"),
+    }
+}
+
+pub(super) fn confirm_live_muse_subscription_flow(
+    path: &Path,
+    expected_device_code: &str,
+) -> Result<()> {
+    check_cancellation_marker(path)?;
+    if !path.exists() {
+        anyhow::bail!("This login flow was cancelled. Start a new login.");
+    }
+    let login = load_pending_login(path, "muse-subscription")
+        .map_err(|_| anyhow::anyhow!("This login flow was cancelled. Start a new login."))?;
+    match login {
+        PendingScriptableLogin::MuseSubscription { device_code, .. }
+            if device_code == expected_device_code =>
+        {
+            Ok(())
+        }
+        _ => anyhow::bail!("This login flow was cancelled. Start a new login."),
+    }
+}
+
 pub(super) fn persist_pending_login(
     path: &Path,
     record: &PendingScriptableLoginRecord,
@@ -748,20 +888,7 @@ pub(super) fn persist_pending_login(
         return crate::storage::write_json_secret(path, record);
     }
     let _lock = lock_pending_login(path)?;
-    let marker = path.with_extension("cancelled");
-    match std::fs::read_to_string(&marker) {
-        Ok(data) => {
-            let expires_at_ms: i64 =
-                serde_json::from_str(&data).context("Invalid pending login cancellation marker")?;
-            anyhow::ensure!(
-                expires_at_ms <= current_time_ms(),
-                "This login flow was cancelled. Start again with a fresh --flow-id."
-            );
-            std::fs::remove_file(&marker).context("Failed to expire login cancellation marker")?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("Failed to read login cancellation marker"),
-    }
+    check_cancellation_marker(path)?;
     anyhow::ensure!(
         record.expires_at_ms > current_time_ms(),
         "Pending login flow expired before it could be saved."
@@ -790,7 +917,8 @@ pub(super) fn require_scriptable_input(
     input.ok_or_else(|| anyhow::anyhow!("No scriptable auth input was provided."))
 }
 
-pub(super) fn load_pending_login(path: &PathBuf, provider: &str) -> Result<PendingScriptableLogin> {
+pub(super) fn load_pending_login(path: &Path, provider: &str) -> Result<PendingScriptableLogin> {
+    check_cancellation_marker(path)?;
     if !path.exists() {
         anyhow::bail!(
             "No pending {} login state found. Run `jcode login --provider {} --print-auth-url` first.",
@@ -829,7 +957,7 @@ pub(super) fn load_pending_login(path: &PathBuf, provider: &str) -> Result<Pendi
     Ok(login)
 }
 
-pub(super) fn clear_pending_login(path: &PathBuf) {
+pub(super) fn clear_pending_login(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
