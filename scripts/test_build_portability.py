@@ -21,7 +21,7 @@ class BuildPortabilityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("JCODE_SCRATCH_DIR"))
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()  # macOS: /var -> /private/var, matches pwd -P
         for directory in ["scripts", ".cargo", "src", "bin"]:
             (self.root / directory).mkdir()
         for name in ["dev_cargo.sh", "remote_config.sh", "rustc-parallel-frontend"]:
