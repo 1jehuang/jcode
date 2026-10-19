@@ -4,7 +4,8 @@
 //! via joint `choice` and `noul` over a structured JSON `state`) with OpenGF
 //! (`Sidecar` / named profile generative candidate synthesis with `"store": false`),
 //! assistant question/option extraction, user-defined constant questions (`custom_prompts`),
-//! and a language-aware deterministic local fallback.
+//! optional feature-completion classification (`"finish"` / `[финал]` / `[finish]` via
+//! `enable_finish_category`), and a language-aware deterministic local fallback.
 
 use serde::{Deserialize, Serialize};
 

@@ -53,6 +53,9 @@ impl App {
             self.suggested_replies.focus,
             self.suggested_replies.cached_response.is_some(),
         ));
+        out.push_str(
+            "- **Controls**: `Tab`/`↑`/`↓` cycle & stage · `0`/`1..9` stage on 1st press, send on 2nd press of same digit · `Enter`/`Ctrl+Enter` send · `Esc` clear\n",
+        );
 
         if let Some(debug) = self.suggested_replies.last_debug.as_ref() {
             out.push_str("\n#### Last Cascade Telemetry\n");
