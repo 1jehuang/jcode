@@ -429,7 +429,23 @@ fn from_persisted_member(
             .checked_sub(terminal_age)
             .unwrap_or_else(Instant::now);
     }
+    hydrate_member_todos(&mut recovered);
     Some(recovered)
+}
+
+/// Todo snapshots live only in memory on the swarm member, so a reload would
+/// otherwise blank every worker's todo list until its next `todo` call. The
+/// session's todo file is the source of truth, so rebuild the snapshot from it.
+fn hydrate_member_todos(member: &mut SwarmMember) {
+    let Ok(todos) = crate::todo::load_todos(&member.session_id) else {
+        return;
+    };
+    if todos.is_empty() {
+        return;
+    }
+    let completed = todos.iter().filter(|t| t.status == "completed").count() as u32;
+    member.todo_progress = Some((completed, todos.len() as u32));
+    member.todo_items = super::background_tasks::compact_todo_items(&todos);
 }
 
 pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
