@@ -649,7 +649,8 @@ fn stored_message_visible_text(message: &jcode::session::StoredMessage) -> Strin
             | ContentBlock::AnthropicThinking { .. }
             | ContentBlock::ReasoningTrace { .. }
             | ContentBlock::OpenAIReasoning { .. }
-            | ContentBlock::ToolReference { .. } => {}
+            | ContentBlock::ToolReference { .. }
+            | ContentBlock::ProviderNative { .. } => {}
         }
     }
     parts.join("\n\n")

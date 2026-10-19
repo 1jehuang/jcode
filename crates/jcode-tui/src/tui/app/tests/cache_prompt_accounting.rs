@@ -1,3 +1,143 @@
+// These fixtures set counters directly for readability, then feed them through
+// the same report API that marks a provider request's usage as fresh.
+fn record_reported_test_cache_usage(app: &mut App) -> bool {
+    app.apply_stream_usage_input_report(
+        Some(app.streaming.streaming_input_tokens),
+        app.streaming.streaming_cache_read_tokens,
+        app.streaming.streaming_cache_creation_tokens,
+    );
+    app.record_completed_stream_cache_usage()
+}
+
+#[test]
+fn cache_accounting_cancelled_request_without_usage_keeps_previous_cache_state() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for remote_mode in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = remote_mode;
+        if remote_mode {
+            app.runtime_mode = AppRuntimeMode::RemoteClient;
+            app.remote_provider_name = Some("Claude".to_string());
+            app.remote_provider_model = Some("claude-opus-5-5".to_string());
+        }
+        let first = vec![Message::user("first")];
+        app.begin_kv_cache_request(&first, &[], "system", "");
+        app.apply_stream_usage_input_report(Some(314), Some(587_580), Some(1_055));
+        app.push_turn_footer(Some(1.0));
+        let completed_at = app.kv_cache.kv_cache_baseline.as_ref().unwrap().completed_at;
+        let last_api = app.last_api_completed;
+        let last_prompt = app.last_turn_input_tokens;
+        let total_prompt = app.token_accounting.total_cache_prompt_tokens;
+        let next_expected = app.token_accounting.cache_next_optimal_input_tokens;
+
+        let mut next = first;
+        next.push(Message::user("cancelled before provider stream opened"));
+        if remote_mode {
+            app.begin_remote_kv_cache_request(App::kv_cache_request_signature(&next, &[], "system", ""));
+        } else {
+            app.begin_kv_cache_request(&next, &[], "system", "");
+        }
+        assert!(app.streaming.streaming_usage_call_reset_pending);
+        assert!(!app.record_completed_stream_cache_usage());
+        assert!(!app.has_streaming_footer_stats());
+        assert_eq!(app.build_turn_footer(None), None);
+        assert_eq!(app.build_turn_footer(Some(2.0)), Some(Message::format_duration(2_000)));
+        if remote_mode {
+            app.current_message_id = Some(42);
+            app.is_processing = true;
+            app.streaming.streaming_text = "partial response without a usage report".to_string();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+        } else {
+            app.push_turn_footer(Some(2.0));
+        }
+        assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
+        assert_eq!(app.kv_cache.kv_cache_baseline.as_ref().unwrap().completed_at, completed_at);
+        assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, next_expected);
+        assert_eq!(app.token_accounting.total_cache_prompt_tokens, total_prompt);
+        assert_eq!(app.last_api_completed, last_api);
+        assert_eq!(app.last_turn_input_tokens, last_prompt);
+        assert!(!app.kv_cache.current_api_usage_recorded);
+    }
+}
+
+#[test]
+fn cache_accounting_claude_reuses_written_boundary_not_uncached_tail() {
+    let mut app = create_test_app();
+    let first = vec![Message::user("first")];
+    app.begin_kv_cache_request(&first, &[], "system", "");
+    app.streaming.streaming_input_tokens = 2_482;
+    app.streaming.streaming_cache_read_tokens = Some(615_629);
+    app.streaming.streaming_cache_creation_tokens = Some(1_375);
+    assert!(record_reported_test_cache_usage(&mut app));
+    assert_eq!(app.token_accounting.last_cache_prompt_tokens, Some(619_486));
+    assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, Some(617_004));
+    assert_eq!(app.kv_cache.kv_cache_baseline.as_ref().unwrap().input_tokens, 617_004);
+
+    let mut second = first;
+    second.push(Message::user("next"));
+    app.begin_kv_cache_request(&second, &[], "system", "");
+    app.kv_cache.current_api_usage_recorded = false;
+    app.streaming.streaming_input_tokens = 283;
+    app.streaming.streaming_cache_read_tokens = Some(617_004);
+    app.streaming.streaming_cache_creation_tokens = Some(3_248);
+    assert!(record_reported_test_cache_usage(&mut app));
+    assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
+    assert_eq!(app.token_accounting.last_cache_optimal_input_tokens, Some(617_004));
+
+    second.push(Message::user("third"));
+    app.begin_kv_cache_request(&second, &[], "system", "");
+    app.kv_cache.current_api_usage_recorded = false;
+    app.streaming.streaming_cache_read_tokens = Some(620_252 - 1_782);
+    app.streaming.streaming_cache_creation_tokens = Some(2_000);
+    assert!(record_reported_test_cache_usage(&mut app));
+    assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
+    assert_eq!(app.kv_cache.kv_cache_miss_samples[0].missed_tokens, 1_782);
+    assert_eq!(app.kv_cache.kv_cache_miss_samples[0].reason, KvCacheMissReason::LowRead);
+}
+
+#[test]
+fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("Claude".to_string());
+    app.remote_provider_model = Some("claude-opus-5-5".to_string());
+    for write in [1_000, 1_375] {
+        app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
+            input: 2_482, output: 100,
+            cache_read_input: Some(615_629), cache_creation_input: Some(write),
+            cost: None, currency: None,
+        }, &mut remote);
+    }
+    assert_eq!(app.kv_cache.kv_cache_baseline.as_ref().unwrap().input_tokens, 617_004);
+    assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, Some(617_004));
+    assert_eq!(app.last_turn_input_tokens, Some(619_486));
+    // A late correction after compaction must not resurrect an old expectation.
+    app.handle_compaction_event(crate::compaction::CompactionEvent {
+        trigger: "semantic".to_string(),
+        pre_tokens: Some(619_486),
+        post_tokens: Some(20_000),
+        tokens_saved: None,
+        duration_ms: None,
+        messages_dropped: None,
+        messages_compacted: Some(10),
+        summary_chars: Some(100),
+        active_messages: Some(3),
+    });
+    app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
+        input: 2_482, output: 101,
+        cache_read_input: Some(615_629), cache_creation_input: Some(1_375),
+        cost: None, currency: None,
+    }, &mut remote);
+    assert!(app.kv_cache.kv_cache_baseline.is_none());
+    assert!(app.token_accounting.cache_next_optimal_input_tokens.is_none());
+}
+
 fn cache_accounting_openai_app() -> App {
     let mut app = create_test_app();
     app.is_remote = true;
@@ -32,7 +172,7 @@ fn cache_accounting_openai_writes_are_subsets_live_and_completed() {
         live.contains("effective_prompt_tokens_including_unrecorded_live: 10k (10,000)"),
         "{live}"
     );
-    assert!(app.record_completed_stream_cache_usage());
+    assert!(record_reported_test_cache_usage(&mut app));
     assert_eq!(app.token_accounting.total_cache_prompt_tokens, 10_000);
     assert_eq!(
         app.kv_cache
@@ -125,7 +265,7 @@ fn cache_accounting_mixed_history_and_live_sum_resolved_prompts() {
     app.streaming.streaming_input_tokens = 10_000;
     app.streaming.streaming_cache_read_tokens = Some(6_000);
     app.streaming.streaming_cache_creation_tokens = Some(2_000);
-    assert!(app.record_completed_stream_cache_usage());
+    assert!(record_reported_test_cache_usage(&mut app));
     let stats = cache_accounting_stats(&mut app);
     assert!(
         stats.contains(
@@ -201,7 +341,7 @@ fn cache_accounting_fully_cached_anthropic_has_nonzero_denominator() {
     app.streaming.streaming_input_tokens = 0;
     app.streaming.streaming_cache_read_tokens = Some(10_000);
     app.streaming.streaming_cache_creation_tokens = Some(0);
-    assert!(app.record_completed_stream_cache_usage());
+    assert!(record_reported_test_cache_usage(&mut app));
     assert_eq!(app.token_accounting.total_cache_prompt_tokens, 10_000);
     let stats = cache_accounting_stats(&mut app);
     assert!(
@@ -230,7 +370,7 @@ fn cache_accounting_missing_last_read_remains_unknown() {
     let mut app = cache_accounting_openai_app();
     app.streaming.streaming_input_tokens = 10_000;
     app.streaming.streaming_cache_creation_tokens = Some(2_000);
-    assert!(app.record_completed_stream_cache_usage());
+    assert!(record_reported_test_cache_usage(&mut app));
     assert_eq!(app.token_accounting.last_cache_read_tokens, None);
     assert_eq!(app.token_accounting.last_cache_creation_tokens, Some(2_000));
     assert!(
@@ -248,7 +388,7 @@ fn cache_report_exposes_actual_expiry_notification_policy() {
     app.begin_kv_cache_request(&[Message::user("test")], &[], "system", "");
     app.streaming.streaming_input_tokens = 10_000;
     app.streaming.streaming_cache_read_tokens = Some(6_000);
-    assert!(app.record_completed_stream_cache_usage());
+    assert!(record_reported_test_cache_usage(&mut app));
     for age in [0, 1770, 1900] {
         app.kv_cache
             .kv_cache_baseline

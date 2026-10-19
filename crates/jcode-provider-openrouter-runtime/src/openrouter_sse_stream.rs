@@ -1,5 +1,7 @@
 use super::*;
+use futures::Stream;
 use jcode_provider_openrouter::stream::OpenRouterStream;
+use std::pin::Pin;
 
 fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static str {
     let lower = api_base.to_ascii_lowercase();
@@ -19,6 +21,33 @@ fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static 
     "Hint: check network connectivity, DNS/TLS, that the base URL includes the API version (usually /v1), and that the model exists on the provider."
 }
 
+/// Hint for a request the server answered with an error status. The network
+/// is working (a response came back), so connectivity advice would mislead:
+/// point at the key, the account balance, or the model instead.
+fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
+    let endpoint_hint = local_endpoint_troubleshooting_hint(api_base, model);
+    let is_local = !endpoint_hint.starts_with("Hint: check network");
+    match status {
+        401 | 403 => {
+            "Hint: the provider rejected the API key. Check that the key is valid and allowed to use this model, or switch to another provider with /model."
+        }
+        402 => {
+            "Hint: this is a billing limit, not a network problem. The key's balance or token allowance is used up: raise the limit or top up in the provider's dashboard, use another key, or switch to another provider with /model."
+        }
+        // Local servers (Ollama, LM Studio) answer 404 for a model that is
+        // not installed or loaded, which their own hint already explains.
+        404 if !is_local => {
+            "Hint: the endpoint or model was not found. Check that the base URL includes the API version (usually /v1) and that the model exists on the provider."
+        }
+        // The provider answered, so this is server-side overload or failure,
+        // not connectivity (#1596). These are retried before surfacing.
+        500..=599 if !is_local => {
+            "Hint: the provider is overloaded or having a temporary server problem, not a network problem. jcode already retried; try again shortly or switch to another provider with /model."
+        }
+        _ => endpoint_hint,
+    }
+}
+
 // ============================================================================
 // SSE Stream Parser
 // ============================================================================
@@ -34,9 +63,11 @@ pub(super) async fn run_stream_with_retries(
     send_openrouter_headers: bool,
     conversation_id: String,
     request: Value,
+    azure_responses: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
+    responses_api: bool,
 ) {
     let mut last_error = None;
     let mut next_retry_delay = None;
@@ -95,9 +126,11 @@ pub(super) async fn run_stream_with_retries(
             send_openrouter_headers,
             &conversation_id,
             request.clone(),
+            azure_responses,
             attempt_tx,
             Arc::clone(&provider_pin),
             model.clone(),
+            responses_api,
         )
         .await
         {
@@ -109,8 +142,7 @@ pub(super) async fn run_stream_with_retries(
                 let saw_output = attempt_guard.finish().await;
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
-                let error_str = format!("{e:#}").to_lowercase();
-                if is_retryable_error(&error_str) && attempt + 1 < max_retries {
+                if retryable_stream_failure(&e) && attempt + 1 < max_retries {
                     if saw_output {
                         // Partial output already reached the consumer; tell it
                         // to discard the partial attempt so the retried
@@ -164,9 +196,11 @@ async fn stream_response(
     send_openrouter_headers: bool,
     conversation_id: &str,
     request: Value,
+    azure_responses: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
+    responses_api: bool,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let _ = tx
@@ -177,7 +211,17 @@ async fn stream_response(
     let connect_start = std::time::Instant::now();
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
 
-    let url = format!("{}/chat/completions", api_base);
+    let route = if azure_responses || responses_api {
+        "responses"
+    } else {
+        "chat/completions"
+    };
+    let request_kind = if azure_responses {
+        "Azure OpenAI Responses"
+    } else {
+        "OpenAI-compatible chat"
+    };
+    let url = format!("{}/{}", api_base, route);
     let mut req = apply_kimi_coding_agent_headers(
         auth.apply(
             client
@@ -204,9 +248,13 @@ async fn stream_response(
     )
     .await
     .with_context(|| {
-        let hint = local_endpoint_troubleshooting_hint(&api_base, &model);
+        let hint = if azure_responses {
+            "Hint: check the Azure deployment and that the endpoint supports /openai/v1/responses."
+        } else {
+            local_endpoint_troubleshooting_hint(&api_base, &model)
+        };
         format!(
-            "Failed to send OpenAI-compatible chat request\n  endpoint: {}\n  model: {}\n  auth: {}\n{}",
+            "Failed to send {request_kind} request\n  endpoint: {}\n  model: {}\n  auth: {}\n{}",
             url,
             model,
             auth.label(),
@@ -225,10 +273,22 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-        let hint = local_endpoint_troubleshooting_hint(&api_base, &model);
+        let hint = if azure_responses {
+            match status.as_u16() {
+                401 | 402 | 403 | 500..=599 => http_status_hint(status.as_u16(), &api_base, &model),
+                429 => {
+                    "Hint: Azure rate limited the request; jcode will retry before returning this error."
+                }
+                _ => {
+                    "Hint: check the Azure deployment and that the endpoint supports /openai/v1/responses."
+                }
+            }
+        } else {
+            http_status_hint(status.as_u16(), &api_base, &model)
+        };
         return Err(jcode_provider_core::retry_after::error_with_retry_after(
             format!(
-                "OpenAI-compatible chat request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\n{}",
+                "{request_kind} request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\n{}",
                 url,
                 model,
                 auth.label(),
@@ -246,7 +306,21 @@ async fn stream_response(
         }))
         .await;
 
-    let mut stream = OpenRouterStream::new(response.bytes_stream(), model.clone(), provider_pin);
+    let mut stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> = if azure_responses {
+        Box::pin(jcode_provider_openai::stream::OpenAIResponsesStream::new(
+            response.bytes_stream(),
+        ))
+    } else if responses_api {
+        Box::pin(super::opencode_go_responses::ResponsesStream::new(
+            response.bytes_stream(),
+        ))
+    } else {
+        Box::pin(OpenRouterStream::new(
+            response.bytes_stream(),
+            model.clone(),
+            provider_pin,
+        ))
+    };
 
     // Idle timeout between streamed chunks. Configurable so slow reasoning
     // models (e.g. DeepSeek) that think silently for minutes before emitting
@@ -255,6 +329,7 @@ async fn stream_response(
     // defaulting to 180s. Shared with the native provider paths (issue #434).
     let idle_timeout_secs = stream_idle_timeout.as_secs();
 
+    let mut saw_message_end = false;
     loop {
         let event = match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
             Ok(Some(Ok(event))) => event,
@@ -281,13 +356,119 @@ async fn stream_response(
                 );
             }
         };
+        if azure_responses {
+            if let StreamEvent::Error {
+                message,
+                retry_after_secs,
+            } = &event
+            {
+                return Err(azure_response_failure(message, *retry_after_secs));
+            }
+            if matches!(event, StreamEvent::MessageEnd { .. }) {
+                saw_message_end = true;
+            }
+        }
         if tx.send(Ok(event)).await.is_err() {
             return Ok(());
         }
+        if saw_message_end {
+            break;
+        }
+    }
+
+    if azure_responses && !saw_message_end {
+        return Err(anyhow::Error::new(AzureResponseFailure {
+            retryable: true,
+            source: anyhow::anyhow!(
+                "Azure OpenAI Responses stream ended before response.completed"
+            ),
+        }));
     }
 
     Ok(())
 }
+
+/// An Azure protocol failure is not necessarily a transient transport failure.
+/// Keep its retry decision separate from the legacy string classifier, and
+/// retain the shared retry-hint error as a source for deadline extraction.
+#[derive(Debug)]
+struct AzureResponseFailure {
+    retryable: bool,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for AzureResponseFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, formatter)
+    }
+}
+
+impl std::error::Error for AzureResponseFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+fn retryable_stream_failure(error: &anyhow::Error) -> bool {
+    if let Some(failure) = error.downcast_ref::<AzureResponseFailure>() {
+        return failure.retryable;
+    }
+    // Preserve the existing classifier and full transport context for every
+    // non-Azure failure, including HTTP errors and reqwest body errors.
+    is_retryable_error(&format!("{error:#}").to_lowercase())
+}
+
+fn azure_response_failure(message: &str, retry_after_secs: Option<u64>) -> anyhow::Error {
+    let lower = message.to_ascii_lowercase();
+    // The shared Responses parser preserves error type/code in the message.
+    // Permanent failures must win even if their prose mentions a timeout or
+    // overload, or the server supplies a retry hint.
+    let permanent = [
+        "invalid_request",
+        "invalid_argument",
+        "content_filter",
+        "content_policy",
+        "authentication",
+        "permission_denied",
+        "insufficient_quota",
+        "billing",
+        "unauthorized",
+        "forbidden",
+        "model_not_found",
+        "deployment_not_found",
+        "tool argument snapshot differs",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let transient = [
+        "rate_limit",
+        "rate limit",
+        "server_error",
+        "internal_error",
+        "internal server error",
+        "service_unavailable",
+        "overloaded",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || jcode_provider_core::is_transient_transport_error(&lower);
+    let retry_after = retry_after_secs.and_then(|seconds| {
+        jcode_provider_core::retry_after::retry_after_body(
+            &serde_json::json!({"retry_after_seconds": seconds}).to_string(),
+        )
+    });
+    anyhow::Error::new(AzureResponseFailure {
+        retryable: !permanent && (transient || retry_after.is_some()),
+        source: jcode_provider_core::retry_after::error_with_retry_after(
+            format!("Azure OpenAI Responses stream error: {message}"),
+            retry_after,
+        ),
+    })
+}
+
+#[cfg(test)]
+#[path = "azure_retry_tests.rs"]
+mod azure_retry_tests;
 
 /// Extract the HTTP status code reported in a formatted provider error string.
 ///
@@ -314,7 +495,10 @@ fn is_retryable_error(error_str: &str) -> bool {
     // not depend on provider-specific body wording.
     match parsed_http_status(error_str) {
         Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422) => return false,
-        Some(429) => return true,
+        // 429 rate limit, and every 5xx: the server answered but is overloaded
+        // or failing on its side. This includes non-standard codes such as the
+        // 529 "overloaded" some OpenAI-compatible providers send (#1596).
+        Some(429 | 500..=599) => return true,
         _ => {}
     }
 
@@ -348,6 +532,33 @@ mod tests {
         assert!(hint.contains("LM Studio"));
         assert!(hint.contains("Local Server"));
         assert!(hint.contains("/v1/models"));
+    }
+
+    /// #1596: an OpenAI-compatible provider answering 529 "heavy usage" (or
+    /// any other 5xx) must be retried, not fail the turn on the first try.
+    #[test]
+    fn every_5xx_status_including_529_is_retryable() {
+        let body = r#"data: {"error":{"message":"We're experiencing heavy usage right now, please try again in a moment.","type":"server_error"}}"#;
+        for status in [
+            "500 internal server error",
+            "502 bad gateway",
+            "503 service unavailable",
+            "520 <unknown status code>",
+            "529 <unknown status code>",
+        ] {
+            let err = format!(
+                "openai-compatible chat request failed\n  endpoint: https://compat.example.test/v1/chat/completions\n  model: glm-5.3\n  auth: compat_api_key\n  status: {status}\n  response: {body}"
+            )
+            .to_lowercase();
+            assert!(is_retryable_error(&err), "{status} must be retried");
+        }
+    }
+
+    #[test]
+    fn server_error_hint_points_at_provider_not_network() {
+        let hint = http_status_hint(529, "https://compat.example.test/v1", "glm-5.3");
+        assert!(hint.contains("overloaded"), "{hint}");
+        assert!(!hint.contains("check network"), "{hint}");
     }
 
     #[test]
@@ -400,5 +611,30 @@ mod tests {
         assert!(is_retryable_error(
             "chat request failed\n  status: 429 unknown\n  response: {}"
         ));
+    }
+
+    /// A 402 means the server answered: the hint must name the billing limit,
+    /// not send the user to check their network.
+    #[test]
+    fn status_hint_names_billing_for_402_not_network() {
+        let hint = http_status_hint(402, "https://apiduck.servepics.com/v1", "glm-5.3");
+        assert!(hint.contains("billing limit"), "{hint}");
+        assert!(hint.contains("/model"), "{hint}");
+        assert!(!hint.contains("network connectivity"), "{hint}");
+
+        for status in [401u16, 403] {
+            let hint = http_status_hint(status, "https://api.example.com/v1", "m");
+            assert!(hint.contains("API key"), "{status}: {hint}");
+            assert!(!hint.contains("network connectivity"), "{status}: {hint}");
+        }
+        assert!(http_status_hint(404, "https://api.example.com/v1", "m").contains("/v1"));
+        // Local servers keep their own advice (e.g. `ollama pull` for a 404).
+        assert!(
+            http_status_hint(404, "http://localhost:11434/v1", "llama3.2").contains("ollama pull")
+        );
+        // Server errors keep the endpoint-specific advice.
+        assert!(
+            http_status_hint(503, "http://localhost:11434/v1", "llama3.2").contains("ollama serve")
+        );
     }
 }

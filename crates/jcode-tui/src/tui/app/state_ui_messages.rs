@@ -20,6 +20,11 @@ fn display_message_from_stored_message(
     if is_background_task_lifecycle_message(&text) {
         return None;
     }
+    if !matches!(message.role, Role::Assistant)
+        && let Some(swarm) = super::remote_notifications::swarm_delivery_display_message(&text)
+    {
+        return Some(swarm);
+    }
     match message.display_role {
         Some(crate::session::StoredDisplayRole::System) => Some(DisplayMessage::system(text)),
         Some(crate::session::StoredDisplayRole::BackgroundTask) => None,
@@ -54,6 +59,15 @@ fn is_background_task_lifecycle_message(content: &str) -> bool {
         || content.starts_with("**Background task stalled**")
 }
 
+/// A tool row for a provider-executed tool (hosted web search), which streams
+/// mid-response as part of the current attempt rather than after it.
+pub(super) fn is_attempt_provider_native_row(message: &DisplayMessage) -> bool {
+    message.role == "tool"
+        && message.tool_data.as_ref().is_some_and(|tool| {
+            crate::message::provider_native::is_provider_native_tool_id(&tool.id)
+        })
+}
+
 fn stored_message_visible_text(message: &crate::session::StoredMessage) -> String {
     let mut parts = Vec::new();
     for block in &message.content {
@@ -77,7 +91,9 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
             ContentBlock::Image { media_type, .. } => {
                 parts.push(format!("[image:{}]", media_type));
             }
-            ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
+            ContentBlock::OpenAICompaction { .. }
+            | ContentBlock::ToolReference { .. }
+            | ContentBlock::ProviderNative { .. } => {}
         }
     }
     parts.join("\n\n")
@@ -89,18 +105,9 @@ impl App {
             return;
         }
         compact_display_message_tool_data(&mut message);
-        // A trailing Ctrl+L spacer only exists to keep the screen clear while
-        // idle. The moment real content arrives, drop it so the transcript
-        // stays contiguous instead of keeping a screenful of blank rows
-        // embedded in the scrollback.
-        if message.role != "spacer"
-            && self
-                .display_messages
-                .last()
-                .is_some_and(|last| last.role == "spacer")
-        {
-            self.display_messages.pop();
-        }
+        // Keep Ctrl+L's spacer as a clear boundary when new content arrives.
+        // The renderer packs only the content after it while following the tail,
+        // so sending a prompt does not restore the pre-clear conversation.
         if self.try_coalesce_repeated_display_message(&message) {
             return;
         }
@@ -109,7 +116,9 @@ impl App {
         // RetryRollback can remove exactly the current attempt's committed
         // output. Any non-assistant message (user/tool/system) is a fence: it
         // proves earlier assistant messages belong to completed work.
-        if message.role == "assistant" {
+        // Provider-native tool rows (hosted web search) are emitted mid-stream
+        // by the same attempt, so they count as attempt output, not a fence.
+        if message.role == "assistant" || is_attempt_provider_native_row(&message) {
             self.attempt_committed_assistant_messages += 1;
         } else {
             self.attempt_committed_assistant_messages = 0;
@@ -196,9 +205,9 @@ impl App {
     }
 
     fn retain_latest_background_tasks(&mut self) {
-        const MAX_PINNED_BACKGROUND_TASKS: usize = 2;
-        if self.background_task_rows.len() > MAX_PINNED_BACKGROUND_TASKS {
-            let stale = self.background_task_rows.len() - MAX_PINNED_BACKGROUND_TASKS;
+        const MAX_TRACKED_BACKGROUND_TASKS: usize = 8;
+        if self.background_task_rows.len() > MAX_TRACKED_BACKGROUND_TASKS {
+            let stale = self.background_task_rows.len() - MAX_TRACKED_BACKGROUND_TASKS;
             self.background_task_rows.drain(..stale);
         }
     }
@@ -300,7 +309,7 @@ impl App {
     }
 
     /// Successful tasks are useful as short-lived confirmation, but should not
-    /// permanently consume the pinned todo band's limited space. Failures stay
+    /// permanently consume the background widget's limited space. Failures stay
     /// until acted on, and running tasks always stay visible.
     pub(super) fn prune_irrelevant_background_tasks(&mut self) -> bool {
         const COMPLETED_TASK_VISIBILITY: std::time::Duration = std::time::Duration::from_secs(12);

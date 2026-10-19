@@ -217,6 +217,7 @@ fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> 
     // `selection` object, no `model` field) must decode as `Request::SetRoute`,
     // not be shadowed by the legacy `set_model` compatibility path.
     let request = Request::SetRoute {
+        automatic_failover: false,
         id: 7,
         selection: jcode_provider_core::RouteSelection {
             model: "gpt-5.5".to_string(),
@@ -230,11 +231,17 @@ fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> 
     assert!(line.contains("\"type\":\"set_route\""));
 
     let decoded = decode_request(&line)?;
-    let Request::SetRoute { id, selection } = decoded else {
+    let Request::SetRoute {
+        id,
+        selection,
+        automatic_failover,
+    } = decoded
+    else {
         return Err(anyhow!(
             "expected structured set_route to decode as SetRoute, got {decoded:?}"
         ));
     };
+    assert!(!automatic_failover);
     assert_eq!(id, 7);
     assert_eq!(selection.model, "gpt-5.5");
     Ok(())
@@ -243,6 +250,7 @@ fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> 
 #[test]
 fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
     let request = Request::SetRoute {
+        automatic_failover: false,
         id: 8,
         selection: jcode_provider_core::RouteSelection {
             model: "gpt-5.5".to_string(),
@@ -258,9 +266,15 @@ fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
     assert!(line.contains("\"kind\":\"jcode-subscription\""));
 
     let decoded = decode_request(&line)?;
-    let Request::SetRoute { id, selection } = decoded else {
+    let Request::SetRoute {
+        id,
+        selection,
+        automatic_failover,
+    } = decoded
+    else {
         return Err(anyhow!("expected Jcode SetRoute, got {decoded:?}"));
     };
+    assert!(!automatic_failover);
     assert_eq!(id, 8);
     assert_eq!(selection.model, "gpt-5.5");
     assert_eq!(
@@ -272,8 +286,46 @@ fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
 }
 
 #[test]
+fn test_automatic_failover_set_route_marker_and_legacy_default() -> Result<()> {
+    let selection = jcode_provider_core::RouteSelection {
+        model: "gpt-6.1-sol".to_string(),
+        runtime_key: jcode_provider_core::RuntimeKey::OpenAIOAuth,
+        api_method: "openai-oauth@work".to_string(),
+        provider_label: "OpenAI".to_string(),
+        detail: String::new(),
+    };
+    let request = Request::SetRoute {
+        id: 19,
+        selection,
+        automatic_failover: true,
+    };
+    let mut wire = serde_json::to_value(&request)?;
+    assert_eq!(wire["automatic_failover"], true);
+    let Request::SetRoute {
+        automatic_failover,
+        selection,
+        ..
+    } = decode_request(&wire.to_string())?
+    else {
+        panic!("expected SetRoute");
+    };
+    assert!(automatic_failover);
+    assert_eq!(selection.account_label(), Some("work"));
+    wire.as_object_mut().unwrap().remove("automatic_failover");
+    let Request::SetRoute {
+        automatic_failover, ..
+    } = decode_request(&wire.to_string())?
+    else {
+        panic!("expected legacy SetRoute");
+    };
+    assert!(!automatic_failover);
+    Ok(())
+}
+
+#[test]
 fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
     let request = Request::SetRoute {
+        automatic_failover: false,
         id: 9,
         selection: jcode_provider_core::RouteSelection {
             model: "grok-build:grok-4.6".to_string(),
@@ -289,9 +341,15 @@ fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
     assert!(line.contains("\"kind\":\"grok-build\""));
 
     let decoded = decode_request(&line)?;
-    let Request::SetRoute { id, selection } = decoded else {
+    let Request::SetRoute {
+        id,
+        selection,
+        automatic_failover,
+    } = decoded
+    else {
         return Err(anyhow!("expected Grok Build SetRoute, got {decoded:?}"));
     };
+    assert!(!automatic_failover);
     assert_eq!(id, 9);
     assert_eq!(selection.model, "grok-build:grok-4.6");
     assert_eq!(
@@ -305,6 +363,7 @@ fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
 #[test]
 fn test_unknown_runtime_key_other_set_route_is_wire_safe() -> Result<()> {
     let request = Request::SetRoute {
+        automatic_failover: false,
         id: 10,
         selection: jcode_provider_core::RouteSelection {
             model: "custom-model".to_string(),
@@ -341,12 +400,15 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     let req = Request::Subscribe {
         system_prompt: None,
         supports_pdf_panels: true,
+        supports_user_response: true,
+        supports_server_failover: false,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),
         target_session_id: Some("sess_target".to_string()),
         client_instance_id: Some("client-123".to_string()),
         client_has_local_history: true,
+        history_base: None,
         allow_session_takeover: true,
         crash_on_disconnect: true,
         continue_on_disconnect: true,
@@ -358,12 +420,15 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     let Request::Subscribe {
         system_prompt: _,
         supports_pdf_panels,
+        supports_user_response,
+        supports_server_failover: _,
         id,
         working_dir,
         selfdev,
         target_session_id,
         client_instance_id,
         client_has_local_history,
+        history_base: _,
         allow_session_takeover,
         crash_on_disconnect,
         continue_on_disconnect,
@@ -374,6 +439,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     };
     assert_eq!(id, 89);
     assert!(supports_pdf_panels);
+    assert!(supports_user_response);
     assert_eq!(working_dir.as_deref(), Some("/tmp/project"));
     assert_eq!(selfdev, Some(true));
     assert_eq!(target_session_id.as_deref(), Some("sess_target"));
@@ -396,12 +462,15 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     let Request::Subscribe {
         system_prompt: _,
         supports_pdf_panels,
+        supports_user_response,
+        supports_server_failover: _,
         id,
         working_dir,
         selfdev,
         target_session_id,
         client_instance_id,
         client_has_local_history,
+        history_base: _,
         allow_session_takeover,
         crash_on_disconnect,
         continue_on_disconnect,
@@ -412,6 +481,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     };
     assert_eq!(id, 91);
     assert!(!supports_pdf_panels);
+    assert!(!supports_user_response);
     assert_eq!(working_dir, None);
     assert_eq!(selfdev, None);
     assert_eq!(target_session_id, None);
@@ -600,6 +670,7 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         id: 7,
         native_ssh_protocol: Some(1),
         capabilities: vec!["session_tools".into()],
+        user_connected_session_ids: None,
     };
     let json = serde_json::to_value(&modern)?;
     assert_eq!(json["native_ssh_protocol"], 1);

@@ -1,6 +1,6 @@
 use super::info_widget::{
-    InfoWidgetData, UsageProvider, changes_section_height, is_traceworthy_memory_event,
-    model_info_height,
+    AuthMethod, InfoWidgetData, changes_section_height, compact_usage_rows,
+    is_traceworthy_memory_event, model_info_height,
 };
 
 pub(crate) const MAX_TODO_LINES: usize = 12;
@@ -21,6 +21,7 @@ pub(crate) struct InfoPage {
 pub(crate) struct PageLayout {
     pub pages: Vec<InfoPage>,
     pub max_page_height: u16,
+    /// Page dots, drawn on the widget's bottom border (they take no row).
     pub show_dots: bool,
 }
 
@@ -78,26 +79,8 @@ pub(crate) fn compute_page_layout(
         }
     }
 
-    let mut show_dots = false;
-    if pages.len() > 1 {
-        let filtered: Vec<InfoPage> = pages
-            .iter()
-            .copied()
-            .filter(|page| page.height < inner_height)
-            .collect();
-        if filtered.len() > 1 {
-            pages = filtered;
-            show_dots = true;
-        } else if filtered.len() == 1 {
-            pages = filtered;
-        }
-    }
-
-    let max_page_height = pages
-        .iter()
-        .map(|page| page.height + u16::from(show_dots))
-        .max()
-        .unwrap_or(0);
+    let show_dots = pages.len() > 1;
+    let max_page_height = pages.iter().map(|page| page.height).max().unwrap_or(0);
 
     PageLayout {
         pages,
@@ -121,35 +104,66 @@ fn compact_memory_height(data: &InfoWidgetData) -> u16 {
 
 fn compact_background_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.background_info
-        && info.running_count > 0
+        && info.has_content()
     {
-        let task_lines = info.running_tasks.len().min(3) as u16;
-        let overflow_line = u16::from(info.running_tasks.len() > 3);
+        let total = if info.rows.is_empty() {
+            info.running_tasks.len()
+        } else {
+            info.rows.len()
+        };
+        let task_lines = total.min(3) as u16;
+        let overflow_line = u16::from(total > 3);
         return 1 + task_lines + overflow_line;
     }
     0
 }
 
-fn compact_usage_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.usage_info
-        && info.available
-    {
-        // Must mirror render_usage_compact exactly, otherwise the compact
-        // overview page either clips its last lines or reserves blank rows.
-        if matches!(info.provider, UsageProvider::CostBased) {
-            // Single "$cost · tokens" line.
-            return 1;
-        }
-        // Subscription-style providers render an optional provider label plus
-        // whichever primary, secondary, and Spark windows are actually present.
-        let label = info.provider.label();
-        let label_line = u16::from(!label.is_empty());
-        let primary_line = u16::from(info.primary_limit_label.is_some());
-        let secondary_line = u16::from(info.secondary_limit_label.is_some());
-        let spark_line = u16::from(info.spark.is_some());
-        return label_line + primary_line + secondary_line + spark_line;
+/// Only a genuine pending first snapshot reserves space. An absent snapshot
+/// after initialization is not evidence that this account supports quota data.
+pub(super) fn startup_usage_pending(data: &InfoWidgetData) -> bool {
+    data.startup_usage_pending
+        && matches!(data.auth_method, AuthMethod::OpenAIOAuth)
+        && !data
+            .usage_info
+            .as_ref()
+            .is_some_and(|info| info.available || info.limit_reached)
+}
+
+pub(super) fn render_overview_usage(
+    data: &InfoWidgetData,
+    width: u16,
+) -> Vec<ratatui::text::Line<'static>> {
+    if startup_usage_pending(data) {
+        return super::info_widget::startup_usage_lines(width);
     }
-    0
+    data.usage_info
+        .as_ref()
+        .filter(|info| info.available || info.limit_reached)
+        .map(|info| compact_usage_rows(info, width, data.usage_display_used))
+        .unwrap_or_default()
+}
+
+fn compact_usage_height(data: &InfoWidgetData) -> u16 {
+    if startup_usage_pending(data) {
+        return 2;
+    }
+    let Some(info) = data.usage_info.as_ref() else {
+        return 0;
+    };
+    if info.limit_reached {
+        return 1;
+    }
+    if !info.available {
+        return 0;
+    }
+    if matches!(info.provider, super::info_widget::UsageProvider::CostBased) {
+        return 1;
+    }
+    // Mirror render_usage_compact without formatting bars during measurement.
+    u16::from(!info.provider.label().is_empty())
+        + u16::from(info.primary_limit_label.is_some())
+        + u16::from(info.secondary_limit_label.is_some())
+        + u16::from(info.spark.is_some())
 }
 
 fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {

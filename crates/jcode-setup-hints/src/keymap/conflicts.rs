@@ -122,6 +122,16 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
             cfg.effort_decrease.as_str(),
         ),
         (
+            "speed_increase",
+            "Increase speed tier",
+            cfg.speed_increase.as_str(),
+        ),
+        (
+            "speed_decrease",
+            "Decrease speed tier",
+            cfg.speed_decrease.as_str(),
+        ),
+        (
             "centered_toggle",
             "Toggle centered layout",
             cfg.centered_toggle.as_str(),
@@ -163,8 +173,13 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
         ),
         (
             "diagram_pane_toggle",
-            "Toggle diagram pane",
+            "Toggle diagram pane position",
             cfg.diagram_pane_toggle.as_str(),
+        ),
+        (
+            "diagram_pane_visibility_toggle",
+            "Show/hide diagram pane",
+            cfg.diagram_pane_visibility_toggle.as_str(),
         ),
         (
             "typing_scroll_lock_toggle",
@@ -175,6 +190,11 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
             "diff_mode_cycle",
             "Cycle diff display mode",
             cfg.diff_mode_cycle.as_str(),
+        ),
+        (
+            "commit_log",
+            "Show project commit log",
+            cfg.commit_log.as_str(),
         ),
         (
             "info_widget_toggle",

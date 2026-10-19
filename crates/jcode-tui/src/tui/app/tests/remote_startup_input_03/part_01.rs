@@ -239,7 +239,7 @@ fn test_mixed_file_and_image_drop_keeps_file_and_attaches_image() {
     let file = dir.path().join("notes with spaces.txt");
     let image = dir.path().join("screenshot.png");
     std::fs::write(&file, b"notes").unwrap();
-    std::fs::write(&image, b"png bytes").unwrap();
+    std::fs::write(&image, crate::tui::app::input::tiny_png_bytes_for_test()).unwrap();
     let dropped = format!(
         "{} {}",
         file.display().to_string().replace(' ', "\\ "),
@@ -258,7 +258,7 @@ fn test_terminal_image_drop_attaches_image_instead_of_routing_as_a_skill() {
     let mut app = create_test_app();
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("dropped screenshot.png");
-    std::fs::write(&image, b"png bytes").unwrap();
+    std::fs::write(&image, crate::tui::app::input::tiny_png_bytes_for_test()).unwrap();
 
     app.handle_paste(image.display().to_string());
 
@@ -277,7 +277,7 @@ fn test_typed_absolute_image_path_promotes_before_slash_routing() {
     let mut app = create_test_app();
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("dropped photo.png");
-    std::fs::write(&image, b"png bytes").unwrap();
+    std::fs::write(&image, crate::tui::app::input::tiny_png_bytes_for_test()).unwrap();
     app.set_input_for_test(image.display().to_string());
 
     assert!(crate::tui::app::input::promote_dropped_images(&mut app));
@@ -291,7 +291,7 @@ fn test_incremental_terminal_drop_promotes_immediately_when_path_completes() {
     let mut app = create_test_app();
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("instant.png");
-    std::fs::write(&image, b"png bytes").unwrap();
+    std::fs::write(&image, crate::tui::app::input::tiny_png_bytes_for_test()).unwrap();
 
     for ch in image.display().to_string().chars() {
         crate::tui::app::input::handle_text_input(&mut app, &ch.to_string());

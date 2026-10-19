@@ -1,0 +1,15 @@
+{
+  "version": "0.89.3",
+  "date": "2026-09-29",
+  "title": "Herdr support and /cloud session moves",
+  "highlights": [
+    "jcode is now a first-class agent in herdr: its name and working/idle state show in the sidebar and herdr agent list, herdr agent wait works on it, and after a herdr restart the pane reopens the same jcode session",
+    "/cloud and /local move a live session, including uncommitted code, to a cloud host and back"
+  ],
+  "improvements": [
+    "herdr reports run in the background with a short timeout, so herdr can never slow jcode down, and jcode releases the pane when you quit"
+  ],
+  "fixes": [
+    "Usage telemetry now counts tokens from responses that fail mid-stream, crashed sessions, compaction, and background agents"
+  ]
+}

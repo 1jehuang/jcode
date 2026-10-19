@@ -86,10 +86,11 @@ pub(crate) fn openai_effective_auth_mode() -> &'static str {
         Ok(creds) if !creds.refresh_token.is_empty() || creds.id_token.is_some() => "oauth",
         Ok(_) => "api-key",
         Err(_) => {
-            if std::env::var("OPENAI_API_KEY")
-                .ok()
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
+            if crate::provider_catalog::load_api_key_from_env_or_config(
+                "OPENAI_API_KEY",
+                "openai.env",
+            )
+            .is_some()
             {
                 "api-key"
             } else {
@@ -423,7 +424,11 @@ enum DerivedLayer {
     OpenRouter(RouteCheapnessEstimate),
     /// The live models.dev catalog card, with the long-context tier selected for
     /// the requested `input_tokens` already applied.
-    ModelsDev(crate::model_pricing::ModelPricingEntry, Currency),
+    ModelsDev(
+        crate::model_pricing::ModelPricingEntry,
+        Currency,
+        crate::model_pricing::PricingMatch,
+    ),
 }
 
 fn derived_layer_for_source_at_size(
@@ -452,25 +457,41 @@ fn derived_layer_for_source_at_size(
     }
 
     // Live models.dev catalog (disk cache; refreshes in the background).
-    let (card, currency) =
-        crate::model_pricing::models_dev_card_at_size(source_key, model, at, input_tokens)?;
-    Some(DerivedLayer::ModelsDev(card, currency))
+    let (card, currency, matched) = crate::model_pricing::models_dev_card_with_provenance_at_size(
+        source_key,
+        model,
+        at,
+        input_tokens,
+    )?;
+    Some(DerivedLayer::ModelsDev(card, currency, matched))
 }
 
 /// Project a derived layer into the route-catalog estimate shape.
 fn derived_layer_estimate(layer: DerivedLayer) -> Option<RouteCheapnessEstimate> {
     match layer {
         DerivedLayer::Curated(estimate) | DerivedLayer::OpenRouter(estimate) => Some(estimate),
-        DerivedLayer::ModelsDev(card, _currency) => {
+        DerivedLayer::ModelsDev(card, _currency, matched) => {
             let input = card.cost.input?;
             let output = card.cost.output?;
+            // A price borrowed from other providers' listings (reseller
+            // fallback) is a reasonable estimate, not the route's own
+            // published rate.
+            let (confidence, note) = match matched {
+                crate::model_pricing::PricingMatch::ProviderTable => {
+                    (RouteCostConfidence::High, "models.dev pricing catalog")
+                }
+                crate::model_pricing::PricingMatch::CrossProvider => (
+                    RouteCostConfidence::Medium,
+                    "models.dev pricing catalog (inferred from other providers)",
+                ),
+            };
             Some(RouteCheapnessEstimate::metered(
                 RouteCostSource::ModelsDevCatalog,
-                RouteCostConfidence::High,
+                confidence,
                 rate_to_micros(input),
                 rate_to_micros(output),
                 card.cost.cache_read.map(rate_to_micros),
-                Some("models.dev pricing catalog".to_string()),
+                Some(note.to_string()),
             ))
         }
     }
@@ -511,7 +532,7 @@ fn derived_layer_card(layer: DerivedLayer) -> Option<(crate::model_pricing::Mode
                 currency,
             ))
         }
-        DerivedLayer::ModelsDev(entry, currency) => {
+        DerivedLayer::ModelsDev(entry, currency, _matched) => {
             entry.to_model_cost().map(|cost| (cost, currency))
         }
     }
@@ -531,7 +552,7 @@ pub(crate) fn derived_entry_for_source_at_size(
     input_tokens: Option<u64>,
 ) -> Option<(crate::model_pricing::ModelPricingEntry, Currency)> {
     match derived_layer_for_source_at_size(source_key, model, service_tier, at, input_tokens)? {
-        DerivedLayer::ModelsDev(entry, currency) => Some((entry, currency)),
+        DerivedLayer::ModelsDev(entry, currency, _matched) => Some((entry, currency)),
         layer => {
             let (cost, currency) = derived_layer_card(layer)?;
             Some((

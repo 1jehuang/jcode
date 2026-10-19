@@ -12,6 +12,67 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[test]
+fn ndjson_preserves_provider_reported_service_tier_without_inferring_it() {
+    let mut state = NdjsonRunState::default();
+    assert_eq!(state.served_service_tier, None);
+    let mut output = Vec::new();
+    for (requested, served) in [
+        (Some("ultrafast"), "default"),
+        (Some("priority"), "priority"),
+        (None, "default"),
+    ] {
+        emit_ndjson_event(
+            &mut output,
+            &mut state,
+            crate::protocol::ServerEvent::ServiceTierReported {
+                requested: requested.map(str::to_owned),
+                tier: served.to_owned(),
+            },
+        )
+        .expect("emit tier metadata");
+        assert_eq!(state.requested_service_tier.as_deref(), requested);
+        assert_eq!(state.served_service_tier.as_deref(), Some(served));
+    }
+    let events: Vec<serde_json::Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0],
+        serde_json::json!({
+            "type": "service_tier", "requested": "ultrafast", "tier": "default",
+            "report_status": "reported_mismatch"
+        })
+    );
+    assert!(events[2]["requested"].is_null());
+}
+
+#[test]
+fn ndjson_service_tier_status_never_infers_confirmation() {
+    for (requested, reported, expected) in [
+        (None, None, "not_reported"),
+        (Some("ultrafast"), Some("auto"), "unresolved"),
+        (Some("ultrafast"), Some("default"), "reported_mismatch"),
+        (Some("ultrafast"), Some("ultrafast"), "reported_match"),
+        (Some("fast"), Some("priority"), "reported_match"),
+        (Some("off"), Some("standard"), "reported_match"),
+        (None, Some("default"), "reported_match"),
+        (Some("flex"), Some("default"), "reported_mismatch"),
+        (Some("future-tier"), Some("default"), "reported_mismatch"),
+    ] {
+        let state = NdjsonRunState {
+            requested_service_tier: requested.map(str::to_string),
+            served_service_tier: reported.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(state.service_tier_report_status(), expected);
+        assert!(!state.service_tier_report_status().contains("confirmed"));
+    }
+}
+
+#[test]
 fn server_reload_report_preserves_json_fields_and_exit_status_contract() {
     let cases = [
         (false, false, false, false),
@@ -271,6 +332,62 @@ impl Provider for FailingTestProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
     }
+}
+
+struct OpenRouterSlotProvider;
+
+#[async_trait]
+impl Provider for OpenRouterSlotProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!(
+            "the provider label test never sends a request"
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+#[test]
+fn run_report_names_local_profile_instead_of_openrouter_slot() {
+    // Ollama/LM Studio share the OpenRouter transport slot (#804).
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("ollama")),
+        "ollama"
+    );
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("lmstudio")),
+        "lmstudio"
+    );
+    // Public OpenRouter and unknown identities keep the slot id.
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("openrouter")),
+        "openrouter"
+    );
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, None),
+        "openrouter"
+    );
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("  ")),
+        "openrouter"
+    );
+    // Other providers keep their established name.
+    assert_eq!(
+        run_report_provider_name(&TestProvider, Some("openai-api")),
+        "test"
+    );
 }
 
 fn spawn_single_response_http_server(status: u16, body: &str) -> String {

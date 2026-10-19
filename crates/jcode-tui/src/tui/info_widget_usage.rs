@@ -1,46 +1,60 @@
+use super::frame::{self, Framed};
 use super::{InfoWidgetData, UsageInfo, UsageProvider};
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+/// Border layout: `Claude limits` top-left with one bar per window in the
+/// body; cost-based providers put the dollar total on the top border.
+pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let Some(info) = &data.usage_info else {
-        return Vec::new();
+        return Framed::default();
     };
+    if info.limit_reached {
+        let label = info.provider.label();
+        let title = if label.is_empty() {
+            frame::label("Limits")
+        } else {
+            frame::label(format!("{} limits", label))
+        };
+        return Framed::body(vec![usage_limit_reached_line()]).title(title);
+    }
     if !info.available {
-        return Vec::new();
+        return if matches!(info.provider, UsageProvider::Anthropic) {
+            Framed::body(vec![usage_unavailable_line()]).title(frame::label("Anthropic limits"))
+        } else {
+            Framed::default()
+        };
     }
 
     match info.provider {
-        UsageProvider::Copilot => {
-            vec![Line::from(vec![Span::styled(
+        UsageProvider::Copilot => Framed::body(vec![Line::from(vec![Span::styled(
+            format!(
+                "{} in + {} out",
+                format_tokens(info.input_tokens),
+                format_tokens(info.output_tokens)
+            ),
+            Style::default().fg(rgb(140, 140, 150)),
+        )])])
+        .title(frame::label("Copilot tokens")),
+        UsageProvider::CostBased => Framed::body(vec![
+            Line::from(vec![
+                Span::styled("💰 ", Style::default().fg(rgb(140, 180, 255))),
+                Span::styled(
+                    crate::money_display::summarize(&info.cost_rows, 4),
+                    Style::default().fg(rgb(180, 180, 190)).bold(),
+                ),
+            ]),
+            Line::from(vec![Span::styled(
                 format!(
                     "{} in + {} out",
                     format_tokens(info.input_tokens),
                     format_tokens(info.output_tokens)
                 ),
                 Style::default().fg(rgb(140, 140, 150)),
-            )])]
-        }
-        UsageProvider::CostBased => {
-            vec![
-                Line::from(vec![
-                    Span::styled("💰 ", Style::default().fg(rgb(140, 180, 255))),
-                    Span::styled(
-                        crate::money_display::summarize(&info.cost_rows, 4),
-                        Style::default().fg(rgb(180, 180, 190)).bold(),
-                    ),
-                ]),
-                Line::from(vec![Span::styled(
-                    format!(
-                        "{} in + {} out",
-                        format_tokens(info.input_tokens),
-                        format_tokens(info.output_tokens)
-                    ),
-                    Style::default().fg(rgb(140, 140, 150)),
-                )]),
-            ]
-        }
+            )]),
+        ])
+        .title(frame::label("Cost")),
         _ => {
             let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
             let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
@@ -58,14 +72,11 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
 
             let mut lines = Vec::new();
             let label = info.provider.label();
-            if !label.is_empty() {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("{} limits", label),
-                    Style::default()
-                        .fg(rgb(140, 140, 150))
-                        .add_modifier(ratatui::style::Modifier::DIM),
-                )]));
-            }
+            let title = if label.is_empty() {
+                frame::label("Limits")
+            } else {
+                frame::label(format!("{} limits", label))
+            };
             if let Some(primary_label) = info.primary_limit_label.as_deref() {
                 lines.push(render_labeled_bar(
                     primary_label,
@@ -102,9 +113,23 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
                     data.usage_display_used,
                 ));
             }
-            lines
+            Framed::body(lines).title(title)
         }
     }
+}
+
+fn usage_limit_reached_line() -> Line<'static> {
+    Line::from(Span::styled(
+        "Usage limit reached",
+        Style::default().fg(rgb(255, 190, 80)).bold(),
+    ))
+}
+
+fn usage_unavailable_line() -> Line<'static> {
+    Line::from(Span::styled(
+        "Usage unavailable (refresh pending or failed)",
+        Style::default().fg(rgb(255, 190, 80)),
+    ))
 }
 
 pub(super) fn render_usage_compact(
@@ -112,8 +137,15 @@ pub(super) fn render_usage_compact(
     width: u16,
     usage_display_used: bool,
 ) -> Vec<Line<'static>> {
+    if info.limit_reached {
+        return vec![usage_limit_reached_line()];
+    }
     if !info.available {
-        return Vec::new();
+        return if matches!(info.provider, UsageProvider::Anthropic) {
+            vec![usage_unavailable_line()]
+        } else {
+            Vec::new()
+        };
     }
 
     if matches!(info.provider, UsageProvider::CostBased) {
@@ -190,7 +222,7 @@ pub(super) fn render_usage_compact(
     lines
 }
 
-fn render_labeled_bar(
+pub(crate) fn render_labeled_bar(
     label: &str,
     used_pct: u8,
     left_pct: u8,
@@ -299,7 +331,7 @@ mod tests {
         // never behind the `$` the widget used to hardcode.
         let data = cost_widget_data(native_rows(&[(Currency::new("CNY"), 0.0123)]));
 
-        let expanded = lines_text(&render_usage_widget(&data, Rect::new(0, 0, 40, 4)));
+        let expanded = lines_text(&render_usage_widget(&data, Rect::new(0, 0, 40, 4)).lines);
         assert!(expanded.contains("CNY 0.0123"), "{expanded}");
         assert!(
             !expanded.contains('$'),
@@ -321,7 +353,7 @@ mod tests {
             (Currency::usd(), 1.5),
         ]));
 
-        let expanded = lines_text(&render_usage_widget(&data, Rect::new(0, 0, 40, 4)));
+        let expanded = lines_text(&render_usage_widget(&data, Rect::new(0, 0, 40, 4)).lines);
         assert!(expanded.contains("CNY 8.0000 +1 more"), "{expanded}");
         assert!(
             !expanded.contains("$9.5000"),
@@ -389,6 +421,22 @@ mod tests {
         assert!(!text.contains("0% left"));
         assert!(!text.contains("100% used"));
         assert!(UnicodeWidthStr::width(text.as_str()) <= 24);
+    }
+
+    #[test]
+    fn unavailable_anthropic_usage_is_explicit_not_silently_hidden() {
+        let info = UsageInfo {
+            provider: UsageProvider::Anthropic,
+            available: false,
+            ..Default::default()
+        };
+
+        let text = render_usage_compact(&info, 50, false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Usage unavailable"));
     }
 
     #[test]

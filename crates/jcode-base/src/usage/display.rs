@@ -175,5 +175,7 @@ pub fn format_usage_bar(percent: f32, width: usize) -> String {
     let filled = filled.min(width);
     let empty = width.saturating_sub(filled);
     let bar: String = "█".repeat(filled) + &"░".repeat(empty);
-    format!("{} {:.0}%", bar, percent)
+    // Right-align the number so the `%` (and any "· resets" suffix) lines up
+    // across rows with different percentages.
+    format!("{} {:>3.0}%", bar, percent)
 }

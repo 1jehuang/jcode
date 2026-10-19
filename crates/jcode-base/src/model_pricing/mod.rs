@@ -78,6 +78,7 @@ use jcode_provider_core::{
     CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS, Currency, Money,
     RouteCheapnessEstimate,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -138,7 +139,27 @@ fn normalize_model_id(model: &str) -> &str {
 /// when the catalog has no entry; never blocks on the network. Schedules a
 /// background refresh when the disk cache is missing or stale.
 pub fn lookup(jcode_provider: &str, model: &str) -> Option<ModelCost> {
-    lookup_entry(jcode_provider, model).and_then(|entry| entry.to_model_cost())
+    lookup_with_provenance(jcode_provider, model).map(|(cost, _)| cost)
+}
+
+/// Where a [`lookup_with_provenance`] price came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PricingMatch {
+    /// The provider's own models.dev table listed the model.
+    ProviderTable,
+    /// Inferred from other providers' listings of the same model id (reseller
+    /// fallback). Plausible but not authoritative for this route.
+    CrossProvider,
+}
+
+/// Like [`lookup`], but also reports whether the price came from the
+/// provider's own table or from the cross-provider reseller fallback.
+pub fn lookup_with_provenance(
+    jcode_provider: &str,
+    model: &str,
+) -> Option<(ModelCost, PricingMatch)> {
+    lookup_entry_with_provenance(jcode_provider, model)
+        .and_then(|(entry, matched)| entry.to_model_cost().map(|cost| (cost, matched)))
 }
 
 /// The models.dev entry itself, extension fields included.
@@ -147,19 +168,156 @@ pub fn lookup(jcode_provider: &str, model: &str) -> Option<ModelCost> {
 /// tiers models.dev states as `cost.context_over_200k`. The billing path needs
 /// them, so it reads this instead.
 pub(crate) fn lookup_entry(jcode_provider: &str, model: &str) -> Option<ModelPricingEntry> {
-    let provider_id = models_dev_provider_id(jcode_provider)?;
+    lookup_entry_with_provenance(jcode_provider, model).map(|(entry, _)| entry)
+}
+
+/// Like [`lookup_entry`], but also reports where the entry came from.
+pub(crate) fn lookup_entry_with_provenance(
+    jcode_provider: &str,
+    model: &str,
+) -> Option<(ModelPricingEntry, PricingMatch)> {
+    let is_openai_compatible = jcode_provider.trim().starts_with("openai-compatible:");
     let cache = ensure_cache_fresh()?;
-    let models = cache.providers.get(provider_id)?;
-    let model = normalize_model_id(model);
-    if let Some(entry) = models.get(model) {
-        return Some(entry.clone());
+    let mapped_provider = models_dev_provider_id(jcode_provider);
+    if let Some(provider_id) = mapped_provider
+        && let Some(models) = cache.providers.get(provider_id)
+    {
+        let model = normalize_model_id(model);
+        if let Some(entry) = models.get(model) {
+            return Some((entry.clone(), PricingMatch::ProviderTable));
+        }
+        // OpenRouter-style ids (`anthropic/claude-...`) may reach here with the
+        // provider prefix still attached; retry on the bare model name.
+        if let Some((_, bare)) = model.rsplit_once('/')
+            && let Some(entry) = models.get(bare)
+        {
+            return Some((entry.clone(), PricingMatch::ProviderTable));
+        }
     }
-    // OpenRouter-style ids (`anthropic/claude-...`) may reach here with the
-    // provider prefix still attached; retry on the bare model name.
-    if let Some((_, bare)) = model.rsplit_once('/') {
-        return models.get(bare).cloned();
+    // Reseller/aggregator keys that models.dev does not list as a provider at
+    // all (`openai-compatible:kilocode`, ...) still serve vendor models under
+    // vendor ids. Match the same id across the other providers' tables instead
+    // of assuming unpriced. A profile that *does* have a models.dev mapping
+    // keeps its own table as the authority: a model missing there is left
+    // unpriced rather than billed at an unrelated provider's rate. First-party
+    // providers never take this path either, and neither do local/keyless
+    // endpoints (Ollama, LM Studio, localhost profiles): they serve vendor
+    // model ids for free, so borrowing a hosted price would invent spend.
+    if is_openai_compatible
+        && mapped_provider.is_none()
+        && !openai_compatible_profile_is_local(jcode_provider)
+    {
+        return cross_provider_lookup(&cache, model)
+            .map(|entry| (entry, PricingMatch::CrossProvider));
     }
     None
+}
+
+/// True when an `openai-compatible:<id>` profile runs locally or without an
+/// API key, so its traffic is not billed at hosted rates. Unknown ids (not a
+/// built-in profile and not a configured `[providers.<id>]`) are treated as
+/// hosted resellers.
+fn openai_compatible_profile_is_local(jcode_provider: &str) -> bool {
+    let Some(id) = jcode_provider
+        .trim()
+        .strip_prefix("openai-compatible:")
+        .map(str::trim)
+    else {
+        return false;
+    };
+    if let Some(profile) = crate::provider_catalog::openai_compatible_profile_by_id(id) {
+        return !profile.requires_api_key || api_base_is_local(profile.api_base);
+    }
+    if let Some(named) = crate::config::config().providers.get(id) {
+        return api_base_is_local(&named.base_url)
+            || named.requires_api_key == Some(false)
+            || named.auth == crate::config::NamedProviderAuth::None;
+    }
+    false
+}
+
+/// Loopback, private-network, link-local, and `.local`/`.lan` hosts.
+fn api_base_is_local(api_base: &str) -> bool {
+    let Ok(url) = url::Url::parse(api_base.trim()) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
+        Some(url::Host::Domain(host)) => {
+            let host = host.to_ascii_lowercase();
+            host == "localhost"
+                || host.ends_with(".localhost")
+                || host.ends_with(".local")
+                || host.ends_with(".lan")
+                || host == "host.docker.internal"
+        }
+        None => false,
+    }
+}
+
+/// Match `model` (normalized, then bare after a `vendor/` split) against
+/// every provider table in the catalog. Exact id matches win over bare-name
+/// matches; among matches the modal (most common) price wins, with the
+/// lexicographically-first provider id as deterministic tie-break.
+fn cross_provider_lookup(cache: &PricingCache, model: &str) -> Option<ModelPricingEntry> {
+    let normalized = normalize_model_id(model);
+    let bare = normalized
+        .rsplit_once('/')
+        .map_or(normalized, |(_, bare)| bare.trim());
+    let mut exact: Vec<(&str, &ModelPricingEntry)> = Vec::new();
+    let mut bare_named: Vec<(&str, &ModelPricingEntry)> = Vec::new();
+    for (provider_id, models) in &cache.providers {
+        if let Some(entry) = models.get(normalized) {
+            exact.push((provider_id.as_str(), entry));
+        } else if let Some(entry) = models.get(bare) {
+            bare_named.push((provider_id.as_str(), entry));
+        }
+    }
+    exact.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    bare_named.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let candidates = if exact.is_empty() {
+        &bare_named
+    } else {
+        &exact
+    };
+    modal_pricing(candidates)
+}
+
+/// Most common price among candidates; price ties resolve to the first
+/// candidate in the (provider-sorted) list so repeated lookups agree.
+fn modal_pricing(candidates: &[(&str, &ModelPricingEntry)]) -> Option<ModelPricingEntry> {
+    let mut counts: HashMap<[u64; 4], usize> = HashMap::new();
+    for (_, entry) in candidates {
+        if let Some(cost) = entry.to_model_cost() {
+            *counts.entry(cost_key(&cost)).or_default() += 1;
+        }
+    }
+    let max_count = counts.values().copied().max()?;
+    candidates
+        .iter()
+        .find(|(_, entry)| {
+            entry
+                .to_model_cost()
+                .is_some_and(|cost| counts.get(&cost_key(&cost)) == Some(&max_count))
+        })
+        .map(|(_, entry)| (*entry).clone())
+}
+
+/// Key a price for modal counting. `None` cache rates get a distinct
+/// sentinel: a missing cache rate is not the same listing as an explicitly
+/// free one, and merging them would let a missing/zero rate outvote a paid
+/// cache majority.
+fn cost_key(cost: &ModelCost) -> [u64; 4] {
+    const MISSING: u64 = u64::MAX;
+    [
+        cost.input_usd_per_mtok.to_bits(),
+        cost.output_usd_per_mtok.to_bits(),
+        cost.cache_read_usd_per_mtok.map_or(MISSING, f64::to_bits),
+        cost.cache_write_usd_per_mtok.map_or(MISSING, f64::to_bits),
+    ]
 }
 
 /// Return the freshest cache available, scheduling a refresh if needed.
@@ -349,24 +507,25 @@ pub(crate) struct VendorFileCard {
 }
 
 /// The models.dev layer's card, always USD, with the long-context tier for
-/// `input_tokens` applied.
+/// `input_tokens` applied, and which catalog table answered (the provider's
+/// own or the cross-provider reseller fallback).
 ///
 /// Reads the full entry rather than the flattened [`ModelCost`], so the
 /// `context_over_200k` rates the catalog parsed into `context_tiers` survive to
 /// the billing path instead of being dropped here. The derived billing layer
 /// (curated tables, OpenRouter caches, models.dev) uses this too, which is what
 /// makes a >200k models.dev call cost more than the base rate.
-pub(crate) fn models_dev_card_at_size(
+pub(crate) fn models_dev_card_with_provenance_at_size(
     provider: &str,
     model: &str,
     at: SystemTime,
     input_tokens: Option<u64>,
-) -> Option<(ModelPricingEntry, Currency)> {
-    let mut entry = lookup_entry(provider, model)?;
+) -> Option<(ModelPricingEntry, Currency, PricingMatch)> {
+    let (mut entry, matched) = lookup_entry_with_provenance(provider, model)?;
     if let Some(selected) = rules::resolve_tier(&entry, at, input_tokens) {
         entry.cost = selected.cost;
     }
-    Some((entry, Currency::usd()))
+    Some((entry, Currency::usd(), matched))
 }
 
 /// What identifies the derived-layer rate card a call would be billed from at

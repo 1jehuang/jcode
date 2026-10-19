@@ -351,10 +351,24 @@ pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option
         }
     };
     // Only the role whose own default this is may claim it.
-    let role = ALL_ROLES
-        .iter()
-        .copied()
-        .find(|role| role.default_rgb() == rgb && palette.is_overridden(*role))?;
+    //
+    // On a 256-color terminal the default was rendered through `color::rgb`,
+    // which quantizes it to an xterm index. Dequantizing that index rarely gives
+    // back the original default, so indexed cells are matched in index space
+    // instead (#1663). `is_overridden` is checked first so a single override
+    // still wins when two defaults share an index.
+    let role = ALL_ROLES.iter().copied().find(|role| {
+        if !palette.is_overridden(*role) {
+            return false;
+        }
+        let (r, g, b) = role.default_rgb();
+        match color {
+            Color::Indexed(index) => {
+                role.default_rgb() == rgb || crate::color::rgb_to_xterm256(r, g, b) == index
+            }
+            _ => role.default_rgb() == rgb,
+        }
+    })?;
     let (r, g, b) = palette.rgb(role);
     Some(crate::color::rgb(r, g, b))
 }
@@ -501,6 +515,37 @@ mod tests {
         );
     }
 
+    /// On a 256-color terminal a role default reaches the buffer as the
+    /// quantized xterm index, which rarely dequantizes back to the default.
+    /// The override must still be applied (#1663).
+    #[test]
+    fn quantized_role_defaults_follow_an_override() {
+        let mut overridden = 0;
+        for role in ALL_ROLES.iter().copied() {
+            let mut palette = Palette::default();
+            palette.set(role, (1, 2, 3));
+            let (r, g, b) = role.default_rgb();
+            let quantized = Color::Indexed(crate::color::rgb_to_xterm256(r, g, b));
+            assert_eq!(
+                configured_native_color(&palette, quantized),
+                Some(crate::color::rgb(1, 2, 3)),
+                "{} override dropped for its quantized default",
+                role.key()
+            );
+            overridden += 1;
+        }
+        assert_eq!(overridden, ALL_ROLES.len());
+        // Unconfigured palettes still attribute nothing.
+        let (r, g, b) = Role::Warning.default_rgb();
+        assert_eq!(
+            configured_native_color(
+                &Palette::default(),
+                Color::Indexed(crate::color::rgb_to_xterm256(r, g, b))
+            ),
+            None
+        );
+    }
+
     #[test]
     fn from_pairs_reports_errors_without_dropping_valid_entries() {
         let (palette, errors) = Palette::from_pairs([
@@ -536,6 +581,8 @@ mod buffer_tests {
         }
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _restore = Restore;
+        // The assertions compare exact truecolor output; never depend on the runner's COLORTERM.
+        crate::color::pin_truecolor_for_tests();
         set_palette(palette);
         body();
     }

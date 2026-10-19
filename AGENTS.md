@@ -4,6 +4,16 @@
 
 - Jcode Desktop is in a separate repository.
 
+## TUI style
+
+- UI chrome must not wrap: startup headers, account rows, status labels, and
+  other compact UI rows should fit their available terminal-cell width or
+  truncate with an ellipsis. Count Unicode display cells, not characters.
+  Preserve one logical row per visual row, including at narrow widths.
+  Chat prose and other intentionally multiline content may wrap normally.
+- Reuse the info widget's limit-bar renderer for usage indicators instead of
+  introducing a different bar glyph, color, or used/remaining convention.
+
 ## Development Workflow
 
 - **Use the user's Git identity** - Create commits with the configured
@@ -15,10 +25,15 @@
   first-time contributor, or an agent. Good PRs can be merged directly after review
   and validation. Do not require a maintainer-authored rewrite merely because of
   who submitted the change. See `CONTRIBUTING.md` for the contribution policy.
-- **Keep work scoped** - Work on your own branch and preserve unrelated work. When
-  the user asks you to review or integrate a PR or branch, you may inspect, test,
-  and integrate that contribution regardless of author status. Do not pull in
-  unrelated branches or merge a PR without user authorization.
+- **Prefer master/main** - Work directly on the repository's primary branch
+  (`master` or `main`) by default. Do not create a branch or worktree merely to
+  start a task. Only do so when the user explicitly requests it or isolation is
+  genuinely necessary, and explain the concrete reason first.
+- **Keep work scoped** - Preserve unrelated work. If already on a branch with
+  ongoing changes, finish and integrate safely rather than switching blindly.
+  When the user asks you to review or integrate a PR or branch, you may inspect,
+  test, and integrate that contribution regardless of author status. Do not pull
+  in unrelated branches or merge a PR without user authorization.
 
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.

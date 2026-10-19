@@ -328,7 +328,9 @@ fn a_failed_save_preserves_the_declared_removal() {
     std::fs::remove_dir(&path).expect("remove the directory");
     home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#1050f0\"\n");
 
-    Config::default().save().expect("save after the file is writable again");
+    Config::default()
+        .save()
+        .expect("save after the file is writable again");
 
     let written = home.read();
     assert!(

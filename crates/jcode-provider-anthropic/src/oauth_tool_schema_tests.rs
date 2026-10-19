@@ -125,3 +125,38 @@ fn oauth_bash_schema_advertises_the_justification_escape_hatch() {
         bash.input_schema
     );
 }
+
+#[test]
+fn oauth_builtins_forward_registry_schemas_including_intent() {
+    // The OAuth route used to swap in hand-curated Claude-Code schemas for
+    // Edit/Write/Read/..., which silently dropped registry options such as
+    // `intent`. Every route must advertise the registry definition verbatim,
+    // only renamed.
+    for (local, oauth) in [
+        ("edit", "Edit"),
+        ("write", "Write"),
+        ("read", "Read"),
+        ("bash", "Bash"),
+    ] {
+        let def = ToolDefinition {
+            name: local.to_string(),
+            description: format!("registry {local}"),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "intent": {"type": "string"},
+                    "file_path": {"type": "string"}
+                },
+                "required": ["file_path"]
+            }),
+            defer_loading: false,
+        };
+        let api = format_tools(std::slice::from_ref(&def), false, false);
+        let oauth_tools = format_tools(std::slice::from_ref(&def), true, false);
+        assert_eq!(oauth_tools.len(), 1);
+        assert_eq!(oauth_tools[0].name, oauth);
+        assert_eq!(oauth_tools[0].description, def.description);
+        assert_eq!(oauth_tools[0].input_schema, api[0].input_schema);
+        assert!(oauth_tools[0].input_schema["properties"]["intent"].is_object());
+    }
+}

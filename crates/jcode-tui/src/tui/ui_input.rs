@@ -1,3 +1,7 @@
+#[path = "ui_input/command_suggestions.rs"]
+mod command_suggestions;
+use command_suggestions::*;
+
 use super::inline_interactive_ui::format_elapsed;
 use super::selection_highlight::highlight_line_selection;
 use super::tools_ui::{get_tool_activity_detail, summarize_batch_running_tools_compact};
@@ -253,71 +257,6 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
     frame.render_widget(Paragraph::new(lines), rect);
 }
 
-fn command_suggestion_lines(
-    app: &dyn TuiState,
-    suggestions: &[(String, &'static str)],
-) -> Vec<Line<'static>> {
-    // Highlight the characters of each command that the typed query matched.
-    // We only highlight the command token itself (the part before the first
-    // space), matched against the corresponding leading token of the input.
-    let needle = command_suggestion_needle(app.input());
-    let highlight = |cmd: &str, base: Style| -> Vec<Span<'static>> {
-        highlight_command_spans(cmd, needle.as_deref(), base)
-    };
-
-    let mut lines = Vec::new();
-    if suggestions.len() == 1 {
-        let (cmd, desc) = &suggestions[0];
-        let base = Style::default().fg(rgb(255, 213, 128));
-        let mut spans = highlight(cmd, base);
-        spans.push(Span::styled(format!("  {}", desc), base));
-        lines.push(Line::from(spans));
-    } else if !suggestions.is_empty() {
-        let selected = app
-            .command_suggestion_selected()
-            .min(suggestions.len().saturating_sub(1));
-        let window_start = command_suggestion_window_start(selected, suggestions.len());
-        let limited: Vec<_> = suggestions
-            .iter()
-            .skip(window_start)
-            .take(app::COMMAND_SUGGESTION_VISIBLE_LIMIT)
-            .collect();
-        let window_end = window_start + limited.len();
-        let more_count = suggestions.len().saturating_sub(window_end);
-        let selected_visible = selected.saturating_sub(window_start);
-
-        for (i, (cmd, desc)) in limited.iter().enumerate() {
-            let is_selected = i == selected_visible;
-            let description_style = if is_selected {
-                Style::default().fg(rgb(255, 213, 128))
-            } else {
-                Style::default().fg(dim_color())
-            };
-            let command_style = if is_selected {
-                Style::default().fg(rgb(255, 213, 128))
-            } else {
-                Style::default().fg(rgb(128, 203, 196))
-            };
-            let mut spans = highlight(cmd, command_style);
-            spans.push(Span::styled(format!("  {}", desc), description_style));
-            if i == 0 && window_start > 0 {
-                spans.push(Span::styled(
-                    format!("  ↑{}", window_start),
-                    Style::default().fg(dim_color()),
-                ));
-            }
-            if i + 1 == limited.len() && more_count > 0 {
-                spans.push(Span::styled(
-                    format!("  +{} more", more_count),
-                    Style::default().fg(dim_color()),
-                ));
-            }
-            lines.push(Line::from(spans));
-        }
-    }
-    lines
-}
-
 /// Extract the slash-command portion of the typed input that should be matched
 /// against suggestion command tokens for highlighting purposes.
 fn command_suggestion_needle(input: &str) -> Option<String> {
@@ -326,49 +265,6 @@ fn command_suggestion_needle(input: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
-}
-
-/// Build spans for a suggestion command, recoloring the characters that the
-/// fuzzy matcher aligned with the typed query. Falls back to a single
-/// unhighlighted span when there is nothing (useful) to highlight.
-fn highlight_command_spans(cmd: &str, needle: Option<&str>, base: Style) -> Vec<Span<'static>> {
-    let positions: Vec<usize> = match needle {
-        Some(n) if !n.is_empty() && n != "/" => crate::tui::fuzzy::fuzzy_match_positions(n, cmd),
-        _ => Vec::new(),
-    };
-    if positions.is_empty() {
-        return vec![Span::styled(cmd.to_string(), base)];
-    }
-
-    // Recolor (rather than underline) the matched characters so they stay in
-    // the command palette's own hue: matched chars are a brighter version of
-    // the line's base color, while unmatched chars are dimmed so the match
-    // visually pops.
-    let highlight_style = base
-        .fg(brighten_command_color(base.fg))
-        .add_modifier(Modifier::BOLD);
-    let rest_style = base.fg(dim_command_color(base.fg));
-    let chars: Vec<char> = cmd.chars().collect();
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut run_start = 0usize;
-    let mut run_is_match = !chars.is_empty() && positions.contains(&0);
-    for i in 1..=chars.len() {
-        let cur_is_match = i < chars.len() && positions.contains(&i);
-        if cur_is_match != run_is_match || i == chars.len() {
-            let chunk: String = chars[run_start..i].iter().collect();
-            spans.push(Span::styled(
-                chunk,
-                if run_is_match {
-                    highlight_style
-                } else {
-                    rest_style
-                },
-            ));
-            run_start = i;
-            run_is_match = cur_is_match;
-        }
-    }
-    spans
 }
 
 /// Blend a palette color toward white to emphasize a matched character while
@@ -392,6 +288,9 @@ pub(crate) fn dim_command_color(color: Option<Color>) -> Color {
 }
 
 pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
+    if app.login_input_hint().is_some() {
+        return 1;
+    }
     // Command suggestions render as an overlay (see
     // `draw_command_suggestions_overlay`) and intentionally reserve no layout
     // height: opening the palette must not move the transcript or footer.
@@ -413,6 +312,9 @@ pub(super) fn send_mode_reserved_width(app: &dyn TuiState) -> usize {
 }
 
 pub(super) fn input_prompt(app: &dyn TuiState) -> (&'static str, Color) {
+    if app.login_input_hint().is_some() {
+        return (" login> ", accent_color());
+    }
     let mode = composer_mode(app.input(), app.is_remote_mode());
     if mode.is_shell() {
         ("$ ", shell_mode_color())
@@ -471,7 +373,10 @@ pub(super) fn pending_prompt_count(app: &dyn TuiState) -> usize {
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
-    app.queued_messages().len() + pending_count + if interleave { 1 } else { 0 }
+    app.queued_messages().len()
+        + app.queued_commands().len()
+        + pending_count
+        + if interleave { 1 } else { 0 }
 }
 
 pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
@@ -496,6 +401,13 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
             ));
         }
     }
+    for msg in app.queued_commands() {
+        let normalized = normalize_repaint_sensitive_notice_text(msg);
+        previews.push(format!(
+            "⏳ {}",
+            normalized.chars().take(100).collect::<String>()
+        ));
+    }
     for msg in app.queued_messages() {
         let normalized = normalize_repaint_sensitive_notice_text(msg);
         previews.push(format!(
@@ -519,6 +431,9 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
         {
             items.push((QueuedMsgType::Interleave, msg));
         }
+    }
+    for msg in app.queued_commands() {
+        items.push((QueuedMsgType::Queued, msg.as_str()));
     }
     for msg in app.queued_messages() {
         items.push((QueuedMsgType::Queued, msg.as_str()));
@@ -772,6 +687,15 @@ fn append_batch_progress_spans(
 }
 
 pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
+    if app.status_notice().as_deref() == Some(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT) {
+        crate::tui::app::oauth_telemetry::note_status_render(area);
+        frame.render_widget(
+            Paragraph::new(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT)
+                .style(Style::default().fg(accent_color())),
+            area,
+        );
+        return;
+    }
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
     let (cache_read, cache_creation) = app.streaming_cache_tokens();
@@ -1152,10 +1076,7 @@ mod tests {
         };
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
-            Some(
-                "2 resets available · expiry unknown (2 resets) · /reset usage limits openai"
-                    .to_owned()
-            )
+            Some("2 resets available · expiry unknown · /reset".to_owned())
         );
         for auth in [
             AuthMethod::OpenAIApiKey,
@@ -1208,14 +1129,17 @@ mod tests {
         };
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
-            "4 resets available · expires 2099-05-01 00:30 UTC, expires 2099-06-01 00:00 UTC, expiry unknown (2 resets) · /reset usage limits openai"
+            format!(
+                "4 resets available · expires in {} · /reset",
+                crate::usage::format_reset_time("2099-05-01T00:30:00Z")
+            )
         );
         let credits = usage.openai_reset_credits.as_mut().unwrap();
         credits.available_count = 1;
         credits.available_expirations = vec![None];
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
-            "1 reset available · expiry unknown (1 reset) · /reset usage limits openai"
+            "1 reset available · expiry unknown · /reset"
         );
         usage.openai_reset_credits.as_mut().unwrap().available_count = 0;
         assert!(openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).is_none());
@@ -1223,12 +1147,10 @@ mod tests {
 
     #[test]
     fn swarm_effort_model_status_uses_shared_label() {
-        for mode in ["swarm", "swarm-deep"] {
-            assert_eq!(
-                overscroll_short_reasoning(mode),
-                Some(crate::tui::app::effort_display_label(mode))
-            );
-        }
+        assert_eq!(
+            overscroll_short_reasoning("swarm"),
+            Some(crate::tui::app::effort_display_label("swarm"))
+        );
         assert_eq!(overscroll_short_reasoning(" high "), Some("high"));
         assert_eq!(overscroll_short_reasoning(" "), None);
     }
@@ -1869,8 +1791,7 @@ pub(crate) fn openai_reset_status_hint(
     let credits = usage.openai_reset_credits.as_ref()?;
     let count = credits.available_count;
     let noun = if count == 1 { "reset" } else { "resets" };
-    let mut details = Vec::new();
-    let mut unknown = count;
+    let mut expiries = Vec::new();
     for expiry in credits
         .available_expirations
         .iter()
@@ -1880,25 +1801,19 @@ pub(crate) fn openai_reset_status_hint(
             .as_deref()
             .and_then(|expiry| chrono::DateTime::parse_from_rfc3339(expiry).ok())
         {
-            details.push(format!(
-                "expires {}",
-                expiry
-                    .with_timezone(&chrono::Utc)
-                    .format("%Y-%m-%d %H:%M UTC")
-            ));
-            unknown -= 1;
+            expiries.push(expiry);
         }
     }
-    if unknown > 0 {
-        details.push(format!(
-            "expiry unknown ({unknown} {})",
-            if unknown == 1 { "reset" } else { "resets" }
-        ));
-    }
-    Some(format!(
-        "{count} {noun} available · {} · /reset usage limits openai",
-        details.join(", ")
-    ))
+    let detail = expiries.into_iter().min().map_or_else(
+        || "expiry unknown".to_string(),
+        |expiry| {
+            format!(
+                "expires in {}",
+                crate::usage::format_reset_time(&expiry.to_rfc3339())
+            )
+        },
+    );
+    Some(format!("{count} {noun} available · {detail} · /reset"))
 }
 
 fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
@@ -1907,12 +1822,8 @@ fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         return Vec::new();
     }
     let line = Line::from(spans);
-    // Keep existing one-line notices unchanged, but never clip reset expiries.
-    let lines = if app.openai_reset_hint().is_some() {
-        super::markdown::wrap_line(line, usize::from(width))
-    } else {
-        vec![line]
-    };
+    // Notifications must never occupy a second row on narrow terminals.
+    let lines = vec![line];
     lines
         .into_iter()
         .map(|line| {
@@ -2015,7 +1926,6 @@ struct OverscrollLevels {
     auth: u8,
     provider: u8,
     model: u8,
-    tight_separators: bool,
 }
 
 /// Compaction ladder, applied one step at a time until the line fits.
@@ -2026,17 +1936,16 @@ struct OverscrollLevels {
 /// only shortened, so the line always answers "where am I, what am I running,
 /// how full is the context".
 const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
-    |l| l.auth = 1,                // hide auth ("OAuth"/"API key")
-    |l| l.git = 1,                 // "~3 +1 ?2 ↑1" -> "±6 ↑1"
-    |l| l.context = 1,             // "74k/256k ▰▰▰▱▱▱▱▱▱▱ 29%" -> "▰▱▱▱ 29%"
-    |l| l.branch = 1,              // long branch -> 12 chars
-    |l| l.provider = 1,            // hide provider
-    |l| l.context = 2,             // "▰▱▱▱ 29%" -> "29%"
-    |l| l.git = 2,                 // hide git status
-    |l| l.branch = 2,              // hide branch
-    |l| l.tight_separators = true, // " · " -> " "
-    |l| l.model = 1,               // drop reasoning effort
-    |l| l.dir = 1,                 // "~/…/jcode" -> "jcode"
+    |l| l.auth = 1,     // hide auth ("OAuth"/"API key")
+    |l| l.git = 1,      // "~3 +1 ?2 ↑1" -> "±6 ↑1"
+    |l| l.context = 1,  // "74k/256k ▰▰▰▱▱▱▱▱▱▱ 29%" -> "▰▱▱▱ 29%"
+    |l| l.branch = 1,   // long branch -> 12 chars
+    |l| l.provider = 1, // hide provider
+    |l| l.context = 2,  // "▰▱▱▱ 29%" -> "29%"
+    |l| l.git = 2,      // hide git status
+    |l| l.branch = 2,   // hide branch
+    |l| l.model = 1,    // drop reasoning effort
+    |l| l.dir = 1,      // "~/…/jcode" -> "jcode"
 ];
 
 fn overscroll_fact_spans(
@@ -2154,14 +2063,10 @@ fn overscroll_fact_spans(
 fn overscroll_fit_facts(facts: &OverscrollFacts, max_width: usize) -> (Vec<Span<'static>>, bool) {
     use unicode_width::UnicodeWidthStr;
     let render = |levels: OverscrollLevels| {
-        let sep_text = if levels.tight_separators { " " } else { " · " };
         let mut out: Vec<Span<'static>> = Vec::new();
         for group in overscroll_fact_spans(facts, levels) {
             if !out.is_empty() {
-                out.push(Span::styled(
-                    sep_text,
-                    Style::default().fg(rgb(100, 100, 110)),
-                ));
+                out.push(Span::raw(" "));
             }
             out.extend(group);
         }
@@ -2364,7 +2269,7 @@ fn overscroll_short_reasoning(effort: &str) -> Option<&str> {
         return None;
     }
     Some(match effort {
-        "swarm" | "swarm-deep" => crate::tui::app::effort_display_label(effort),
+        "swarm" => crate::tui::app::effort_display_label(effort),
         "max" => "max",
         "xhigh" => "xhigh",
         "high" => "high",
@@ -2486,7 +2391,14 @@ pub(super) fn draw_input(
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
-    if has_suggestions {
+    if let Some(hint) = app.login_input_hint() {
+        hint_shown = true;
+        hint_line = Some(hint.to_string());
+        lines.push(Line::from(Span::styled(
+            hint,
+            Style::default().fg(accent_color()),
+        )));
+    } else if has_suggestions {
         // Overlay pass owns the palette rows; no inline hint line competes
         // with it.
     } else if let Some(shell_hint) = shell_mode_hint(mode) {

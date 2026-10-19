@@ -200,6 +200,11 @@ impl MultiProvider {
             _ => profile_id.clone(),
         };
 
+        let model_spec = if jcode_provider_core::oauth_account_label(api_method).is_some() {
+            format!("{api_method}:{bare_name}")
+        } else {
+            model_spec
+        };
         DefaultModelSelection {
             model_spec,
             provider_key,
@@ -239,6 +244,9 @@ impl MultiProvider {
         if let Some((prefix, rest)) = model_request.split_once(':') {
             let prefix = prefix.trim();
             if !prefix.is_empty() && !rest.trim().is_empty() {
+                if jcode_provider_core::oauth_account_label(prefix).is_some() {
+                    return Some(prefix.to_string());
+                }
                 // Dual-auth (Anthropic/OpenAI) prefixes fold onto their canonical
                 // session key via the single shared parser.
                 if let Some(route) = jcode_provider_core::AuthRoute::parse(prefix) {
@@ -328,6 +336,14 @@ impl MultiProvider {
     }
 
     fn session_provider_key_matches_provider_name(provider_key: &str, provider_name: &str) -> bool {
+        let provider_key = if jcode_provider_core::oauth_account_label(provider_key).is_some() {
+            provider_key
+                .split_once('@')
+                .map(|(method, _)| method)
+                .unwrap_or(provider_key)
+        } else {
+            provider_key
+        };
         let provider_key = Self::canonical_session_provider_key(provider_key.trim());
         let Some(derived) = Self::session_provider_key_from_provider_name(provider_name)
             .or_else(|| crate::session::derive_session_provider_key(provider_name))
@@ -364,6 +380,12 @@ impl MultiProvider {
         if crate::provider::explicit_model_provider_prefix(model).is_some() {
             return model.to_string();
         }
+        if model
+            .split_once(':')
+            .is_some_and(|(method, _)| jcode_provider_core::oauth_account_label(method).is_some())
+        {
+            return model.to_string();
+        }
 
         // An `@provider` suffix is an explicit OpenRouter upstream pin. It is
         // stronger route identity than older/stale `provider_key` metadata.
@@ -395,6 +417,9 @@ impl MultiProvider {
         else {
             return model.to_string();
         };
+        if jcode_provider_core::oauth_account_label(provider_key).is_some() {
+            return format!("{provider_key}:{model}");
+        }
         // Dual-auth keys map to a model prefix via the single shared parser,
         // keeping the emitted prefix in lockstep with the parsers.
         //
@@ -453,16 +478,34 @@ impl MultiProvider {
         if model.is_empty() {
             return String::new();
         }
-        // The model itself carries explicit OpenRouter route identity. Honor it
-        // before persisted route metadata, which may come from an older buggy
-        // session and contradict the pin.
-        if crate::provider::explicit_model_provider_prefix(model).is_none() && model.contains('@') {
+        // A worker model override can carry its own transport while the child
+        // still has its parent's saved route. Honor the explicit model first.
+        if crate::provider::explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
+            || model.split_once(':').is_some_and(|(prefix, rest)| {
+                !prefix.trim().is_empty()
+                    && !rest.trim().is_empty()
+                    && (crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                        prefix,
+                    )
+                    .is_some()
+                        || crate::config::config().providers.contains_key(prefix))
+            })
+        {
+            return model.to_string();
+        }
+        if model.contains('@') {
             return format!("openrouter:{model}");
         }
         if let Some(api_method) = route_api_method
             .map(str::trim)
             .filter(|api_method| !api_method.is_empty())
         {
+            if jcode_provider_core::oauth_account_label(api_method).is_some() {
+                return format!("{api_method}:{model}");
+            }
             match ModelRouteApiMethod::parse(api_method) {
                 ModelRouteApiMethod::JcodeSubscription => return model.to_string(),
                 ModelRouteApiMethod::GrokBuild => {
@@ -720,6 +763,26 @@ mod tests {
             ),
             "nvidia-nim:nvidia/example"
         );
+    }
+
+    #[test]
+    fn session_route_explicit_model_override_wins_over_inherited_transport() {
+        for (model, inherited_route) in [
+            ("openai-api:gpt-5.5", "claude-api"),
+            ("claude-oauth:claude-opus-4-6", "openai-api"),
+            ("openrouter:z-ai/glm-5.3", "claude-api"),
+            ("cerebras:qwen-3-235b-a22b-instruct-2507", "claude-api"),
+        ] {
+            assert_eq!(
+                MultiProvider::model_switch_request_for_session_route(
+                    model,
+                    Some(inherited_route),
+                    Some(inherited_route),
+                ),
+                model,
+                "worker override {model} must not inherit {inherited_route}",
+            );
+        }
     }
 
     #[test]

@@ -197,29 +197,62 @@ fn save_and_load_github_token() -> Result<()> {
     Ok(())
 }
 
+/// Restores an environment variable on drop, so a failed assertion cannot
+/// leave later tests pointed at a removed temp directory.
+struct EnvRestore {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvRestore {
+    fn capture(key: &'static str) -> Self {
+        Self {
+            key,
+            previous: std::env::var_os(key),
+        }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => crate::env::set_var(self.key, value),
+            None => crate::env::remove_var(self.key),
+        }
+    }
+}
+
 #[test]
 fn save_github_token_creates_config_dir() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
+    let _restore_jcode_home = EnvRestore::capture("JCODE_HOME");
+    let _restore_xdg = EnvRestore::capture("XDG_CONFIG_HOME");
     let dir = TempDir::new().map_err(|e| anyhow!(e))?;
-    let prev_jcode_home = std::env::var_os("JCODE_HOME");
 
-    // Sandbox the whole home. `save_github_token` also allowlists the hosts path,
-    // and that allowlist is written to `jcode_dir()/config.toml`. Leaving
-    // JCODE_HOME unset here (the XDG branch of the path resolver does not need it)
-    // sent the write to the developer's real `~/.jcode/config.toml`, appending one
-    // dead temp path per test run. The XDG branch is covered by
-    // `legacy_copilot_config_dir_uses_xdg_config_home`, which only resolves a path.
-    crate::env::set_var("JCODE_HOME", dir.path());
+    // The XDG location is only used when JCODE_HOME is unset. Check that
+    // resolution as a pure path computation, without writing anything.
+    crate::env::remove_var("JCODE_HOME");
+    crate::env::set_var("XDG_CONFIG_HOME", dir.path().join("xdg"));
+    assert_eq!(
+        legacy_copilot_config_dir(),
+        dir.path().join("xdg").join("github-copilot")
+    );
+
+    // Saving also records a trust entry in `<jcode_dir>/config.toml`. Only
+    // JCODE_HOME redirects that on every platform (on Windows the home dir
+    // ignores HOME), so the write happens entirely inside the tempdir.
+    let jcode_home = dir.path().join("jcode-home");
+    crate::env::set_var("JCODE_HOME", &jcode_home);
 
     let result = save_github_token("gho_newtoken", "testuser");
     assert!(result.is_ok());
 
-    let hosts_path = ExternalCopilotAuthSource::HostsJson.path();
-    assert!(
-        hosts_path.exists(),
-        "saving the token should create its config dir: {}",
-        hosts_path.display()
-    );
+    let hosts_path = jcode_home
+        .join("external")
+        .join(".config")
+        .join("github-copilot")
+        .join("hosts.json");
+    assert!(hosts_path.exists());
 
     let loaded = load_token_from_json(&hosts_path)?;
     assert_eq!(loaded, "gho_newtoken");
@@ -227,19 +260,13 @@ fn save_github_token_creates_config_dir() -> Result<()> {
     // The trusted-path entry has to land in the sandbox, so a future test that
     // drops the JCODE_HOME sandbox fails here instead of quietly editing the
     // real config.
-    let sandbox_config = dir.path().join("config.toml");
+    let sandbox_config = jcode_home.join("config.toml");
     let written = std::fs::read_to_string(&sandbox_config)
         .map_err(|e| anyhow!("sandboxed config should exist: {e}"))?;
     assert!(
         written.contains(COPILOT_HOSTS_AUTH_SOURCE_ID),
         "the trusted external auth path should be recorded in the sandbox: {written}"
     );
-
-    if let Some(prev) = prev_jcode_home {
-        crate::env::set_var("JCODE_HOME", prev);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
     Ok(())
 }
 
@@ -381,6 +408,73 @@ fn choose_default_model_with_opus() {
         },
     ];
     assert_eq!(choose_default_model(&models), "claude-opus-4.6");
+}
+
+fn copilot_models(ids: &[&str]) -> Vec<CopilotModelInfo> {
+    ids.iter()
+        .map(|id| CopilotModelInfo {
+            id: id.to_string(),
+            name: String::new(),
+            vendor: String::new(),
+            version: String::new(),
+            model_picker_enabled: true,
+            capabilities: Default::default(),
+        })
+        .collect()
+}
+
+#[test]
+fn choose_default_model_prefers_newest_claude_flagship() {
+    let models = copilot_models(&[
+        "claude-sonnet-4.6",
+        "claude-opus-4.6",
+        "claude-opus-4.8",
+        "claude-opus-5.5",
+        "gpt-5.5",
+    ]);
+    assert_eq!(choose_default_model(&models), "claude-opus-5.5");
+}
+
+#[test]
+fn choose_default_model_auto_promotes_unlisted_newer_opus() {
+    let models = copilot_models(&["claude-opus-4.6", "claude-opus-5.5", "claude-opus-5.9"]);
+    assert_eq!(choose_default_model(&models), "claude-opus-5.9");
+}
+
+#[test]
+fn choose_default_model_realistic_catalog_no_longer_pins_opus_4_6() {
+    // Shape of a real paid-tier /models response: the shipped fallback list,
+    // newer flagships, and non-picker entries such as embeddings.
+    let mut models = copilot_models(jcode_provider_copilot::FALLBACK_MODELS);
+    models.extend(copilot_models(&[
+        "claude-opus-4.8",
+        "claude-opus-5.5",
+        "gpt-5.6",
+    ]));
+    models.push(CopilotModelInfo {
+        id: "claude-opus-9".to_string(),
+        name: String::new(),
+        vendor: String::new(),
+        version: String::new(),
+        model_picker_enabled: false,
+        capabilities: Default::default(),
+    });
+    let chosen = choose_default_model(&models);
+    assert_ne!(
+        chosen, "claude-opus-4.6",
+        "regression: stale Opus 4.6 default"
+    );
+    assert_eq!(chosen, "claude-opus-5.5");
+}
+
+#[test]
+fn choose_default_model_ignores_fast_and_cheap_variants() {
+    let models = copilot_models(&[
+        "claude-haiku-4.5",
+        "claude-opus-4.6-fast",
+        "claude-opus-4.8",
+    ]);
+    assert_eq!(choose_default_model(&models), "claude-opus-4.8");
 }
 
 #[test]

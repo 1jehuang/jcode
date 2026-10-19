@@ -1,82 +1,52 @@
+/// Regression: the completion-gate circuit breaker clears
+/// `auto_poke_incomplete_todos`, and the only restore used to live in the
+/// all-complete branch. Since the breaker can only trip while every todo is
+/// complete, an agent that added open work immediately afterwards left
+/// auto-poke disarmed for the rest of the session, and the guard at the top
+/// of `schedule_auto_poke_followup_if_needed` returned false immediately.
 #[test]
-fn test_model_picker_preview_arrow_keys_navigate() {
-    let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
 
-    // Type /model to open preview
-    for c in "/model".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
-            .unwrap();
-    }
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                group: None,
+                id: "open".to_string(),
+                content: "Still open".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
+                confidence_history: Vec::new(),
+            }],
+        )
+        .expect("save todos");
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker preview should be open");
-    assert!(picker.preview);
-    let initial_selected = picker.selected;
+        // The exact state the circuit breaker leaves behind: flag cleared,
+        // configured default still on, nothing else touched.
+        app.auto_poke_default_on = true;
+        app.auto_poke_incomplete_todos = false;
+        app.last_auto_poke_fingerprint = None;
+        app.final_response_todo_fingerprint = None;
+        app.todo_final_response_requested = false;
+        app.pending_queued_dispatch = false;
+        app.pending_turn = false;
 
-    // Down arrow should navigate in preview mode
-    app.handle_key(KeyCode::Down, KeyModifiers::empty())
-        .unwrap();
+        let poked = app.schedule_auto_poke_followup_if_needed();
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("picker should still be open");
-    assert!(picker.preview, "should remain in preview mode");
-    assert_eq!(picker.selected, initial_selected + 1);
-
-    // Up arrow should navigate back
-    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("picker should still be open");
-    assert!(picker.preview, "should remain in preview mode");
-    assert_eq!(picker.selected, initial_selected);
-
-    // Opening the preview should place the cursor in the model filter argument.
-    assert_eq!(app.input(), "/model ");
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "open work must re-arm auto-poke after the completion-gate breaker"
+        );
+        assert!(poked, "open work must still produce a poke");
+    });
 }
 
-#[test]
-fn test_open_model_picker_without_routes_shows_actionable_guidance() {
-    let mut app = create_test_app();
-
-    app.open_model_picker();
-    wait_for_model_picker_load(&mut app);
-
-    assert!(app.inline_interactive_state.is_none());
-    assert_eq!(app.status_notice(), Some("No models available".to_string()));
-
-    let last = app.display_messages.last().expect("display message");
-    assert_eq!(last.role, "system");
-    assert!(last.content.contains("/login"));
-    assert!(last.content.contains("/account"));
-    assert!(last.content.contains("/model"));
-}
-
-#[test]
-fn test_remote_model_picker_during_startup_waits_for_session_catalog() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
-    app.remote_provider_model = Some("gpt-5.6-sol".to_string());
-    app.remote_available_entries.clear();
-    app.remote_model_options.clear();
-
-    app.open_model_picker();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("loading model picker should be open");
-    assert_eq!(picker.entries.len(), 1);
-    assert_eq!(picker.entries[0].name, "gpt-5.6-sol");
-    assert_eq!(picker.entries[0].options[0].detail, "updating model list…");
-}
+include!("model_picker_startup_tests.rs");
 
 #[test]
 fn test_remote_model_command_opens_picker_without_catalog_request() {
@@ -557,6 +527,9 @@ fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
 
 #[test]
 fn test_model_picker_reuses_cached_entries_until_invalidated() {
+    // The cache key includes account/config paths. Keep them stable while
+    // account-selection regressions scope their own temporary homes.
+    let _env_lock = crate::storage::lock_test_env();
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
@@ -2201,12 +2174,21 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
             .unwrap();
     }
-    // Explicit navigation makes the selection deliberate, so Enter activates.
-    // Navigate to the Anthropic API key row (an offline api-key prompt flow).
-    app.handle_key(KeyCode::Down, KeyModifiers::empty())
-        .unwrap();
-    app.handle_key(KeyCode::Down, KeyModifiers::empty())
-        .unwrap();
+    // Navigate deliberately to the offline API-key flow by semantic action,
+    // rather than assuming a fixed number of saved-account/add-account rows.
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    let target = picker
+        .filtered
+        .iter()
+        .position(|&index| {
+            matches!(&picker.entries[index].action, crate::tui::PickerAction::Login(provider)
+                if provider.id == "anthropic-api")
+        })
+        .expect("Anthropic API key login should be listed");
+    for _ in 0..target {
+        app.handle_key(KeyCode::Down, KeyModifiers::empty())
+            .unwrap();
+    }
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 

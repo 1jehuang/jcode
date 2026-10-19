@@ -1087,6 +1087,111 @@ fn test_journal_replay_skips_corrupt_line_and_keeps_tail() -> Result<()> {
     Ok(())
 }
 
+fn text_block(text: &str) -> ContentBlock {
+    ContentBlock::Text {
+        text: text.to_string(),
+        cache_control: None,
+    }
+}
+
+/// #1632: a process killed between writing the checkpoint snapshot and
+/// deleting the journal must not duplicate the journaled messages on the next
+/// load, and later genuinely-new journal entries must still replay.
+#[test]
+fn test_interrupted_checkpoint_does_not_duplicate_journal_messages() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-journal-interrupted-checkpoint-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_interrupted_checkpoint_test";
+    let mut session = Session::create_with_id(session_id.to_string(), None, Some("t".into()));
+    session.add_message(Role::User, vec![text_block("start")]);
+    session.save()?;
+
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "toolu_1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+            thought_signature: None,
+        }],
+    );
+    session.save()?;
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "ok".into(),
+            is_error: None,
+        }],
+    );
+    session.save()?;
+
+    let journal_path = session_journal_path(session_id)?;
+    let stale_journal = std::fs::read_to_string(&journal_path)?;
+    assert_eq!(stale_journal.lines().count(), 2);
+
+    // Checkpoint, then put the journal back as if the delete never happened.
+    session.mark_messages_full_dirty();
+    session.save()?;
+    assert!(!journal_path.exists());
+    std::fs::write(&journal_path, &stale_journal)?;
+
+    let loaded = Session::load(session_id)?;
+    assert_eq!(
+        loaded.messages.len(),
+        3,
+        "journal replay duplicated messages"
+    );
+    let remote = Session::load_for_remote_startup(session_id)?;
+    assert_eq!(remote.messages.len(), 3);
+
+    // A genuinely new entry after the stale prefix still replays.
+    let mut resumed = loaded;
+    resumed.add_message(Role::Assistant, vec![text_block("after restart")]);
+    resumed.save()?;
+    let reloaded = Session::load(session_id)?;
+    assert_eq!(reloaded.messages.len(), 4);
+    assert_eq!(reloaded.messages[3].content_preview(), "after restart");
+    let mut ids: Vec<_> = reloaded.messages.iter().map(|m| m.id.clone()).collect();
+    ids.dedup();
+    assert_eq!(ids.len(), 4);
+    Ok(())
+}
+
+/// #1632: snapshots that were already written with duplicated messages (by
+/// builds before idempotent replay) are repaired on load and on the next save.
+#[test]
+fn test_load_repairs_snapshot_with_duplicated_message_ids() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-duplicate-ids-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_duplicate_ids_test";
+    let mut session = Session::create_with_id(session_id.to_string(), None, Some("t".into()));
+    session.add_message(Role::User, vec![text_block("one")]);
+    session.add_message(Role::Assistant, vec![text_block("two")]);
+    let dup = session.messages[1].clone();
+    session.messages.push(dup);
+    session.mark_messages_full_dirty();
+    session.save()?;
+
+    let mut loaded = Session::load(session_id)?;
+    assert_eq!(loaded.messages.len(), 2);
+    loaded.save()?;
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(session_path(session_id)?)?)?;
+    assert_eq!(raw["messages"].as_array().map(Vec::len), Some(2));
+    Ok(())
+}
+
 #[test]
 fn test_journal_replay_salvages_glued_entries_on_torn_line() -> Result<()> {
     let _env_lock = lock_env();
@@ -1256,6 +1361,43 @@ fn test_redacted_for_export_redacts_tool_result_and_tool_input() -> Result<()> {
     assert!(!input_str.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"));
     assert!(!input_str.contains("short-secret-value"));
     assert!(input_str.contains("fn add(a: i32, b: i32)"));
+    Ok(())
+}
+
+#[test]
+fn test_redacted_for_export_redacts_provider_native_items_only_in_copy() -> Result<()> {
+    let mut session = Session::create_with_id(
+        "session_redact_native_test".to_string(),
+        None,
+        Some("redaction test".to_string()),
+    );
+    let item = serde_json::json!({
+        "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+        "input": {"query": "why does ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 fail"}
+    });
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ProviderNative {
+            provider: "anthropic".to_string(),
+            item: item.clone(),
+        }],
+    );
+
+    let persisted = session.redacted_for_export();
+    let ContentBlock::ProviderNative { item: exported, .. } = &persisted.messages[0].content[0]
+    else {
+        return Err(anyhow!("expected provider-native block"));
+    };
+    assert!(
+        !exported
+            .to_string()
+            .contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123")
+    );
+    // The live session keeps the item verbatim for replay.
+    let ContentBlock::ProviderNative { item: stored, .. } = &session.messages[0].content[0] else {
+        return Err(anyhow!("expected provider-native block"));
+    };
+    assert_eq!(stored, &item);
     Ok(())
 }
 
@@ -2814,4 +2956,312 @@ fn first_visible_user_prompt_becomes_the_generated_title() {
 
     session.rename_title(Some("Custom".into()));
     assert_eq!(session.display_title(), Some("Custom"));
+}
+
+/// Resuming a long session records an env snapshot. Past the retention cap
+/// that used to force a full rewrite of a tens-of-MB snapshot on every
+/// resume. It must append to the journal instead, and trim only when a
+/// checkpoint rewrites the snapshot anyway.
+#[test]
+fn env_snapshot_past_cap_appends_instead_of_rewriting_snapshot() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-env-snapshot-append-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_env_snapshot_append";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.append_stored_message(StoredMessage {
+        id: "msg_env_1".to_string(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    let snapshot = |reason: &str| EnvSnapshot {
+        captured_at: Utc::now(),
+        reason: reason.to_string(),
+        session_id: session_id.to_string(),
+        working_dir: None,
+        provider: "openai".to_string(),
+        model: "gpt-5.4".to_string(),
+        jcode_version: "test".to_string(),
+        jcode_git_hash: None,
+        jcode_git_dirty: None,
+        os: "linux".to_string(),
+        arch: "x86_64".to_string(),
+        pid: 1,
+        is_selfdev: false,
+        is_debug: false,
+        is_canary: false,
+        testing_build: None,
+        working_git: None,
+    };
+    for i in 0..MAX_ENV_SNAPSHOTS {
+        session.record_env_snapshot(snapshot(&format!("fill{i}")));
+    }
+    session.save()?;
+
+    let snapshot_path = storage_paths::session_path(session_id)?;
+    let journal_path = session_journal_path_from_snapshot(&snapshot_path);
+    let snapshot_bytes = std::fs::read(&snapshot_path)?;
+
+    session.record_env_snapshot(snapshot("resume"));
+    session.save()?;
+
+    assert_eq!(
+        std::fs::read(&snapshot_path)?,
+        snapshot_bytes,
+        "recording one env snapshot past the cap must not rewrite the snapshot"
+    );
+    assert!(journal_path.exists(), "the new env snapshot is journaled");
+
+    let loaded = Session::load(session_id)?;
+    assert_eq!(
+        loaded.env_snapshots.last().map(|s| s.reason.as_str()),
+        Some("resume")
+    );
+    Ok(())
+}
+
+/// Resuming a large session changes metadata (status, pid). That used to
+/// rewrite the whole multi-MB snapshot on every resume. It must journal the
+/// change instead, and both full and startup-stub loads must see it.
+#[test]
+fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-meta-journal-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_meta_journal_large";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    let big = "x".repeat(64 * 1024);
+    for i in 0..24 {
+        session.append_stored_message(StoredMessage {
+            id: format!("msg_{i}"),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: big.clone(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: Some(Utc::now()),
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+    }
+    session.save()?;
+    let snapshot_path = storage_paths::session_path(session_id)?;
+    let before = std::fs::read(&snapshot_path)?;
+    assert!(before.len() as u64 >= 1024 * 1024, "fixture must be large");
+
+    session.custom_title = Some("renamed".to_string());
+    session.status = SessionStatus::Closed;
+    session.save()?;
+
+    assert_eq!(
+        std::fs::read(&snapshot_path)?,
+        before,
+        "a metadata change must not rewrite a large snapshot"
+    );
+    let full = Session::load(session_id)?;
+    assert_eq!(full.custom_title.as_deref(), Some("renamed"));
+    assert!(matches!(full.status, SessionStatus::Closed));
+    let stub = Session::load_startup_stub(session_id)?;
+    assert_eq!(stub.custom_title.as_deref(), Some("renamed"));
+    assert!(matches!(stub.status, SessionStatus::Closed));
+    Ok(())
+}
+
+fn big_compaction(tag: &str) -> crate::session::StoredCompactionState {
+    crate::session::StoredCompactionState {
+        summary_text: String::new(),
+        openai_encrypted_content: Some(format!("{tag}{}", "e".repeat(300 * 1024))),
+        covers_up_to_turn: 3,
+        original_turn_count: 3,
+        compacted_count: 3,
+    }
+}
+
+/// Multi-MB compaction state must not be repeated in every journal entry
+/// (that overflowed the journal cap on each save and forced full rewrites),
+/// yet every load path must still see the current compaction.
+#[test]
+fn journal_entries_elide_unchanged_compaction_but_loads_keep_it() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-compaction-elide-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_compaction_elide";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    let msg = |i: usize| StoredMessage {
+        id: format!("m{i}"),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: format!("hello {i}"),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    };
+    session.append_stored_message(msg(0));
+    session.compaction = Some(big_compaction("A"));
+    session.save()?; // first save: snapshot carries compaction
+
+    let snapshot_path = storage_paths::session_path(session_id)?;
+    let journal_path = session_journal_path_from_snapshot(&snapshot_path);
+    for i in 1..6 {
+        session.append_stored_message(msg(i));
+        session.save()?;
+    }
+    let journal_len = std::fs::metadata(&journal_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert!(
+        journal_len > 0 && journal_len < 64 * 1024,
+        "unchanged compaction must be elided from journal entries (journal {journal_len} bytes)"
+    );
+
+    let full = Session::load(session_id)?;
+    assert_eq!(full.messages.len(), 6);
+    assert_eq!(full.compaction, Some(big_compaction("A")));
+    let stub = Session::load_startup_stub(session_id)?;
+    assert_eq!(stub.compaction, Some(big_compaction("A")));
+    let remote = Session::load_for_remote_startup(session_id)?;
+    assert_eq!(remote.compaction, Some(big_compaction("A")));
+
+    // A changed compaction is written and wins on reload.
+    session.compaction = Some(big_compaction("B"));
+    session.append_stored_message(msg(6));
+    session.save()?;
+    session.append_stored_message(msg(7));
+    session.save()?;
+    let reloaded = Session::load(session_id)?;
+    assert_eq!(reloaded.compaction, Some(big_compaction("B")));
+    assert_eq!(reloaded.messages.len(), 8);
+
+    // Clearing compaction is persisted too (not mistaken for "unchanged").
+    let mut cleared = reloaded;
+    cleared.compaction = None;
+    cleared.append_stored_message(msg(8));
+    cleared.save()?;
+    assert_eq!(Session::load(session_id)?.compaction, None);
+    Ok(())
+}
+
+/// Journals written before the elision flag existed carry the full
+/// compaction in every entry and must still load unchanged.
+#[test]
+fn legacy_journal_entries_with_inline_compaction_still_load() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-compaction-legacy-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let session_id = "session_compaction_legacy";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.append_stored_message(StoredMessage {
+        id: "m0".into(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hi".into(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save()?;
+    let snapshot_path = storage_paths::session_path(session_id)?;
+    let journal_path = session_journal_path_from_snapshot(&snapshot_path);
+    // Hand-write a legacy-format entry (no compaction_unchanged field).
+    let mut meta = serde_json::to_value(session.journal_meta())?;
+    meta["compaction"] = serde_json::to_value(big_compaction("L"))?;
+    meta.as_object_mut().unwrap().remove("compaction_unchanged");
+    // Replay ignores entries not newer than the snapshot.
+    meta["updated_at"] = serde_json::to_value(Utc::now() + chrono::Duration::seconds(5))?;
+    let line = serde_json::json!({ "meta": meta });
+    std::fs::write(&journal_path, format!("{line}\n"))?;
+    assert_eq!(
+        Session::load(session_id)?.compaction,
+        Some(big_compaction("L"))
+    );
+    assert_eq!(
+        Session::load_startup_stub(session_id)?.compaction,
+        Some(big_compaction("L"))
+    );
+    Ok(())
+}
+
+/// Fixture writer for the old-binary compatibility check. Writes a session
+/// with large compaction followed by journal entries that elide it. Runs only
+/// when JCODE_COMPAT_FIXTURE_HOME is set.
+#[test]
+#[ignore]
+fn write_compaction_elision_compat_fixture() -> Result<()> {
+    let Some(home) = std::env::var_os("JCODE_COMPAT_FIXTURE_HOME") else {
+        return Ok(());
+    };
+    let _env_lock = lock_env();
+    let _home = EnvVarGuard::set("JCODE_HOME", &home);
+    let mut session = Session::create_with_id("session_compat_fixture_1".to_string(), None, None);
+    for i in 0..4 {
+        session.append_stored_message(StoredMessage {
+            id: format!("m{i}"),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format!("compat {i}"),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: Some(Utc::now()),
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        if i == 0 {
+            session.compaction = Some(big_compaction("C"));
+        }
+        session.save()?;
+    }
+    Ok(())
+}
+
+/// Reader half of the compatibility check: after an older binary has loaded
+/// and re-saved the fixture, every message must still be present.
+#[test]
+#[ignore]
+fn read_compaction_elision_compat_fixture() -> Result<()> {
+    let Some(home) = std::env::var_os("JCODE_COMPAT_FIXTURE_HOME") else {
+        return Ok(());
+    };
+    let _env_lock = lock_env();
+    let _home = EnvVarGuard::set("JCODE_HOME", &home);
+    let session = Session::load("session_compat_fixture_1")?;
+    let ids: Vec<_> = session.messages.iter().map(|m| m.id.clone()).collect();
+    for i in 0..4 {
+        assert!(ids.contains(&format!("m{i}")), "message m{i} lost: {ids:?}");
+    }
+    println!(
+        "COMPAT messages={} compaction_present={}",
+        session.messages.len(),
+        session.compaction.is_some()
+    );
+    Ok(())
 }

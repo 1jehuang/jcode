@@ -35,10 +35,6 @@ impl App {
             None,
         );
         self.append_current_turn_system_reminder(&mut split);
-        crate::prompt::append_swarm_effort_directive(
-            &mut split,
-            self.provider.reasoning_effort().as_deref(),
-        );
         self.context_info = context_info;
         split
     }
@@ -182,7 +178,8 @@ impl App {
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. }
-                    | ContentBlock::ToolReference { .. } => {}
+                    | ContentBlock::ToolReference { .. }
+                    | ContentBlock::ProviderNative { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }
@@ -219,7 +216,8 @@ impl App {
             .filter(|e| e.active)
             .map(|e| e.content)
             .collect();
-        let sidecar = crate::sidecar::Sidecar::new();
+        // Honor this session's `/agents memory` choice, like server-side extraction.
+        let sidecar = crate::sidecar::Sidecar::for_session(&self.session);
         match sidecar
             .extract_memories_with_existing(&transcript, &existing)
             .await

@@ -66,6 +66,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/rebuild"
             | "/update"
             | "/update-sim"
+            | "/update-rehearsal"
             | "/onboarding-sim"
             | "/onboarding-preview"
             | "/usage"
@@ -111,6 +112,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/split"
             | "/btw"
             | "/transfer"
+            | "/desktop"
             | "/workspace"
     )
 }
@@ -226,6 +228,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         // `/test`, `/mission`, `/goal`, and `/goals` are dispatched inside
         // `handle_session_command`, so they need no separate entries here.
         || super::commands::handle_session_command(app, trimmed)
+        || super::commands_desktop::handle_desktop_command(app, trimmed)
         || super::commands::handle_dictation_command(app, trimmed)
         || super::commands::handle_config_command(app, trimmed)
         || super::commands_colors::handle_colors_command(app, trimmed)
@@ -244,6 +247,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::state_ui::handle_info_command(app, trimmed)
         || super::auth::handle_auth_command(app, trimmed)
         || super::tui_lifecycle_runtime::handle_dev_command(app, trimmed)
+        || app.handle_update_rehearsal_command(trimmed)
 }
 
 /// Environment-mode tests run in their own process, so parallel local-mode
@@ -358,6 +362,7 @@ mod tests {
             "/split",
             "/btw question",
             "/transfer",
+            "/desktop",
             "/workspace",
             "/workspace split",
             "/todos",

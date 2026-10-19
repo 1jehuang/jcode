@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 fn session(id: &str) -> SessionInfo {
     SessionInfo {
         edit_stats: None,
+        user_connected: false,
         parent_session_id: (id == "persisted-2").then(|| "persisted-1".into()),
         agent_label: (id == "persisted-2").then(|| "API reviewer".into()),
         swarm_status: (id == "persisted-2").then(|| "running".into()),
@@ -116,6 +117,10 @@ impl UnixHarness {
             while !server_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((socket, _)) => {
+                        // On BSD/macOS accepted sockets can inherit the listener's nonblocking flag.
+                        socket
+                            .set_nonblocking(false)
+                            .expect("blocking accepted socket");
                         server_clients.fetch_add(1, Ordering::AcqRel);
                         let sessions = Arc::clone(&server_sessions);
                         let clients = Arc::clone(&server_clients);

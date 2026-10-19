@@ -134,6 +134,9 @@ pub(super) fn openrouter_route_model_id(model: &str) -> String {
 }
 
 pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption) -> String {
+    if jcode_provider_core::oauth_account_label(&route.api_method).is_some() {
+        return picker_route_selection(entry, route).routed_model_spec();
+    }
     let bare_name = model_entry_base_name(entry);
     let api_method = crate::provider::ModelRouteApiMethod::parse(&route.api_method);
     match api_method {
@@ -199,6 +202,9 @@ pub(super) fn openai_compatible_profile_id_for_route(route: &PickerOption) -> Op
 }
 
 pub(super) fn model_entry_saved_spec(entry: &PickerEntry) -> String {
+    if entry.name == "inherit coordinator" {
+        return "inherit".to_string();
+    }
     let bare_name = model_entry_base_name(entry);
     let route = entry.options.get(entry.selected_option);
     if let Some(route) = route {
@@ -393,6 +399,28 @@ mod tests {
                 && cheapness_key(&usd) < cheapness_key(&unconvertible),
             "an unconvertible route must not be ordered as if the units matched"
         );
+    }
+
+    #[test]
+    fn saved_account_picker_specs_preserve_exact_account_and_effort() {
+        for (provider, base, model) in [
+            ("Anthropic", "claude-oauth", "claude-sonnet-4-6"),
+            ("OpenAI", "openai-oauth", "gpt-5.5"),
+        ] {
+            for label in ["work", "personal", "research"] {
+                let option = route(provider, &format!("{base}@{label}"));
+                let mut entry = entry(model, option.clone());
+                entry.name = format!("{model} (high)");
+                entry.effort = Some("high".into());
+                let expected = format!("{base}@{label}:{model}");
+                assert_eq!(picker_route_model_spec(&entry, &option), expected);
+                assert_eq!(model_entry_saved_spec(&entry), expected);
+                assert_eq!(
+                    picker_route_selection(&entry, &option).account_label(),
+                    Some(label)
+                );
+            }
+        }
     }
 
     #[test]

@@ -82,7 +82,8 @@ impl Agent {
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. }
-                    | ContentBlock::ToolReference { .. } => {}
+                    | ContentBlock::ToolReference { .. }
+                    | ContentBlock::ProviderNative { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }
@@ -177,6 +178,14 @@ impl Agent {
     }
 
     pub(super) fn provider_key_for_new_session(&self) -> Option<String> {
+        if let Some(label) = self.provider.oauth_account_label() {
+            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
+                "openai-oauth"
+            } else {
+                "claude-oauth"
+            };
+            return Some(format!("{method}@{label}"));
+        }
         if self
             .provider
             .explicit_provider_pin_for_current_model()
@@ -192,6 +201,46 @@ impl Agent {
         }
 
         crate::session::derive_session_provider_key(self.provider.name())
+    }
+
+    /// Re-apply the persisted session model on resume (or attach). A stale
+    /// credential pin (the deployment's credential changed type since the
+    /// session was created) is recovered onto the usable credential and the
+    /// session's route metadata is rewritten to match, so swarm workers and
+    /// later resumes inherit the route this session actually runs on.
+    pub(crate) fn restore_session_model_from_session(&mut self) {
+        let Some(model) = self.session.model.clone() else {
+            self.session.model = Some(self.provider_model());
+            return;
+        };
+        match crate::provider::restore_session_model(
+            self.provider.as_ref(),
+            &model,
+            self.session.provider_key.as_deref(),
+            self.session.route_api_method.as_deref(),
+        ) {
+            Ok(restore) => {
+                if let Some(healed) = restore.healed_route {
+                    logging::warn(&format!(
+                        "Session {} route healed: '{}' -> '{}' (provider_key {:?} -> {:?})",
+                        self.session.id,
+                        healed.stale_request,
+                        restore.request,
+                        self.session.provider_key,
+                        healed.provider_key,
+                    ));
+                    self.session.provider_key = healed.provider_key;
+                    self.session.route_api_method = healed.route_api_method;
+                }
+                self.reconcile_explicit_provider_pin_route();
+            }
+            Err(e) => {
+                logging::error(&format!(
+                    "Failed to restore session model '{}': {}",
+                    model, e
+                ));
+            }
+        }
     }
 
     pub(super) fn reconcile_explicit_provider_pin_route(&mut self) {

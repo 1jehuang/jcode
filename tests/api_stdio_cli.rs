@@ -78,6 +78,7 @@ fn exercise_stdio(close_daemon_first: bool) {
             min_version: API_VERSION_MAJOR,
             max_version: API_VERSION_MAJOR,
             client: "isolated-stdio-cli-test".into(),
+            supports_user_response: false,
         },
     );
     let hello = rx

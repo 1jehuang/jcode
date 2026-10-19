@@ -137,7 +137,11 @@ impl ProviderSpend {
     /// lesser of the two losses.
     fn refresh_usd_mirrors(&mut self) {
         self.day_usd = self.day.get(&Currency::usd()).copied().unwrap_or(0.0);
-        self.month_usd = self.month_spend.get(&Currency::usd()).copied().unwrap_or(0.0);
+        self.month_usd = self
+            .month_spend
+            .get(&Currency::usd())
+            .copied()
+            .unwrap_or(0.0);
         self.all_time_usd = self.all_time.get(&Currency::usd()).copied().unwrap_or(0.0);
     }
 
@@ -1041,10 +1045,9 @@ mod tests {
         let spend = spend_snapshot(key).expect("still records after rollback");
         assert_eq!(
             spend.all_time,
-            std::collections::BTreeMap::from([
-                (Currency::new("CNY"), 4.0),
-                (Currency::usd(), 5.0),
-            ])
+            std::collections::BTreeMap::from(
+                [(Currency::new("CNY"), 4.0), (Currency::usd(), 5.0),]
+            )
         );
     }
 
