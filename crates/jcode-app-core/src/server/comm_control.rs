@@ -725,6 +725,22 @@ fn spawn_assigned_task_run(
                     coordinators: Arc::clone(&swarm_coordinators),
                 };
                 persist_swarm_state_for(&swarm_id, &swarm_state).await;
+                if auto_completed {
+                    let coordinator = swarm_coordinators.read().await.get(&swarm_id).cloned();
+                    let content = previous_items
+                        .iter()
+                        .find(|item| item.id == task_id)
+                        .map(|item| item.content.clone())
+                        .unwrap_or_default();
+                    if let Some(coordinator) = coordinator {
+                        super::swarm_todo_link::sync_task_status(
+                            &coordinator,
+                            &task_id,
+                            &content,
+                            "done",
+                        );
+                    }
+                }
                 let plan_reason = if auto_completed {
                     "task_completed"
                 } else {
@@ -1390,6 +1406,14 @@ async fn handle_comm_assign_task_with_mode(
         coordinators: Arc::clone(swarm_coordinators),
     };
     persist_swarm_state_for(&swarm_id, &swarm_state).await;
+    // Mirror the assignment onto the requesting coordinator's matching todo so
+    // the pinned todo band shows this worker's emoji on that row.
+    super::swarm_todo_link::link_assignment(
+        &req_session_id,
+        &selected_task_id,
+        &content,
+        &target_session,
+    );
 
     broadcast_swarm_plan(
         &swarm_id,
