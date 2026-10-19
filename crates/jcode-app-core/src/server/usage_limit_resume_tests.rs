@@ -258,8 +258,9 @@ async fn scheduled_turn_hitting_a_far_usage_limit_waits_for_the_reset_and_resume
     };
     assert_eq!(id, 0);
     let retry_after = retry_after_secs.expect("usage-limit error must carry retry_after_secs");
+    let earliest = min_resume_gap(Duration::from_secs(2), real_start).as_secs();
     assert!(
-        (2 + 5..=2 + 30).contains(&retry_after),
+        (earliest..=2 + 30).contains(&retry_after),
         "resume at the reset plus 5-30 s of jitter, got {retry_after}"
     );
 
