@@ -837,6 +837,8 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
         if let ServerEvent::Compaction {
             trigger,
             pre_tokens,
+            post_tokens,
+            tokens_saved,
             messages_compacted,
             ..
         } = event
@@ -847,6 +849,12 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
                 Some(80_000),
                 "remote compaction must forward the provider's pre-compaction count"
             );
+            let post = post_tokens.expect("native compaction must report an estimated post count");
+            assert!(
+                post < 80_000,
+                "post count should reflect the compacted context"
+            );
+            assert_eq!(tokens_saved, Some(80_000 - post));
             assert!(
                 messages_compacted.is_some_and(|count| count > 0),
                 "native compaction should report a non-empty compacted prefix"

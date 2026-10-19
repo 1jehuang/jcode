@@ -1365,7 +1365,8 @@ impl Agent {
             if let Some((encrypted_content, compacted_count, native_pre_tokens, native_trigger)) =
                 openai_native_compaction.take()
             {
-                self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
+                let (estimated_pre_tokens, estimated_post_tokens) =
+                    self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
                 // Native OpenAI compaction is applied after the provider stream,
                 // so `messages_for_provider()` did not have an event to emit at
                 // the top of this iteration. Notify clients now, before any
@@ -1373,14 +1374,18 @@ impl Agent {
                 // The FIFO event ordering lets the TUI invalidate its old
                 // append-only baseline before seeing the compacted signature.
                 //
-                // Only a provider-supplied pre-compaction count is trustworthy
-                // here. The response's own input usage is not the pre-compaction
-                // context size, so omit the value rather than mislabel it (#1178).
+                // Prefer a provider-supplied pre-compaction count. Otherwise use
+                // jcode's own context estimate, never the response's input usage,
+                // which is not the pre-compaction context size (#1178).
+                let pre_tokens = native_pre_tokens.or(estimated_pre_tokens);
+                let post_tokens = estimated_post_tokens;
                 let _ = event_tx.send(ServerEvent::Compaction {
                     trigger: native_trigger,
-                    pre_tokens: native_pre_tokens,
-                    post_tokens: None,
-                    tokens_saved: None,
+                    pre_tokens,
+                    post_tokens,
+                    tokens_saved: pre_tokens
+                        .zip(post_tokens)
+                        .map(|(pre, post)| pre.saturating_sub(post)),
                     duration_ms: None,
                     messages_dropped: None,
                     messages_compacted: Some(compacted_count),

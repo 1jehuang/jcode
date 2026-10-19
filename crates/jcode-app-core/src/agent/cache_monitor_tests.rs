@@ -142,15 +142,12 @@ async fn native_compaction_cache_refresh_is_classified_before_compaction_is_anno
                     ..
                 } => {
                     assert_eq!(trigger, "openai_native_auto");
-                    assert_eq!(
-                        pre_tokens, None,
-                        "response input is not a pre-compaction count"
-                    );
-                    assert_eq!(
-                        post_tokens, None,
-                        "opaque payload length is not a token count"
-                    );
-                    assert_eq!(tokens_saved, None);
+                    // Counts come from jcode's local context estimate. The
+                    // response's input usage is not a pre-compaction count.
+                    let pre = pre_tokens.expect("local pre-compaction estimate");
+                    let post = post_tokens.expect("local post-compaction estimate");
+                    assert_ne!(pre, 204_393, "response input is not a pre-compaction count");
+                    assert_eq!(tokens_saved, Some(pre.saturating_sub(post)));
                     assert_eq!(summary_chars, None);
                     assert!(
                         refresh_seen,

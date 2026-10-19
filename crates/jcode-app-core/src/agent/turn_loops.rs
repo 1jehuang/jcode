@@ -966,7 +966,7 @@ impl Agent {
             };
 
             if let Some((encrypted_content, compacted_count)) = openai_native_compaction.take() {
-                self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
+                let _ = self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
             }
 
             // If stop_reason indicates truncation (e.g. max_tokens), discard tool calls
