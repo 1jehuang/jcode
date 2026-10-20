@@ -381,3 +381,18 @@ fn roster_groups_working_agents_before_finished_ones() {
         rows[0]
     );
 }
+
+#[test]
+fn failed_lane_blocks_its_phase_and_offers_retry() {
+    let mut todos = grid_todos();
+    todos[5].status = "in_progress".into(); // docs lane still open
+    todos[5].assigned_to = Some("session_crab_1700000000".into());
+    let agents = vec![agent("crab", "failed", Some("build failed"), Some(5))];
+    let rows = render(&todos, &agents, 120);
+    assert!(rows[0].contains("⏸ phase 1 blocked"), "{rows:?}");
+    let docs = rows.iter().find(|r| r.contains("docs")).unwrap();
+    assert!(docs.contains("✗ build failed · swarm retry"), "{rows:?}");
+    // No failure: no blocked marker.
+    let rows = render(&grid_todos(), &[], 120);
+    assert!(!rows[0].contains("blocked"), "{rows:?}");
+}

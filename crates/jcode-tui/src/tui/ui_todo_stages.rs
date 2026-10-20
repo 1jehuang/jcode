@@ -482,10 +482,13 @@ fn lane_note_spans(
         .find(|agent| matches!(agent.status.as_str(), "failed" | "crashed"))
     {
         let reason = agent.activity.clone().unwrap_or_else(|| "failed".into());
-        return vec![Span::styled(
-            format!("✗ {reason}"),
-            Style::default().fg(todo_failure_color()),
-        )];
+        return vec![
+            Span::styled(
+                format!("✗ {reason}"),
+                Style::default().fg(todo_failure_color()),
+            ),
+            Span::styled(" · swarm retry", Style::default().fg(todo_meta_color())),
+        ];
     }
     if let Some(agent) = assigned
         .iter()
@@ -779,3 +782,38 @@ fn truncate_to_width(text: &str, max: usize) -> String {
 #[cfg(test)]
 #[path = "ui_todo_stages_tests.rs"]
 mod tests;
+
+/// `⏸ phase 2 blocked` when the active phase has a lane whose worker failed:
+/// later phases cannot start until it is retried or reassigned.
+pub(crate) fn blocked_phase_spans(
+    todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
+) -> Vec<Span<'static>> {
+    if !crate::todo::stages::has_stages(todos.iter().copied()) {
+        return Vec::new();
+    }
+    let stages = ordered_layout(todos);
+    let Some(current) = current_stage(&stages, todos) else {
+        return Vec::new();
+    };
+    let stage = &stages[current];
+    let failed = stage.item_indices().any(|i| {
+        !is_done(todos[i])
+            && todos[i].assigned_to.as_deref().is_some_and(|owner| {
+                agents.iter().any(|agent| {
+                    agent.matches(owner) && matches!(agent.status.as_str(), "failed" | "crashed")
+                })
+            })
+    });
+    if !failed {
+        return Vec::new();
+    }
+    let label = match stage.number {
+        Some(n) => format!("  ⏸ phase {n} blocked"),
+        None => "  ⏸ blocked".to_string(),
+    };
+    vec![Span::styled(
+        label,
+        Style::default().fg(todo_failure_color()),
+    )]
+}

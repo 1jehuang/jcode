@@ -1636,8 +1636,14 @@ fn render_todo_stage_status_header(
 ) -> Line<'static> {
     let mut spans = Vec::new();
     let roster = agent_roster_spans(todos, agents);
-    let roster_width: usize = roster.iter().map(|span| span.content.width()).sum();
-    push_stage_pips(&mut spans, todos, inner_width.saturating_sub(roster_width));
+    let blocked = todo_stages::blocked_phase_spans(todos, agents);
+    let side: usize = roster
+        .iter()
+        .chain(blocked.iter())
+        .map(|span| span.content.width())
+        .sum();
+    push_stage_pips(&mut spans, todos, inner_width.saturating_sub(side));
+    spans.extend(blocked);
     spans.extend(roster);
     todo_card_line(spans, base_indent, inner_width)
 }
