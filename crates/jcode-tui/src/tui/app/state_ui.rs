@@ -695,21 +695,23 @@ impl App {
         } else {
             snapshot
         };
-        let mut snapshot = if self.observe_mode_enabled {
+        let snapshot = if self.observe_mode_enabled {
             self.decorate_side_panel_with_observe(snapshot, focus_observe)
         } else {
             snapshot
         };
-        if self.side_panel_user_hidden && snapshot.focused_page_id.is_some() {
-            snapshot.focused_page_id = None;
-        }
         self.apply_side_panel_snapshot(snapshot);
     }
 
     pub(super) fn apply_side_panel_snapshot(
         &mut self,
-        snapshot: crate::side_panel::SidePanelSnapshot,
+        mut snapshot: crate::side_panel::SidePanelSnapshot,
     ) {
+        // Local app panels refresh through this path too. Content updates must
+        // not undo a user dismissal or replace the saved selection.
+        if self.side_panel_user_hidden {
+            snapshot.focused_page_id = None;
+        }
         if snapshot != self.side_panel {
             self.wake_idle_hibernation();
         }

@@ -85,6 +85,7 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                wave: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Continue working".to_string(),
@@ -138,6 +139,7 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                wave: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Finished work".to_string(),
@@ -202,6 +204,7 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                wave: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Needs validation".to_string(),
@@ -261,6 +264,7 @@ fn test_remote_poke_status_and_off_update_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                wave: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Continue working".to_string(),

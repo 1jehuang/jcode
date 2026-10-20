@@ -142,7 +142,7 @@ pub(super) fn apply_failover_target(
         error: None,
         resolved_credential: agent.active_resolved_credential(),
         provider_oauth_email: super::provider_oauth_email(agent.provider_handle().as_ref()),
-        provider_oauth_account_label: agent.provider_handle().oauth_account_label(),
+        provider_oauth_account_label: agent.provider_handle().serving_oauth_account_label(),
         reasoning_effort: agent.provider_reasoning_effort(),
     });
     let _ = event_tx.send(ServerEvent::ConnectionPhase {
@@ -162,7 +162,7 @@ pub(super) async fn process_message_with_server_failover(
     enabled: bool,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
-    let mut result = super::client_lifecycle::process_message_streaming_mpsc(
+    let result = super::client_lifecycle::process_message_streaming_mpsc(
         Arc::clone(&agent),
         content,
         images,
@@ -170,26 +170,80 @@ pub(super) async fn process_message_with_server_failover(
         event_tx.clone(),
     )
     .await;
-    if !enabled {
+    if !enabled || result.is_ok() {
         return result;
     }
+    let mut guard = agent.lock().await;
+    retry_turn_with_server_failover(&mut guard, result, reminder, event_tx).await
+}
+
+/// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
+/// on an already locked agent. No client runs a countdown for these turns, so
+/// the server always applies the account router itself.
+pub(super) async fn process_locked_message_with_server_failover(
+    agent: &mut Agent,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    let reminder = system_reminder.clone();
+    let result = super::client_lifecycle::process_locked_message_streaming_mpsc(
+        agent,
+        content,
+        images,
+        system_reminder,
+        event_tx.clone(),
+    )
+    .await;
+    retry_turn_with_server_failover(agent, result, reminder, event_tx).await
+}
+
+/// [`process_locked_message_with_server_failover`] for callers holding an
+/// `Arc<Mutex<Agent>>`.
+pub(super) async fn process_server_initiated_message(
+    agent: Arc<Mutex<Agent>>,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    let mut guard = agent.lock().await;
+    process_locked_message_with_server_failover(
+        &mut guard,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+    )
+    .await
+}
+
+/// Given the result of a turn attempt, switch to the next pool-approved
+/// account and re-run the same turn while it keeps failing with a
+/// usage/rate-limit error.
+pub(super) async fn retry_turn_with_server_failover(
+    agent: &mut Agent,
+    mut result: anyhow::Result<()>,
+    reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
     let mut attempts = 0;
     while let Err(error) = &result {
         if attempts >= MAX_SERVER_FAILOVERS {
             break;
         }
         let message = crate::util::format_error_chain(error);
-        let mut guard = agent.lock().await;
         // Only retry a turn whose last persisted message is still the
         // request (user prompt or tool results). Never re-ask after the
         // model already produced a partial reply.
-        if guard.last_message_role() != Some(crate::message::Role::User) {
+        if agent.last_message_role() != Some(crate::message::Role::User) {
             break;
         }
-        let Some(target) = pick_failover_target(&guard, &message) else {
+        let Some(target) = pick_failover_target(agent, &message) else {
             break;
         };
-        if let Err(switch_error) = apply_failover_target(&mut guard, &target, &event_tx) {
+        if let Err(switch_error) = apply_failover_target(agent, &target, &event_tx) {
             crate::logging::warn(&format!(
                 "Server account failover to {} failed: {switch_error}",
                 target.spec
@@ -197,7 +251,7 @@ pub(super) async fn process_message_with_server_failover(
             break;
         }
         attempts += 1;
-        result = guard
+        result = agent
             .continue_turn_after_failover(reminder.clone(), event_tx.clone())
             .await;
     }
@@ -377,6 +431,54 @@ mod tests {
             event,
             ServerEvent::ConnectionPhase { phase } if phase.starts_with("retrying on")
         )));
+    }
+
+    #[tokio::test]
+    async fn server_initiated_turns_always_use_account_router() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::config::Config::invalidate_cache();
+        let mut pool = crate::auth::account_pool::AccountPool::default();
+        pool.members = vec!["anthropic-api".into(), "openai-api".into()];
+        pool.save().unwrap();
+
+        let provider = TwoAccountProvider {
+            on_openai: Arc::new(StdMutex::new(false)),
+            calls: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+        let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+        let session =
+            crate::session::Session::create_with_id("session_swarm_failover".into(), None, None);
+        let agent = Arc::new(Mutex::new(Agent::new_with_session(
+            provider_dyn,
+            registry,
+            session,
+            None,
+        )));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = process_server_initiated_message(
+            Arc::clone(&agent),
+            "swarm task",
+            Vec::new(),
+            None,
+            tx,
+        )
+        .await;
+        let calls = provider.calls.lock().unwrap().clone();
+        match prev_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        crate::config::Config::invalidate_cache();
+
+        assert!(result.is_ok(), "worker turn should fail over: {result:?}");
+        assert_eq!(
+            calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
+            vec![false, true]
+        );
     }
 
     #[tokio::test]

@@ -13,13 +13,10 @@ Pass `model: "inherit"` to force coordinator inheritance even with a configured
 default. Model selection does not change reused workers. Run `swarm list_models`
 to check available models/routes. Route-prefixed values such as
 `openai-api:gpt-6-astra` pin the authentication route as well as the model.
-Pass `effort` when spawning or assigning swarm work:
-
-- Implementation tasks: `effort: "low"`.
-- Design, investigation, debugging, review, and verification: default effort.
-- Context fetching / bulk reading / summarization: `effort: "none"`.
-- Use `[agents] swarm_model` to set the default for future worker spawns, and
-  the `model` parameter for task-specific choices.
+Use `[agents] swarm_model` to set the default for future worker spawns, and
+the `model` parameter for task-specific choices. Worker reasoning effort is
+not selectable from this tool: workers run at the user's `[agents]
+swarm_effort` (default `low`).
 
 Structure guidance for spawned swarm agents:
 

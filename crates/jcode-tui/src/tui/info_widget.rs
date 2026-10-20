@@ -414,6 +414,9 @@ pub struct UsageInfo {
     pub available: bool,
     /// A request was rejected for a usage limit, even without a fresh snapshot.
     pub limit_reached: bool,
+    /// Masked email of the OAuth account these limits belong to
+    /// (e.g. `j***5@gmail.com`). Never holds an unmasked address.
+    pub account_hint: Option<String>,
 }
 
 /// Session-level KV cache telemetry for providers that report cache usage.

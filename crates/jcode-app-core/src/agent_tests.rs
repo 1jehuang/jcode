@@ -626,6 +626,50 @@ impl Provider for NativeCompactionStreamProvider {
     }
 }
 
+#[tokio::test]
+async fn context_limit_recovery_announces_measured_token_counts() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeCompactionStreamProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    for idx in 0..40 {
+        agent.add_message(
+            if idx % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            vec![ContentBlock::Text {
+                text: format!("message {idx} {}", "x".repeat(4_000)),
+                cache_control: None,
+            }],
+        );
+    }
+
+    assert!(agent.try_auto_compact_after_context_limit("maximum context length exceeded"));
+    match agent.take_recovery_compaction_event() {
+        ServerEvent::Compaction {
+            trigger,
+            pre_tokens,
+            post_tokens,
+            tokens_saved,
+            messages_dropped,
+            ..
+        } => {
+            assert_eq!(trigger, "auto_recovery");
+            let pre = pre_tokens.expect("recovery must report a pre-compaction count");
+            let post = post_tokens.expect("recovery must report a post-compaction count");
+            assert!(
+                post < pre,
+                "recovery should shrink the context ({pre} -> {post})"
+            );
+            assert_eq!(tokens_saved, Some(pre - post));
+            assert!(messages_dropped.is_some_and(|count| count > 0));
+        }
+        other => panic!("expected compaction event, got {other:?}"),
+    }
+}
+
 #[test]
 fn tool_output_to_content_blocks_preserves_labeled_images() {
     let output = ToolOutput::new("Image ready").with_labeled_image(
@@ -837,6 +881,8 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
         if let ServerEvent::Compaction {
             trigger,
             pre_tokens,
+            post_tokens,
+            tokens_saved,
             messages_compacted,
             ..
         } = event
@@ -847,6 +893,12 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
                 Some(80_000),
                 "remote compaction must forward the provider's pre-compaction count"
             );
+            let post = post_tokens.expect("native compaction must report an estimated post count");
+            assert!(
+                post < 80_000,
+                "post count should reflect the compacted context"
+            );
+            assert_eq!(tokens_saved, Some(80_000 - post));
             assert!(
                 messages_compacted.is_some_and(|count| count > 0),
                 "native compaction should report a non-empty compacted prefix"

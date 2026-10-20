@@ -199,6 +199,7 @@ fn cache_warning_does_not_leak_anthropic_expiry_into_openai_route() {
         provider: "anthropic".into(),
         model: "claude-opus-4-6".into(),
         upstream_provider: None,
+        account: None,
         signature: None,
     };
     app.kv_cache.kv_cache_baseline = Some(baseline.clone());
@@ -227,6 +228,7 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
         provider: "openai-api".into(),
         model: "gpt-6-astra".into(),
         upstream_provider: None,
+        account: None,
         signature: Some(App::kv_cache_request_signature(
             &messages,
             &[],

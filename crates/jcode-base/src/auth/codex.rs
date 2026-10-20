@@ -195,6 +195,33 @@ pub fn list_accounts() -> Result<Vec<OpenAiAccount>> {
     Ok(auth.openai_accounts)
 }
 
+/// Label of the saved account whose tokens these credentials are. This is the
+/// account a request actually authenticates as, which can differ from the
+/// globally active login when a session loaded its credentials earlier.
+pub fn account_label_for_credentials(
+    accounts: &[OpenAiAccount],
+    credentials: &CodexCredentials,
+) -> Option<String> {
+    accounts
+        .iter()
+        .find(|account| {
+            (!credentials.access_token.is_empty()
+                && account.access_token == credentials.access_token)
+                || (!credentials.refresh_token.is_empty()
+                    && account.refresh_token == credentials.refresh_token)
+        })
+        .or_else(|| {
+            // Tokens rotate; the ChatGPT account id is stable per login.
+            let account_id = credentials.account_id.as_deref()?;
+            let mut matches = accounts
+                .iter()
+                .filter(|account| account.account_id.as_deref() == Some(account_id));
+            let account = matches.next()?;
+            matches.next().is_none().then_some(account)
+        })
+        .map(|account| account.label.clone())
+}
+
 pub fn active_account_label() -> Option<String> {
     let auth = load_auth_file().ok()?;
     crate::auth::account_store::active_account_label(

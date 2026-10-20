@@ -195,6 +195,7 @@ fn cold_cache_warning_is_persisted_when_starting_next_request() {
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: None,
     });
 
@@ -240,6 +241,7 @@ fn cold_cache_warning_fires_on_idle_tick_before_next_message() {
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: None,
     });
 
@@ -306,6 +308,7 @@ fn idle_cold_cache_warning_waits_for_ttl_and_rearms_after_new_cache_write() {
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: None,
     });
 
@@ -371,6 +374,7 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
         provider,
         model,
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -426,6 +430,7 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
         provider,
         model,
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -507,6 +512,7 @@ fn legitimate_model_switch_miss_pushes_informational_notice() {
         provider: app.kv_cache_provider_name(),
         model: "claude-opus-4-5".to_string(),
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -539,6 +545,7 @@ fn kv_cache_notice_explicit_loss_matrix() {
         (None, "same", None),
         (Some(0), "provider", Some("provider switch")),
         (Some(0), "upstream", Some("upstream switch")),
+        (Some(0), "account", Some("account switch")),
         (Some(0), "expired", Some("expired")),
     ] {
         let mut app = create_test_app();
@@ -552,10 +559,14 @@ fn kv_cache_notice_explicit_loss_matrix() {
             provider: app.kv_cache_provider_name(),
             model: app.kv_cache_provider_model(),
             upstream_provider: Some("old upstream".into()),
+            account: None,
             signature: None,
         };
         if route == "provider" {
             baseline.provider = "other provider".into();
+        }
+        if route == "account" {
+            baseline.account = Some("fox".into());
         }
         if route == "expired" {
             baseline.provider = "anthropic".into();
@@ -564,6 +575,9 @@ fn kv_cache_notice_explicit_loss_matrix() {
         }
         let mut request = app.fallback_pending_kv_cache_request();
         request.call_index = 3;
+        if route == "account" {
+            request.account = Some("otter".into());
+        }
         if route == "expired" {
             request.provider = "anthropic".into();
             request.started_at = Some(Instant::now());
@@ -594,7 +608,18 @@ fn kv_cache_notice_explicit_loss_matrix() {
             assert_eq!(notices.len(), 1, "route={route} read={read:?}");
             assert!(notices[0].content.contains(reason), "{:?}", notices[0]);
             assert!(notices[0].content.contains("call 3"));
-            assert!(notices[0].content.contains("cached / 100000 expected"));
+            assert!(
+                notices[0].content.contains("cached / 100K expected"),
+                "{:?}",
+                notices[0]
+            );
+            if route == "account" {
+                assert!(
+                    notices[0].content.contains("account switched fox -> otter"),
+                    "{:?}",
+                    notices[0]
+                );
+            }
             assert!(notices[0].content.starts_with("ℹ️"));
         } else {
             assert!(
@@ -651,6 +676,7 @@ fn kv_cache_baseline_from_other_session_is_ignored() {
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: Some(big_signature),
     });
 
@@ -701,6 +727,7 @@ fn kv_cache_baseline_same_session_still_compares() {
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -746,6 +773,7 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
         provider: app.kv_cache_provider_name(),
         model: app.kv_cache_provider_model(),
         upstream_provider: None,
+        account: None,
         signature: Some(old_signature.clone()),
     });
 
@@ -826,6 +854,7 @@ fn native_compaction_application_invalidates_kv_cache_baseline_before_continuati
         provider: app.kv_cache_provider_name(),
         model: app.kv_cache_provider_model(),
         upstream_provider: None,
+        account: None,
         signature: Some(old_signature),
     });
     let old_generation = app.kv_cache.cache_generation;

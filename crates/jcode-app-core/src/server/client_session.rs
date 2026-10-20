@@ -768,6 +768,25 @@ pub(super) async fn handle_subscribe(
         }
     }
 
+    // A TUI that reloads itself reconnects, then its old process exits and the
+    // disconnect cleanup removes the member and clears the coordinator slot,
+    // before the new process subscribes again. Reclaim on every subscribe, not
+    // only on the resume path, so the owner always ends up holding its slot.
+    let subscribed_swarm_id = swarm_members
+        .read()
+        .await
+        .get(client_session_id)
+        .and_then(|member| member.swarm_id.clone());
+    if let Some(swarm_id) = subscribed_swarm_id {
+        reclaim_coordinator_slot_on_resume(
+            &swarm_id,
+            client_session_id,
+            swarm_members,
+            swarm_coordinators,
+        )
+        .await;
+    }
+
     let should_selfdev = *client_selfdev || matches!(selfdev, Some(true));
 
     if should_selfdev {
@@ -951,6 +970,65 @@ fn resumed_member_swarm_id(
     } else {
         Some(temporary_swarm_id.to_string())
     }
+}
+
+/// A resumed user-facing root session takes back its swarm's coordinator slot
+/// when the slot is empty or held by a headless worker or one of its own
+/// descendants. A server reload disconnects the TUI owner for a moment; in
+/// that window the slot used to be cleared or captured by a spawned worker,
+/// leaving the owner unable to drive its own swarm after reconnecting.
+async fn reclaim_coordinator_slot_on_resume(
+    swarm_id: &str,
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+) {
+    let previous = {
+        let members = swarm_members.read().await;
+        let Some(me) = members.get(session_id) else {
+            return;
+        };
+        if me.is_headless
+            || me.report_back_to_session_id.is_some()
+            || me.swarm_id.as_deref() != Some(swarm_id)
+        {
+            return;
+        }
+        let coordinators = swarm_coordinators.read().await;
+        let current = coordinators.get(swarm_id).cloned();
+        let should_claim = match current.as_deref() {
+            None => true,
+            Some(current) if current == session_id => false,
+            Some(current) => match members.get(current) {
+                None => true,
+                Some(holder) => {
+                    holder.is_headless
+                        || holder.swarm_id.as_deref() != Some(swarm_id)
+                        || super::swarm_is_self_or_ancestor(&members, session_id, current)
+                }
+            },
+        };
+        if !should_claim {
+            return;
+        }
+        current
+    };
+    swarm_coordinators
+        .write()
+        .await
+        .insert(swarm_id.to_string(), session_id.to_string());
+    let mut members = swarm_members.write().await;
+    if let Some(previous) = previous.as_deref()
+        && let Some(holder) = members.get_mut(previous)
+    {
+        holder.role = "agent".to_string();
+    }
+    if let Some(me) = members.get_mut(session_id) {
+        me.role = "coordinator".to_string();
+    }
+    crate::logging::info(&format!(
+        "Resumed session {session_id} reclaimed coordinator slot for swarm {swarm_id} (previous: {previous:?})"
+    ));
 }
 
 async fn rename_swarm_member_session(
@@ -1857,6 +1935,13 @@ pub(super) async fn handle_resume_session(
                     .and_then(|member| member.swarm_id.clone())
             } {
                 rename_plan_participant(&swarm_id, &old_session_id, &session_id, swarm_plans).await;
+                reclaim_coordinator_slot_on_resume(
+                    &swarm_id,
+                    &session_id,
+                    swarm_members,
+                    swarm_coordinators,
+                )
+                .await;
                 let swarm_state = SwarmState {
                     members: Arc::clone(swarm_members),
                     swarms_by_id: Arc::clone(swarms_by_id),
@@ -1893,7 +1978,7 @@ pub(super) async fn handle_resume_session(
                     guard.provider_context_window(),
                     guard.active_resolved_credential(),
                     guard.provider_reasoning_effort(),
-                    guard.provider_handle().oauth_account_label(),
+                    guard.provider_handle().serving_oauth_account_label(),
                 )
             };
 

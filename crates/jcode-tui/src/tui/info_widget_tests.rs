@@ -139,6 +139,7 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
                 confidence_history: Vec::new(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                wave: None,
             },
             crate::todo::TodoItem {
                 group: None,
@@ -151,6 +152,7 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
                 confidence_history: Vec::new(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                wave: None,
             },
         ],
         ..Default::default()
@@ -183,6 +185,7 @@ fn todos_widgets_render_group_headers_when_groups_present() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
+        wave: None,
     };
     let data = InfoWidgetData {
         todos: vec![
@@ -225,6 +228,7 @@ fn task_group_headers_render_their_own_weighted_confidence() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
+        wave: None,
     };
     let data = InfoWidgetData {
         todos: vec![
@@ -263,6 +267,7 @@ fn todos_widgets_stay_flat_without_groups() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
+        wave: None,
     };
     let data = InfoWidgetData {
         todos: vec![mk("a", "completed"), mk("b", "pending")],
@@ -285,6 +290,7 @@ fn todos_widget_renders_exact_pips_for_small_lists() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
+        wave: None,
     };
     let data = InfoWidgetData {
         todos: vec![
@@ -363,6 +369,7 @@ fn todo_widget_header_says_plan_when_showing_swarm_plan_projection() {
 
 fn todo_item(id: &str, content: &str, status: &str, group: Option<&str>) -> crate::todo::TodoItem {
     crate::todo::TodoItem {
+        wave: None,
         content: content.to_string(),
         status: status.to_string(),
         priority: "medium".to_string(),
@@ -1803,6 +1810,7 @@ fn placements_never_include_border_only_widgets() {
             ..Default::default()
         }),
         todos: vec![crate::todo::TodoItem {
+            wave: None,
             group: None,
             content: "ship patch".to_string(),
             status: "in_progress".to_string(),

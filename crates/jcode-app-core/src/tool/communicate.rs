@@ -691,6 +691,33 @@ fn try_claim_run_plan_driver(
     })
 }
 
+/// Seed an empty swarm plan from the caller's session todos.
+///
+/// Only runs when the plan has no items, so an explicit `propose_plan` always
+/// wins. Returns quietly when there are no open todos.
+async fn seed_plan_from_todos_if_empty(ctx: &ToolContext) -> Result<()> {
+    if fetch_plan_status(&ctx.session_id)
+        .await
+        .is_ok_and(|summary| summary.item_count > 0)
+    {
+        return Ok(());
+    }
+    let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
+    let items = crate::server::swarm_todo_link::plan_items_from_todos(&todos);
+    if items.is_empty() {
+        return Ok(());
+    }
+    let request = Request::CommProposePlan {
+        id: REQUEST_ID,
+        session_id: ctx.session_id.clone(),
+        items,
+    };
+    let response = send_request(request)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to seed swarm plan from todos: {}", e))?;
+    ensure_success(&response)
+}
+
 /// Drive `run_plan` as a managed background task and return immediately.
 ///
 /// The coordinating agent stays responsive: the plan loop runs inside the
@@ -1232,7 +1259,9 @@ async fn run_swarm_plan_loop(
                 },
                 message: params.message.clone(),
                 model: params.model.clone(),
-                effort: params.effort.clone(),
+                // Worker effort is not agent-controlled: the server applies
+                // `agents.swarm_effort` (default "low").
+                effort: None,
             };
             match send_request(request).await {
                 Ok(ServerEvent::CommAssignTaskResponse {
@@ -1383,7 +1412,9 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         request_nonce: Some(fresh_spawn_request_nonce(ctx)),
         spawn_mode: params.spawn_mode.clone(),
         model: params.model.clone(),
-        effort: params.effort.clone(),
+        // Worker effort is not agent-controlled: the server applies
+        // `agents.swarm_effort` (default "low").
+        effort: None,
         label: None,
     };
 
@@ -1627,7 +1658,6 @@ fn format_swarm_model_list(
             route.model, route.provider, route.api_method, availability, cost, detail
         ));
     }
-    out.push_str("\nAlso pass effort (none|minimal|low|medium|high|xhigh|max) to set the spawned agent's reasoning effort.");
     out
 }
 
@@ -1733,9 +1763,6 @@ struct CommunicateInput {
     /// threshold.
     #[serde(default)]
     tldr: Option<String>,
-    /// Reasoning effort for spawned agents (none|minimal|low|medium|high|xhigh|max).
-    #[serde(default)]
-    effort: Option<String>,
     /// Per-worker model override for spawn and assignment-created workers.
     /// Takes precedence over agents.swarm_model; see list_models for routes.
     #[serde(default)]
@@ -1913,11 +1940,6 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "description": "Model for new workers, e.g. 'openai-api:gpt-5.6-luna'. 'inherit' uses yours. See list_models."
                 },
-                "effort": {
-                    "type": "string",
-                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
-                    "description": "Optional reasoning effort for spawned agents. Omit for the model default."
-                },
                 "session_ids": {
                     "type": "array",
                     "items": {"type": "string"}
@@ -1969,6 +1991,7 @@ impl Tool for CommunicateTool {
                 },
                 "plan_items": {
                     "type": "array",
+                    "description": "Plan items for propose_plan. run_plan with no plan uses your todo list instead: same-wave todos run in parallel, later waves wait.",
                     "items": {
                         "type": "object",
                         "additionalProperties": true
@@ -2469,7 +2492,9 @@ impl Tool for CommunicateTool {
                     request_nonce: None,
                     spawn_mode: params.spawn_mode.clone(),
                     model: params.model.clone(),
-                    effort: params.effort.clone(),
+                    // Worker effort is not agent-controlled: the server applies
+                    // `agents.swarm_effort` (default "low").
+                    effort: None,
                     label: Some(label),
                 };
 
@@ -2774,7 +2799,9 @@ impl Tool for CommunicateTool {
                     spawn_if_needed: params.spawn_if_needed,
                     message: params.message.clone(),
                     model: params.model.clone(),
-                    effort: params.effort.clone(),
+                    // Worker effort is not agent-controlled: the server applies
+                    // `agents.swarm_effort` (default "low").
+                    effort: None,
                 };
 
                 match send_request(request).await {
@@ -2826,7 +2853,9 @@ impl Tool for CommunicateTool {
                         spawn_if_needed: params.spawn_if_needed,
                         message: params.message.clone(),
                         model: params.model.clone(),
-                        effort: params.effort.clone(),
+                        // Worker effort is not agent-controlled: the server applies
+                        // `agents.swarm_effort` (default "low").
+                        effort: None,
                     };
 
                     match send_request(request).await {
@@ -2873,6 +2902,10 @@ impl Tool for CommunicateTool {
             }
 
             "run_plan" => {
+                // No swarm plan yet: use the coordinator's own todo list as the
+                // plan. Waves become stages, so parallel todos fan out to
+                // workers and later waves wait, without the model writing ids.
+                seed_plan_from_todos_if_empty(&ctx).await?;
                 // Background-by-default: the plan driver runs as a managed
                 // background task (progress card, bg tool, notify/wake) so the
                 // coordinating agent stays responsive. Pass background=false

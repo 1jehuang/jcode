@@ -1928,6 +1928,18 @@ impl Provider for MultiProvider {
         self.selected_account_for_provider(self.active_provider())
     }
 
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            _ => None,
+        }
+    }
+
     fn active_oauth_account_email(&self) -> Option<String> {
         let runtime = match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider(),

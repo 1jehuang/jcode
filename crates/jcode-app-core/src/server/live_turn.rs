@@ -13,7 +13,7 @@
 //! `Done`/`Error` event (id 0) so attached clients can settle the externally
 //! started turn in their UI.
 
-use super::client_lifecycle::process_locked_message_streaming_mpsc;
+use super::turn_failover::process_locked_message_with_server_failover;
 use super::{
     SwarmEvent, SwarmMember, session_event_fanout_sender, truncate_detail, update_member_status,
     update_member_status_with_report,
@@ -68,19 +68,24 @@ pub(super) async fn idle_live_agent(
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<OwnedMutexGuard<Agent>> {
-    let agent = {
-        let guard = sessions.read().await;
-        guard.get(session_id).cloned()
-    }?;
+    let agent =
+        super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await?;
 
-    let has_live_attachments = {
+    // Headless workers never have a client attachment by design, and members
+    // restored from disk after a server restart carry a closed placeholder
+    // channel. Both are still server-drivable, so they must remain wakeable:
+    // otherwise a wake falls back to a soft-interrupt queue that an idle agent
+    // never drains, and the worker silently stays idle.
+    let can_drive = {
         let members = swarm_members.read().await;
         members
             .get(session_id)
-            .map(|member| !member.event_txs.is_empty() || !member.event_tx.is_closed())
+            .map(|member| {
+                member.is_headless || !member.event_txs.is_empty() || !member.event_tx.is_closed()
+            })
             .unwrap_or(false)
     };
-    if !has_live_attachments {
+    if !can_drive {
         return None;
     }
 
@@ -135,7 +140,7 @@ pub(super) async fn spawn_tracked_live_turn(
                     )
                     .await
             } else {
-                process_locked_message_streaming_mpsc(
+                process_locked_message_with_server_failover(
                     &mut agent,
                     &message,
                     vec![],

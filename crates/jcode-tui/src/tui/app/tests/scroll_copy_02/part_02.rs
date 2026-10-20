@@ -771,6 +771,141 @@ fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
 }
 
 #[test]
+fn test_side_panel_dismiss_survives_local_page_refresh() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        for (command, page_id) in [
+            ("/splitview on", "split_view"),
+            ("/observe on", "observe"),
+            ("/todos on", "session_todos"),
+        ] {
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.dismiss_side_panel();
+            app.push_display_message(DisplayMessage::assistant("new live content"));
+            app.refresh_split_view_if_needed();
+            app.observe_tool_call(&crate::message::ToolCall {
+                id: "side-refresh".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"file_path": "AGENTS.md"}),
+                intent: None,
+                thought_signature: None,
+            });
+            app.refresh_todos_view_if_needed();
+            assert!(
+                app.side_panel.focused_page().is_none(),
+                "refresh reopened {page_id}"
+            );
+            assert_eq!(app.last_side_panel_focus_id.as_deref(), Some(page_id));
+            app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+                .unwrap();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.dismiss_side_panel();
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            assert!(
+                !app.side_panel_user_hidden,
+                "explicit app command should reveal"
+            );
+        }
+    });
+}
+
+#[test]
+fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, _) = make_edit_badge_test_app(30);
+    // The File diff cache is process-global and keyed by path and message
+    // index. Sibling tests render shorter `demo.txt` edits at the same index,
+    // so use a path of our own to always render this 30-line diff.
+    if let Some(tool) = app.display_messages[1].tool_data.as_mut() {
+        tool.input["file_path"] = serde_json::json!("side-close-file-diff.txt");
+    }
+    app.bump_display_messages_version();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(app.diff_pane_visible(), "File diff should remain visible");
+    assert!(app.diff_pane_focus, "visible File diff should retain focus");
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        .unwrap();
+    assert!(
+        app.diff_pane_scroll > 0,
+        "j should still scroll the File diff"
+    );
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    assert!(app.diff_pane_focus);
+}
+
+#[test]
+fn test_side_panel_close_in_file_mode_without_edits_restores_composer() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+    assert_eq!(app.display_edit_tool_message_count, 0);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(!app.diff_pane_visible());
+    assert!(
+        !app.diff_pane_focus,
+        "focus must not stay on an invisible File diff pane"
+    );
+    render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::last_layout_snapshot()
+            .unwrap()
+            .diff_pane_area
+            .is_none(),
+        "no right pane should remain without edits"
+    );
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "j", "normal typing must reach the composer");
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+}
+
+#[test]
 fn test_mouse_click_in_input_switches_focus_from_side_panel() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();

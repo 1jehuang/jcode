@@ -575,10 +575,9 @@ pub struct AgentsConfig {
     /// string to change the worker default. An explicit `model` in the swarm
     /// tool overrides this default for newly spawned workers.
     pub swarm_model: Option<String>,
-    /// Optional default reasoning effort for spawned swarm/subagent sessions
-    /// (`"low"`, `"medium"`, `"high"`, ...). Applied when a `swarm spawn`
-    /// call does not pass an explicit `effort`. Leave unset to let workers
-    /// inherit the provider-wide reasoning effort.
+    /// Reasoning effort for spawned swarm workers (`"low"`, `"medium"`,
+    /// `"high"`, ...). The swarm tool does not let agents choose worker
+    /// effort. Unset means `"low"`.
     pub swarm_effort: Option<String>,
     /// Root reasoning effort in swarm mode. Unset or invalid means `low`.
     /// This does not change worker effort (`swarm_effort`).

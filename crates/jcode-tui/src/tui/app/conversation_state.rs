@@ -90,23 +90,38 @@ impl App {
         context_limit: u64,
         strategy: &str,
     ) -> String {
-        if event.pre_tokens.is_none() && event.post_tokens.is_none() {
-            return format!("📦 Compacted ({strategy}): token counts unavailable");
-        }
-        let usage = |tokens: Option<u64>| match tokens {
-            Some(tokens) if context_limit > 0 => format!(
-                "~{} tokens ({:.1}%)",
-                Self::format_compaction_number(tokens),
-                tokens as f64 / context_limit as f64 * 100.0,
-            ),
-            Some(tokens) => format!("~{} tokens", Self::format_compaction_number(tokens)),
-            None => "token count unavailable".to_string(),
+        let usage = |tokens: u64| {
+            if context_limit > 0 {
+                format!(
+                    "~{} tokens ({:.1}%)",
+                    Self::format_compaction_number(tokens),
+                    tokens as f64 / context_limit as f64 * 100.0,
+                )
+            } else {
+                format!("~{} tokens", Self::format_compaction_number(tokens))
+            }
         };
-        format!(
-            "📦 Compacted ({strategy}): {} → {}",
-            usage(event.pre_tokens),
-            usage(event.post_tokens),
-        )
+        // Show whatever is known. Never print "unavailable": a missing side is
+        // simply omitted, and with no counts at all the message count is used.
+        match (event.pre_tokens, event.post_tokens) {
+            (Some(pre), Some(post)) => {
+                format!(
+                    "📦 Compacted ({strategy}): {} → {}",
+                    usage(pre),
+                    usage(post)
+                )
+            }
+            (Some(pre), None) => format!("📦 Compacted ({strategy}): from {}", usage(pre)),
+            (None, Some(post)) => format!("📦 Compacted ({strategy}): now {}", usage(post)),
+            (None, None) => match event.messages_compacted.filter(|count| *count > 0) {
+                Some(count) => format!(
+                    "📦 Compacted ({strategy}): {} older message{} summarized",
+                    Self::format_compaction_number(count as u64),
+                    if count == 1 { "" } else { "s" },
+                ),
+                None => format!("📦 Compacted ({strategy})"),
+            },
+        }
     }
 
     pub(super) fn format_compaction_number(value: u64) -> String {
@@ -875,18 +890,23 @@ mod tests {
         event.post_tokens = None;
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): token counts unavailable"
+            "📦 Compacted (emergency): 100 older messages summarized"
+        );
+        event.messages_compacted = None;
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 200_000),
+            "📦 Compacted (emergency)"
         );
         event.post_tokens = Some(40_000);
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): token count unavailable → ~40,000 tokens (20.0%)"
+            "📦 Compacted (emergency): now ~40,000 tokens (20.0%)"
         );
         event.pre_tokens = Some(180_000);
         event.post_tokens = None;
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): ~180,000 tokens (90.0%) → token count unavailable"
+            "📦 Compacted (emergency): from ~180,000 tokens (90.0%)"
         );
         event.pre_tokens = Some(0);
         event.post_tokens = Some(0);

@@ -43,6 +43,7 @@ fn cache_diagnostic_fixture() -> (App, PendingKvCacheRequest) {
         provider: "openai-oauth".into(),
         model: "test-model".into(),
         upstream_provider: None,
+        account: None,
         signature: Some(signature.clone()),
     };
     let request = PendingKvCacheRequest {
@@ -54,6 +55,7 @@ fn cache_diagnostic_fixture() -> (App, PendingKvCacheRequest) {
         provider: baseline.provider.clone(),
         model: baseline.model.clone(),
         upstream_provider: None,
+        account: None,
         signature: Some(signature),
         baseline_messages_prefix_matches: Some(true),
         baseline: Some(baseline),

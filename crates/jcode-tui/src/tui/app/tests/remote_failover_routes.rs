@@ -431,6 +431,37 @@ fn test_remote_failover_esc_cancels_without_route_request_or_resend() {
 }
 
 #[test]
+fn test_remote_failover_typing_and_enter_queue_instead_of_canceling() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut remote) = remote_exact_failover_fixture();
+        app.input.clear();
+        app.cursor_pos = 0;
+        for key in [KeyCode::Char('n'), KeyCode::Char('x'), KeyCode::Enter] {
+            rt.block_on(remote::handle_remote_key_event(
+                &mut app,
+                crossterm::event::KeyEvent::new(key, KeyModifiers::NONE),
+                &mut remote,
+            ))
+            .unwrap();
+            assert!(
+                app.pending_provider_failover.is_some(),
+                "{key:?} must not cancel the account switch"
+            );
+        }
+        assert!(app.input.is_empty());
+        assert_eq!(app.queued_messages, vec!["nx".to_string()]);
+        assert!(
+            !app.display_messages
+                .iter()
+                .any(|message| message.content.contains("Auto-switch canceled"))
+        );
+    });
+}
+
+#[test]
 fn test_cancel_image_only_failover_restores_attachments() {
     with_temp_jcode_home(|| {
         write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");

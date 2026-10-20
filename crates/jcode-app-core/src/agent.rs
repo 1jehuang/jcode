@@ -151,6 +151,29 @@ impl Agent {
         }
     }
 
+    /// OAuth account serving this request. Prompt caches are per account, so
+    /// a failover between accounts must be attributed, not reported as an
+    /// unexplained provider eviction.
+    fn kv_cache_account_identity(&self) -> Option<String> {
+        if self.provider.active_resolved_credential()
+            != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return None;
+        }
+        // An unbound runtime authenticates with the globally active account.
+        self.provider.oauth_account_label().or_else(|| {
+            match jcode_provider_core::parse_provider_hint(self.provider.name()) {
+                Some(jcode_provider_core::ActiveProvider::Claude) => {
+                    crate::auth::claude::active_account_label()
+                }
+                Some(jcode_provider_core::ActiveProvider::OpenAI) => {
+                    crate::auth::codex::active_account_label()
+                }
+                _ => None,
+            }
+        })
+    }
+
     fn begin_kv_cache_monitor_request(&mut self, event: &ServerEvent, model: &str) {
         let ServerEvent::KvCacheRequest {
             system_static_hash,
@@ -171,6 +194,7 @@ impl Agent {
             provider,
             model: model.to_string(),
             upstream_provider: self.last_upstream_provider.clone(),
+            account: self.kv_cache_account_identity(),
         };
         let signature = crate::kv_cache_monitor::RequestSignature {
             system_static_hash: *system_static_hash,
@@ -209,7 +233,7 @@ impl Agent {
             "KV_CACHE_MISS"
         };
         let diagnostic = format!(
-            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
+            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?} detail={:?}",
             self.session.id,
             miss.reason.id(),
             miss.reason.harness_caused(),
@@ -217,6 +241,7 @@ impl Agent {
             miss.expected_tokens,
             miss.read_tokens,
             miss.documented_cause,
+            miss.detail,
         );
         if expected_refresh {
             logging::info(&diagnostic);
@@ -347,6 +372,9 @@ pub struct Agent {
     /// MCP tools to wait for), this is set so the per-turn registry scan stops.
     /// Reset whenever the tool list is intentionally unlocked.
     mcp_late_register_resolved: bool,
+    /// Before/after token counts from the last context-limit auto-recovery,
+    /// consumed when the turn loop announces the compaction to clients.
+    last_recovery_compaction: Option<(u64, u64, usize)>,
     /// Whether `locked_tools` was built for provider-native deferred MCP
     /// loading. A mid-session model/provider switch can change that
     /// capability; the snapshot must then be rebuilt, or the new provider
@@ -492,6 +520,7 @@ impl Agent {
             last_usage: TokenUsage::default(),
             locked_tools: None,
             mcp_late_register_resolved: false,
+            last_recovery_compaction: None,
             locked_tools_native_deferred: false,
             announced_mcp_tools: HashSet::new(),
             announced_mcp_scan_index: 0,
@@ -887,7 +916,15 @@ impl Agent {
         &mut self,
         encrypted_content: String,
         compacted_count: usize,
-    ) -> Result<()> {
+    ) -> Result<(Option<u64>, Option<u64>)> {
+        // Measure the context before and after so clients can show what the
+        // compaction did. OpenAI does not report these sizes for native
+        // compaction, so jcode's own estimate is the best available figure.
+        let compaction = self.registry.compaction();
+        let pre_tokens = compaction
+            .try_read()
+            .ok()
+            .map(|manager| manager.token_estimate_with(self.session.provider_messages()) as u64);
         let encrypted_content_len = encrypted_content.len();
         let (summary_text, openai_encrypted_content) =
             if crate::provider::openai_request::openai_encrypted_content_is_sendable(
@@ -915,10 +952,12 @@ impl Agent {
         };
 
         self.session.compaction = Some(state.clone());
-        let compaction = self.registry.compaction();
+        let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
             manager.set_budget(self.provider.context_window());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
+            post_tokens =
+                Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
         }
 
         self.cache_tracker.reset();
@@ -936,7 +975,7 @@ impl Agent {
             .with_session_id(self.session.id.clone())
             .force_attribution(),
         );
-        Ok(())
+        Ok((pre_tokens, post_tokens))
     }
 
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {

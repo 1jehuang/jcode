@@ -1,9 +1,9 @@
 use super::ClientConnectionInfo;
-use super::client_lifecycle::process_message_streaming_mpsc;
 use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
 };
+use super::turn_failover::process_server_initiated_message;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     append_swarm_completion_report_instructions, broadcast_swarm_plan, broadcast_swarm_status,
@@ -572,9 +572,10 @@ async fn register_visible_spawned_member(
 
 /// Resolve the reasoning effort for a spawned swarm worker (#1165).
 ///
-/// Precedence mirrors the model path: an explicit `effort` on the spawn call
-/// wins, then the `agents.swarm_effort` config pin, and only then does the
-/// worker inherit the provider-wide reasoning effort (`None`).
+/// The swarm tool no longer lets agents choose worker effort, so
+/// `requested_effort` only arrives from direct protocol clients (SDK). It wins
+/// when present, then the user's `agents.swarm_effort` config pin, and
+/// otherwise workers run at [`DEFAULT_SWARM_WORKER_EFFORT`].
 pub(super) fn resolve_swarm_spawn_effort(
     requested_effort: Option<&str>,
     configured_swarm_effort: Option<&str>,
@@ -585,8 +586,14 @@ pub(super) fn resolve_swarm_spawn_effort(
             .filter(|effort| !effort.is_empty())
             .map(str::to_string)
     };
-    clean(requested_effort).or_else(|| clean(configured_swarm_effort))
+    clean(requested_effort)
+        .or_else(|| clean(configured_swarm_effort))
+        .or_else(|| Some(DEFAULT_SWARM_WORKER_EFFORT.to_string()))
 }
+
+/// Reasoning effort for spawned swarm workers when neither the request nor
+/// `agents.swarm_effort` sets one.
+pub(super) const DEFAULT_SWARM_WORKER_EFFORT: &str = "low";
 
 /// Spawn mode for one swarm spawn. An explicit per-call mode wins, except
 /// `auto`: a model passing `auto` expresses no preference, so the user's
@@ -844,7 +851,7 @@ pub(super) async fn spawn_swarm_agent(
                     let agent = agent_arc.lock().await;
                     agent.message_count()
                 };
-                let result = process_message_streaming_mpsc(
+                let result = process_server_initiated_message(
                     Arc::clone(&agent_arc),
                     &initial_msg,
                     vec![],
@@ -1433,7 +1440,14 @@ async fn ensure_spawn_coordinator_swarm(
     // Coordinator-slot election is now only about the swarm-level coordinator used
     // for shared plan operations (propose/approve/assign). Only a root session
     // (depth 0, no spawner) claims it, and only when the slot is empty or stale.
-    if is_root && coordinator_id.as_deref() != Some(req_session_id) {
+    // Headless sessions never claim it: a worker orphaned by its owner's brief
+    // disconnect (server reload) must not lock the owner out of its swarm.
+    let requester_is_headless = swarm_members
+        .read()
+        .await
+        .get(req_session_id)
+        .is_some_and(|member| member.is_headless);
+    if is_root && !requester_is_headless && coordinator_id.as_deref() != Some(req_session_id) {
         let should_claim = coordinator_id.is_none() || coordinator_is_stale;
         if should_claim {
             let promoted = {

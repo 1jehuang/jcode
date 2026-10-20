@@ -689,6 +689,16 @@ pub(crate) fn switched_model_account_suffix(
     }
 }
 
+/// Notice after switching the active saved account. The switch rebinds this
+/// session and becomes the default for new sessions, but other sessions that
+/// are already running keep the credentials they loaded.
+pub(super) fn account_switch_notice(provider: &str, label: &str) -> String {
+    format!(
+        "Switched {provider} account to `{label}` for this session and new sessions. \
+         Other running sessions keep their current account until they reload."
+    )
+}
+
 pub(super) fn mask_email(email: &str) -> String {
     let trimmed = email.trim();
     let Some((local, domain)) = trimmed.split_once('@') else {
@@ -1784,5 +1794,16 @@ mod switched_model_account_suffix_tests {
             " (via API key)"
         );
         assert_eq!(switched_model_account_suffix(None, Some("  ")), "");
+    }
+}
+
+#[cfg(test)]
+mod account_switch_notice_tests {
+    #[test]
+    fn notice_states_that_other_running_sessions_are_unchanged() {
+        let notice = super::account_switch_notice("OpenAI", "openai-fox");
+        assert!(notice.contains("`openai-fox`"));
+        assert!(notice.contains("this session and new sessions"));
+        assert!(notice.contains("Other running sessions keep their current account"));
     }
 }

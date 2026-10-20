@@ -17,7 +17,10 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
         } else {
             frame::label(format!("{} limits", label))
         };
-        return Framed::body(vec![usage_limit_reached_line()]).title(title);
+        return with_account_hint(
+            Framed::body(vec![usage_limit_reached_line()]).title(title),
+            info,
+        );
     }
     if !info.available {
         return if matches!(info.provider, UsageProvider::Anthropic) {
@@ -113,8 +116,17 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
                     data.usage_display_used,
                 ));
             }
-            Framed::body(lines).title(title)
+            with_account_hint(Framed::body(lines).title(title), info)
         }
+    }
+}
+
+/// Masked account email on the right of the top border. The frame drops it
+/// rather than wrapping when the title row is too narrow.
+fn with_account_hint(framed: Framed, info: &UsageInfo) -> Framed {
+    match info.account_hint.as_deref().filter(|hint| !hint.is_empty()) {
+        Some(hint) => framed.title_right(frame::dim(hint.to_string())),
+        None => framed,
     }
 }
 
@@ -176,8 +188,16 @@ pub(super) fn render_usage_compact(
     let mut lines = Vec::new();
     let label = info.provider.label();
     if !label.is_empty() {
+        let mut header = format!("{} limits", label);
+        if let Some(hint) = info.account_hint.as_deref().filter(|hint| !hint.is_empty()) {
+            let with_hint = format!("{header} · {hint}");
+            // Chrome must not wrap: keep the hint only when the row fits.
+            if UnicodeWidthStr::width(with_hint.as_str()) <= usize::from(width) {
+                header = with_hint;
+            }
+        }
         lines.push(Line::from(vec![Span::styled(
-            format!("{} limits", label),
+            header,
             Style::default()
                 .fg(rgb(140, 140, 150))
                 .add_modifier(ratatui::style::Modifier::DIM),
@@ -456,6 +476,42 @@ mod tests {
         assert!(!text.contains("5-hour"));
         assert!(!text.contains("Weekly"));
         assert_eq!(lines.len(), 2); // Provider label plus one quota bar.
+    }
+
+    #[test]
+    fn usage_widget_shows_masked_account_and_drops_it_when_narrow() {
+        let info = UsageInfo {
+            provider: UsageProvider::OpenAI,
+            primary_limit_label: Some("7-day".to_string()),
+            five_hour: 0.4,
+            available: true,
+            account_hint: Some("j***5@gmail.com".to_string()),
+            ..Default::default()
+        };
+
+        let wide = render_usage_compact(&info, 48, false);
+        assert_eq!(line_text(&wide[0]), "OpenAI limits · j***5@gmail.com");
+        let narrow = render_usage_compact(&info, 20, false);
+        assert_eq!(line_text(&narrow[0]), "OpenAI limits");
+
+        let data = InfoWidgetData {
+            usage_info: Some(info.clone()),
+            ..Default::default()
+        };
+        let framed = render_usage_widget(&data, Rect::new(0, 0, 40, 3));
+        let all = framed.all_lines().iter().map(line_text).collect::<Vec<_>>();
+        assert!(all.iter().any(|line| line == "j***5@gmail.com"));
+
+        let exhausted = InfoWidgetData {
+            usage_info: Some(UsageInfo {
+                limit_reached: true,
+                ..info
+            }),
+            ..Default::default()
+        };
+        let framed = render_usage_widget(&exhausted, Rect::new(0, 0, 40, 3));
+        let all = framed.all_lines().iter().map(line_text).collect::<Vec<_>>();
+        assert!(all.iter().any(|line| line == "j***5@gmail.com"));
     }
 }
 
