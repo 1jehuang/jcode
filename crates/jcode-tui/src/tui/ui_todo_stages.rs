@@ -439,8 +439,8 @@ fn lane_titles_spans(lane_todos: &[&crate::todo::TodoItem], width: usize) -> Vec
 /// `●●○  parser 🦊  Extract lexer, Update callers, Add tests`.
 /// The status strip leads, so the left edge reads as a block of progress;
 /// then the group name; then the titles. Phases are labelled on the header
-/// row, so the body has no heading rows. Finished phases are left to the
-/// header unless everything is done.
+/// row, so the body has no heading rows. Every phase is listed: finished and
+/// active phases in their phase colour, phases not yet started dimmed.
 pub(crate) fn push_stage_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
@@ -450,11 +450,9 @@ pub(crate) fn push_stage_lines(
 ) {
     let stages = ordered_layout(todos);
     let current = current_stage(&stages, todos);
-    let shown = |index: usize| stages.len() < 2 || !current.is_some_and(|current| index < current);
     let lanes: Vec<(usize, &crate::todo::stages::TodoLane)> = stages
         .iter()
         .enumerate()
-        .filter(|(index, _)| shown(*index))
         .flat_map(|(index, stage)| stage.lanes.iter().map(move |lane| (index, lane)))
         .collect();
     let items_of = |lane: &crate::todo::stages::TodoLane| -> Vec<&crate::todo::TodoItem> {

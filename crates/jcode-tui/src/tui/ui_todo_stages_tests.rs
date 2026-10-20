@@ -92,11 +92,11 @@ fn header_labels_each_phase_with_its_pips() {
         "{rows:?}"
     );
     let trimmed: Vec<&str> = rows.iter().map(|r| r.trim()).collect();
-    // Finished phase 1 lives on the header only; ungrouped todos are lanes of
-    // their own, each led by its status.
+    // Every phase is listed; ungrouped todos are lanes of their own, each
+    // led by its status.
     assert_eq!(
         &trimmed[1..],
-        &["●  stage field", "●  pinned band", "○  integrate"],
+        &["●  read types", "●  stage field", "●  pinned band", "○  integrate"],
         "{rows:?}"
     );
     let joined = rows.join("\n");
@@ -189,7 +189,7 @@ fn lane_row_shows_agent_emoji_and_activity() {
 }
 
 #[test]
-fn finished_phases_stay_on_the_header_until_all_done() {
+fn finished_phases_keep_their_lanes() {
     let mut todos = grid_todos();
     todos.push(laned("Wrap up", "pending", 3, "release"));
     for todo in todos.iter_mut().take(9) {
@@ -198,11 +198,9 @@ fn finished_phases_stay_on_the_header_until_all_done() {
     let rows = render(&todos, &[], 100);
     eprintln!("{}", rows.join("\n"));
     assert_eq!(rows[0].trim(), "phase 1 ●●●●●●  phase 2 ●●●  phase 3 ○");
-    assert_eq!(rows.len(), 2, "body shows only the open phase: {rows:?}");
-    assert!(rows[1].contains("Wrap up"), "{rows:?}");
-    todos[9].status = "completed".into();
-    let rows = render(&todos, &[], 100);
+    assert_eq!(rows.len(), 1 + 6, "every phase keeps its lanes: {rows:?}");
     assert!(rows.iter().any(|r| r.contains("Extract lexer")), "{rows:?}");
+    assert!(rows.last().unwrap().contains("Wrap up"), "{rows:?}");
 }
 
 #[test]
