@@ -61,6 +61,7 @@ export JCODE_NO_TELEMETRY=1 JCODE_NO_AUTO_UPDATE=1
 export JCODE_OPENAI_COMPAT_API_BASE='http://127.0.0.1:$MODEL_PORT/v1'
 export OPENAI_COMPAT_API_KEY=x JCODE_OPENAI_COMPAT_DEFAULT_MODEL=fake-model
 unset JCODE_SOCKET JCODE_SESSION_ID
+if [[ -e '$W/ssh-unavailable' ]]; then exit 43; fi
 exec bash -c "\${SSH_ORIGINAL_COMMAND:?}"
 EOF
 chmod +x "$W/remote-shell"
@@ -99,7 +100,8 @@ launch_args+=("$JCODE_BIN" --no-update --no-selfdev --ssh cloud-git-fixture
 printf -v launch 'cd %q && ' "$launch_dir"
 printf -v launch_command '%q ' "${launch_args[@]}"
 launch+=$launch_command
-tmux -S "$TMUX_SOCK" -f /dev/null new-session -d -s git-state -x 180 -y 55 "$launch"
+tmux -S "$TMUX_SOCK" -f /dev/null new-session -d -s git-state \
+    -x "${TERM_COLS:-180}" -y "${TERM_ROWS:-55}" "$launch"
 wait_for() {
     local text=$1
     for ((i=0; i<120; i++)); do
@@ -137,4 +139,29 @@ for ((i=0; i<120; i++)); do
 done
 [[ $clean == true ]] || fail 'clean repositories must remain visible and labeled'
 cp "$W/frame.txt" "$W/clean-frame.txt"
+if [[ ${EXPECT_CLOUD_STATUS:-0} == 1 ]]; then
+    for label in 'Machine:' 'CPU' 'RAM' 'Disk' 'Connection: Ready' \
+        'Updated ' 'probe ' 'Lifecycle' 'Uptime ' 'Sleep: policy unavailable' \
+        'Workspace' 'Cloud:' 'Local (source):' 'Transferred:'; do
+        wait_for "$label"
+    done
+    for metric in CPU RAM Disk; do
+        grep -Eq "$metric.*[0-9]+%" "$W/frame.txt" || fail "$metric telemetry is missing a measured percentage"
+    done
+    grep -Fq 'Cloud VM: main clean' "$W/frame.txt" || fail 'cloud card hides repository status'
+    grep -Fq 'Local: main clean' "$W/frame.txt" || fail 'cloud card hides local repository status'
+    cp "$W/frame.txt" "$W/telemetry-frame.txt"
+    echo 'JCODE_CHECKPOINT {"message":"Live cloud resource, connection, lifecycle and workspace sections visible"}'
+    # Reject new read-only probes, without interrupting the already-open native
+    # protocol bridge. Old values must become explicitly stale, not current zeroes.
+    touch "$W/ssh-unavailable"
+    wait_for 'Connection: Unavailable'
+    wait_for 'stale'
+    cp "$W/frame.txt" "$W/stale-frame.txt"
+    rm -- "$W/ssh-unavailable"
+    wait_for 'Connection: Ready'
+    if grep -Fq 'stale' "$W/frame.txt"; then fail 'successful telemetry still marked stale'; fi
+    cp "$W/frame.txt" "$W/recovered-frame.txt"
+    echo 'JCODE_CHECKPOINT {"message":"Telemetry failure marked stale and recovered on next successful probe"}'
+fi
 printf 'PASS: independent local and remote changes visible and refreshed (artifacts: %s)\n' "$W"

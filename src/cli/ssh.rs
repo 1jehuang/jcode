@@ -93,6 +93,17 @@ async fn run_unix(args: Args) -> Result<()> {
     crate::env::set_var("JCODE_SSH_REMOTE", host);
     crate::env::set_var("JCODE_SSH_BINARY", binary);
     crate::env::set_var("JCODE_SSH_WORKING_DIR", &working_dir);
+    // The local migration lease is the source of truth for the last transfer.
+    // Do not reuse a timestamp from a previous attachment or another host.
+    let lease = args
+        .resume
+        .as_deref()
+        .and_then(crate::storage::read_session_lease);
+    if let Some(timestamp) = last_transfer_for_host(host, lease.as_ref()) {
+        crate::env::set_var("JCODE_SSH_LAST_TRANSFER_AT", timestamp);
+    } else {
+        crate::env::remove_var("JCODE_SSH_LAST_TRANSFER_AT");
+    }
     if let Some(socket) = args.ssh_server_socket.as_deref() {
         crate::env::set_var("JCODE_SSH_SERVER_SOCKET", socket);
     } else {
@@ -147,6 +158,19 @@ fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn last_transfer_for_host<'a>(
+    host: &str,
+    lease: Option<&'a crate::storage::SessionLease>,
+) -> Option<&'a str> {
+    let lease = lease?;
+    if lease.away_host.as_deref() != Some(host)
+        || chrono::DateTime::parse_from_rfc3339(&lease.updated_at).is_err()
+    {
+        return None;
+    }
+    Some(&lease.updated_at)
+}
+
 /// Return a remote-aware resume command, never a local session lookup.
 pub(crate) fn resume_hint(session_id: &str) -> Option<String> {
     let host = std::env::var("JCODE_SSH_REMOTE").ok()?;
@@ -171,6 +195,30 @@ pub(crate) fn resume_hint(session_id: &str) -> Option<String> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn transfer_timestamp_requires_matching_host_and_valid_lease() {
+        let mut lease = crate::storage::SessionLease {
+            session_id: "session_cloud_widget".into(),
+            epoch: 1,
+            away_host: Some("cloud-box".into()),
+            repo_root: Some("/repo".into()),
+            last_sync_snapshot: None,
+            last_sync_head: None,
+            updated_at: "2026-10-20T07:30:00Z".into(),
+        };
+        assert_eq!(
+            last_transfer_for_host("cloud-box", Some(&lease)),
+            Some("2026-10-20T07:30:00Z")
+        );
+        assert_eq!(last_transfer_for_host("other-box", Some(&lease)), None);
+        assert_eq!(last_transfer_for_host("cloud-box", None), None);
+        lease.away_host = None;
+        assert_eq!(last_transfer_for_host("cloud-box", Some(&lease)), None);
+        lease.away_host = Some("cloud-box".into());
+        lease.updated_at = "not-a-timestamp".into();
+        assert_eq!(last_transfer_for_host("cloud-box", Some(&lease)), None);
+    }
 
     #[test]
     fn remote_modes_accept_explicit_remote_ids_without_local_lookup() {

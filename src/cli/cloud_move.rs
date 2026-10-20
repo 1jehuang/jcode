@@ -1726,6 +1726,7 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
         "JCODE_SSH_SERVER_SOCKET",
         "JCODE_SSH_LOCAL_WORKING_DIR",
         "JCODE_SSH_LOCAL_IS_SOURCE",
+        "JCODE_SSH_LAST_TRANSFER_AT",
         "JCODE_SSH_CONFIG",
         "JCODE_SOCKET",
     ] {
