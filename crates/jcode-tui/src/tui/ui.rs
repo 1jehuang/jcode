@@ -955,6 +955,7 @@ struct BodyCacheKey {
     /// Live swarm-member data renders beneath the tool call that spawned each
     /// member, so status/todo/tool-intent updates must invalidate the body.
     swarm_members_signature: u64,
+    latex_rendering: crate::config::LatexRenderingMode,
 }
 
 #[derive(Clone)]
@@ -1037,6 +1038,7 @@ impl BodyCacheState {
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
+                    && entry.key.latex_rendering == key.latex_rendering
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -1058,6 +1060,7 @@ impl BodyCacheState {
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
+                    && entry.key.latex_rendering == key.latex_rendering
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -1098,6 +1101,7 @@ impl BodyCacheState {
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
+                    && entry.key.latex_rendering == key.latex_rendering
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (false, idx, entry.msg_count));
@@ -1120,6 +1124,7 @@ impl BodyCacheState {
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
+                    && entry.key.latex_rendering == key.latex_rendering
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (true, idx, entry.msg_count));
@@ -1227,6 +1232,7 @@ struct FullPrepCacheKey {
     expanded_images_version: u64,
     /// Signature of live swarm member cards embedded beneath spawn tool calls.
     swarm_members_signature: u64,
+    latex_rendering: crate::config::LatexRenderingMode,
 }
 
 #[derive(Clone)]

@@ -198,6 +198,9 @@ impl App {
             "show-agentgrep-output" => {
                 "/show-agentgrep-output\nShow whether full agentgrep search output renders inline in the transcript.\n\n/show-agentgrep-output on\nRender the full agentgrep search results inline beneath each agentgrep call instead of just the one-line summary.\n\n/show-agentgrep-output off\nShow only the compact one-line agentgrep summary."
             }
+            "latex" => {
+                "/latex\nShow the current LaTeX math rendering mode.\n\n/latex status\nShow the current mode.\n\n/latex on|off\nEnable image rendering or disable it in favor of Unicode text.\n\n/latex none|unicode|image\nnone keeps the raw $...$ source. unicode converts supported notation to terminal-friendly text math. image typesets each formula to a PNG and shows it with the terminal image protocol (needs latex+dvipng or pdflatex+pdftocairo installed).\n\nAliases: raw for none, text/terminal for unicode, png/images for image. The choice is saved to config.toml and applies to the session immediately. JCODE_LATEX_RENDERING overrides it when set."
+            }
             "tool-call-details" => {
                 "/tool-call-details\nShow whether the dimmed technical detail (command, path, args) renders next to the model-provided intent on tool rows.\n\n/tool-call-details on\nShow the technical detail after the intent, e.g. `bash · Run tests · $ cargo test`.\n\n/tool-call-details off\nShow only the intent on tool rows that have one. Rows without an intent still show the technical detail, and error summaries always render."
             }

@@ -3031,6 +3031,59 @@ fn handle_show_agentgrep_output_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = slash_command_rest(trimmed, "/latex") else {
+        return false;
+    };
+    let arg = rest.trim();
+
+    let current = crate::config::config().display.latex_rendering;
+    if arg.is_empty() || arg.eq_ignore_ascii_case("status") {
+        app.push_display_message(DisplayMessage::system(format!(
+            "LaTeX rendering: {} (use /latex [on|off|none|unicode|image|status])\n\n  none    - keep raw $...$ source\n  unicode - terminal-friendly text math\n  image   - typeset PNG per formula (needs latex+dvipng or pdflatex+pdftocairo)",
+            current.as_str()
+        )));
+        return true;
+    }
+
+    let mode = match arg.to_ascii_lowercase().as_str() {
+        "on" => Some(crate::config::LatexRenderingMode::Image),
+        "off" => Some(crate::config::LatexRenderingMode::Unicode),
+        _ => crate::config::LatexRenderingMode::parse(arg),
+    };
+    let Some(mode) = mode else {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /latex [on|off|none|unicode|image|status]".to_string(),
+        ));
+        return true;
+    };
+
+    match crate::config::Config::set_latex_rendering(mode) {
+        Ok(()) => {
+            let effective = crate::config::config().display.latex_rendering;
+            app.set_status_notice(format!("LaTeX rendering: {}", effective.as_str()));
+            let override_note = if effective != mode {
+                " JCODE_LATEX_RENDERING overrides the saved mode."
+            } else {
+                ""
+            };
+            app.push_display_message(DisplayMessage::system(format!(
+                "Saved LaTeX rendering: {}. Effective mode: {}.{}",
+                mode.as_str(),
+                effective.as_str(),
+                override_note
+            )))
+        }
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Failed to set LaTeX rendering to {}: {}. Nothing changed; the session keeps {}.",
+            mode.as_str(),
+            error,
+            crate::config::config().display.latex_rendering.as_str()
+        ))),
+    }
+    true
+}
+
 fn parse_agents_target(raw: &str) -> Option<crate::tui::AgentModelTarget> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "swarm" | "agent" | "agents" | "subagent" | "subagents" => {
