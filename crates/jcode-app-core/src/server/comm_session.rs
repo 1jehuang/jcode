@@ -1175,6 +1175,18 @@ pub(super) async fn handle_comm_stop(
                     working_dir,
                 );
             }
+        } else {
+            // The agent was mid-turn so its lock was busy; still record that
+            // the session is closed, or it looks alive on disk forever (and
+            // reload keeps re-announcing awaits on it).
+            if let Ok(mut session) = crate::session::Session::load(&target_session) {
+                session.mark_closed();
+                if let Err(error) = session.save() {
+                    crate::logging::warn(&format!(
+                        "stop {target_session}: failed to persist closed status: {error}"
+                    ));
+                }
+            }
         }
     }
 

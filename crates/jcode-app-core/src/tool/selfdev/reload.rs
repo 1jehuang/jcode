@@ -195,9 +195,20 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
     // Background awaits auto-resume on the new server and report via
     // notify/wake, so they need no agent action. Only blocking awaits, whose
     // socket waiter dies with the old process, must be rerun by the agent.
+    // Awaits whose members have all finished (session closed, crashed, or
+    // gone) have nothing left to wait for, so they are not re-announced.
+    let member_finished = |session_id: &str| -> bool {
+        crate::session::Session::load(session_id)
+            .map(|session| session_status_is_finished(&session.status))
+            .unwrap_or(true)
+    };
     let pending_awaits: Vec<_> = crate::server::pending_await_members_for_session(session_id)
         .into_iter()
         .filter(|state| !state.background)
+        .filter(|state| {
+            state.requested_ids.is_empty()
+                || !state.requested_ids.iter().all(|id| member_finished(id))
+        })
         .collect();
     if !pending_awaits.is_empty() {
         let await_list = pending_awaits
@@ -226,6 +237,18 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
     }
 
     notes
+}
+
+/// A session that can no longer reach `ready`/`completed` on its own, so an
+/// await on it has nothing left to wait for.
+fn session_status_is_finished(status: &crate::session::SessionStatus) -> bool {
+    !matches!(
+        status,
+        crate::session::SessionStatus::Active
+            | crate::session::SessionStatus::Reloaded
+            | crate::session::SessionStatus::Compacted
+            | crate::session::SessionStatus::RateLimited
+    )
 }
 
 pub(super) fn resolve_selfdev_reload_repo_dir(
@@ -432,6 +455,31 @@ impl SelfDevTool {
                     ack.hash
                 )))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod finished_member_tests {
+    use super::session_status_is_finished;
+    use crate::session::SessionStatus;
+
+    #[test]
+    fn closed_crashed_and_errored_members_are_finished() {
+        assert!(session_status_is_finished(&SessionStatus::Closed));
+        assert!(session_status_is_finished(&SessionStatus::Crashed {
+            message: None
+        }));
+        assert!(session_status_is_finished(&SessionStatus::Error {
+            message: "x".into()
+        }));
+        for live in [
+            SessionStatus::Active,
+            SessionStatus::Reloaded,
+            SessionStatus::Compacted,
+            SessionStatus::RateLimited,
+        ] {
+            assert!(!session_status_is_finished(&live), "{live:?}");
         }
     }
 }
