@@ -160,6 +160,8 @@ pub fn has_unconsented_legacy_credentials() -> bool {
 }
 
 pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
     let path = jcode_auth_path()?;
     let mut auth = if path.exists() {
         crate::storage::harden_secret_file_permissions(&path);
@@ -180,6 +182,8 @@ pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {
 }
 
 pub fn save_auth_file(auth: &JcodeOpenAiAuthFile) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
     let auth_path = jcode_auth_path()?;
     let clean = JcodeOpenAiAuthFile {
         openai_accounts: auth.openai_accounts.clone(),
@@ -233,6 +237,8 @@ pub fn active_account_label() -> Option<String> {
 }
 
 pub fn set_active_account(label: &str) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
     let mut auth = load_auth_file()?;
     crate::auth::account_store::set_active_account(
         label,
@@ -247,6 +253,8 @@ pub fn set_active_account(label: &str) -> Result<()> {
 }
 
 pub fn upsert_account(account: OpenAiAccount) -> Result<String> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
     let mut auth = load_auth_file()?;
     let label = crate::auth::account_store::upsert_account(
         ACCOUNT_LABEL_PREFIX,
@@ -261,6 +269,8 @@ pub fn upsert_account(account: OpenAiAccount) -> Result<String> {
 }
 
 pub fn remove_account(label: &str) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
     let mut auth = load_auth_file()?;
     let before = auth.openai_accounts.len();
     auth.openai_accounts
@@ -283,6 +293,8 @@ pub fn remove_account(label: &str) -> Result<()> {
 }
 
 pub fn clear_accounts() -> Result<usize> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
     let mut auth = load_auth_file()?;
     let removed = auth.openai_accounts.len();
     auth.openai_accounts.clear();
@@ -300,6 +312,8 @@ pub fn update_account_tokens(
     account_id: Option<String>,
     expires_at: Option<i64>,
 ) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
     let mut auth = load_auth_file()?;
     if let Some(account) = auth
         .openai_accounts
@@ -324,6 +338,8 @@ pub fn update_account_tokens(
 }
 
 pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
     let mut auth = load_auth_file()?;
     if let Some(account) = auth
         .openai_accounts
