@@ -269,6 +269,68 @@ pub(crate) fn push_stage_pips(
     }
 }
 
+/// Header-row summary of finished phases, placed to the right of the pips:
+/// `  ✓ phase 1, 2 done · schema, render, swarm`. Group names drop first, then
+/// the whole summary, so it never wraps. Empty when no phase has finished or
+/// when every phase has (the body then shows them all).
+pub(crate) fn finished_phases_summary(
+    todos: &[&crate::todo::TodoItem],
+    width: usize,
+) -> Vec<Span<'static>> {
+    if !crate::todo::stages::has_stages(todos.iter().copied()) {
+        return Vec::new();
+    }
+    let stages = ordered_layout(todos);
+    let Some(current) = current_stage(&stages, todos) else {
+        return Vec::new();
+    };
+    if current == 0 || stages.len() < 2 {
+        return Vec::new();
+    }
+    let finished = &stages[..current];
+    let numbers: Vec<String> = finished
+        .iter()
+        .filter_map(|stage| stage.number.map(|n| n.to_string()))
+        .collect();
+    let mut groups: Vec<String> = Vec::new();
+    for stage in finished {
+        for lane in &stage.lanes {
+            if let Some(group) = &lane.group
+                && !groups.contains(group)
+            {
+                groups.push(group.clone());
+            }
+        }
+    }
+    let green = Style::default().fg(rgb(100, 180, 100));
+    let meta = Style::default().fg(todo_meta_color());
+    let label = if numbers.is_empty() {
+        format!("{} phases done", finished.len())
+    } else if numbers.len() == 1 {
+        format!("phase {} done", numbers[0])
+    } else {
+        format!("phase {} done", numbers.join(", "))
+    };
+    let mut spans = vec![Span::raw("   "), Span::styled(format!("✓ {label}"), green)];
+    let base = width_of(&spans);
+    if base > width {
+        return Vec::new();
+    }
+    if !groups.is_empty() {
+        let names = format!(" · {}", groups.join(", "));
+        let room = width - base;
+        if room >= 8 {
+            let shown = if names.width() > room {
+                format!("{}…", truncate_to_width(&names, room - 1))
+            } else {
+                names
+            };
+            spans.push(Span::styled(shown, meta));
+        }
+    }
+    spans
+}
+
 /// Agent emoji (with failure marks) and the live activity of the lane's
 /// running worker.
 fn lane_agent_chip(
@@ -414,6 +476,12 @@ pub(crate) fn push_stage_lines(
     let indent = if stages.len() > 1 { "  " } else { "" };
 
     for (stage_index, stage) in stages.iter().enumerate() {
+        // Finished phases are summarised on the header row; the body is for
+        // the active phase and what comes after it. A fully finished list
+        // keeps every phase so the card does not go blank.
+        if stages.len() > 1 && current.is_some_and(|current| stage_index < current) {
+            continue;
+        }
         // `phase 1 · done`, `phase 2 · now`: the number says which phase, the
         // word says where it stands, so repeated states stay unambiguous.
         if stages.len() > 1 {

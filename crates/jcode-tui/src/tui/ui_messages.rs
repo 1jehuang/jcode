@@ -4,7 +4,10 @@ use gmail_drafts::*;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
-use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
+use todo_stages::{
+    agent_roster_spans, finished_phases_summary, push_stage_lines, push_stage_pips,
+    render_todo_item_line,
+};
 
 use super::*;
 #[path = "ui_messages_cache.rs"]
@@ -1636,6 +1639,11 @@ fn render_todo_stage_status_header(
     let roster_width: usize = roster.iter().map(|span| span.content.width()).sum();
     push_stage_pips(&mut spans, todos, inner_width.saturating_sub(roster_width));
     spans.extend(roster);
+    let used: usize = spans.iter().map(|span| span.content.width()).sum();
+    spans.extend(finished_phases_summary(
+        todos,
+        inner_width.saturating_sub(used),
+    ));
     todo_card_line(spans, base_indent, inner_width)
 }
 

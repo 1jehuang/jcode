@@ -86,13 +86,11 @@ fn stages_read_as_now_next_with_arrow_pips() {
     ];
     let rows = render(&todos, &[], 60);
     eprintln!("{}", rows.join("\n"));
-    assert_eq!(rows[0].trim(), "● → ●● → ○", "{rows:?}");
+    assert_eq!(rows[0].trim(), "● → ●● → ○   ✓ phase 1 done", "{rows:?}");
     let trimmed: Vec<&str> = rows.iter().map(|r| r.trim()).collect();
     assert_eq!(
         &trimmed[1..],
         &[
-            "phase 1 · done",
-            "✓ read types",
             "phase 2 · now",
             "✓ stage field",
             "● pinned band",
@@ -190,13 +188,18 @@ fn lane_row_shows_agent_emoji_and_activity() {
 }
 
 #[test]
-fn every_phase_is_labelled_with_number_and_state() {
+fn finished_phases_move_to_the_header_row() {
     let mut todos = grid_todos();
     todos.push(laned("Wrap up", "pending", 3, "release"));
     for todo in todos.iter_mut().take(9) {
         todo.status = "completed".into();
     }
     let rows = render(&todos, &[], 100);
+    eprintln!("{}", rows.join("\n"));
+    assert!(
+        rows[0].ends_with("✓ phase 1, 2 done · parser, ui, docs, integration, release"),
+        "finished phases summarised on the header: {rows:?}"
+    );
     let labels: Vec<&str> = rows
         .iter()
         .map(|r| r.trim())
@@ -204,9 +207,23 @@ fn every_phase_is_labelled_with_number_and_state() {
         .collect();
     assert_eq!(
         labels,
-        ["phase 1 · done", "phase 2 · done", "phase 3 · now"],
+        ["phase 3 · now"],
+        "body shows only open phases: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("Extract lexer")),
         "{rows:?}"
     );
+    // Narrow: names drop, then the summary, never wrapping.
+    for width in [60u16, 40, 24] {
+        let rows = render(&todos, &[], width);
+        eprintln!("--- {width}\n{}", rows.join("\n"));
+        assert_fits(&rows, width);
+    }
+    // All done: nothing to focus on, so every phase is shown again.
+    todos[9].status = "completed".into();
+    let rows = render(&todos, &[], 100);
+    assert!(rows.iter().any(|r| r.contains("Extract lexer")), "{rows:?}");
 }
 
 #[test]
