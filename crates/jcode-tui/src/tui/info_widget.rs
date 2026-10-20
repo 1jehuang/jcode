@@ -1132,7 +1132,7 @@ pub fn calculate_placements(
         None => return Vec::new(),
     };
 
-    let outcome = super::info_widget_layout::calculate_placements_anchored(
+    let outcome = calculate_placements_with_cloud_reflow(
         messages_area,
         margins,
         data,
@@ -1145,6 +1145,46 @@ pub fn calculate_placements(
         state.swarm_dock_last_engaged = Some(Instant::now());
     }
     outcome.visible
+}
+
+/// Repack cloud details only when asynchronously loaded Overview rows cannot
+/// grow inside their original anchor. Keep the resident layout unless a fresh
+/// priority pass fits the full Overview without losing any visible widget.
+pub(super) fn calculate_placements_with_cloud_reflow(
+    area: Rect,
+    margins: &Margins,
+    data: &InfoWidgetData,
+    enabled: bool,
+    anchors: &[super::info_widget_layout::WidgetAnchor],
+) -> super::info_widget_layout::PlacementOutcome {
+    use super::info_widget_layout::calculate_placements_anchored;
+    let resident = calculate_placements_anchored(area, margins, data, enabled, anchors);
+    if data.cloud_info.is_none() || anchors.is_empty() {
+        return resident;
+    }
+    let Some(overview) = resident
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+    else {
+        return resident;
+    };
+    let needed =
+        calculate_widget_height(WidgetKind::Overview, data, overview.rect.width, area.height);
+    if overview.rect.height >= needed {
+        return resident;
+    }
+    let fresh = calculate_placements_anchored(area, margins, data, enabled, &[]);
+    let fits = fresh.visible.iter().any(|p| {
+        p.kind == WidgetKind::Overview
+            && p.rect.height
+                >= calculate_widget_height(WidgetKind::Overview, data, p.rect.width, area.height)
+    });
+    let preserves = resident
+        .visible
+        .iter()
+        .all(|old| fresh.visible.iter().any(|new| new.kind == old.kind));
+    if fits && preserves { fresh } else { resident }
 }
 
 /// How long after a scroll the transcript still counts as moving for resident
@@ -2225,6 +2265,10 @@ fn render_sections(
 // ---------------------------------------------------------------------------
 // Tips widget - rotating helpful tips and keyboard shortcuts
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "info_widget_cloud_reflow_tests.rs"]
+mod cloud_reflow_tests;
 
 #[cfg(test)]
 #[path = "info_widget_startup_tests.rs"]
