@@ -359,40 +359,79 @@ fn lane_strip_spans(
     strip
 }
 
-/// A lane's titles in order (`a → b → c`), coloured by status. When too wide,
-/// leading finished titles drop first (the strip still shows them), then the
-/// tail is cut with an ellipsis.
+/// Titles never shrink below this many cells before earlier finished titles
+/// are dropped to make room.
+const MIN_TITLE_CELLS: usize = 8;
+
+/// A lane's titles in order (`a, b, c`), coloured by status, each capped to a
+/// fair share of the row so every task stays visible.
 fn lane_titles_spans(lane_todos: &[&crate::todo::TodoItem], width: usize) -> Vec<Span<'static>> {
-    let arrow = || Span::styled(" → ", Style::default().fg(rgb(105, 100, 135)));
+    let comma = || Span::styled(", ", Style::default().fg(rgb(105, 100, 135)));
     let title = |todo: &crate::todo::TodoItem| -> Span<'static> {
         todo_card_item_spans(todo, false)
             .pop()
             .unwrap_or_else(|| Span::raw(todo.content.clone()))
     };
+    // Every shown title gets a fair share of the row, so a long first title
+    // cannot push the rest off screen. Short titles give their spare cells to
+    // longer ones. Leading finished titles drop first when even the minimum
+    // share does not fit (the dot strip still counts them).
+    let fit = |items: &[&crate::todo::TodoItem]| -> Option<Vec<Span<'static>>> {
+        let n = items.len();
+        let budget = width.checked_sub(2 * n.saturating_sub(1))?;
+        let natural: Vec<usize> = items.iter().map(|t| t.content.width()).collect();
+        let mut caps = natural.clone();
+        if natural.iter().sum::<usize>() > budget {
+            let mut sorted = natural.clone();
+            sorted.sort_unstable();
+            let mut remaining = budget;
+            let mut cap = 0;
+            for (i, w) in sorted.iter().enumerate() {
+                let share = remaining / (n - i);
+                if *w <= share {
+                    remaining -= w;
+                } else {
+                    cap = share;
+                    break;
+                }
+            }
+            if cap < MIN_TITLE_CELLS.min(*natural.iter().max().unwrap_or(&0)) {
+                return None;
+            }
+            caps = natural.iter().map(|w| (*w).min(cap)).collect();
+        }
+        let mut spans = Vec::new();
+        for (i, (todo, cap)) in items.iter().zip(caps).enumerate() {
+            if i > 0 {
+                spans.push(comma());
+            }
+            let mut span = title(todo);
+            if span.content.width() > cap {
+                span.content = format!(
+                    "{}…",
+                    truncate_to_width(&span.content, cap.saturating_sub(1))
+                )
+                .into();
+            }
+            spans.push(span);
+        }
+        Some(spans)
+    };
     let done_prefix = lane_todos.iter().take_while(|todo| is_done(todo)).count();
     let max_skip = done_prefix.min(lane_todos.len().saturating_sub(1));
-    let build = |skip: usize| -> Vec<Span<'static>> {
-        let mut spans = Vec::new();
-        for (i, todo) in lane_todos[skip..].iter().enumerate() {
-            if i > 0 {
-                spans.push(arrow());
-            }
-            spans.push(title(todo));
+    for skip in 0..=max_skip {
+        if let Some(spans) = fit(&lane_todos[skip..]) {
+            return spans;
         }
-        spans
-    };
-    let mut spans = build(0);
-    for skip in 1..=max_skip {
-        if width_of(&spans) <= width {
-            break;
-        }
-        spans = build(skip);
     }
+    // Still too narrow: show the active-most tail and cut it.
+    let spans = fit(&lane_todos[max_skip..max_skip + 1])
+        .unwrap_or_else(|| vec![title(lane_todos[max_skip])]);
     super::truncate_line_with_ellipsis_to_width(&Line::from(spans), width).spans
 }
 
 /// Render todos that declare stages, one row per lane:
-/// `✓●○  parser 🦊  Extract lexer → Update callers → Add tests`.
+/// `●●○  parser 🦊  Extract lexer, Update callers, Add tests`.
 /// The status strip leads, so the left edge reads as a block of progress;
 /// then the group name; then the titles. Phases are labelled on the header
 /// row, so the body has no heading rows. Finished phases are left to the
