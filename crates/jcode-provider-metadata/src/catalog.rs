@@ -486,6 +486,22 @@ pub const YOLO_AUTO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+// Opper is an OpenAI-compatible gateway. Its `/models` listing is
+// authenticated, so the full catalog is discovered with the account key after
+// login; `default_model` keeps the `claude-sonnet-4-6` pool selected until that
+// refresh lands. Pool names route across providers; `provider/model` ids pin
+// one route.
+pub const OPPER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "opper",
+    display_name: "Opper",
+    api_base: "https://api.opper.ai/v3/compat",
+    api_key_env: "OPPER_API_KEY",
+    env_file: "opper.env",
+    setup_url: "https://platform.opper.ai",
+    default_model: Some("claude-sonnet-4-6"),
+    requires_api_key: true,
+};
+
 pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "openai-compatible",
     display_name: "OpenAI-compatible",
@@ -497,7 +513,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -539,6 +555,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
     MUSE_SUBSCRIPTION_PROFILE,
     CELERIS_PROFILE,
     YOLO_AUTO_PROFILE,
+    OPPER_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
     OPENAI_COMPAT_PROFILE,
@@ -1251,6 +1268,19 @@ pub const YOLO_AUTO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescr
     order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
 };
 
+pub const OPPER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "opper",
+    display_name: "Opper",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &[],
+    menu_detail: "API key, OpenAI-compatible API",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(OPPER_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
+};
+
 pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "google",
     display_name: "Google/Gmail",
@@ -1264,7 +1294,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1312,6 +1342,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
     MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
     CELERIS_LOGIN_PROVIDER,
     YOLO_AUTO_LOGIN_PROVIDER,
+    OPPER_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
     OPENAI_COMPAT_LOGIN_PROVIDER,
