@@ -81,9 +81,24 @@ EOF
 FAKE_LOG="$W/model.log" FAKE_LABEL=model python3 "$(dirname "$0")/fake_openai_server.py" "$MODEL_PORT" > "$W/model-output.log" 2>&1 &
 MODEL_PID=$!
 PATH="$W/bin:$PATH" ssh -o BatchMode=yes cloud-git-fixture 'printf fixture-ready' > "$W/probe" || fail 'SSH fixture startup'
-# The local TUI stays in local-repo, while its agent and Git snapshot live in remote-repo.
-printf -v launch 'cd %q && env -u JCODE_SOCKET -u JCODE_SESSION_ID PATH=%q JCODE_HOME=%q JCODE_RUNTIME_DIR=%q JCODE_NO_AUTO_UPDATE=1 JCODE_NO_TELEMETRY=1 %q --no-update --no-selfdev --ssh cloud-git-fixture --ssh-binary %q --remote-working-dir %q' \
-    "$W/local-repo" "$W/bin:$PATH" "$W/local-home" "$W/local-run" "$JCODE_BIN" "$JCODE_BIN" "$W/remote-repo"
+# By default, emulate /cloud's explicit source metadata from a non-repo launch
+# directory. SOURCE_MODE=launch checks generic --ssh's launch-dir fallback too.
+launch_dir=$W
+launch_args=(env -u JCODE_SOCKET -u JCODE_SESSION_ID -u JCODE_SSH_LOCAL_WORKING_DIR
+    "PATH=$W/bin:$PATH" "JCODE_HOME=$W/local-home" "JCODE_RUNTIME_DIR=$W/local-run"
+    JCODE_NO_AUTO_UPDATE=1 JCODE_NO_TELEMETRY=1)
+if [[ ${SOURCE_MODE:-handoff} == launch ]]; then
+    launch_dir=$W/local-repo
+    local_label='Local (launch dir):'
+else
+    launch_args+=("JCODE_SSH_LOCAL_WORKING_DIR=$W/local-repo")
+    local_label='Local:'
+fi
+launch_args+=("$JCODE_BIN" --no-update --no-selfdev --ssh cloud-git-fixture
+    --ssh-binary "$JCODE_BIN" --remote-working-dir "$W/remote-repo")
+printf -v launch 'cd %q && ' "$launch_dir"
+printf -v launch_command '%q ' "${launch_args[@]}"
+launch+=$launch_command
 tmux -S "$TMUX_SOCK" -f /dev/null new-session -d -s git-state -x 180 -y 55 "$launch"
 wait_for() {
     local text=$1
@@ -98,11 +113,28 @@ wait_for remote-only.txt
 wait_for local-only.txt
 # Assert both were visible in the same frame, rather than on alternating pages.
 grep -Fq remote-only.txt "$W/frame.txt" || fail 'remote state disappeared when local state appeared'
+grep -Fq 'Cloud VM:' "$W/frame.txt" || fail 'cloud source is not labeled'
+grep -Fq "$local_label" "$W/frame.txt" || fail 'local source is not labeled correctly'
 cp "$W/frame.txt" "$W/initial-frame.txt"
+echo 'JCODE_CHECKPOINT {"message":"Both repository sources and initial changes visible"}'
 printf 'remote refresh\n' > "$W/remote-repo/remote-later.txt"
 printf 'local refresh\n' > "$W/local-repo/local-later.txt"
 wait_for remote-later.txt
 wait_for local-later.txt
 grep -Fq remote-later.txt "$W/frame.txt" || fail 'refreshed states not visible together'
 cp "$W/frame.txt" "$W/refreshed-frame.txt"
+echo 'JCODE_CHECKPOINT {"message":"Both repository sources refreshed after independent edits"}'
+rm -- "$W/local-repo/local-only.txt" "$W/local-repo/local-later.txt" \
+    "$W/remote-repo/remote-only.txt" "$W/remote-repo/remote-later.txt"
+clean=false
+for ((i=0; i<120; i++)); do
+    tmux -S "$TMUX_SOCK" capture-pane -p -t git-state > "$W/frame.txt"
+    if grep -Eq 'Cloud VM:.*clean' "$W/frame.txt" && grep -Eq 'Local.*clean' "$W/frame.txt"; then
+        clean=true
+        break
+    fi
+    sleep 0.25
+done
+[[ $clean == true ]] || fail 'clean repositories must remain visible and labeled'
+cp "$W/frame.txt" "$W/clean-frame.txt"
 printf 'PASS: independent local and remote changes visible and refreshed (artifacts: %s)\n' "$W"
