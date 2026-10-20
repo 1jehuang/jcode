@@ -160,6 +160,12 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Whether to advertise this tool to the model. Compatibility-only tools
+    /// can remain executable without adding a redundant API definition.
+    fn model_visible(&self) -> bool {
+        true
+    }
+
     /// Human-readable description.
     fn description(&self) -> &str;
 
