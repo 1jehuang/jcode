@@ -58,11 +58,9 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
             if let Some(host) = host {
                 cmd.args(["--host", host]);
             }
-            app.set_status_notice("Moving session to the cloud...");
         }
         CloudCommand::Return => {
             cmd.args(["return", "--json", "--session", session_id]);
-            app.set_status_notice("Bringing session back...");
         }
         CloudCommand::Where => {
             cmd.args(["where", "--session", session_id]);
@@ -89,7 +87,7 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
     let (tx, rx) = std::sync::mpsc::channel();
     let stderr = child.stderr.take();
     let progress_tx = tx.clone();
-    std::thread::spawn(move || {
+    let stderr_reader = std::thread::spawn(move || {
         use std::io::BufRead;
         let mut collected = String::new();
         if let Some(stderr) = stderr {
@@ -109,9 +107,17 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
     });
     std::thread::spawn(move || {
         let output = child.wait_with_output();
+        let _ = stderr_reader.join();
         let _ = tx.send(CloudEvent::Done(output.map_err(|e| e.to_string())));
     });
+    let progress_message = app.display_messages.len();
+    let steps = vec!["Starting cloud command".to_string()];
+    app.push_display_message(DisplayMessage::system(render_cloud_steps(&steps, 0, None)));
     app.cloud_job = Some(CloudJob {
+        progress_message,
+        steps,
+        started: std::time::Instant::now(),
+        frame: 0,
         command,
         trimmed: trimmed.to_string(),
         session_id: session_id.to_string(),
@@ -128,6 +134,10 @@ pub(super) enum CloudEvent {
 }
 
 pub(in crate::tui) struct CloudJob {
+    progress_message: usize,
+    steps: Vec<String>,
+    started: std::time::Instant,
+    frame: usize,
     command: CloudCommand,
     trimmed: String,
     session_id: String,
@@ -143,10 +153,12 @@ impl App {
         };
         let mut redraw = false;
         let mut done = None;
-        let mut progress = None;
         while let Ok(event) = job.rx.try_recv() {
             match event {
-                CloudEvent::Progress(text) => progress = Some(text),
+                CloudEvent::Progress(text) => {
+                    job.steps.push(text);
+                    redraw = true;
+                }
                 CloudEvent::Stderr(text) => job.stderr = text,
                 CloudEvent::Done(result) => {
                     done = Some(result);
@@ -154,20 +166,23 @@ impl App {
                 }
             }
         }
-        if let Some(text) = progress {
-            self.set_status_notice(format!("☁ {text}"));
-            redraw = true;
+        let frame = (job.started.elapsed().as_millis() / 100) as usize;
+        redraw |= frame != job.frame;
+        job.frame = frame;
+        let finished = done
+            .as_ref()
+            .map(|result| result.as_ref().is_ok_and(|output| output.status.success()));
+        let index = job.progress_message;
+        let content = render_cloud_steps(&job.steps, frame, finished);
+        if redraw || done.is_some() {
+            self.replace_display_message_content(index, content);
         }
         let Some(result) = done else {
             return redraw;
         };
-        // Collect any trailing stderr the reader thread produced.
-        let mut job = self.cloud_job.take().expect("cloud job present");
-        if let Ok(CloudEvent::Stderr(text)) =
-            job.rx.recv_timeout(std::time::Duration::from_millis(500))
-        {
-            job.stderr = text;
-        }
+        // Done is sent only after the stderr reader has joined, so every
+        // progress event and diagnostic has already been drained above.
+        let job = self.cloud_job.take().expect("cloud job present");
         match result {
             Ok(output) => finish_cloud_command(self, job, output),
             Err(error) => self.push_display_message(DisplayMessage::error(format!(
@@ -176,6 +191,68 @@ impl App {
         }
         true
     }
+}
+
+fn render_cloud_steps(steps: &[String], frame: usize, finished: Option<bool>) -> String {
+    const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let mut lines = vec!["Cloud session transfer".to_string()];
+    for (index, step) in steps.iter().enumerate() {
+        let last = index + 1 == steps.len();
+        let marker = if !last || finished == Some(true) {
+            "✓"
+        } else if finished == Some(false) {
+            "✗"
+        } else {
+            SPINNER[frame % SPINNER.len()]
+        };
+        lines.push(format!("{marker} {}. {step}", index + 1));
+    }
+    lines.join("  \n")
+}
+
+/// Keep remote diagnostics literal so Markdown cannot fold their newlines.
+fn format_cloud_failure(command: &str, stderr: &str) -> String {
+    let details = stderr
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            !line.starts_with("[cloud ")
+                && !line.starts_with(
+                    "** WARNING: connection is not using a post-quantum key exchange algorithm.",
+                )
+                && !line.starts_with(
+                    "** This session may be vulnerable to \"store now, decrypt later\" attacks.",
+                )
+                && !(line.starts_with("** The server may need to be upgraded.")
+                    && line.contains("openssh.com/pq.html"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let details = details.trim();
+    let mut message = format!("{command} failed. Nothing moved, the session is still here.");
+    if details.is_empty() {
+        message.push_str("\n\nNo error details were returned by the cloud command.");
+        return message;
+    }
+    // Nested fences in diagnostics must not break out of the literal block.
+    let fence = "`".repeat(
+        details
+            .split(|c| c != '`')
+            .map(str::len)
+            .max()
+            .unwrap_or(0)
+            .max(2)
+            + 1,
+    );
+    message.push_str(&format!("\n\n{fence}text\n{details}\n{fence}"));
+    if (details.contains("Saved account '") && details.contains("' no longer exists."))
+        || ((details.contains("No account with label '")
+            || details.contains("No OpenAI account with label '"))
+            && details.contains("' found"))
+    {
+        message.push_str("\n\nThe session's saved provider account is missing on the cloud host. Sign in to that provider on the cloud host using the same account label, or use /model locally to select an account already configured there, then retry. Provider credentials are not copied by cloud moves.");
+    }
+    message
 }
 
 fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Output) {
@@ -190,15 +267,8 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
     let trimmed = trimmed.as_str();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
-        let stderr = stderr
-            .lines()
-            .filter(|l| !l.starts_with("[cloud "))
-            .collect::<Vec<_>>()
-            .join("\n");
-        app.push_display_message(DisplayMessage::error(format!(
-            "{} failed. Nothing moved, the session is still here.\n{}",
-            trimmed,
-            stderr.trim()
+        app.push_display_message(DisplayMessage::error(format_cloud_failure(
+            trimmed, &stderr,
         )));
         app.set_status_notice("Cloud move failed");
         return;
@@ -259,6 +329,111 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn polling_keeps_all_steps_and_stops_spinner_on_failure() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut app = crate::tui::app::tests::create_test_app();
+        let index = app.display_messages.len();
+        app.push_display_message(DisplayMessage::system("Cloud session transfer"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.cloud_job = Some(CloudJob {
+            progress_message: index,
+            steps: vec!["Starting cloud command".into()],
+            started: std::time::Instant::now(),
+            frame: 0,
+            command: CloudCommand::Move { host: None },
+            trimmed: "/cloud".into(),
+            session_id: "test".into(),
+            rx,
+            stderr: String::new(),
+        });
+        tx.send(CloudEvent::Progress("Checking host".into()))
+            .unwrap();
+        tx.send(CloudEvent::Progress("Uploading session".into()))
+            .unwrap();
+        assert!(app.poll_cloud_job());
+        let content = &app.display_messages[index].content;
+        assert!(content.contains("✓ 2. Checking host"));
+        assert!(content.contains("3. Uploading session"));
+        tx.send(CloudEvent::Stderr("Error: test failure".into()))
+            .unwrap();
+        tx.send(CloudEvent::Done(Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(256),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })))
+        .unwrap();
+        assert!(app.poll_cloud_job());
+        assert!(app.cloud_job.is_none());
+        assert!(
+            app.display_messages[index]
+                .content
+                .contains("✗ 3. Uploading session")
+        );
+        assert!(!app.poll_cloud_job());
+    }
+
+    #[test]
+    fn cloud_transcript_preserves_steps_and_animates_only_active_step() {
+        let steps = vec!["Preparing host".into(), "Uploading session".into()];
+        let first = render_cloud_steps(&steps, 0, None);
+        let next = render_cloud_steps(&steps, 1, None);
+        assert!(first.contains("✓ 1. Preparing host"));
+        assert!(first.contains("⠋ 2. Uploading session"));
+        assert!(next.contains("⠙ 2. Uploading session"));
+        assert!(render_cloud_steps(&steps, 0, Some(true)).contains("✓ 2. Uploading session"));
+        let failed = render_cloud_steps(&steps, 0, Some(false));
+        assert!(failed.contains("✓ 1. Preparing host"));
+        assert!(failed.contains("✗ 2. Uploading session"));
+    }
+
+    #[test]
+    fn cloud_failure_strips_only_known_boilerplate() {
+        let message = format_cloud_failure(
+            "/cloud",
+            concat!(
+                "[cloud prepare] checking host\n",
+                "** WARNING: connection is not using a post-quantum key exchange algorithm.\n",
+                "** This session may be vulnerable to \"store now, decrypt later\" attacks.\n",
+                "** The server may need to be upgraded. See https://openssh.com/pq.html\n",
+                "Error: remote failed\n\nCaused by:\n    Permission denied (publickey).\n",
+                "WARNING: host key changed\n",
+            ),
+        );
+        assert!(!message.contains("[cloud"));
+        assert!(!message.contains("post-quantum"));
+        assert!(!message.contains("store now"));
+        assert!(!message.contains("openssh.com"));
+        assert!(message.contains("```text\nError: remote failed\n\nCaused by:\n    Permission denied (publickey).\nWARNING: host key changed\n```"));
+        assert!(!message.contains("Sign in"));
+    }
+
+    #[test]
+    fn cloud_failure_explains_missing_saved_account() {
+        for error in [
+            "Saved account 'work' no longer exists. Select an account with /model.",
+            "No account with label 'work' found",
+            "No OpenAI account with label 'work' found",
+        ] {
+            let message = format_cloud_failure("/cloud", error);
+            assert!(message.contains(error));
+            assert!(message.contains("missing on the cloud host"));
+            assert!(message.contains("use /model locally"));
+            assert!(message.contains("credentials are not copied"));
+        }
+    }
+
+    #[test]
+    fn cloud_failure_handles_empty_details_and_nested_fences() {
+        let message = format_cloud_failure("/local", "[cloud export] exporting\n");
+        assert!(message.starts_with("/local failed."));
+        assert!(message.contains("No error details were returned"));
+        assert!(!message.contains("```"));
+        let message = format_cloud_failure("/cloud", "Error:\r\n```shell\r\nfailed\r\n```\r\n");
+        assert!(message.contains("````text\nError:\n```shell\nfailed\n```\n````"));
+    }
 
     #[test]
     fn parses_cloud_commands() {
