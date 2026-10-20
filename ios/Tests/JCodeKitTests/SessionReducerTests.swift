@@ -412,6 +412,23 @@ private func event(_ line: String) -> ConnectionOutput {
 
 // MARK: - Turn-level connection phase
 
+@Test func reconnectDuringRetainedTurnKeepsProcessing() {
+    var state = SessionReducer.reduce(SessionState(), intent: .userSentMessage("long task"))
+    state = SessionReducer.reduce(state, .phase(.reconnecting(attempt: 1)))
+    #expect(!state.isProcessing)
+    state = run(
+        [
+            event(
+                #"{"type":"history","id":2,"session_id":"s","messages":[{"role":"user","content":"long task"}],"activity":{"is_processing":true}}"#
+            )
+        ], from: state)
+    #expect(state.isProcessing)
+
+    state = run(
+        [event(#"{"type":"history","id":3,"session_id":"s","messages":[]}"#)], from: state)
+    #expect(!state.isProcessing)
+}
+
 @Test func connectionPhaseTracksAndClears() {
     var state = run([event(#"{"type":"connection_phase","phase":"authenticating"}"#)])
     #expect(state.serverPhase == "authenticating")
