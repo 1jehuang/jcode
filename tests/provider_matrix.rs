@@ -1,5 +1,5 @@
 use anyhow::Result;
-use jcode::auth::{AuthState, AuthStatus};
+use jcode::auth::{AuthState, AuthStatus, muse};
 use jcode::cli::provider_init::{
     ProviderChoice, apply_login_provider_profile_env, choice_for_login_provider,
     init_provider_for_validation,
@@ -29,6 +29,7 @@ fn lock_env() -> MutexGuard<'static, ()> {
 
 fn tracked_env_vars() -> Vec<String> {
     let mut keys: HashSet<String> = [
+        muse::EXPERIMENTAL_ENV_VAR,
         "JCODE_HOME",
         "XDG_CONFIG_HOME",
         "JCODE_OPENROUTER_API_BASE",
@@ -260,7 +261,20 @@ fn write_profile_login_material(
     label: &str,
 ) -> Result<()> {
     let resolved = resolve_openai_compatible_profile(profile);
-    if resolved.requires_api_key {
+    if resolved.id == "muse-subscription" {
+        // Native Muse login reads its JSON credential store, not a profile env file.
+        jcode::env::set_var(muse::EXPERIMENTAL_ENV_VAR, "1");
+        muse::save_credentials(&muse::MuseCredentials {
+            api_key: format!("sk-{label}-{}", resolved.id),
+            access_token: format!("dca:{label}-test-grant"),
+            base_url: muse::EXPECTED_API_BASE_URL.to_string(),
+            user_email: None,
+            user_full_name: None,
+            is_subs_active: true,
+            minted_at_ms: chrono::Utc::now().timestamp_millis(),
+            subs_usage: None,
+        })?;
+    } else if resolved.requires_api_key {
         write_profile_api_key_file(env, profile, &format!("sk-{label}-{}", resolved.id))?;
     }
     Ok(())
