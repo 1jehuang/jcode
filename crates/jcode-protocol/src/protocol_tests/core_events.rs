@@ -734,6 +734,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
             cache_reported_input_tokens: 100,
             cache_read_input_tokens: 80,
             cache_creation_input_tokens: 10,
+            ..Default::default()
         }),
         all_sessions: Vec::new(),
         client_count: None,

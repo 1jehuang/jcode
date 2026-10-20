@@ -34,6 +34,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml = "0.9"
 toml = "0.8"
+# Format-preserving config writes: `save` overlays the serialized struct onto
+# the parsed existing file so comments and sections this build does not model
+# survive a settings change. Already a transitive dependency of `toml`, so this
+# adds no crate to the build graph.
+toml_edit = "0.20.2"
 
 # File operations
 

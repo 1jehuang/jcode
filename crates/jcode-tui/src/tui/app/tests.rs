@@ -69,6 +69,10 @@ include!("tests/skill_invocation_multi_word.rs");
 include!("tests/remote_header_hint_facts.rs");
 include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
+include!("tests/pricing_call_pin.rs");
+include!("tests/config_parse_notice.rs");
+include!("tests/pricing_config_reload.rs");
+include!("tests/pricing_vendor_file_report.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
 #[test]
@@ -913,6 +917,8 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
             output: 153,
             cache_read_input: Some(0),
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -936,6 +942,8 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
             output: 153,
             cache_read_input: Some(0),
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -978,6 +986,7 @@ fn cache_stats_uses_remote_history_token_usage_totals() {
         cache_reported_input_tokens: 1_000_000,
         cache_read_input_tokens: 600_000,
         cache_creation_input_tokens: 50_000,
+        ..Default::default()
     });
 
     assert!(super::state_ui::handle_info_command(

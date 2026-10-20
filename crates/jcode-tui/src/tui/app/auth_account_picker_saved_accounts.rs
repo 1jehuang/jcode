@@ -79,6 +79,7 @@ fn new_login_account_entries() -> Vec<crate::tui::PickerEntry> {
                 detail: "Sign in with a new account label without replacing saved credentials"
                     .to_string(),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: PickerAction::Account(AccountPickerAction::Add {
                 provider_id: provider_id.to_string(),
@@ -160,6 +161,7 @@ fn saved_login_entry(
                 if active { " · active saved login" } else { "" }
             ),
             estimated_reference_cost_micros: None,
+            comparable_reference_cost_micros: None,
         }],
         action: PickerAction::Account(AccountPickerAction::Replace {
             provider_id: provider_id.to_string(),

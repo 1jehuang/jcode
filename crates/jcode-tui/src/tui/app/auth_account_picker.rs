@@ -464,6 +464,7 @@ impl App {
                 available: true,
                 detail,
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action,
             selected_option: 0,
@@ -626,6 +627,7 @@ impl App {
                         plan
                     ),
                     estimated_reference_cost_micros: None,
+                    comparable_reference_cost_micros: None,
                 }],
                 action: crate::tui::PickerAction::Account(
                     crate::tui::AccountPickerAction::Switch {
@@ -680,6 +682,7 @@ impl App {
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,
+                    comparable_reference_cost_micros: None,
                 }],
                 action: crate::tui::PickerAction::Account(
                     crate::tui::AccountPickerAction::Switch {
@@ -708,6 +711,7 @@ impl App {
                 available: true,
                 detail: format!("create {}", next_claude),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add {
                 provider_id: "claude".to_string(),
@@ -732,6 +736,7 @@ impl App {
                 available: true,
                 detail: format!("create {}", next_openai),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add {
                 provider_id: "openai".to_string(),
@@ -766,6 +771,7 @@ impl App {
                     format!("refresh {}", replace_claude)
                 },
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace {
                 provider_id: "claude".to_string(),
@@ -801,6 +807,7 @@ impl App {
                     format!("refresh {}", replace_openai)
                 },
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace {
                 provider_id: "openai".to_string(),
@@ -893,6 +900,7 @@ impl App {
                         plan
                     ),
                     estimated_reference_cost_micros: None,
+                    comparable_reference_cost_micros: None,
                 }],
                 action: crate::tui::PickerAction::Account(
                     crate::tui::AccountPickerAction::Switch {
@@ -921,6 +929,7 @@ impl App {
                 available: true,
                 detail: format!("create {}", next_label),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add {
                 provider_id: "claude".to_string(),
@@ -955,6 +964,7 @@ impl App {
                     format!("refresh {}", replace_target)
                 },
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace {
                 provider_id: "claude".to_string(),
@@ -1022,6 +1032,7 @@ impl App {
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,
+                    comparable_reference_cost_micros: None,
                 }],
                 action: crate::tui::PickerAction::Account(
                     crate::tui::AccountPickerAction::Switch {
@@ -1050,6 +1061,7 @@ impl App {
                 available: true,
                 detail: format!("create {}", next_label),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add {
                 provider_id: "openai".to_string(),
@@ -1084,6 +1096,7 @@ impl App {
                     format!("refresh {}", replace_target)
                 },
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace {
                 provider_id: "openai".to_string(),

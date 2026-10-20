@@ -3399,6 +3399,7 @@ fn emit_ndjson_event(
             output,
             cache_read_input,
             cache_creation_input,
+            ..
         } => {
             state.usage = crate::agent::TokenUsage {
                 input_tokens: input,

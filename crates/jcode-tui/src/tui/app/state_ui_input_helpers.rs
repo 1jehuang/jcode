@@ -166,6 +166,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     ),
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
+        "/pricing",
+        "Explain which layer prices the current model, and why",
+    ),
+    RegisteredCommand::public(
         "/productivity",
         "Generate a shareable usage report + dashboard image",
     ),

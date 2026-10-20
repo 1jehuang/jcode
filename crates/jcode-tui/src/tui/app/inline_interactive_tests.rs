@@ -83,6 +83,7 @@ fn picker_option_with_method(provider: &str, api_method: &str) -> PickerOption {
         available: true,
         detail: String::new(),
         estimated_reference_cost_micros: None,
+        comparable_reference_cost_micros: None,
     }
 }
 

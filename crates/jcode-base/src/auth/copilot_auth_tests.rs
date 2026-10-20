@@ -256,7 +256,51 @@ fn save_github_token_creates_config_dir() -> Result<()> {
 
     let loaded = load_token_from_json(&hosts_path)?;
     assert_eq!(loaded, "gho_newtoken");
-    assert!(jcode_home.join("config.toml").exists());
+
+    // The trusted-path entry has to land in the sandbox, so a future test that
+    // drops the JCODE_HOME sandbox fails here instead of quietly editing the
+    // real config.
+    let sandbox_config = jcode_home.join("config.toml");
+    let written = std::fs::read_to_string(&sandbox_config)
+        .map_err(|e| anyhow!("sandboxed config should exist: {e}"))?;
+    assert!(
+        written.contains(COPILOT_HOSTS_AUTH_SOURCE_ID),
+        "the trusted external auth path should be recorded in the sandbox: {written}"
+    );
+    Ok(())
+}
+
+/// The XDG branch of the hosts path, asserted without saving anything.
+///
+/// Kept separate from the save test on purpose: covering this branch by removing
+/// JCODE_HOME around a save is what used to write temp paths into the real
+/// `~/.jcode/config.toml`.
+#[test]
+fn legacy_copilot_config_dir_uses_xdg_config_home() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let prev_jcode_home = std::env::var_os("JCODE_HOME");
+    let prev_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+
+    crate::env::remove_var("JCODE_HOME");
+    crate::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+    assert_eq!(
+        legacy_copilot_config_dir(),
+        dir.path().join("github-copilot")
+    );
+
+    if let Some(prev) = prev_jcode_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+
+    if let Some(prev) = prev_xdg_config_home {
+        crate::env::set_var("XDG_CONFIG_HOME", prev);
+    } else {
+        crate::env::remove_var("XDG_CONFIG_HOME");
+    }
     Ok(())
 }
 

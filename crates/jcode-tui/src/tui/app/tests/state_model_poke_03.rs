@@ -2037,6 +2037,7 @@ fn test_model_picker_filter_text_includes_provider_and_method() {
             available: true,
             detail: "https://llm.comtegra.cloud/v1".to_string(),
             estimated_reference_cost_micros: None,
+            comparable_reference_cost_micros: None,
         }],
         action: crate::tui::PickerAction::Model,
         selected_option: 0,

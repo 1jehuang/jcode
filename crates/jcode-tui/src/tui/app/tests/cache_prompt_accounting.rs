@@ -111,6 +111,7 @@ fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
         app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
             input: 2_482, output: 100,
             cache_read_input: Some(615_629), cache_creation_input: Some(write),
+            cost: None, currency: None,
         }, &mut remote);
     }
     assert_eq!(app.kv_cache.kv_cache_baseline.as_ref().unwrap().input_tokens, 617_004);
@@ -131,6 +132,7 @@ fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
     app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
         input: 2_482, output: 101,
         cache_read_input: Some(615_629), cache_creation_input: Some(1_375),
+        cost: None, currency: None,
     }, &mut remote);
     assert!(app.kv_cache.kv_cache_baseline.is_none());
     assert!(app.token_accounting.cache_next_optimal_input_tokens.is_none());
@@ -222,6 +224,8 @@ fn cache_accounting_remote_snapshots_count_openai_prompt_once() {
                 output: 100,
                 cache_read_input: Some(read),
                 cache_creation_input: write,
+                cost: None,
+                currency: None,
             },
             &mut remote,
         );

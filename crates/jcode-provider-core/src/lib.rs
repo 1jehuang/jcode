@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
 pub mod catalog_refresh;
+pub mod currency;
 pub mod failover;
 pub mod fallback_pick;
 pub mod fingerprint;
@@ -18,6 +19,7 @@ pub mod service_tier;
 pub mod transport;
 pub mod ws_deflate;
 
+pub use currency::{Currency, Money};
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;
 
@@ -1495,6 +1497,14 @@ pub enum RouteCostSource {
     OpenRouterCatalog,
     /// Live models.dev pricing catalog (https://models.dev/api.json).
     ModelsDevCatalog,
+    /// Hand-written `[pricing.providers]` rules from the user's config.
+    ConfigPriceSheet,
+    /// A `[pricing.providers.<vendor>].file` price file from the user's config.
+    ///
+    /// Distinct from [`Self::ConfigPriceSheet`] so a price the user's own card
+    /// did not write is never reported as if their card had: the sheet is
+    /// authoritative over everything *derived*, not over what they typed.
+    ExtraPriceSource,
     Heuristic,
 }
 
@@ -1513,6 +1523,11 @@ pub struct RouteCheapnessEstimate {
     pub billing_kind: RouteBillingKind,
     pub source: RouteCostSource,
     pub confidence: RouteCostConfidence,
+    /// Currency the per-token prices are denominated in. Every derivation path
+    /// that does not state one is USD (the models.dev catalog's currency), and
+    /// payloads written before this field existed default to USD as well.
+    #[serde(default = "Currency::usd")]
+    pub currency: Currency,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monthly_price_micros: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1544,6 +1559,7 @@ impl RouteCheapnessEstimate {
             billing_kind: RouteBillingKind::Metered,
             source,
             confidence,
+            currency: Currency::usd(),
             monthly_price_micros: None,
             input_price_per_mtok_micros: Some(input_price_per_mtok_micros),
             output_price_per_mtok_micros: Some(output_price_per_mtok_micros),
@@ -1559,6 +1575,14 @@ impl RouteCheapnessEstimate {
         }
     }
 
+    /// State the currency the prices are denominated in. Constructors default
+    /// to USD because every non-config source (models.dev, OpenRouter, the
+    /// curated tables) publishes USD.
+    pub fn with_currency(mut self, currency: Currency) -> Self {
+        self.currency = currency;
+        self
+    }
+
     pub fn subscription(
         source: RouteCostSource,
         confidence: RouteCostConfidence,
@@ -1570,6 +1594,7 @@ impl RouteCheapnessEstimate {
             billing_kind: RouteBillingKind::Subscription,
             source,
             confidence,
+            currency: Currency::usd(),
             monthly_price_micros: Some(monthly_price_micros),
             input_price_per_mtok_micros: None,
             output_price_per_mtok_micros: None,
@@ -1595,6 +1620,7 @@ impl RouteCheapnessEstimate {
             billing_kind: RouteBillingKind::IncludedQuota,
             source,
             confidence,
+            currency: Currency::usd(),
             monthly_price_micros: Some(monthly_price_micros),
             input_price_per_mtok_micros: None,
             output_price_per_mtok_micros: None,
@@ -1615,6 +1641,10 @@ fn reference_request_cost_micros(
     input_price_per_mtok_micros.saturating_mul(CHEAPNESS_REFERENCE_INPUT_TOKENS) / 1_000_000
         + output_price_per_mtok_micros.saturating_mul(CHEAPNESS_REFERENCE_OUTPUT_TOKENS) / 1_000_000
 }
+
+#[cfg(test)]
+#[path = "route_currency_tests.rs"]
+mod route_currency_tests;
 
 #[cfg(test)]
 #[path = "saved_account_route_tests.rs"]

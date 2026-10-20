@@ -1,4 +1,5 @@
 use super::*;
+use crate::money_display::note_pricing_problems;
 use crate::tui::TuiState as _;
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -555,7 +556,15 @@ impl App {
             seven_day_resets_at: None,
             spark: None,
             spark_resets_at: None,
-            total_cost: self.cost.total_cost,
+            cost_rows: {
+                let mut rows = crate::money_display::DisplayTarget::from_config()
+                    .resolve_totals(&self.cost.total_cost_by_currency);
+                // F8/F20, I-2 and F-C: an out-of-effect rule, a rejected
+                // `[pricing]` section, and a card that cannot price the call all
+                // mean this figure is not the truth the user's config implies.
+                note_pricing_problems(&mut rows, self.cost.pricing_notice.as_ref());
+                rows
+            },
             input_tokens: display_input_tokens,
             output_tokens: display_output_tokens,
             cache_read_tokens: self.streaming.streaming_cache_read_tokens,
@@ -577,7 +586,7 @@ impl App {
                 seven_day_resets_at: None,
                 spark: None,
                 spark_resets_at: None,
-                total_cost: 0.0,
+                cost_rows: Vec::new(),
                 input_tokens: display_input_tokens,
                 output_tokens: display_output_tokens,
                 cache_read_tokens: None,
@@ -626,7 +635,7 @@ impl App {
                     seven_day_resets_at: usage.seven_day_resets_at.clone(),
                     spark: None,
                     spark_resets_at: None,
-                    total_cost: 0.0,
+                    cost_rows: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
                     cache_read_tokens: None,
@@ -704,7 +713,7 @@ impl App {
                         .spark
                         .as_ref()
                         .and_then(|w| w.resets_at.clone()),
-                    total_cost: 0.0,
+                    cost_rows: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
                     cache_read_tokens: None,
@@ -1753,7 +1762,7 @@ impl crate::tui::TuiState for App {
             None
         };
 
-        let history_cache = self.remote_token_usage_totals;
+        let history_cache = self.remote_token_usage_totals.as_ref();
         let history_prompt = history_cache.map_or(Some(0), |usage| usage.cache_prompt_tokens);
         let history_read = history_cache.map_or(0, |usage| usage.cache_read_input_tokens);
         let history_write = history_cache.map_or(0, |usage| usage.cache_creation_input_tokens);

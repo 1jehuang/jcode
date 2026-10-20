@@ -13,6 +13,8 @@ fn test_handle_server_event_token_usage_uses_per_call_deltas() {
             output: 10,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -22,6 +24,8 @@ fn test_handle_server_event_token_usage_uses_per_call_deltas() {
             output: 30,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -31,6 +35,8 @@ fn test_handle_server_event_token_usage_uses_per_call_deltas() {
             output: 30,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -81,6 +87,8 @@ fn test_handle_server_event_tool_exec_pauses_tps_but_collects_final_tool_usage()
             output: 25,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -114,6 +122,8 @@ fn test_handle_server_event_kv_cache_request_resets_tps_output_watermark_for_nex
             output: 40,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -153,6 +163,8 @@ fn test_handle_server_event_kv_cache_request_resets_tps_output_watermark_for_nex
             output: 15,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -350,6 +362,8 @@ fn test_handle_server_event_tps_message_end_counts_late_usage_without_timer_runn
             output: 20,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -381,6 +395,8 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
             output: 10,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -394,6 +410,8 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
             output: 30,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -403,6 +421,8 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
             output: 30,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );

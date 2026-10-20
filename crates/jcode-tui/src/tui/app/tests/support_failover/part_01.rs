@@ -5,12 +5,20 @@ use crate::bus::{
     ClientMaintenanceAction, InputShellCompleted, SessionUpdateStatus, UpdateStatus,
 };
 use crate::tui::TuiState;
+use jcode_provider_core::Currency;
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
+
+/// Session cost in USD for the (all-USD) test configs.
+///
+/// The session total is kept per currency (F21); these tests all bill in USD.
+fn session_cost_usd(app: &App) -> f32 {
+    app.cost.total_in(&Currency::usd())
+}
 
 fn cleanup_background_task_files(task_id: &str) {
     let task_dir = std::env::temp_dir().join("jcode-bg-tasks");

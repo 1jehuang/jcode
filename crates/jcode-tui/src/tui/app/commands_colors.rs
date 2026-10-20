@@ -162,7 +162,10 @@ fn generate_palette(app: &mut App, seed: Option<&str>) {
     let generated = jcode_tui_style::harmony::generate_from_seed(seed_rgb, background);
     let report = jcode_tui_style::analyze_harmony(&generated, background);
 
-    let result = persist(|colors| {
+    // No declared removal: the generator writes every role, so the overlay
+    // already replaces them. Declaring `display.colors` here would delete the
+    // palette we just wrote, because removals are applied after the overlay.
+    let result = persist(&[], |colors| {
         colors.clear();
         for role in ALL_ROLES.iter().copied() {
             colors.insert(role.key().to_string(), to_hex(generated.rgb(role)));
@@ -198,7 +201,7 @@ fn set_color(app: &mut App, role_key: &str, value: &str) {
         return;
     };
 
-    match persist(|colors| {
+    match persist(&[], |colors| {
         colors.insert(role.key().to_string(), to_hex(rgb));
     }) {
         Ok(()) => {
@@ -225,12 +228,16 @@ fn reset_colors(app: &mut App, role_key: Option<&str>) {
                 )));
                 return;
             };
-            persist(|colors| {
+            // A single-role reset is deletion by omission too: the key leaves
+            // the in-memory map, so the save has to be told to drop it from the
+            // file as well.
+            let dotted = format!("display.colors.{}", role.key());
+            persist(&[dotted.as_str()], |colors| {
                 colors.remove(role.key());
             })
             .map(|()| format!("Reset {} to its default.", role.key()))
         }
-        None => persist(|colors| colors.clear())
+        None => persist(&["display.colors"], |colors| colors.clear())
             .map(|()| "Reset every color to its default.".to_string()),
     };
 
@@ -245,13 +252,13 @@ fn reset_colors(app: &mut App, role_key: Option<&str>) {
 /// Mutate `[display.colors]`, save, and reinstall the live palette.
 ///
 /// Reload-then-patch-then-save (rather than serializing cached state) so a
-/// concurrent config edit by another jcode session is not clobbered.
+/// concurrent config edit by another jcode session is not clobbered, and so a
+/// config we cannot parse is reported instead of being overwritten.
 fn persist(
+    removals: &[&str],
     mutate: impl FnOnce(&mut std::collections::BTreeMap<String, String>),
 ) -> anyhow::Result<()> {
-    let mut config = crate::config::Config::load();
-    mutate(&mut config.display.colors);
-    config.save()?;
+    crate::config::Config::update_removing(removals, |config| mutate(&mut config.display.colors))?;
     crate::tui::theme_detect::init_palette();
     Ok(())
 }
@@ -286,5 +293,63 @@ mod tests {
                 "usage should document {subcommand}"
             );
         }
+    }
+
+    /// A malformed config must survive a color change.
+    ///
+    /// `persist` reloads before patching, so a config we cannot parse has to be
+    /// reported rather than replaced by in-memory defaults - that write would
+    /// drop every setting in the file, not just the colors.
+    #[test]
+    fn a_malformed_config_is_not_overwritten_by_a_color_change() {
+        struct HomeGuard {
+            previous: Option<std::ffi::OsString>,
+            _temp: tempfile::TempDir,
+        }
+
+        impl HomeGuard {
+            fn new(config_body: &str) -> Self {
+                let temp = tempfile::tempdir().expect("temp dir");
+                std::fs::write(temp.path().join("config.toml"), config_body).expect("write config");
+                let previous = std::env::var_os("JCODE_HOME");
+                crate::env::set_var("JCODE_HOME", temp.path());
+                crate::config::Config::invalidate_cache();
+                Self {
+                    previous,
+                    _temp: temp,
+                }
+            }
+
+            fn config_text(&self) -> String {
+                std::fs::read_to_string(self._temp.path().join("config.toml")).expect("read config")
+            }
+        }
+
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+
+        let broken = "[display\ncolors = {}\n";
+        let home = HomeGuard::new(broken);
+
+        let result = persist(&[], |colors| {
+            colors.insert("user".to_string(), "#ff0000".to_string());
+        });
+
+        assert!(
+            result.is_err(),
+            "a config that cannot be parsed must not be silently rewritten"
+        );
+        assert_eq!(
+            home.config_text(),
+            broken,
+            "the unparseable config must survive byte-for-byte"
+        );
     }
 }

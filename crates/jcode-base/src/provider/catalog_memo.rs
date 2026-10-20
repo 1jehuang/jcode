@@ -10,6 +10,10 @@ pub(super) struct RoutesMemoEntry {
     pub(super) scope_key: String,
     pub(super) auth_generation: u64,
     pub(super) catalog_generation: u64,
+    /// Bumped when a new config (and so a new `[pricing]` view) comes into
+    /// force. Prices are read from the config at build time, so without this a
+    /// hand-edited `[pricing]` fed the picker stale numbers until the TTL.
+    pub(super) pricing_generation: u64,
     pub(super) routes: Vec<ModelRoute>,
     /// `listable_model_names_from_routes(&routes)`, cached because the
     /// non-chat-model heuristic string-scans every route name and callers
@@ -194,10 +198,16 @@ impl MultiProvider {
             let shared_key = self.routes_memo_key();
             let auth_generation = pricing::auth_pricing_generation();
             let catalog_gen = catalog_generation();
+            // Read (not just compare) the pricing generation before judging
+            // entries fresh: the read is what observes a newly loaded config, so
+            // an edit to `[pricing]` is seen here instead of only after
+            // something else happens to price a call.
+            let pricing_gen = crate::model_pricing::pricing_generation();
             let fresh = |entry: &RoutesMemoEntry| {
                 entry.scope_key == shared_key
                     && entry.auth_generation == auth_generation
                     && entry.catalog_generation == catalog_gen
+                    && entry.pricing_generation == pricing_gen
                     && entry.built_at.elapsed() < ROUTES_MEMO_TTL
             };
 
@@ -243,6 +253,7 @@ impl MultiProvider {
             if self.routes_memo_key() != shared_key
                 || pricing::auth_pricing_generation() != auth_generation
                 || catalog_generation() != catalog_gen
+                || crate::model_pricing::pricing_generation() != pricing_gen
             {
                 continue;
             }
@@ -256,6 +267,7 @@ impl MultiProvider {
             if self.routes_memo_key() != shared_key
                 || pricing::auth_pricing_generation() != auth_generation
                 || catalog_generation() != catalog_gen
+                || crate::model_pricing::pricing_generation() != pricing_gen
             {
                 continue;
             }
@@ -264,6 +276,7 @@ impl MultiProvider {
                 scope_key: shared_key.clone(),
                 auth_generation,
                 catalog_generation: catalog_gen,
+                pricing_generation: pricing_gen,
                 listable_models: listable_model_names_from_routes(&routes),
                 routes,
             };
@@ -290,6 +303,7 @@ impl MultiProvider {
             scope_key: self.routes_memo_key(),
             auth_generation: pricing::auth_pricing_generation(),
             catalog_generation: catalog_generation(),
+            pricing_generation: crate::model_pricing::pricing_generation(),
             listable_models: listable_model_names_from_routes(&routes),
             routes,
         }

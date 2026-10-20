@@ -47,6 +47,7 @@ fn sample_picker() -> crate::tui::InlineInteractiveState {
                 available: true,
                 detail: String::new(),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Model,
             selected_option: 0,
@@ -133,6 +134,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
             available: true,
             detail: String::new(),
             estimated_reference_cost_micros: None,
+            comparable_reference_cost_micros: None,
         }],
         action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
             provider_id: "claude".to_string(),
@@ -159,6 +161,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
                 available: true,
                 detail: String::new(),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                 provider_id: "openai".to_string(),
@@ -204,6 +207,7 @@ fn sample_agent_target_picker() -> crate::tui::InlineInteractiveState {
                 available: true,
                 detail: "/agents swarm".to_string(),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::AgentTarget(crate::tui::AgentModelTarget::Swarm),
             selected_option: 0,

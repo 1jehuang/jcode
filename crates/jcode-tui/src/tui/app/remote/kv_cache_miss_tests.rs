@@ -83,6 +83,8 @@ fn remote_kv_cache_miss_deduplicates_token_usage_local_classification() {
             output: 10,
             cache_read_input: Some(0),
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -95,6 +97,8 @@ fn remote_kv_cache_miss_deduplicates_token_usage_local_classification() {
             output: 10,
             cache_read_input: Some(0),
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );

@@ -3552,6 +3552,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "toml_edit 0.20.2",
  "url",
  "urlencoding",
  "uuid",

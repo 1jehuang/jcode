@@ -3,11 +3,16 @@ fn agent_failover_set_default_model(model: &str) -> anyhow::Result<()> {
 }
 
 fn agent_failover_catalog(provider: &MultiProvider, routes: Vec<ModelRoute>) {
+    // Read the pricing generation first: it may load the config and advance
+    // the reload generation that `routes_memo_key` folds in. Capturing the key
+    // afterwards keeps the injected entry fresh for its own lookup.
+    let pricing_generation = crate::model_pricing::pricing_generation();
     *provider.routes_memo.lock().unwrap() = Some(RoutesMemoEntry {
         built_at: std::time::Instant::now(),
         scope_key: provider.routes_memo_key(),
         auth_generation: pricing::auth_pricing_generation(),
         catalog_generation: catalog_generation(),
+        pricing_generation,
         listable_models: listable_model_names_from_routes(&routes),
         routes,
     });

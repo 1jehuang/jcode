@@ -1206,7 +1206,7 @@ fn push_cache_baseline(lines: &mut Vec<String>, label: &str, baseline: Option<&K
 }
 
 fn format_cache_stats(app: &App) -> String {
-    let remote_usage = app.remote_token_usage_totals;
+    let remote_usage = app.remote_token_usage_totals.as_ref();
     let remote_cache_reported = remote_usage
         .map(|usage| usage.cache_reported_input_tokens)
         .unwrap_or(0);
@@ -1488,7 +1488,19 @@ fn format_cache_stats(app: &App) -> String {
         "- client_observed_completed_output_tokens: {}",
         bold_count(app.token_accounting.total_output_tokens)
     ));
-    lines.push(format!("- total_cost_usd: {:.6}", app.cost.total_cost));
+    lines.push(format!(
+        "- total_cost_by_currency: {}",
+        if app.cost.total_cost_by_currency.is_empty() {
+            "none".to_string()
+        } else {
+            app.cost
+                .total_cost_by_currency
+                .iter()
+                .map(|(currency, amount)| format!("{currency} {amount:.6}"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        }
+    ));
     lines.push(format!(
         "- cached_prompt_price_per_1m: {}",
         app.cost
