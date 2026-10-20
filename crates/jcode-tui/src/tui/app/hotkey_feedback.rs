@@ -527,6 +527,11 @@ fn contextual_lookup(
                 "copy the visible chat to the clipboard",
             ))
         }
+        KeyCode::Char('e') if modifiers == KeyModifiers::ALT => Some(KnownHotkey::new(
+            alt('e'),
+            "prompt_history",
+            "show more previous prompts",
+        )),
         _ => None,
     }
 }

@@ -642,6 +642,10 @@ async fn handle_remote_key_internal(
                 app.paste_from_clipboard();
                 return Ok(());
             }
+            KeyCode::Char('e') => {
+                input::handle_alt_key(app, KeyCode::Char('e'));
+                return Ok(());
+            }
             _ => {}
         }
     }
