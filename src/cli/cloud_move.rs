@@ -111,8 +111,11 @@ impl Target {
         {
             return Ok(host);
         }
+        if super::cloud_managed::account_available() {
+            return Ok(super::cloud_managed::HOST.to_string());
+        }
         bail!(
-            "no cloud host configured: pass --host <ssh-alias> or set JCODE_CLOUD_HOST (for example the `jcode-cloud-alpha` alias in ~/.ssh/config)"
+            "no cloud machine: sign in with `jcode login` to use the Jcode Cloud machine included with your subscription, or pass --host <ssh-alias> / set JCODE_CLOUD_HOST"
         )
     }
 
@@ -127,6 +130,15 @@ impl Target {
     /// Fail fast, with an actionable message, when the cloud host's jcode is
     /// too old to speak the move protocol.
     fn preflight(&self, host: &str) -> Result<()> {
+        if super::cloud_managed::is_managed(host) && self.transport.is_none() {
+            step("prepare", "waking your Jcode Cloud machine");
+            super::cloud_managed::connect(&mut |m| step("prepare", m))?;
+            let home = dirs::home_dir()
+                .map(|h| h.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.run_shell(host, &super::cloud_managed::prepare_script(&home))
+                .context("prepare the Jcode Cloud machine")?;
+        }
         match self.run_remote(host, &["cloud", "receive", "--help"], None) {
             Ok(_) => Ok(()),
             Err(error) => {
@@ -139,6 +151,39 @@ impl Target {
                 Err(error.context(format!("could not run jcode on `{host}`")))
             }
         }
+    }
+
+    /// `ssh` with the options every cloud call uses, including the private
+    /// config for the managed machine.
+    fn ssh_command(host: &str) -> Result<Command> {
+        let mut command = Command::new("ssh");
+        if super::cloud_managed::is_managed(host) {
+            command.args(super::cloud_managed::ssh_args()?);
+        }
+        command.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "--"]);
+        command.arg(host);
+        Ok(command)
+    }
+
+    /// Run a raw shell script on the target (managed-machine preparation).
+    fn run_shell(&self, host: &str, script: &str) -> Result<()> {
+        let mut command = Self::ssh_command(host)?;
+        command.arg("bash -s");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        child
+            .stdin
+            .take()
+            .context("ssh stdin")?
+            .write_all(script.as_bytes())?;
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+        }
+        Ok(())
     }
 
     /// Run `jcode <args>` on the target, feeding `stdin` and returning stdout.
@@ -160,11 +205,8 @@ impl Target {
                 command
             }
             None => {
-                let mut command = Command::new("ssh");
-                command
-                    .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "--"])
-                    .arg(host)
-                    .arg(&remote_cmd);
+                let mut command = Self::ssh_command(host)?;
+                command.arg(&remote_cmd);
                 command
             }
         };
@@ -1298,6 +1340,17 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             let root = storage::read_session_lease(&id).and_then(|l| l.repo_root);
             exec_attach(&id, &host, root.as_deref(), &Target::default())
         }
+        C::Machine { action } => {
+            use super::args::CloudMachineAction as A;
+            let reply = match action {
+                A::Status => super::cloud_managed::status()?,
+                A::Wake => super::cloud_managed::connect(&mut |m| eprintln!("{m}"))?,
+                A::Stop => super::cloud_managed::stop()?,
+            };
+            println!("{}", super::cloud_managed::describe(&reply));
+            Ok(())
+        }
+        C::Proxy => super::cloud_managed::run_proxy(),
         C::Receive { .. } => run_receive(),
         C::Activate { session, epoch } => run_activate(&session, epoch),
         C::Export { session, epoch } => run_export(&session, epoch),

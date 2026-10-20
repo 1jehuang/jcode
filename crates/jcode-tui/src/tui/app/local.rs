@@ -73,7 +73,7 @@ pub(super) async fn process_turn_with_input(
 }
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
-    let reset_redraw = app.poll_usage_reset();
+    let reset_redraw = app.poll_usage_reset() | app.poll_cloud_job();
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as

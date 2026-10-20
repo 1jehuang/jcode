@@ -778,6 +778,17 @@ pub(crate) enum CloudCommand {
         session: Option<String>,
     },
 
+    /// Show, wake, or stop the Jcode Cloud machine included with your Jcode
+    /// subscription. Its disk persists while it sleeps.
+    Machine {
+        #[arg(value_enum, default_value = "status")]
+        action: CloudMachineAction,
+    },
+
+    /// Internal: SSH ProxyCommand that wakes and authorizes the managed machine.
+    #[command(hide = true)]
+    Proxy,
+
     /// Internal: remote side of `cloud move` (reads a bundle tarball on stdin).
     #[command(hide = true)]
     Receive {
@@ -804,10 +815,17 @@ pub(crate) enum CloudCommand {
     },
 }
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub(crate) enum CloudMachineAction {
+    Status,
+    Wake,
+    Stop,
+}
+
 #[derive(Parser, Debug, Clone, Default)]
 pub(crate) struct CloudMoveTarget {
-    /// SSH host alias for the cloud machine. Defaults to [cloud] host in config
-    /// or $JCODE_CLOUD_HOST.
+    /// SSH host alias for the cloud machine. Defaults to $JCODE_CLOUD_HOST,
+    /// else your subscription's managed Jcode Cloud machine (`jcode-cloud`).
     #[arg(long)]
     pub(crate) host: Option<String>,
     /// Remote jcode binary (name or path). Defaults to `jcode`.

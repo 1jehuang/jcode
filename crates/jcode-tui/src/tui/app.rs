@@ -1212,6 +1212,8 @@ pub struct App {
     hibernate_exit_requested: Option<String>,
     // `/cloud` or `/local` finished: reattach at the new location on quit.
     cloud_handoff_requested: Option<CloudHandoff>,
+    // Running `/cloud` or `/local` job (wakes the machine, moves the session).
+    cloud_job: Option<commands_cloud::CloudJob>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message

@@ -193,6 +193,11 @@ impl SshOptions {
 
     fn command(&self) -> Command {
         let mut command = Command::new("ssh");
+        if super::cloud_managed::is_managed(&self.host)
+            && let Ok(args) = super::cloud_managed::ssh_args()
+        {
+            command.args(args);
+        }
         command.args([
             "-T",
             "-o",

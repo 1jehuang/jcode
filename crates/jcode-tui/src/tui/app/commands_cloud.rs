@@ -68,9 +68,17 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
             cmd.args(["where", "--session", session_id]);
         }
     }
-    cmd.env("JCODE_CLOUD_QUIET", "1");
-    let output = match cmd.output() {
-        Ok(output) => output,
+    if app.cloud_job.is_some() {
+        app.push_display_message(DisplayMessage::error(
+            "A cloud move is already in progress.".to_string(),
+        ));
+        return true;
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
         Err(error) => {
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to run jcode cloud: {error}"
@@ -78,16 +86,122 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
             return true;
         }
     };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stderr = child.stderr.take();
+    let progress_tx = tx.clone();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut collected = String::new();
+        if let Some(stderr) = stderr {
+            for line in std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if let Some(rest) = line.strip_prefix("[cloud ") {
+                    let detail = rest.split_once("] ").map(|(_, d)| d).unwrap_or(rest);
+                    let _ = progress_tx.send(CloudEvent::Progress(detail.to_string()));
+                }
+                collected.push_str(&line);
+                collected.push('\n');
+            }
+        }
+        let _ = progress_tx.send(CloudEvent::Stderr(collected));
+    });
+    std::thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(CloudEvent::Done(output.map_err(|e| e.to_string())));
+    });
+    app.cloud_job = Some(CloudJob {
+        command,
+        trimmed: trimmed.to_string(),
+        session_id: session_id.to_string(),
+        rx,
+        stderr: String::new(),
+    });
+    true
+}
+
+pub(super) enum CloudEvent {
+    Progress(String),
+    Stderr(String),
+    Done(Result<std::process::Output, String>),
+}
+
+pub(in crate::tui) struct CloudJob {
+    command: CloudCommand,
+    trimmed: String,
+    session_id: String,
+    rx: std::sync::mpsc::Receiver<CloudEvent>,
+    stderr: String,
+}
+
+impl App {
+    /// Drain the running `/cloud` job. Returns true when the UI should redraw.
+    pub(super) fn poll_cloud_job(&mut self) -> bool {
+        let Some(job) = self.cloud_job.as_mut() else {
+            return false;
+        };
+        let mut redraw = false;
+        let mut done = None;
+        let mut progress = None;
+        while let Ok(event) = job.rx.try_recv() {
+            match event {
+                CloudEvent::Progress(text) => progress = Some(text),
+                CloudEvent::Stderr(text) => job.stderr = text,
+                CloudEvent::Done(result) => {
+                    done = Some(result);
+                    break;
+                }
+            }
+        }
+        if let Some(text) = progress {
+            self.set_status_notice(format!("☁ {text}"));
+            redraw = true;
+        }
+        let Some(result) = done else {
+            return redraw;
+        };
+        // Collect any trailing stderr the reader thread produced.
+        let mut job = self.cloud_job.take().expect("cloud job present");
+        if let Ok(CloudEvent::Stderr(text)) =
+            job.rx.recv_timeout(std::time::Duration::from_millis(500))
+        {
+            job.stderr = text;
+        }
+        match result {
+            Ok(output) => finish_cloud_command(self, job, output),
+            Err(error) => self.push_display_message(DisplayMessage::error(format!(
+                "Failed to run jcode cloud: {error}"
+            ))),
+        }
+        true
+    }
+}
+
+fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Output) {
+    let CloudJob {
+        command,
+        trimmed,
+        session_id,
+        stderr,
+        ..
+    } = job;
+    let session_id = session_id.as_str();
+    let trimmed = trimmed.as_str();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr
+            .lines()
+            .filter(|l| !l.starts_with("[cloud "))
+            .collect::<Vec<_>>()
+            .join("\n");
         app.push_display_message(DisplayMessage::error(format!(
             "{} failed. Nothing moved, the session is still here.\n{}",
             trimmed,
             stderr.trim()
         )));
         app.set_status_notice("Cloud move failed");
-        return true;
+        return;
     }
     match command {
         CloudCommand::Where => {
@@ -103,7 +217,7 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
             let host = report["host"].as_str().unwrap_or_default().to_string();
             let repo_root = report["repo_root"].as_str().map(str::to_string);
             app.push_display_message(DisplayMessage::system(format!(
-                "☁️ Session moved to `{host}`. Reattaching there and continuing. Use /local to bring it back. Your local files stay editable, and git merges both sides on return."
+                "☁️ Session moved to `{host}`. Reattaching there and continuing. Its disk persists while it sleeps. Use /local to bring it back. Your local files stay editable, and git merges both sides on return."
             )));
             app.cloud_handoff_requested = Some(CloudHandoff::Remote {
                 session_id: session_id.to_string(),
@@ -140,7 +254,6 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
             app.should_quit = true;
         }
     }
-    true
 }
 
 #[cfg(test)]
