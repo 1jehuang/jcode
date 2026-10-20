@@ -77,7 +77,7 @@ fn unstaged_list_renders_as_plain_checklist() {
 }
 
 #[test]
-fn stages_read_as_now_next_with_arrow_pips() {
+fn header_labels_each_phase_with_its_pips() {
     let todos = vec![
         todo("1", "read types", "completed", Some(1)),
         todo("2", "stage field", "completed", Some(2)),
@@ -86,17 +86,17 @@ fn stages_read_as_now_next_with_arrow_pips() {
     ];
     let rows = render(&todos, &[], 60);
     eprintln!("{}", rows.join("\n"));
-    assert_eq!(rows[0].trim(), "● → ●● → ○   ✓ phase 1 done", "{rows:?}");
+    assert_eq!(
+        rows[0].trim(),
+        "phase 1 ●  phase 2 ●●  phase 3 ○",
+        "{rows:?}"
+    );
     let trimmed: Vec<&str> = rows.iter().map(|r| r.trim()).collect();
+    // Finished phase 1 lives on the header only; ungrouped todos are lanes of
+    // their own, each led by its status.
     assert_eq!(
         &trimmed[1..],
-        &[
-            "phase 2 · now",
-            "✓  stage field",
-            "●  pinned band",
-            "phase 3 · next",
-            "○  integrate"
-        ],
+        &["✓  stage field", "●  pinned band", "○  integrate"],
         "{rows:?}"
     );
     let joined = rows.join("\n");
@@ -120,45 +120,38 @@ fn grid_todos() -> Vec<TodoItem> {
 }
 
 #[test]
-fn each_lane_is_one_row_with_tasks_left_to_right() {
+fn each_lane_row_leads_with_dots_then_name_then_titles() {
     let rows = render(&grid_todos(), &[], 100);
     eprintln!("{}", rows.join("\n"));
     assert_fits(&rows, 100);
     let trimmed: Vec<&str> = rows.iter().map(|r| r.trim()).collect();
-    assert_eq!(trimmed[0], "●●○●●● → ○○○");
-    assert_eq!(trimmed[1], "phase 1 · now");
+    assert_eq!(trimmed[0], "phase 1 ●●○●●●  phase 2 ○○○");
     assert_eq!(
-        trimmed[2],
-        "parser       ✓●○  Extract lexer → Update callers → Add lexer tests"
+        &trimmed[1..],
+        &[
+            "✓●○  parser       Extract lexer → Update callers → Add lexer tests",
+            "✓✓   ui           Rename rails → Draw lane headers",
+            "✓    docs         Update tool desc",
+            "○○   integration  Wire lanes into plan → End-to-end swarm test",
+            "○    release      Build and commit",
+        ],
+        "{rows:?}"
     );
-    assert_eq!(
-        trimmed[3],
-        "ui           ✓✓   Rename rails → Draw lane headers"
-    );
-    assert_eq!(trimmed[4], "docs         ✓    Update tool desc");
-    assert_eq!(trimmed[5], "phase 2 · next");
-    assert_eq!(
-        trimmed[6],
-        "integration  ○○   Wire lanes into plan → End-to-end swarm test"
-    );
-    assert_eq!(trimmed[7], "release      ○    Build and commit");
-    assert_eq!(rows.len(), 8);
 }
 
 #[test]
-fn narrow_rows_fold_finished_tasks_and_never_wrap() {
+fn narrow_rows_fold_finished_titles_and_never_wrap() {
     for width in [60u16, 40, 24, 14] {
         let rows = render(&grid_todos(), &[], width);
         eprintln!("--- {width}\n{}", rows.join("\n"));
         assert_fits(&rows, width);
-        assert_eq!(rows.len(), 8, "one row per lane at {width}");
+        assert_eq!(rows.len(), 6, "one row per lane at {width}");
     }
     let rows = render(&grid_todos(), &[], 50);
     let parser = rows.iter().find(|r| r.contains("parser")).unwrap();
-    // Finished titles drop first; the strip still shows them as ✓.
-    assert!(parser.contains("✓●○  Update callers"), "{rows:?}");
-    let rows = render(&grid_todos(), &[], 14);
-    assert!(rows[0].contains("4/6 → 0/3"), "{rows:?}");
+    assert!(parser.contains("parser       Update callers"), "{rows:?}");
+    assert!(render(&grid_todos(), &[], 30)[0].contains("1 ●●○●●●  2 ○○○"));
+    assert!(render(&grid_todos(), &[], 18)[0].contains("1 4/6  2 0/3"));
 }
 
 #[test]
@@ -183,13 +176,15 @@ fn lane_row_shows_agent_emoji_and_activity() {
     }
     let rows = render(&todos, &agents, 120);
     let parser = rows.iter().find(|r| r.contains("parser")).unwrap();
-    assert!(parser.contains("parser 🦊"), "{rows:?}");
-    assert!(parser.contains("justrust test · 1m"), "{rows:?}");
+    assert!(
+        parser.contains("parser 🦊") && parser.contains("justrust test · 1m"),
+        "{rows:?}"
+    );
     assert!(rows.iter().any(|r| r.contains("docs 🦀✗")), "{rows:?}");
 }
 
 #[test]
-fn finished_phases_move_to_the_header_row() {
+fn finished_phases_stay_on_the_header_until_all_done() {
     let mut todos = grid_todos();
     todos.push(laned("Wrap up", "pending", 3, "release"));
     for todo in todos.iter_mut().take(9) {
@@ -197,31 +192,9 @@ fn finished_phases_move_to_the_header_row() {
     }
     let rows = render(&todos, &[], 100);
     eprintln!("{}", rows.join("\n"));
-    assert!(
-        rows[0].ends_with("✓ phase 1, 2 done · parser, ui, docs, integration, release"),
-        "finished phases summarised on the header: {rows:?}"
-    );
-    let labels: Vec<&str> = rows
-        .iter()
-        .map(|r| r.trim())
-        .filter(|r| r.starts_with("phase "))
-        .collect();
-    assert_eq!(
-        labels,
-        ["phase 3 · now"],
-        "body shows only open phases: {rows:?}"
-    );
-    assert!(
-        !rows.iter().any(|r| r.contains("Extract lexer")),
-        "{rows:?}"
-    );
-    // Narrow: names drop, then the summary, never wrapping.
-    for width in [60u16, 40, 24] {
-        let rows = render(&todos, &[], width);
-        eprintln!("--- {width}\n{}", rows.join("\n"));
-        assert_fits(&rows, width);
-    }
-    // All done: nothing to focus on, so every phase is shown again.
+    assert_eq!(rows[0].trim(), "phase 1 ●●●●●●  phase 2 ●●●  phase 3 ○");
+    assert_eq!(rows.len(), 2, "body shows only the open phase: {rows:?}");
+    assert!(rows[1].contains("Wrap up"), "{rows:?}");
     todos[9].status = "completed".into();
     let rows = render(&todos, &[], 100);
     assert!(rows.iter().any(|r| r.contains("Extract lexer")), "{rows:?}");

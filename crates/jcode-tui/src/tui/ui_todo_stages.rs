@@ -1,12 +1,12 @@
 //! Stage rows and swarm agent chips for todo cards.
 //!
 //! Layout comes from [`crate::todo::stages::stage_layout`], the same function
-//! `run_plan` uses, so the card always matches execution order. Each stage
-//! opens with a plain word (`now`, `next`, `later`, `done`), and the header
-//! pips put an arrow between stages (`●●● → ○○`). Each lane (todo group) is
-//! one row: its name, then its tasks left to right. Rows in a stage run in
-//! parallel, tasks along a row run in sequence. No divider lines or rails. A
-//! list with no stages renders exactly like a plain checklist.
+//! `run_plan` uses, so the card always matches execution order. The header row
+//! labels each phase with its pips (`phase 1 ●●●  phase 2 ○○`). Below it each
+//! lane (todo group) is one row: its status strip, its name, then its titles
+//! left to right. Lanes run in parallel within a phase, titles along a row in
+//! sequence. No divider lines or rails. A list with no stages renders exactly
+//! like a plain checklist.
 //!
 //! Agents are swarm workers linked through `TodoItem::assigned_to`. They are
 //! shown as their session emoji (🦊, 🐑, ...) with a short live activity note.
@@ -192,16 +192,6 @@ fn current_stage(
         .position(|stage| stage.item_indices().any(|i| !is_done(todos[i])))
 }
 
-/// Plain-word position of a stage relative to the active one.
-fn stage_word(index: usize, current: Option<usize>) -> (&'static str, Style) {
-    match current {
-        Some(current) if index == current => ("now", Style::default().fg(asap_color()).bold()),
-        Some(current) if index == current + 1 => ("next", Style::default().fg(stage_color())),
-        Some(current) if index > current => ("later", Style::default().fg(rgb(105, 100, 135))),
-        _ => ("done", Style::default().fg(rgb(100, 180, 100))),
-    }
-}
-
 fn pip_span(todo: &crate::todo::TodoItem) -> Span<'static> {
     let (glyph, color) = match todo.status.as_str() {
         "completed" => ("●", rgb(100, 180, 100)),
@@ -211,11 +201,11 @@ fn pip_span(todo: &crate::todo::TodoItem) -> Span<'static> {
     Span::styled(glyph, Style::default().fg(color))
 }
 
-/// Header pips with an arrow between stages, e.g. `●●● → ○○`.
+/// Header pips labelled per phase: `phase 1 ●●●  phase 2 ●○  phase 3 ○○`.
 ///
-/// Falls back to per-stage counts (`✓ → 1/3`) when the pips do not fit, and
-/// to plain proportional pips when even that is too wide. A list without
-/// stages produces the same pips as before.
+/// Narrower widths fall back to `1 ●●●  2 ●○`, then per-phase counts
+/// (`1 ✓  2 1/2`), then plain proportional pips. A list without stages
+/// produces the same pips as before.
 pub(crate) fn push_stage_pips(
     spans: &mut Vec<Span<'static>>,
     todos: &[&crate::todo::TodoItem],
@@ -227,108 +217,57 @@ pub(crate) fn push_stage_pips(
     }
     let stages = ordered_layout(todos);
     let current = current_stage(&stages, todos);
-    let arrow = || Span::styled(" → ", Style::default().fg(stage_color()));
-
-    let mut full: Vec<Span<'static>> = Vec::new();
-    for (index, stage) in stages.iter().enumerate() {
-        if index > 0 {
-            full.push(arrow());
-        }
-        full.extend(stage.item_indices().map(|i| pip_span(todos[i])));
-    }
-    if width_of(&full) <= max_width {
-        spans.extend(full);
-        return;
-    }
-
-    let mut compact: Vec<Span<'static>> = Vec::new();
-    for (index, stage) in stages.iter().enumerate() {
-        if index > 0 {
-            compact.push(arrow());
-        }
-        let total = stage.len();
-        let done = stage.item_indices().filter(|&i| is_done(todos[i])).count();
-        if done == total {
-            compact.push(Span::styled("✓", Style::default().fg(rgb(100, 180, 100))));
-        } else {
-            let color = if Some(index) == current {
-                asap_color()
-            } else {
-                rgb(120, 120, 135)
-            };
-            compact.push(Span::styled(
-                format!("{done}/{total}"),
-                Style::default().fg(color),
-            ));
-        }
-    }
-    if width_of(&compact) <= max_width {
-        spans.extend(compact);
-    } else {
-        push_todo_status_pips(spans, todos.iter().copied(), max_width);
-    }
-}
-
-/// Header-row summary of finished phases, placed to the right of the pips:
-/// `  ✓ phase 1, 2 done · schema, render, swarm`. Group names drop first, then
-/// the whole summary, so it never wraps. Empty when no phase has finished or
-/// when every phase has (the body then shows them all).
-pub(crate) fn finished_phases_summary(
-    todos: &[&crate::todo::TodoItem],
-    width: usize,
-) -> Vec<Span<'static>> {
-    if !crate::todo::stages::has_stages(todos.iter().copied()) {
-        return Vec::new();
-    }
-    let stages = ordered_layout(todos);
-    let Some(current) = current_stage(&stages, todos) else {
-        return Vec::new();
+    let label_style = |index: usize| match current {
+        Some(current) if index == current => Style::default().fg(stage_color()).bold(),
+        Some(current) if index > current => Style::default().fg(rgb(105, 100, 135)),
+        _ => Style::default().fg(stage_color()),
     };
-    if current == 0 || stages.len() < 2 {
-        return Vec::new();
-    }
-    let finished = &stages[..current];
-    let numbers: Vec<String> = finished
-        .iter()
-        .filter_map(|stage| stage.number.map(|n| n.to_string()))
-        .collect();
-    let mut groups: Vec<String> = Vec::new();
-    for stage in finished {
-        for lane in &stage.lanes {
-            if let Some(group) = &lane.group
-                && !groups.contains(group)
-            {
-                groups.push(group.clone());
+    let variant = |prefix: &str, counts: bool| -> Vec<Span<'static>> {
+        let mut out = Vec::new();
+        for (index, stage) in stages.iter().enumerate() {
+            if index > 0 {
+                out.push(Span::raw("  "));
+            }
+            let label = match stage.number {
+                Some(n) => format!("{prefix}{n} "),
+                None => String::new(),
+            };
+            if !label.is_empty() {
+                out.push(Span::styled(label, label_style(index)));
+            }
+            if counts {
+                let total = stage.len();
+                let done = stage.item_indices().filter(|&i| is_done(todos[i])).count();
+                if done == total {
+                    out.push(Span::styled("✓", Style::default().fg(rgb(100, 180, 100))));
+                } else {
+                    let color = if Some(index) == current {
+                        asap_color()
+                    } else {
+                        rgb(120, 120, 135)
+                    };
+                    out.push(Span::styled(
+                        format!("{done}/{total}"),
+                        Style::default().fg(color),
+                    ));
+                }
+            } else {
+                out.extend(stage.item_indices().map(|i| pip_span(todos[i])));
             }
         }
-    }
-    let green = Style::default().fg(rgb(100, 180, 100));
-    let meta = Style::default().fg(todo_meta_color());
-    let label = if numbers.is_empty() {
-        format!("{} phases done", finished.len())
-    } else if numbers.len() == 1 {
-        format!("phase {} done", numbers[0])
-    } else {
-        format!("phase {} done", numbers.join(", "))
+        out
     };
-    let mut spans = vec![Span::raw("   "), Span::styled(format!("✓ {label}"), green)];
-    let base = width_of(&spans);
-    if base > width {
-        return Vec::new();
-    }
-    if !groups.is_empty() {
-        let names = format!(" · {}", groups.join(", "));
-        let room = width - base;
-        if room >= 8 {
-            let shown = if names.width() > room {
-                format!("{}…", truncate_to_width(&names, room - 1))
-            } else {
-                names
-            };
-            spans.push(Span::styled(shown, meta));
+    for candidate in [
+        variant("phase ", false),
+        variant("", false),
+        variant("", true),
+    ] {
+        if width_of(&candidate) <= max_width {
+            spans.extend(candidate);
+            return;
         }
     }
-    spans
+    push_todo_status_pips(spans, todos.iter().copied(), max_width);
 }
 
 /// Agent emoji (with failure marks) and the live activity of the lane's
@@ -407,26 +346,12 @@ fn lane_name_spans(
     name
 }
 
-/// Status glyph plus task text, no gutter or confidence suffix.
-fn item_cell_spans(todo: &crate::todo::TodoItem) -> Vec<Span<'static>> {
-    let mut spans = todo_card_item_spans(todo, false);
-    if !spans.is_empty() {
-        spans.remove(0);
-    }
-    spans
-}
-
-/// One lane's row body: a status strip (`✓●○`) padded to `strip_width` so the
-/// titles of every lane line up, then the titles in order (`a → b → c`),
-/// coloured by status. When too wide, leading finished titles drop first (the
-/// strip still shows them), then the tail is cut with an ellipsis.
-fn lane_chain_spans(
+/// A lane's status strip (`✓●○`), padded to `strip_width` so the names after
+/// it line up across lanes.
+fn lane_strip_spans(
     lane_todos: &[&crate::todo::TodoItem],
     strip_width: usize,
-    width: usize,
 ) -> Vec<Span<'static>> {
-    // Status glyphs sit together as one strip (`✓●○`), then the titles follow
-    // in the same order, coloured by status. No per-task icon/title pairs.
     let mut strip: Vec<Span<'static>> = lane_todos
         .iter()
         .map(|todo| {
@@ -439,18 +364,23 @@ fn lane_chain_spans(
     strip.push(Span::raw(
         " ".repeat(strip_width.saturating_sub(lane_todos.len()) + 2),
     ));
+    strip
+}
+
+/// A lane's titles in order (`a → b → c`), coloured by status. When too wide,
+/// leading finished titles drop first (the strip still shows them), then the
+/// tail is cut with an ellipsis.
+fn lane_titles_spans(lane_todos: &[&crate::todo::TodoItem], width: usize) -> Vec<Span<'static>> {
     let arrow = || Span::styled(" → ", Style::default().fg(rgb(105, 100, 135)));
     let title = |todo: &crate::todo::TodoItem| -> Span<'static> {
         todo_card_item_spans(todo, false)
             .pop()
             .unwrap_or_else(|| Span::raw(todo.content.clone()))
     };
-    // Finished titles at the front drop first when the row is too wide; the
-    // strip still shows them as ✓.
     let done_prefix = lane_todos.iter().take_while(|todo| is_done(todo)).count();
     let max_skip = done_prefix.min(lane_todos.len().saturating_sub(1));
     let build = |skip: usize| -> Vec<Span<'static>> {
-        let mut spans = strip.clone();
+        let mut spans = Vec::new();
         for (i, todo) in lane_todos[skip..].iter().enumerate() {
             if i > 0 {
                 spans.push(arrow());
@@ -469,10 +399,12 @@ fn lane_chain_spans(
     super::truncate_line_with_ellipsis_to_width(&Line::from(spans), width).spans
 }
 
-/// Render todos that declare stages. Each stage opens with a plain word
-/// (`now`, `next`, `later`, `done`); below it every lane is one row: the
-/// group name, then that lane's tasks in order from left to right. Rows in a
-/// stage run in parallel, tasks along a row run in sequence.
+/// Render todos that declare stages, one row per lane:
+/// `✓●○  parser 🦊  Extract lexer → Update callers → Add tests`.
+/// The status strip leads, so the left edge reads as a block of progress;
+/// then the group name; then the titles. Phases are labelled on the header
+/// row, so the body has no heading rows. Finished phases are left to the
+/// header unless everything is done.
 pub(crate) fn push_stage_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
@@ -482,79 +414,59 @@ pub(crate) fn push_stage_lines(
 ) {
     let stages = ordered_layout(todos);
     let current = current_stage(&stages, todos);
-    let name_width = stages
+    let shown = |index: usize| stages.len() < 2 || !current.is_some_and(|current| index < current);
+    let lanes: Vec<&crate::todo::stages::TodoLane> = stages
         .iter()
-        .flat_map(|stage| stage.lanes.iter())
+        .enumerate()
+        .filter(|(index, _)| shown(*index))
+        .flat_map(|(_, stage)| stage.lanes.iter())
+        .collect();
+    let items_of = |lane: &crate::todo::stages::TodoLane| -> Vec<&crate::todo::TodoItem> {
+        lane.items.iter().map(|&i| todos[i]).collect()
+    };
+    let strip_width = lanes.iter().map(|lane| lane.items.len()).max().unwrap_or(0);
+    let name_width = lanes
+        .iter()
         .map(|lane| {
-            let items: Vec<&crate::todo::TodoItem> = lane.items.iter().map(|&i| todos[i]).collect();
-            width_of(&lane_name_spans(lane.group.as_deref(), &items, agents))
+            width_of(&lane_name_spans(
+                lane.group.as_deref(),
+                &items_of(lane),
+                agents,
+            ))
         })
         .max()
         .unwrap_or(0)
         .min(inner_width / 3);
-    let indent = if stages.len() > 1 { "  " } else { "" };
-    let strip_width = stages
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| stages.len() < 2 || !current.is_some_and(|current| *index < current))
-        .flat_map(|(_, stage)| stage.lanes.iter())
-        .map(|lane| lane.items.len())
-        .max()
-        .unwrap_or(0);
 
-    for (stage_index, stage) in stages.iter().enumerate() {
-        // Finished phases are summarised on the header row; the body is for
-        // the active phase and what comes after it. A fully finished list
-        // keeps every phase so the card does not go blank.
-        if stages.len() > 1 && current.is_some_and(|current| stage_index < current) {
-            continue;
+    for lane in lanes {
+        let items = items_of(lane);
+        let mut row = lane_strip_spans(&items, strip_width);
+        if name_width > 0 {
+            let name = lane_name_spans(lane.group.as_deref(), &items, agents);
+            let name =
+                super::truncate_line_with_ellipsis_to_width(&Line::from(name), name_width).spans;
+            let pad = name_width.saturating_sub(width_of(&name)) + 2;
+            row.extend(name);
+            row.push(Span::raw(" ".repeat(pad)));
         }
-        // `phase 1 · done`, `phase 2 · now`: the number says which phase, the
-        // word says where it stands, so repeated states stay unambiguous.
-        if stages.len() > 1 {
-            let (word, style) = stage_word(stage_index, current);
-            let mut label = Vec::new();
-            if let Some(number) = stage.number {
-                label.push(Span::styled(
-                    format!("phase {number}"),
-                    Style::default().fg(stage_color()).bold(),
-                ));
-                label.push(Span::styled(" · ", Style::default().fg(todo_meta_color())));
-            }
-            label.push(Span::styled(word, style));
-            lines.push(todo_card_line(label, base_indent, inner_width));
+        let room = inner_width.saturating_sub(width_of(&row));
+        let titles = lane_titles_spans(&items, room);
+        let titles_width = width_of(&titles);
+        row.extend(titles);
+        let (_, note) = lane_agent_chip(&items, agents);
+        let note_room = room.saturating_sub(titles_width + 2);
+        if !note.is_empty() && note_room >= 6 {
+            let shown = if note.width() > note_room {
+                format!("{}…", truncate_to_width(&note, note_room - 1))
+            } else {
+                note
+            };
+            row.push(Span::styled(
+                format!("  {shown}"),
+                Style::default().fg(todo_meta_color()),
+            ));
         }
-        for lane in &stage.lanes {
-            let items: Vec<&crate::todo::TodoItem> = lane.items.iter().map(|&i| todos[i]).collect();
-            let mut row = vec![Span::raw(indent)];
-            if name_width > 0 {
-                let name = lane_name_spans(lane.group.as_deref(), &items, agents);
-                let name =
-                    super::truncate_line_with_ellipsis_to_width(&Line::from(name), name_width)
-                        .spans;
-                let pad = name_width.saturating_sub(width_of(&name)) + 2;
-                row.extend(name);
-                row.push(Span::raw(" ".repeat(pad)));
-            }
-            let room = inner_width.saturating_sub(width_of(&row));
-            let chain = lane_chain_spans(&items, strip_width, room);
-            let chain_width = width_of(&chain);
-            row.extend(chain);
-            let (_, note) = lane_agent_chip(&items, agents);
-            let note_room = room.saturating_sub(chain_width + 2);
-            if !note.is_empty() && note_room >= 6 {
-                let shown = if note.width() > note_room {
-                    format!("{}…", truncate_to_width(&note, note_room - 1))
-                } else {
-                    note
-                };
-                row.push(Span::styled(
-                    format!("  {shown}"),
-                    Style::default().fg(todo_meta_color()),
-                ));
-            }
-            lines.push(todo_card_line(row, base_indent, inner_width));
-        }
+        lines.push(todo_card_line(row, base_indent, inner_width));
     }
 }
 

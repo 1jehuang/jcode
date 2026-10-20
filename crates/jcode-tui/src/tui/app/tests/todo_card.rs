@@ -685,9 +685,8 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
         let text = render_and_snap(&app, &mut terminal);
         let band: Vec<&str> = text.lines().take(8).collect();
         let joined = band.join("\n");
-        assert!(joined.contains("●● → ○"), "stage pips at {width}:\n{text}");
-        assert!(joined.contains("phase 1 · now"), "phase label at {width}:\n{text}");
-        let alpha = band.iter().find(|row| row.contains("stage one alpha")).unwrap();
+        assert!(joined.contains("1 ●●") && joined.contains("2 ○"), "phase pips at {width}:\n{text}");
+                let alpha = band.iter().find(|row| row.contains("stage one alpha")).unwrap();
         assert!(alpha.contains("alpha lane 🦨"), "lane row at {width}:\n{text}");
         let beta = band.iter().find(|row| row.contains("stage one beta")).unwrap();
         assert!(beta.contains("beta lane 🦝"), "lane row at {width}:\n{text}");
