@@ -602,6 +602,7 @@ fn todo(content: &str, status: &str, group: Option<&str>) -> TodoItem {
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
+        details: None,
     }
 }
 

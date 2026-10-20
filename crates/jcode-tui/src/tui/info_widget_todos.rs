@@ -19,6 +19,7 @@ pub(crate) fn swarm_plan_todos(items: &[crate::plan::PlanItem]) -> Vec<crate::to
         .iter()
         .map(|item| crate::todo::TodoItem {
             stage: None,
+            details: None,
             content: item.content.clone(),
             status: normalize_plan_status_for_todo(&item.status),
             priority: item.priority.clone(),

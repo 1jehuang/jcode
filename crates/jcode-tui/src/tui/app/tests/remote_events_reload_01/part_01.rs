@@ -1400,6 +1400,7 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Continue working".to_string(),

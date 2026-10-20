@@ -130,6 +130,26 @@ pub(crate) fn apply_task_status(
     false
 }
 
+/// Longer brief (`details`) of the coordinator's todo matching a plan task, so
+/// a worker gets full context even though the card shows a short title.
+pub(crate) fn todo_details(
+    coordinator_session: &str,
+    task_id: &str,
+    content: &str,
+) -> Option<String> {
+    let mut todos = crate::todo::load_todos(coordinator_session).ok()?;
+    details_for(&mut todos, task_id, content)
+}
+
+fn details_for(todos: &mut [TodoItem], task_id: &str, content: &str) -> Option<String> {
+    find_todo(todos, task_id, content)?
+        .details
+        .as_deref()
+        .map(str::trim)
+        .filter(|details| !details.is_empty())
+        .map(str::to_string)
+}
+
 fn update_todos(session_id: &str, update: impl FnOnce(&mut Vec<TodoItem>) -> bool) {
     let Ok(mut todos) = crate::todo::load_todos(session_id) else {
         return;
@@ -271,6 +291,19 @@ mod tests {
             ]
         );
         assert!(items.iter().all(|item| item.status == "queued"));
+    }
+
+    #[test]
+    fn details_reach_the_matching_todo_only() {
+        let mut todos = vec![todo("a", "pending", None), todo("b", "pending", None)];
+        todos[0].details = Some("  Edit src/x.rs; keep API stable.  ".into());
+        assert_eq!(
+            details_for(&mut todos, "a", "task a").as_deref(),
+            Some("Edit src/x.rs; keep API stable.")
+        );
+        assert_eq!(details_for(&mut todos, "b", "task b"), None);
+        todos[1].details = Some("   ".into());
+        assert_eq!(details_for(&mut todos, "b", "task b"), None);
     }
 
     #[test]

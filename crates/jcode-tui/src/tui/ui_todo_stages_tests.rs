@@ -190,6 +190,30 @@ fn lane_row_shows_agent_emoji_and_activity() {
 }
 
 #[test]
+fn finished_stages_share_one_done_header_and_vanish_when_all_done() {
+    let mut todos = grid_todos();
+    todos.push(laned("Wrap up", "pending", 3, "release"));
+    for todo in todos.iter_mut().take(9) {
+        todo.status = "completed".into();
+    }
+    let rows = render(&todos, &[], 100);
+    let words: Vec<&str> = rows
+        .iter()
+        .map(|r| r.trim())
+        .filter(|r| ["done", "now", "next"].contains(r))
+        .collect();
+    assert_eq!(words, ["done", "now"], "{rows:?}");
+
+    todos[9].status = "completed".into();
+    let rows = render(&todos, &[], 100);
+    assert!(
+        rows.iter()
+            .all(|r| !["done", "now", "next"].contains(&r.trim())),
+        "{rows:?}"
+    );
+}
+
+#[test]
 fn unstaged_agent_rows_keep_inline_chip() {
     let todos = vec![
         assigned(

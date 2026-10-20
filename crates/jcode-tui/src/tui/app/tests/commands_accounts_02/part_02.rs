@@ -140,6 +140,7 @@ fn test_refactor_status_summarizes_current_todos() {
             &[
                 crate::todo::TodoItem {
                     stage: None,
+                    details: None,
                     group: None,
                     id: "one".to_string(),
                     content: "Split giant module".to_string(),
@@ -153,6 +154,7 @@ fn test_refactor_status_summarizes_current_todos() {
                 },
                 crate::todo::TodoItem {
                     stage: None,
+                    details: None,
                     group: None,
                     id: "two".to_string(),
                     content: "Run review subagent".to_string(),
@@ -196,6 +198,7 @@ fn test_refactor_resume_uses_saved_mode_and_current_todos() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 stage: None,
+                details: None,
                 group: None,
                 id: "resume1".to_string(),
                 content: "Extract review prompt builder".to_string(),

@@ -316,6 +316,7 @@ mod tests {
             blocked_by: Vec::new(),
             assigned_to: None,
             stage: None,
+            details: None,
         }
     }
 

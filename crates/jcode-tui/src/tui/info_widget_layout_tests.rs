@@ -20,6 +20,7 @@ use crate::tui::info_widget::{
 fn todo(id: &str, status: &str) -> crate::todo::TodoItem {
     crate::todo::TodoItem {
         stage: None,
+        details: None,
         group: None,
         content: format!("task {id}"),
         status: status.to_string(),

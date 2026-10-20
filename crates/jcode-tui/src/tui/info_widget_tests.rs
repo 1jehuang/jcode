@@ -140,6 +140,7 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
                 blocked_by: Vec::new(),
                 assigned_to: None,
                 stage: None,
+                details: None,
             },
             crate::todo::TodoItem {
                 group: None,
@@ -153,6 +154,7 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
                 blocked_by: Vec::new(),
                 assigned_to: None,
                 stage: None,
+                details: None,
             },
         ],
         ..Default::default()
@@ -186,6 +188,7 @@ fn todos_widgets_render_group_headers_when_groups_present() {
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
+        details: None,
     };
     let data = InfoWidgetData {
         todos: vec![
@@ -229,6 +232,7 @@ fn task_group_headers_render_their_own_weighted_confidence() {
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
+        details: None,
     };
     let data = InfoWidgetData {
         todos: vec![
@@ -268,6 +272,7 @@ fn todos_widgets_stay_flat_without_groups() {
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
+        details: None,
     };
     let data = InfoWidgetData {
         todos: vec![mk("a", "completed"), mk("b", "pending")],
@@ -291,6 +296,7 @@ fn todos_widget_renders_exact_pips_for_small_lists() {
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
+        details: None,
     };
     let data = InfoWidgetData {
         todos: vec![
@@ -370,6 +376,7 @@ fn todo_widget_header_says_plan_when_showing_swarm_plan_projection() {
 fn todo_item(id: &str, content: &str, status: &str, group: Option<&str>) -> crate::todo::TodoItem {
     crate::todo::TodoItem {
         stage: None,
+        details: None,
         content: content.to_string(),
         status: status.to_string(),
         priority: "medium".to_string(),
@@ -1811,6 +1818,7 @@ fn placements_never_include_border_only_widgets() {
         }),
         todos: vec![crate::todo::TodoItem {
             stage: None,
+            details: None,
             group: None,
             content: "ship patch".to_string(),
             status: "in_progress".to_string(),

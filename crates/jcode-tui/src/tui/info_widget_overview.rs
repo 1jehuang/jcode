@@ -244,6 +244,7 @@ mod tests {
         let data = InfoWidgetData {
             todos: vec![TodoItem {
                 stage: None,
+                details: None,
                 group: None,
                 content: "ship refactor".to_string(),
                 status: "pending".to_string(),

@@ -473,6 +473,12 @@ pub struct TodoItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub stage: Option<u32>,
+    /// Optional longer brief: file paths, acceptance criteria, context. Never
+    /// drawn on the todo card (which shows only the short `content` title),
+    /// but appended to a swarm worker's assignment so short titles do not
+    /// starve workers of context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
 }
 
 /// Accept `2`, `2.0`, `"2"`, `"stage 2"`, `""`, or `null` for a todo stage.

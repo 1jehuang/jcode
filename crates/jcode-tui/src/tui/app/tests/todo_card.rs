@@ -89,6 +89,7 @@ fn refresh_todo_card_updates_content_when_todos_change() {
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
+        details: None,
     };
 
     crate::todo::save_todos(&session_id, &[todo("write the card", "pending")]).unwrap();
@@ -134,6 +135,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
+        details: None,
     }];
     let goal = |score| crate::todo::TodoGoal {
         group: None,
@@ -192,6 +194,7 @@ fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoI
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
+        details: None,
     }
 }
 

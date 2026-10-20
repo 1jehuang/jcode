@@ -757,7 +757,11 @@ impl Tool for TodoTool {
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "Task. Keep it short, ideally under 40 characters; todos render side by side."
+                                "description": "Short title, ideally under 40 characters; todos render side by side. Put longer context in details."
+                            },
+                            "details": {
+                                "type": "string",
+                                "description": "Optional longer brief: files, acceptance criteria, context. Not shown on the card; given to a swarm worker that takes this todo."
                             },
                             "status": {
                                 "type": "string",

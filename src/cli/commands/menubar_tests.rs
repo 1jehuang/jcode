@@ -99,7 +99,8 @@ fn session_menu_item_title_loads_persisted_todo_title() {
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
-            wave: None,
+            stage: None,
+            details: None,
         }],
     )
     .expect("save todos");

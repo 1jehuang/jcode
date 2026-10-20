@@ -411,11 +411,18 @@ pub(crate) fn push_stage_lines(
         .max()
         .unwrap_or(0)
         .min(inner_width / 3);
-    let indent = if stages.len() > 1 { "  " } else { "" };
+    let indent = if stages.len() > 1 && current.is_some() {
+        "  "
+    } else {
+        ""
+    };
 
     for (stage_index, stage) in stages.iter().enumerate() {
-        if stages.len() > 1 {
-            let (word, style) = stage_word(stage_index, current);
+        // Finished stages share one `done` header, and when the whole list is
+        // done no stage words are needed at all.
+        let (word, style) = stage_word(stage_index, current);
+        let repeat_done = word == "done" && stage_index > 0;
+        if stages.len() > 1 && current.is_some() && !repeat_done {
             lines.push(todo_card_line(
                 vec![Span::styled(word, style)],
                 base_indent,

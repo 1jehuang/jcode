@@ -571,6 +571,7 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
             blocked_by: Vec::new(),
             assigned_to: None,
             stage: None,
+            details: None,
         }],
     )
     .expect("save todos");
@@ -625,6 +626,7 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
             blocked_by: Vec::new(),
             assigned_to: None,
             stage: None,
+            details: None,
         }],
     )
     .expect("save todos");

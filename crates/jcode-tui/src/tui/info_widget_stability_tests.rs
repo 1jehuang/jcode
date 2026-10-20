@@ -21,6 +21,7 @@ fn rich_data() -> InfoWidgetData {
         todos: vec![
             crate::todo::TodoItem {
                 stage: None,
+                details: None,
                 group: None,
                 content: "first task".to_string(),
                 status: "in_progress".to_string(),
@@ -34,6 +35,7 @@ fn rich_data() -> InfoWidgetData {
             },
             crate::todo::TodoItem {
                 stage: None,
+                details: None,
                 group: None,
                 content: "second task".to_string(),
                 status: "pending".to_string(),
