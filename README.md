@@ -132,3 +132,9 @@ Jcode is inventing a new form of customizability. One that doesn't limit you to 
 
 
 <!-- Add self-dev demo thumbnail/video and fuller writeup here. -->
+
+## Other
+
+- [Token optimization](docs/HARNESS.md#token-optimization)
+- [KV cache](docs/HARNESS.md#kv-cache)
+- [Hill-climbable measurements](docs/HARNESS.md#hill-climbable-measurements)
