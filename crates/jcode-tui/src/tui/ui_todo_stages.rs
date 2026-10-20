@@ -2,12 +2,11 @@
 //!
 //! Stages run down, lanes run across. Layout comes from
 //! [`crate::todo::stages::stage_layout`], the same function `run_plan` uses,
-//! so the card always matches execution order. Each stage starts with its
-//! number in the left gutter, matching the numbered header pips
-//! (`1 ●●●  2 ○○`). Lanes (todo groups inside a stage) sit side by side as
+//! so the card always matches execution order. Stage numbers appear once, on
+//! the header pips (`1 ●●●  2 ○○`). Lanes (todo groups inside a stage) sit side by side as
 //! columns under their group name when the terminal is wide enough, and stack
-//! under the same headings otherwise. No divider lines or rails: spacing,
-//! bold lane headers and the gutter number carry the structure. A list with
+//! under the same headings otherwise. No divider lines or rails: bold lane
+//! headers carry the structure. A list with
 //! no stages renders exactly like a plain checklist.
 //!
 //! Agents are swarm workers linked through `TodoItem::assigned_to`. They are
@@ -148,7 +147,7 @@ fn agent_state_mark(status: &str) -> Option<(&'static str, Color)> {
 /// Columns narrower than this make lanes stack instead.
 const MIN_LANE_COLUMN: usize = 22;
 /// Blank cells between lane columns.
-const LANE_GAP: usize = 3;
+const LANE_GAP: usize = 2;
 /// Rows a lane may use in column mode before the rest fold into `+N more`.
 const MAX_LANE_ROWS: usize = 6;
 
@@ -409,8 +408,39 @@ fn lane_window(lane_todos: &[&crate::todo::TodoItem]) -> (std::ops::Range<usize>
     (start..start + visible, len - visible)
 }
 
-/// Render todos that declare stages as a stage grid: stage number in the left
-/// gutter, lanes as columns (or stacked when narrow), no divider lines.
+/// Column widths sized to content. When the natural widths do not fit, the
+/// widest columns shrink first (water filling) so short lanes keep their text.
+/// Returns `None` when even that leaves a column under [`MIN_LANE_COLUMN`].
+fn fit_columns(natural: &[usize], available: usize) -> Option<Vec<usize>> {
+    let k = natural.len();
+    let room = available.checked_sub((k - 1) * LANE_GAP)?;
+    if natural.iter().sum::<usize>() <= room {
+        return Some(natural.to_vec());
+    }
+    let mut sorted = natural.to_vec();
+    sorted.sort_unstable();
+    let mut remaining = room;
+    let mut cap = 0;
+    for (i, width) in sorted.iter().enumerate() {
+        let share = remaining / (k - i);
+        if *width <= share {
+            remaining -= width;
+        } else {
+            cap = share;
+            break;
+        }
+    }
+    let widths: Vec<usize> = natural.iter().map(|w| (*w).min(cap)).collect();
+    widths
+        .iter()
+        .zip(natural)
+        .all(|(w, n)| *w >= MIN_LANE_COLUMN.min(*n))
+        .then_some(widths)
+}
+
+/// Render todos that declare stages as a stage grid. Stage numbers live only
+/// on the header pips; lanes sit side by side as content-sized columns (or
+/// stack when narrow). No gutter, blank rows, or divider lines.
 pub(crate) fn push_stage_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
@@ -419,26 +449,11 @@ pub(crate) fn push_stage_lines(
     inner_width: usize,
 ) {
     let stages = ordered_layout(todos);
-    let current = current_stage(&stages, todos);
-    let digits = stages
-        .iter()
-        .filter_map(|stage| stage.number)
-        .map(|n| n.to_string().len())
-        .max()
-        .unwrap_or(1);
-    let gutter_width = digits + 1;
-    let body_width = inner_width.saturating_sub(gutter_width);
+    let indent = || Span::raw("  ");
+    let body_width = inner_width.saturating_sub(2);
     let mut previous_groups: Option<Vec<Option<String>>> = None;
 
-    for (index, stage) in stages.iter().enumerate() {
-        let mut gutter_label = stage
-            .number
-            .map(|n| Span::styled(format!("{n:>digits$} "), stage_label_style(index, current)));
-        let mut gutter = || -> Span<'static> {
-            gutter_label
-                .take()
-                .unwrap_or_else(|| Span::raw(" ".repeat(gutter_width)))
-        };
+    for stage in &stages {
         let lanes: Vec<(Option<&str>, Vec<&crate::todo::TodoItem>)> = stage
             .lanes
             .iter()
@@ -459,52 +474,50 @@ pub(crate) fn push_stage_lines(
         let show_headers = (named && previous_groups.as_ref() != Some(&groups)) || any_agents;
         previous_groups = Some(groups);
 
-        if index > 0 && stages.len() > 1 && stage.number.is_some() {
-            lines.push(Line::from(""));
-        }
+        let windows: Vec<_> = lanes.iter().map(|(_, items)| lane_window(items)).collect();
+        let natural: Vec<usize> = lanes
+            .iter()
+            .zip(&windows)
+            .map(|((group, items), (range, hidden))| {
+                let header = if show_headers {
+                    width_of(&lane_header_spans(*group, items, agents, usize::MAX / 2))
+                } else {
+                    0
+                };
+                let rows = items[range.clone()]
+                    .iter()
+                    .map(|todo| width_of(&item_cell_spans(todo)))
+                    .max()
+                    .unwrap_or(0);
+                let more = if *hidden > 0 {
+                    format!("+{hidden} more").width()
+                } else {
+                    0
+                };
+                header.max(rows).max(more)
+            })
+            .collect();
+        let columns = (lanes.len() >= 2)
+            .then(|| fit_columns(&natural, body_width))
+            .flatten();
 
-        let k = lanes.len();
-        let column_mode = k >= 2 && body_width >= k * MIN_LANE_COLUMN + (k - 1) * LANE_GAP;
-        if column_mode {
-            let col = (body_width - (k - 1) * LANE_GAP) / k;
-            let gap = || Span::raw(" ".repeat(LANE_GAP));
-            if show_headers {
-                let mut row = vec![gutter()];
-                for (lane_index, (group, items)) in lanes.iter().enumerate() {
-                    if lane_index > 0 {
-                        row.push(gap());
+        if let Some(widths) = columns {
+            let last = widths.len() - 1;
+            let push_row = |lines: &mut Vec<Line<'static>>, cells: Vec<Vec<Span<'static>>>| {
+                let mut row = vec![indent()];
+                for (i, (cell, width)) in cells.into_iter().zip(&widths).enumerate() {
+                    if i > 0 {
+                        row.push(Span::raw(" ".repeat(LANE_GAP)));
                     }
-                    row.extend(fit_cell(lane_header_spans(*group, items, agents, col), col));
-                }
-                lines.push(todo_card_line(row, base_indent, inner_width));
-            }
-            let windows: Vec<_> = lanes.iter().map(|(_, items)| lane_window(items)).collect();
-            let height = windows
-                .iter()
-                .map(|(range, hidden)| range.len() + usize::from(*hidden > 0))
-                .max()
-                .unwrap_or(0);
-            for row_index in 0..height {
-                let mut row = vec![gutter()];
-                for (lane_index, ((_, items), (range, hidden))) in
-                    lanes.iter().zip(&windows).enumerate()
-                {
-                    if lane_index > 0 {
-                        row.push(gap());
-                    }
-                    let cell = if row_index < range.len() {
-                        item_cell_spans(items[range.start + row_index])
-                    } else if row_index == range.len() && *hidden > 0 {
-                        vec![Span::styled(
-                            format!("  +{hidden} more"),
-                            Style::default().fg(todo_meta_color()),
-                        )]
+                    if i == last {
+                        row.extend(
+                            super::truncate_line_with_ellipsis_to_width(&Line::from(cell), *width)
+                                .spans,
+                        );
                     } else {
-                        Vec::new()
-                    };
-                    row.extend(fit_cell(cell, col));
+                        row.extend(fit_cell(cell, *width));
+                    }
                 }
-                // Drop trailing padding so rows do not carry dead cells.
                 while row
                     .last()
                     .is_some_and(|span| span.content.trim().is_empty())
@@ -512,18 +525,50 @@ pub(crate) fn push_stage_lines(
                     row.pop();
                 }
                 lines.push(todo_card_line(row, base_indent, inner_width));
+            };
+            if show_headers {
+                let cells = lanes
+                    .iter()
+                    .zip(&widths)
+                    .map(|((group, items), width)| lane_header_spans(*group, items, agents, *width))
+                    .collect();
+                push_row(lines, cells);
+            }
+            let height = windows
+                .iter()
+                .map(|(range, hidden)| range.len() + usize::from(*hidden > 0))
+                .max()
+                .unwrap_or(0);
+            for row_index in 0..height {
+                let cells = lanes
+                    .iter()
+                    .zip(&windows)
+                    .map(|((_, items), (range, hidden))| {
+                        if row_index < range.len() {
+                            item_cell_spans(items[range.start + row_index])
+                        } else if row_index == range.len() && *hidden > 0 {
+                            vec![Span::styled(
+                                format!("+{hidden} more"),
+                                Style::default().fg(todo_meta_color()),
+                            )]
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .collect();
+                push_row(lines, cells);
             }
             continue;
         }
 
         for (group, items) in &lanes {
             if show_headers && (group.is_some() || items.iter().any(|t| t.assigned_to.is_some())) {
-                let mut row = vec![gutter()];
+                let mut row = vec![indent()];
                 row.extend(lane_header_spans(*group, items, agents, body_width));
                 lines.push(todo_card_line(row, base_indent, inner_width));
             }
             for todo in items {
-                let mut row = vec![gutter()];
+                let mut row = vec![indent()];
                 row.extend(item_cell_spans(todo));
                 lines.push(todo_card_line(row, base_indent, inner_width));
             }

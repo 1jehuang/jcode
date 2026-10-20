@@ -96,12 +96,12 @@ fn stages_get_numbered_pips_and_gutter_numbers() {
     }
     assert!(
         rows.iter()
-            .any(|r| r.trim_start().starts_with("1 ✓ read types")),
+            .any(|r| r.trim_start().starts_with("✓ read types")),
         "{rows:?}"
     );
     let parallel = rows.iter().find(|r| r.contains("stage field")).unwrap();
     assert!(
-        parallel.trim_start().starts_with("2 ✓ stage field") && parallel.contains("● pinned band"),
+        parallel.trim_start().starts_with("✓ stage field") && parallel.contains("● pinned band"),
         "ungrouped parallel items sit side by side: {rows:?}"
     );
 }
@@ -143,11 +143,27 @@ fn wide_stage_lays_lanes_out_as_columns_under_group_names() {
     // Stage two has its own lanes, so it gets fresh headers.
     let header2 = rows.iter().find(|r| r.contains("integration")).unwrap();
     assert!(
-        header2.contains("release") && header2.trim_start().starts_with("2 "),
+        header2.contains("release") && header2.trim_start().starts_with("integration"),
         "{rows:?}"
     );
     // Grid is shorter than a stacked list.
-    assert!(rows.len() < 1 + 9 + 5, "{} rows", rows.len());
+    assert_eq!(rows.len(), 1 + 4 + 3, "compact grid: {rows:?}");
+    // Stage numbers appear only on the header pips, never as a gutter.
+    assert!(
+        rows[1..]
+            .iter()
+            .all(|r| !r.trim_start().starts_with(|c: char| c.is_ascii_digit())),
+        "{rows:?}"
+    );
+    // Columns hug their content: two-cell gap after the longest parser item.
+    let gap = &first[first.find("Extract lexer").unwrap()..first.find("✓ Rename").unwrap()];
+    assert!(
+        gap.width()
+            <= "Extract lexer".width() + "Add lexer tests".width() - "Extract lexer".width()
+                + 2
+                + 0,
+        "{rows:?}"
+    );
 }
 
 #[test]
@@ -160,7 +176,7 @@ fn narrow_stage_stacks_lanes_under_headings() {
     let rows = render(&grid_todos(), &[], 50);
     let parser = rows
         .iter()
-        .position(|r| r.trim_start().starts_with("1 parser"))
+        .position(|r| r.trim_start().starts_with("parser"))
         .unwrap();
     assert!(rows[parser + 1].contains("Extract lexer"), "{rows:?}");
     assert!(rows.iter().any(|r| r.trim() == "ui"), "{rows:?}");
