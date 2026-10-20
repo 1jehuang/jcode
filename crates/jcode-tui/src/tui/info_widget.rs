@@ -6,6 +6,7 @@
 //! In left-aligned mode, widgets only appear on the right margin.
 
 pub use super::cloud_git::{DualGitInfo, RepoState};
+pub use super::cloud_status::{CloudMachineStats, CloudProbeState, CloudStatusInfo};
 use super::color_support::rgb;
 #[path = "info_widget_commits.rs"]
 mod commits;
@@ -752,10 +753,10 @@ pub struct InfoWidgetData {
     /// Git repository status
     pub git_info: Option<GitInfo>,
     /// Machine telemetry is only present for native SSH attachments.
-    pub(crate) cloud_info: Option<super::cloud_status::CloudStatusInfo>,
+    pub cloud_info: Option<CloudStatusInfo>,
     /// Live transport startup/reconnect state overrides cached probe readiness.
-    pub(crate) cloud_connection: Option<String>,
-    pub(crate) cloud_working: bool,
+    pub cloud_connection: Option<String>,
+    pub cloud_working: bool,
     /// Independent local and VM snapshots when this TUI is attached over SSH.
     pub dual_git_info: Option<DualGitInfo>,
     /// Absolute paths the agent edited this session (edit-style tool calls),
