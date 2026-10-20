@@ -1,15 +1,15 @@
 <div align="center">
 
+<p>
+<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
+</p>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/jcode-mark-inverse.svg">
   <img src="assets/brand/jcode-mark.svg" alt="jcode halftone donut logo" width="160">
 </picture>
 
 <br><br>
-
-<p>
-<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
-</p>
 
 # jcode
 
@@ -57,8 +57,6 @@
 # macOS & Linux
 curl -fsSL https://jcode.sh/install | bash
 ```
-
-[Windows installation instructions](https://jcode.sh/docs#install).
 
 <div align="center">
 
