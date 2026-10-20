@@ -91,9 +91,11 @@ launch_args=(env -u JCODE_SOCKET -u JCODE_SESSION_ID -u JCODE_SSH_LOCAL_WORKING_
 if [[ ${SOURCE_MODE:-handoff} == launch ]]; then
     launch_dir=$W/local-repo
     local_label='Local (launch dir):'
+    local_workspace_label='Local:'
 else
     launch_args+=("JCODE_SSH_LOCAL_WORKING_DIR=$W/local-repo")
     local_label='Local:'
+    local_workspace_label='Local (source):'
 fi
 launch_args+=("$JCODE_BIN" --no-update --no-selfdev --ssh cloud-git-fixture
     --ssh-binary "$JCODE_BIN" --remote-working-dir "$W/remote-repo")
@@ -142,14 +144,14 @@ cp "$W/frame.txt" "$W/clean-frame.txt"
 if [[ ${EXPECT_CLOUD_STATUS:-0} == 1 ]]; then
     for label in 'Machine:' 'CPU' 'RAM' 'Disk' 'Connection: Ready' \
         'Updated ' 'probe ' 'Lifecycle' 'Uptime ' 'Sleep: policy unavailable' \
-        'Workspace' 'Cloud:' 'Local (source):' 'Transferred:'; do
+        'Workspace' 'Cloud:' "$local_workspace_label" 'Transferred:'; do
         wait_for "$label"
     done
     for metric in CPU RAM Disk; do
         grep -Eq "$metric.*[0-9]+%" "$W/frame.txt" || fail "$metric telemetry is missing a measured percentage"
     done
     grep -Fq 'Cloud VM: main clean' "$W/frame.txt" || fail 'cloud card hides repository status'
-    grep -Fq 'Local: main clean' "$W/frame.txt" || fail 'cloud card hides local repository status'
+    grep -Fq "$local_label main clean" "$W/frame.txt" || fail 'cloud card hides local repository status'
     cp "$W/frame.txt" "$W/telemetry-frame.txt"
     echo 'JCODE_CHECKPOINT {"message":"Live cloud resource, connection, lifecycle and workspace sections visible"}'
     # Reject new read-only probes, without interrupting the already-open native
