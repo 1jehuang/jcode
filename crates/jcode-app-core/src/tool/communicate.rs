@@ -1694,7 +1694,6 @@ const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
     "retry",
     "list_models",
     "list_swarms",
-    "set_swarm_label",
 ];
 
 #[derive(Clone, Deserialize)]
@@ -1896,7 +1895,7 @@ impl Tool for CommunicateTool {
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn: the worker's lane name (e.g. 'auth refactor'). Each spawned worker owns that lane in your todo list (created from the prompt if missing); its todo list is the lane and syncs only it. For set_swarm_label: the new unique label."
+                    "description": "Required for spawn: the worker's lane name (e.g. 'auth refactor'). Each spawned worker owns that lane in your todo list (created from the prompt if missing); its todo list is the lane and syncs only it."
                 },
                 "phase": {
                     "type": "integer",
