@@ -272,6 +272,32 @@ mod lane_sync_tests {
     }
 
     #[test]
+    fn lane_id_covers_grouped_ungrouped_and_unstaged() {
+        assert_eq!(
+            lane_id(&item("a", "pending", Some(2), Some("ui"))),
+            "lane:2:ui"
+        );
+        assert_eq!(lane_id(&item("b", "pending", None, Some("ui"))), "lane::ui");
+        assert_eq!(lane_id(&item("c", "pending", Some(1), None)), "lane:todo:c");
+        assert_eq!(
+            lane_id(&item("d", "pending", Some(1), Some("   "))),
+            "lane:todo:d"
+        );
+    }
+
+    #[test]
+    fn merge_rejects_renaming_an_ungrouped_lane() {
+        let coordinator = vec![item("x", "pending", Some(1), None)];
+        let link = LaneLink {
+            coordinator: "boss".into(),
+            worker: "fox".into(),
+            lane: "lane:todo:x".into(),
+        };
+        let worker = vec![item("renamed", "completed", Some(1), None)];
+        assert_eq!(merge_worker_lane(&coordinator, &link, &worker), None);
+    }
+
+    #[test]
     fn worker_is_seeded_with_exactly_its_lane() {
         let seeded = lane_todos_for_worker(&coordinator(), "lane:1:parser");
         let ids: Vec<&str> = seeded.iter().map(|t| t.id.as_str()).collect();
