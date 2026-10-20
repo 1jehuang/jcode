@@ -576,6 +576,10 @@ async fn provider_matrix_explicit_compatible_choice_overrides_stale_active_profi
             .unwrap_or_else(|| panic!("{} should map to a ProviderChoice", provider.id));
 
         let env = TestEnv::new()?;
+        // The compatible-provider matrix includes the experimental Muse
+        // subscription route; explicit initialization is gated behind this
+        // opt-in, and TestEnv restores the variable on drop.
+        jcode::env::set_var("JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION", "1");
         env.clear_profile_keys();
         write_profile_login_material(&env, selected, "selected-direct")?;
         write_profile_login_material(&env, stale, "stale-direct")?;
