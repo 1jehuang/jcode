@@ -411,23 +411,23 @@ pub(crate) fn push_stage_lines(
         .max()
         .unwrap_or(0)
         .min(inner_width / 3);
-    let indent = if stages.len() > 1 && current.is_some() {
-        "  "
-    } else {
-        ""
-    };
+    let indent = if stages.len() > 1 { "  " } else { "" };
 
     for (stage_index, stage) in stages.iter().enumerate() {
-        // Finished stages share one `done` header, and when the whole list is
-        // done no stage words are needed at all.
-        let (word, style) = stage_word(stage_index, current);
-        let repeat_done = word == "done" && stage_index > 0;
-        if stages.len() > 1 && current.is_some() && !repeat_done {
-            lines.push(todo_card_line(
-                vec![Span::styled(word, style)],
-                base_indent,
-                inner_width,
-            ));
+        // `phase 1 · done`, `phase 2 · now`: the number says which phase, the
+        // word says where it stands, so repeated states stay unambiguous.
+        if stages.len() > 1 {
+            let (word, style) = stage_word(stage_index, current);
+            let mut label = Vec::new();
+            if let Some(number) = stage.number {
+                label.push(Span::styled(
+                    format!("phase {number}"),
+                    Style::default().fg(stage_color()).bold(),
+                ));
+                label.push(Span::styled(" · ", Style::default().fg(todo_meta_color())));
+            }
+            label.push(Span::styled(word, style));
+            lines.push(todo_card_line(label, base_indent, inner_width));
         }
         for lane in &stage.lanes {
             let items: Vec<&crate::todo::TodoItem> = lane.items.iter().map(|&i| todos[i]).collect();

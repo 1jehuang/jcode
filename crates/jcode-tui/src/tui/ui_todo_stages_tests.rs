@@ -91,12 +91,12 @@ fn stages_read_as_now_next_with_arrow_pips() {
     assert_eq!(
         &trimmed[1..],
         &[
-            "done",
+            "phase 1 · done",
             "✓ read types",
-            "now",
+            "phase 2 · now",
             "✓ stage field",
             "● pinned band",
-            "next",
+            "phase 3 · next",
             "○ integrate"
         ],
         "{rows:?}"
@@ -128,7 +128,7 @@ fn each_lane_is_one_row_with_tasks_left_to_right() {
     assert_fits(&rows, 100);
     let trimmed: Vec<&str> = rows.iter().map(|r| r.trim()).collect();
     assert_eq!(trimmed[0], "●●○●●● → ○○○");
-    assert_eq!(trimmed[1], "now");
+    assert_eq!(trimmed[1], "phase 1 · now");
     assert_eq!(
         trimmed[2],
         "parser       ✓ Extract lexer → ● Update callers → ○ Add lexer tests"
@@ -138,7 +138,7 @@ fn each_lane_is_one_row_with_tasks_left_to_right() {
         "ui           ✓ Rename rails → ✓ Draw lane headers"
     );
     assert_eq!(trimmed[4], "docs         ✓ Update tool desc");
-    assert_eq!(trimmed[5], "next");
+    assert_eq!(trimmed[5], "phase 2 · next");
     assert_eq!(
         trimmed[6],
         "integration  ○ Wire lanes into plan → ○ End-to-end swarm test"
@@ -190,25 +190,21 @@ fn lane_row_shows_agent_emoji_and_activity() {
 }
 
 #[test]
-fn finished_stages_share_one_done_header_and_vanish_when_all_done() {
+fn every_phase_is_labelled_with_number_and_state() {
     let mut todos = grid_todos();
     todos.push(laned("Wrap up", "pending", 3, "release"));
     for todo in todos.iter_mut().take(9) {
         todo.status = "completed".into();
     }
     let rows = render(&todos, &[], 100);
-    let words: Vec<&str> = rows
+    let labels: Vec<&str> = rows
         .iter()
         .map(|r| r.trim())
-        .filter(|r| ["done", "now", "next"].contains(r))
+        .filter(|r| r.starts_with("phase "))
         .collect();
-    assert_eq!(words, ["done", "now"], "{rows:?}");
-
-    todos[9].status = "completed".into();
-    let rows = render(&todos, &[], 100);
-    assert!(
-        rows.iter()
-            .all(|r| !["done", "now", "next"].contains(&r.trim())),
+    assert_eq!(
+        labels,
+        ["phase 1 · done", "phase 2 · done", "phase 3 · now"],
         "{rows:?}"
     );
 }
