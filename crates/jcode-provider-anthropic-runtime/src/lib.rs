@@ -15,6 +15,7 @@
 //! Uses the Anthropic Messages API directly without the Python SDK.
 //! This provides better control and eliminates the Python dependency.
 
+mod model_selection;
 mod reasoning_request;
 
 use jcode_base::auth;
@@ -1503,29 +1504,12 @@ impl Provider for AnthropicProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        // Native-1M models (Opus 4.8/4.7) no longer carry a redundant `[1m]`
-        // alias. Gracefully migrate a stale `<model>[1m]` id (from old config or
-        // a restored session) to its canonical form, since the suffix is a no-op
-        // for these models.
-        let model: &str = if is_1m_model(model)
-            && matches!(
-                jcode_provider_core::anthropic_context_mode(model),
-                jcode_provider_core::AnthropicContextMode::Native1M
-            ) {
-            strip_1m_suffix(model)
-        } else {
-            model
-        };
-        if !self
-            .profile_models
-            .as_ref()
-            .is_some_and(|models| models.iter().any(|configured| configured == model))
-            && !jcode_base::provider::known_anthropic_model_ids()
-                .iter()
-                .any(|known| known == model)
-        {
-            anyhow::bail!("Model {} not supported by Anthropic provider", model);
-        }
+        let model = &model_selection::resolve(
+            model,
+            self.profile_models.as_deref(),
+            jcode_base::provider::known_anthropic_model_ids,
+        )
+        .map_err(|id| anyhow::anyhow!("Model {id} not supported by Anthropic provider"))?;
         *self
             .model
             .write()
