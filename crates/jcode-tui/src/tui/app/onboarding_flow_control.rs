@@ -175,7 +175,8 @@ impl App {
         let Ok(dir) = crate::storage::jcode_dir() else {
             return true;
         };
-        if crate::setup_hints::SetupHintsState::load().launch_count > 5 {
+        let hints = crate::setup_hints::SetupHintsState::load();
+        if hints.onboarding_start_choice_shown || hints.launch_count > 5 {
             return false;
         }
         !Self::has_established_native_session_history(&dir)
@@ -931,7 +932,26 @@ impl App {
             shown_at: Instant::now(),
         });
         self.onboarding_prefetch_recent_project();
+        self.onboarding_mark_start_choice_shown();
         self.set_status_notice("Press any key to switch, Enter to choose");
+    }
+
+    /// Persist that the first-run start choice was shown so it never appears
+    /// again. Rehearsals and previews don't count as a real first run.
+    fn onboarding_mark_start_choice_shown(&self) {
+        if self.onboarding_sim_active() || self.onboarding_preview_mode {
+            return;
+        }
+        let mut hints = crate::setup_hints::SetupHintsState::load();
+        if hints.onboarding_start_choice_shown {
+            return;
+        }
+        hints.onboarding_start_choice_shown = true;
+        if let Err(err) = hints.save() {
+            crate::logging::error(&format!(
+                "Failed to persist onboarding start choice marker: {err}"
+            ));
+        }
     }
 
     /// Formatted copy shown above the two first-run actions.
