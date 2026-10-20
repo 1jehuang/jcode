@@ -2272,6 +2272,15 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             app.copy_chat_viewport_context_to_clipboard();
             true
         }
+        KeyCode::Char('e') => {
+            let expanded = crate::tui::ui::viewport::toggle_prompt_history_expanded();
+            app.set_status_notice(if expanded {
+                "Prompt history: showing more previous prompts (Alt+E to collapse)"
+            } else {
+                "Prompt history: collapsed"
+            });
+            true
+        }
         _ => false,
     }
 }

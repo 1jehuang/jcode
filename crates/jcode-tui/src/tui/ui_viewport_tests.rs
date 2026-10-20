@@ -124,3 +124,14 @@ fn copy_badge_alt_label_uses_trimmed_config_override() {
     );
     assert_eq!(super::copy_badge_alt_label_from_config("⌥"), "⌥");
 }
+
+#[test]
+fn expanded_prompt_preview_lists_recent_offscreen_prompts_oldest_first() {
+    let starts: Vec<usize> = (0..10).map(|i| i * 10).collect();
+    let texts: Vec<String> = (0..10).map(|i| format!("prompt  {i}\nline")).collect();
+    // Scroll 75: prompts 0..=7 start above the viewport.
+    let items = super::expanded_prompt_preview_items(&starts, &texts, 75, 0);
+    assert_eq!(items.len(), super::EXPANDED_PROMPT_PREVIEW_COUNT);
+    assert_eq!(items.first().unwrap().0, "3");
+    assert_eq!(items.last().unwrap(), &("8".to_string(), "prompt 7 line".to_string()));
+}

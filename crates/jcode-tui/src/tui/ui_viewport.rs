@@ -1269,7 +1269,42 @@ pub(super) fn draw_messages(
         frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
     }
 
-    if crate::config::config().display.prompt_preview && scroll > 0 {
+    if crate::config::config().display.prompt_preview && scroll > 0 && prompt_history_expanded() {
+        let items = expanded_prompt_preview_items(
+            wrapped_user_prompt_starts,
+            user_prompt_texts,
+            scroll,
+            preview_start + app.compacted_hidden_user_prompts(),
+        );
+        if !items.is_empty() {
+            let dim_style = Style::default().dim();
+            let width = content_area.width.saturating_sub(1) as usize;
+            let lines: Vec<Line<'static>> = items
+                .into_iter()
+                .map(|(num, text)| {
+                    let mut line = Line::from(vec![
+                        Span::styled(num, dim_style.fg(dim_color()).bg(user_bg())),
+                        Span::styled("› ", dim_style.fg(user_color()).bg(user_bg())),
+                        Span::styled(text, dim_style.fg(user_text()).bg(user_bg())),
+                    ]);
+                    if line.width() > width {
+                        truncate_line_in_place_to_width(&mut line, width.saturating_sub(1));
+                        line.spans
+                            .push(Span::styled("…", dim_style.fg(dim_color()).bg(user_bg())));
+                    }
+                    line
+                })
+                .collect();
+            let preview_area = Rect {
+                x: content_area.x,
+                y: render_area.y,
+                width: content_area.width.saturating_sub(1),
+                height: lines.len() as u16,
+            };
+            clear_area(frame, preview_area);
+            frame.render_widget(Paragraph::new(lines), preview_area);
+        }
+    } else if crate::config::config().display.prompt_preview && scroll > 0 {
         let last_offscreen_prompt_idx =
             lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
 
@@ -1514,6 +1549,15 @@ fn compute_prompt_preview_line_count(
     area_width: u16,
     prompt_number_offset: usize,
 ) -> u16 {
+    if prompt_history_expanded() {
+        return expanded_prompt_preview_items(
+            wrapped_user_prompt_starts,
+            user_prompt_texts,
+            scroll,
+            prompt_number_offset,
+        )
+        .len() as u16;
+    }
     let last_offscreen = lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
     let Some(prompt_order) = last_offscreen else {
         return 0;
@@ -1531,6 +1575,46 @@ fn compute_prompt_preview_line_count(
     let text_flat = prompt_text.replace('\n', " ");
     let display_width = UnicodeWidthStr::width(text_flat.as_str());
     if display_width > content_width { 2 } else { 1 }
+}
+
+/// Number of previous prompts shown when the expanded prompt history (Alt+E) is on.
+const EXPANDED_PROMPT_PREVIEW_COUNT: usize = 6;
+
+static PROMPT_HISTORY_EXPANDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn prompt_history_expanded() -> bool {
+    PROMPT_HISTORY_EXPANDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Toggle the expanded previous-prompt band. Returns the new state.
+pub(crate) fn toggle_prompt_history_expanded() -> bool {
+    !PROMPT_HISTORY_EXPANDED.fetch_xor(true, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Last few offscreen prompts, oldest first, as `(number, flattened text)`.
+fn expanded_prompt_preview_items(
+    wrapped_user_prompt_starts: &[usize],
+    user_prompt_texts: &[String],
+    scroll: usize,
+    prompt_number_offset: usize,
+) -> Vec<(String, String)> {
+    let offscreen = lower_bound(wrapped_user_prompt_starts, scroll).min(user_prompt_texts.len());
+    let mut items: Vec<(String, String)> = (0..offscreen)
+        .rev()
+        .filter_map(|idx| {
+            let text = user_prompt_texts[idx].trim();
+            (!text.is_empty()).then(|| {
+                (
+                    format!("{}", prompt_number_offset + idx + 1),
+                    text.split_whitespace().collect::<Vec<_>>().join(" "),
+                )
+            })
+        })
+        .take(EXPANDED_PROMPT_PREVIEW_COUNT)
+        .collect();
+    items.reverse();
+    items
 }
 
 fn compute_max_scroll_with_prompt_preview(
