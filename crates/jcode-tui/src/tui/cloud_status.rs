@@ -2,14 +2,14 @@
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum CloudProbeState {
+pub enum CloudProbeState {
     Loading,
     Ready,
     Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CloudStatusInfo {
+pub struct CloudStatusInfo {
     pub host: String,
     pub remote_dir: String,
     pub local_dir: Option<String>,
@@ -23,7 +23,7 @@ pub(crate) struct CloudStatusInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct CloudMachineStats {
+pub struct CloudMachineStats {
     pub hostname: Option<String>,
     pub cpu_percent: Option<f64>,
     pub cpu_count: Option<u32>,
