@@ -410,7 +410,7 @@ fn swarm_strip_stands_down_through_dock_blinks() {
 
 /// The swarm dock widget renders the compact summary at the cell level:
 /// place it through the real `calculate_placements` + `render_all` path into
-/// a TestBackend and assert the summary + progress bar landed inside the
+/// a TestBackend and assert the agent summary landed inside the
 /// placement rect.
 #[test]
 fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
@@ -421,7 +421,6 @@ fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
     let data = crate::tui::info_widget::InfoWidgetData {
         swarm_info: Some(crate::tui::info_widget::SwarmInfo {
             managed_members: vec![coordinator, strip_member("s1", "reviewer", "completed")],
-            plan_progress: Some((3, 2, 7)),
             ..Default::default()
         }),
         ..Default::default()
@@ -466,8 +465,8 @@ fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
         "expected agents tally inside dock rect, got:\n{dock_text}"
     );
     assert!(
-        dock_text.contains("nodes 3/7"),
-        "expected node progress on dock border, got:\n{dock_text}"
+        !dock_text.contains("nodes "),
+        "plan progress must not appear in the dock, got:\n{dock_text}"
     );
     assert!(
         dock_text.contains("researcher") && dock_text.contains("reviewer"),

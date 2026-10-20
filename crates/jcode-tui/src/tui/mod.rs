@@ -987,7 +987,7 @@ pub trait TuiState {
     fn client_update_available(&self) -> bool;
     /// Whether a newer server binary is available (remote mode)
     fn server_update_available(&self) -> Option<bool>;
-    /// Get info widget data (todos, client count, etc.)
+    /// Get info widget data (runtime, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
 
     /// Whether the inline swarm gallery band should be shown above the chat.

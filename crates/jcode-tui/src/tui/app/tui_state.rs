@@ -1557,22 +1557,6 @@ impl crate::tui::TuiState for App {
             Some(self.session.id.as_str())
         };
 
-        let todos_are_swarm_plan = self.swarm_enabled && !self.swarm_plan_items.is_empty();
-        let (todos, todo_goals) =
-            if crate::config::config().display.pin_todos && !todos_are_swarm_plan {
-                // The pinned band is the single source of truth while enabled. Do
-                // not duplicate the same session todos in a margin or overview
-                // info widget.
-                (Vec::new(), Vec::new())
-            } else if todos_are_swarm_plan {
-                (
-                    crate::tui::info_widget::swarm_plan_todos(&self.swarm_plan_items),
-                    Vec::new(),
-                )
-            } else {
-                gather_todos_and_goals_for_session(session_id)
-            };
-
         let context_snapshot = self.context_snapshot();
         let context_info = if let Some(context_info) = context_snapshot.info.clone() {
             (context_info.total_chars > 0).then_some(context_info)
@@ -1698,7 +1682,7 @@ impl crate::tui::TuiState for App {
             };
 
             // Dock data: the agents this session actually manages (spawn
-            // subtree), the shared panel selection/focus, and plan progress.
+            // subtree) and the shared panel selection/focus.
             // This is what the SwarmStatus widget renders. Computed outside
             // the activity gate: managing agents is itself "interesting".
             let managed_members = self.inline_swarm_members();
@@ -1709,22 +1693,6 @@ impl crate::tui::TuiState for App {
                 || client_count.is_some()
                 || !managed_members.is_empty()
             {
-                let plan_progress = if self.swarm_plan_items.is_empty() {
-                    None
-                } else {
-                    let total = self.swarm_plan_items.len() as u32;
-                    let done = self
-                        .swarm_plan_items
-                        .iter()
-                        .filter(|item| matches!(item.status.as_str(), "completed" | "done"))
-                        .count() as u32;
-                    let running = self
-                        .swarm_plan_items
-                        .iter()
-                        .filter(|item| matches!(item.status.as_str(), "running" | "running_stale"))
-                        .count() as u32;
-                    Some((done, running, total))
-                };
                 Some(crate::tui::info_widget::SwarmInfo {
                     session_count,
                     subagent_status,
@@ -1738,7 +1706,6 @@ impl crate::tui::TuiState for App {
                             .min(managed_members.len().saturating_sub(1))
                     },
                     focused: self.swarm_panel_focused,
-                    plan_progress,
                     spinner_frame: (self.animation_elapsed()
                         * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
                         as usize,
@@ -1874,9 +1841,6 @@ impl crate::tui::TuiState for App {
                 self.remote_startup_phase.is_some(),
                 crate::usage::remote_account_usage_received(),
             ),
-            todos,
-            todo_goals,
-            todos_are_swarm_plan,
             context_info,
             context_info_stale: !context_snapshot.fresh,
             queue_mode: Some(self.queue_mode),

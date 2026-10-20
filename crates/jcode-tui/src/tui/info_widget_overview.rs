@@ -3,12 +3,9 @@ use super::info_widget::{
     is_traceworthy_memory_event, model_info_height,
 };
 
-pub(crate) const MAX_TODO_LINES: usize = 12;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InfoPageKind {
     CompactOnly,
-    TodosExpanded,
     MemoryExpanded,
 }
 
@@ -40,16 +37,6 @@ pub(crate) fn compute_page_layout(
     }
 
     let mut candidates: Vec<InfoPage> = Vec::new();
-    let todos_compact = compact_todos_height(data);
-
-    let todos_expanded = expanded_todos_height(data);
-    if todos_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::TodosExpanded,
-            height: compact_height - todos_compact + todos_expanded,
-        });
-    }
-
     let memory_compact = compact_memory_height(data);
     let memory_expanded = expanded_memory_height(data);
     if memory_expanded > 0 {
@@ -87,10 +74,6 @@ pub(crate) fn compute_page_layout(
         max_page_height,
         show_dots,
     }
-}
-
-fn compact_todos_height(data: &InfoWidgetData) -> u16 {
-    if data.todos.is_empty() { 0 } else { 2 }
 }
 
 fn compact_memory_height(data: &InfoWidgetData) -> u16 {
@@ -174,27 +157,12 @@ fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
 /// counts) are not sections here, only the detail behind them.
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
     model_info_height(data)
-        + compact_todos_height(data)
         + compact_memory_height(data)
         + compact_background_height(data)
         + compact_usage_height(data)
         + compact_kv_cache_height(data)
         + changes_section_height(data)
         + u16::from(data.cloud_info.is_some())
-}
-
-fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
-    if data.todos.is_empty() {
-        return 0;
-    }
-
-    let available_lines = MAX_TODO_LINES.saturating_sub(1);
-    let todo_lines = data.todos.len().min(available_lines);
-    let mut height = 1 + u16::try_from(todo_lines).unwrap_or(u16::MAX);
-    if data.todos.len() > available_lines {
-        height += 1;
-    }
-    height
 }
 
 fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
@@ -221,7 +189,6 @@ fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{InfoPageKind, compute_page_layout};
-    use crate::todo::TodoItem;
     use crate::tui::info_widget::{InfoWidgetData, MemoryInfo};
     use std::collections::HashMap;
 
@@ -241,22 +208,8 @@ mod tests {
     }
 
     #[test]
-    fn compute_page_layout_keeps_multiple_expanded_pages_when_height_allows() {
+    fn compute_page_layout_only_offers_non_plan_pages() {
         let data = InfoWidgetData {
-            todos: vec![TodoItem {
-                stage: None,
-                details: None,
-                group: None,
-                content: "ship refactor".to_string(),
-                status: "pending".to_string(),
-                priority: "high".to_string(),
-                id: "todo-1".to_string(),
-                blocked_by: Vec::new(),
-                assigned_to: None,
-                confidence: None,
-                completion_confidence: None,
-                confidence_history: Vec::new(),
-            }],
             memory_info: Some(MemoryInfo {
                 total_count: 3,
                 project_count: 2,
@@ -270,14 +223,8 @@ mod tests {
 
         let layout = compute_page_layout(&data, 40, 8);
 
-        assert!(layout.pages.len() >= 2);
-        assert!(layout.show_dots);
-        assert!(
-            layout
-                .pages
-                .iter()
-                .any(|page| page.kind == InfoPageKind::TodosExpanded)
-        );
+        assert_eq!(layout.pages.len(), 1);
+        assert!(!layout.show_dots);
         assert!(
             layout
                 .pages

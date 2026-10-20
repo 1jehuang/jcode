@@ -271,6 +271,50 @@ fn pinned_todos_payload_refreshes_and_clears_with_config_and_todos() {
 }
 
 #[test]
+fn session_todos_and_swarm_plan_are_not_info_widget_data() {
+    let _env_lock = crate::storage::lock_test_env();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    let content = "PLAN_INFO_MUST_NOT_APPEAR";
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo("t1", content, "in_progress")],
+    )
+    .unwrap();
+    // The private list remains available to transcript cards and tools.
+    assert_eq!(crate::todo::load_todos(&session_id).unwrap()[0].content, content);
+    app.toggle_todo_card();
+    assert!(app.display_messages.iter().any(|message| {
+        message.role == "todos" && message.content.contains(content)
+    }));
+    let assert_no_plan = |app: &App| {
+        let info = app.info_widget_data();
+        assert!(!format!("{info:?}").contains(content));
+        assert!(
+            info.available_widgets()
+                .iter()
+                .all(|kind| { !matches!(kind.as_str(), "todos" | "plan") })
+        );
+    };
+    assert_no_plan(&app);
+    app.swarm_enabled = true;
+    app.swarm_plan_items = vec![crate::plan::PlanItem {
+        id: "task-1".into(),
+        content: content.into(),
+        status: "running".into(),
+        priority: "high".into(),
+        subsystem: None,
+        file_scope: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    }];
+    assert_no_plan(&app);
+    assert_eq!(app.swarm_plan_items[0].content, content);
+    crate::todo::save_todos(&session_id, &[]).unwrap();
+    invalidate_todos_cache(&session_id);
+}
+
+#[test]
 fn pinned_todos_are_omitted_from_info_widgets() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin = PinTodosEnvGuard::enable();
@@ -283,9 +327,12 @@ fn pinned_todos_are_omitted_from_info_widgets() {
     .unwrap();
 
     let info = app.info_widget_data();
-    assert!(info.todos.is_empty());
-    assert!(info.todo_goals.is_empty());
-    assert!(!info.has_data_for(crate::tui::info_widget::WidgetKind::Todos));
+    assert!(
+        info.available_widgets()
+            .iter()
+            .all(|kind| !matches!(kind.as_str(), "todos" | "plan"))
+    );
+    assert!(!format!("{info:?}").contains("only in pinned band"));
 
     crate::todo::save_todos(&session_id, &[]).unwrap();
 }
