@@ -72,6 +72,38 @@ fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
     }
 }
 
+/// How a todo call wrote, for measuring whether agents use incremental edits
+/// instead of resending the list. Counted locally in
+/// `~/.jcode/stats/todo-write-modes.json`; nothing leaves the machine.
+fn todo_write_mode(input: &Value) -> &'static str {
+    let has = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
+    match (has("todos"), has("update") || has("add") || has("remove")) {
+        (true, _) => "full",
+        (false, true) => "patch",
+        (false, false) if has("goals") || has("plan") => "assessment",
+        _ => "read",
+    }
+}
+
+fn record_todo_write_mode(input: &Value) {
+    static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_guard) = COUNTER_LOCK.lock() else {
+        return;
+    };
+    let mode = todo_write_mode(input);
+    let Ok(dir) = crate::storage::jcode_dir().map(|dir| dir.join("stats")) else {
+        return;
+    };
+    let path = dir.join("todo-write-modes.json");
+    let mut counts: HashMap<String, u64> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    *counts.entry(mode.to_string()).or_default() += 1;
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = crate::storage::write_json_fast(&path, &counts);
+}
+
 /// Turn incremental edits into a full `todos` list so every downstream rule
 /// (status validation, confidence history, gates, lane and plan sync) runs on
 /// one path. `update` changes only the given fields of todos matched by `id`;
@@ -136,7 +168,14 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         let target = todo.as_object_mut().expect("stored todo is an object");
         for (key, value) in fields {
             if key != "id" {
-                target.insert(key.clone(), value.clone());
+                // `phase`/`lane` are the card's words for `stage`/`group`;
+                // write the canonical key so an alias never sits beside it.
+                let key = match key.as_str() {
+                    "phase" | "wave" => "stage",
+                    "lane" => "group",
+                    other => other,
+                };
+                target.insert(key.to_string(), value.clone());
             }
         }
     }
@@ -834,15 +873,12 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read or update structured todo items and optional goal-level assessments. \
-         Use this tool VERY frequently, far more than feels necessary. The user watches \
-         todo progress live, so a stale list looks like stalled work. For any task with \
-         more than one step: write the full plan before starting, mark an item \
-         in_progress before working on it, mark it completed the moment it is done \
-         (never batch completions), and add newly discovered work as soon as you find it. \
-         Write the full list once with `todos`; after that use `update` (by id) to change \
-         status or fields, `add` for new work, and `remove` rarely, instead of resending \
-         the whole list. Expect to call this after nearly every meaningful step."
+        "Read or update todos and goal assessments. For multi-step work, write the plan \
+         once with `todos`. Then use `update` by id for status/field changes and `add` \
+         for new work. Reserve full replacement for restructuring; remove rarely. \
+         Mark work in_progress before starting and completed as soon as it is done. \
+         Keep the live list current after meaningful steps. Use short titles, with \
+         longer context in details. Organize parallel lanes within sequential phases."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -902,14 +938,14 @@ impl Tool for TodoTool {
                                 "type": "string",
                                 "description": "ID."
                             },
-                            "group": {
+                            "lane": {
                                 "type": "string",
                                 "description": "Optional lane name: one lane per coherent goal; todos in a lane run in order and one swarm agent owns a lane. Omit for flat list."
                             },
-                            "stage": {
+                            "phase": {
                                 "type": "integer",
                                 "minimum": 1,
-                                "description": "Optional phase (1, 2, 3...). Phase 2 starts after phase 1 is done. Inside a phase, lanes (todos sharing a group) run in parallel. Omit when steps must happen in list order."
+                                "description": "Optional phase (1, 2, 3...). Phase 2 starts after phase 1 is done. Inside a phase, lanes (todos sharing a lane) run in parallel. Omit when steps must happen in list order."
                             },
                             "confidence": {
                                 "type": "string",
@@ -1007,6 +1043,7 @@ impl Tool for TodoTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        record_todo_write_mode(&input);
         let input = apply_todo_patch(input, || {
             serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
                 .unwrap_or(Value::Array(Vec::new()))
@@ -1148,6 +1185,10 @@ mod tests {
             .get("properties")
             .and_then(|v| v.as_object())
             .expect("todo item should advertise properties");
+        assert!(item_props.contains_key("phase"));
+        assert!(item_props.contains_key("lane"));
+        assert!(!item_props.contains_key("stage"));
+        assert!(!item_props.contains_key("group"));
         assert!(item_props.contains_key("confidence"));
         assert!(item_props.contains_key("completion_confidence"));
         assert!(!item_props.contains_key("closed_feedback_loop"));
@@ -1824,6 +1865,57 @@ mod tests {
     /// ungrouped goal unconditionally (not only as a group header), so an
     /// ungrouped goal left over from a previous flat todo list is exactly what
     /// the reporter saw frozen in the panel.
+    #[tokio::test]
+    async fn patch_mode_accepts_phase_and_lane_and_counts_write_modes() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "todo-phase-lane";
+        let tool = TodoTool::new();
+
+        // Full write using the card's words.
+        tool.execute(
+            json!({"todos": [{"content": "a", "status": "pending", "priority": "high",
+                              "id": "a", "confidence": "plausible",
+                              "phase": 2, "lane": "parser"}]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("full write with phase/lane");
+        let todos = load_todos(session).unwrap();
+        assert_eq!(todos[0].stage, Some(2));
+        assert_eq!(todos[0].group.as_deref(), Some("parser"));
+
+        // Patch moving it with the same words.
+        tool.execute(
+            json!({"update": [{"id": "a", "phase": 3, "lane": "ui"}]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("patch with phase/lane");
+        let todos = load_todos(session).unwrap();
+        assert_eq!(todos[0].stage, Some(3));
+        assert_eq!(todos[0].group.as_deref(), Some("ui"));
+
+        tool.execute(json!({}), test_ctx(session))
+            .await
+            .expect("read");
+        let counts: HashMap<String, u64> = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("stats/todo-write-modes.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(counts.get("full"), Some(&1));
+        assert_eq!(counts.get("patch"), Some(&1));
+        assert_eq!(counts.get("read"), Some(&1));
+
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     #[tokio::test]
     async fn patch_mode_updates_adds_and_removes_without_resending_the_list() {
         let _guard = crate::storage::lock_test_env();

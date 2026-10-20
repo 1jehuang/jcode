@@ -438,7 +438,8 @@ pub struct TodoItem {
     /// Optional group label. Todos that share a group are displayed together
     /// under a single header. Use one group per coherent goal; when work is
     /// steered into a new area, start a new group instead of renaming.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also accepted as `lane`: the lane this todo belongs to.
+    #[serde(default, alias = "lane", skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     /// Forward-looking evidence state that this todo can be completed
     /// correctly. Legacy sessions stored a 0-100 score; numbers map onto the
@@ -469,6 +470,7 @@ pub struct TodoItem {
     #[serde(
         default,
         alias = "wave",
+        alias = "phase",
         deserialize_with = "deserialize_optional_stage",
         skip_serializing_if = "Option::is_none"
     )]
