@@ -30,11 +30,11 @@ pub struct BackgroundTaskRow {
 pub mod backend;
 mod cloud_git;
 mod cloud_status;
-mod info_widget_cloud;
 pub(crate) mod color_support;
 mod core;
 pub(crate) mod fuzzy;
 pub mod herdr;
+mod info_widget_cloud;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.
