@@ -1756,6 +1756,10 @@ struct CommunicateInput {
     /// Required and nonblank for the explicit `spawn` action.
     #[serde(default)]
     label: Option<String>,
+    /// Phase (todo `stage`) a spawned worker's lane joins. Defaults to the
+    /// active phase.
+    #[serde(default, alias = "stage")]
+    phase: Option<u32>,
 }
 
 impl CommunicateInput {
@@ -1885,7 +1889,12 @@ impl Tool for CommunicateTool {
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn: agent chip label (e.g. 'auth refactor'). For set_swarm_label: the new unique label."
+                    "description": "Required for spawn: the worker's lane name (e.g. 'auth refactor'). Each spawned worker owns that lane in your todo list (created from the prompt if missing); its todo list is the lane and syncs only it. For set_swarm_label: the new unique label."
+                },
+                "phase": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "For spawn: which phase the worker's lane belongs to. Defaults to the active phase."
                 },
                 "working_dir": {
                     "type": "string",
@@ -1976,7 +1985,7 @@ impl Tool for CommunicateTool {
                 },
                 "plan_items": {
                     "type": "array",
-                    "description": "Plan items for propose_plan. launch runs your todo list instead: each group in a stage is one lane owned by one agent whose todo list is that lane; lanes run in parallel, later stages wait.",
+                    "description": "Plan items for propose_plan. launch runs your todo list instead: each lane in a phase is owned by one agent whose todo list is that lane; lanes run in parallel, later phases wait.",
                     "items": {
                         "type": "object",
                         "additionalProperties": true
@@ -2469,6 +2478,37 @@ impl Tool for CommunicateTool {
 
             "spawn" => {
                 let label = params.required_spawn_label()?;
+                // Every spawned worker owns one lane in the coordinator's todo
+                // list: the lane named `label` in `phase` (default: the active
+                // phase), created from the prompt when it does not exist. The
+                // worker's own todo list is that lane and syncs only it.
+                let prompt = params.spawn_initial_message();
+                let lane_id = {
+                    let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
+                    let title = prompt
+                        .as_deref()
+                        .and_then(|prompt| prompt.lines().map(str::trim).find(|l| !l.is_empty()))
+                        .map(|line| line.chars().take(60).collect::<String>())
+                        .unwrap_or_else(|| label.clone());
+                    let (updated, lane_id) = crate::todo::stages::ensure_spawn_lane(
+                        &todos,
+                        &label,
+                        params.phase,
+                        &title,
+                        prompt.as_deref(),
+                        &{
+                            let mut n = todos.len() + 1;
+                            while todos.iter().any(|t| t.id == format!("lane-{n}")) {
+                                n += 1;
+                            }
+                            format!("lane-{n}")
+                        },
+                    );
+                    if updated != todos {
+                        crate::todo::save_todos(&ctx.session_id, &updated)?;
+                    }
+                    lane_id
+                };
                 let request = Request::CommSpawn {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -2487,10 +2527,18 @@ impl Tool for CommunicateTool {
                     Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
                         if !new_session_id.is_empty() =>
                     {
-                        Ok(
-                            ToolOutput::new(format!("Spawned new agent: {}", new_session_id))
-                                .with_metadata(serde_json::json!({"session_id": new_session_id})),
-                        )
+                        crate::server::swarm_todo_link::link_assignment(
+                            &ctx.session_id,
+                            &lane_id,
+                            "",
+                            &new_session_id,
+                        );
+                        Ok(ToolOutput::new(format!(
+                            "Spawned new agent: {new_session_id}"
+                        ))
+                        .with_metadata(
+                            serde_json::json!({"session_id": new_session_id, "lane": lane_id}),
+                        ))
                     }
                     Ok(response) => {
                         ensure_success(&response)?;

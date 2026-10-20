@@ -343,3 +343,122 @@ mod lane_sync_tests {
         assert_eq!(merge_worker_lane(&coordinator(), &gone, &worker), None);
     }
 }
+
+/// Phase a new lane should join when the caller did not choose one: the first
+/// phase that still has open work, else the last phase, else `None` (an
+/// unstaged list stays unstaged).
+pub fn default_phase(todos: &[TodoItem]) -> Option<u32> {
+    let refs: Vec<&TodoItem> = todos.iter().collect();
+    let stages = stage_layout(&refs);
+    let open = |stage: &TodoStage| {
+        stage
+            .item_indices()
+            .any(|i| !matches!(refs[i].status.as_str(), "completed" | "cancelled"))
+    };
+    stages
+        .iter()
+        .find(|stage| stage.number.is_some() && open(stage))
+        .or_else(|| stages.iter().rev().find(|stage| stage.number.is_some()))
+        .and_then(|stage| stage.number)
+}
+
+/// Ensure the coordinator's todo list has a lane named `lane` in `phase` for a
+/// spawned worker, returning the updated list and the lane id. An existing
+/// lane with that group in that phase is adopted as is; otherwise one item is
+/// appended from `title` / `details`. Every spawned worker therefore owns
+/// exactly one lane, and that lane is all it syncs.
+pub fn ensure_spawn_lane(
+    todos: &[TodoItem],
+    lane: &str,
+    phase: Option<u32>,
+    title: &str,
+    details: Option<&str>,
+    id_hint: &str,
+) -> (Vec<TodoItem>, String) {
+    let lane = lane.trim();
+    let phase = phase.or_else(|| default_phase(todos));
+    let probe = TodoItem {
+        id: id_hint.to_string(),
+        group: Some(lane.to_string()),
+        stage: phase,
+        ..Default::default()
+    };
+    let id = lane_id(&probe);
+    if todos.iter().any(|todo| lane_id(todo) == id) {
+        return (todos.to_vec(), id);
+    }
+    let mut todos = todos.to_vec();
+    let title = title.trim();
+    todos.push(TodoItem {
+        id: id_hint.to_string(),
+        content: if title.is_empty() {
+            lane.to_string()
+        } else {
+            title.to_string()
+        },
+        status: "pending".to_string(),
+        priority: "high".to_string(),
+        group: Some(lane.to_string()),
+        stage: phase,
+        details: details
+            .map(str::trim)
+            .filter(|details| !details.is_empty())
+            .map(str::to_string),
+        ..Default::default()
+    });
+    (todos, id)
+}
+
+#[cfg(test)]
+mod spawn_lane_tests {
+    use super::*;
+
+    fn item(id: &str, status: &str, stage: Option<u32>, group: Option<&str>) -> TodoItem {
+        TodoItem {
+            id: id.into(),
+            content: id.into(),
+            status: status.into(),
+            stage,
+            group: group.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn new_lane_joins_the_active_phase_by_default() {
+        let todos = vec![
+            item("a", "completed", Some(1), Some("x")),
+            item("b", "pending", Some(2), Some("y")),
+            item("c", "pending", Some(3), Some("z")),
+        ];
+        let (out, id) = ensure_spawn_lane(&todos, "docs", None, "Write docs", Some("README"), "s1");
+        assert_eq!(id, "lane:2:docs");
+        let added = out.last().unwrap();
+        assert_eq!(added.stage, Some(2));
+        assert_eq!(added.group.as_deref(), Some("docs"));
+        assert_eq!(added.content, "Write docs");
+        assert_eq!(added.details.as_deref(), Some("README"));
+    }
+
+    #[test]
+    fn explicit_phase_wins_and_existing_lane_is_adopted() {
+        let todos = vec![
+            item("a", "pending", Some(1), Some("x")),
+            item("b", "pending", Some(3), Some("docs")),
+        ];
+        let (out, id) = ensure_spawn_lane(&todos, "docs", Some(3), "ignored", None, "s1");
+        assert_eq!(id, "lane:3:docs");
+        assert_eq!(out, todos, "existing lane adopted without new items");
+        let (out, id) = ensure_spawn_lane(&todos, "docs", Some(1), "New", None, "s2");
+        assert_eq!(id, "lane:1:docs");
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn unstaged_list_gets_an_unstaged_lane() {
+        let todos = vec![item("a", "pending", None, None)];
+        let (out, id) = ensure_spawn_lane(&todos, "fix", None, "Fix it", None, "s1");
+        assert_eq!(id, "lane::fix");
+        assert_eq!(out.last().unwrap().stage, None);
+    }
+}

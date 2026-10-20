@@ -778,12 +778,12 @@ impl Tool for TodoTool {
                             },
                             "group": {
                                 "type": "string",
-                                "description": "Optional group label; one group per coherent goal, new direction = new group. Omit for flat list."
+                                "description": "Optional lane name: one lane per coherent goal; todos in a lane run in order and one swarm agent owns a lane. Omit for flat list."
                             },
                             "stage": {
                                 "type": "integer",
                                 "minimum": 1,
-                                "description": "Optional stage (1, 2, 3...). Stage 2 starts after stage 1 is done. Inside a stage, todos sharing a group form a lane that runs in order, and different groups run in parallel. Omit when steps must happen in list order."
+                                "description": "Optional phase (1, 2, 3...). Phase 2 starts after phase 1 is done. Inside a phase, lanes (todos sharing a group) run in parallel. Omit when steps must happen in list order."
                             },
                             "confidence": {
                                 "type": "string",
