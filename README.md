@@ -9,8 +9,6 @@
   <img src="assets/brand/jcode-mark.svg" alt="jcode halftone donut logo" width="160">
 </picture>
 
-<br><br>
-
 # jcode
 
 <p>
