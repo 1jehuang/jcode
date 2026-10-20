@@ -119,6 +119,8 @@ pub enum WidgetKind {
     Tips,
     /// Changes: the dirty file list (the status line owns branch and counts)
     GitStatus,
+    /// Native SSH cloud machine and workspace details.
+    CloudVm,
     /// Commits: recent history on the current branch
     Commits,
 }
@@ -138,6 +140,7 @@ impl WidgetKind {
             WidgetKind::Compaction => 9,
             WidgetKind::BackgroundTasks => 10,
             WidgetKind::GitStatus => 11,
+            WidgetKind::CloudVm => 12,
             WidgetKind::Commits => 12,
             WidgetKind::SwarmStatus => 12, // Session list - lower priority
             WidgetKind::AmbientMode => 13, // Scheduled agent - lower priority
@@ -162,6 +165,7 @@ impl WidgetKind {
             WidgetKind::ModelInfo => Side::Left,
             WidgetKind::Tips => Side::Left,
             WidgetKind::GitStatus => Side::Left,
+            WidgetKind::CloudVm => Side::Left,
             WidgetKind::Commits => Side::Left,
         }
     }
@@ -183,6 +187,7 @@ impl WidgetKind {
             WidgetKind::ModelInfo => 1,
             WidgetKind::Tips => 3,
             WidgetKind::GitStatus => 1,
+            WidgetKind::CloudVm => 16,
             WidgetKind::Commits => 1,
         }
     }
@@ -201,6 +206,7 @@ impl WidgetKind {
             WidgetKind::Compaction,
             WidgetKind::BackgroundTasks,
             WidgetKind::GitStatus,
+            WidgetKind::CloudVm,
             WidgetKind::Commits,
             WidgetKind::SwarmStatus,
             WidgetKind::AmbientMode,
@@ -224,6 +230,7 @@ impl WidgetKind {
             WidgetKind::ModelInfo => "model",
             WidgetKind::Tips => "tips",
             WidgetKind::GitStatus => "git",
+            WidgetKind::CloudVm => "cloud",
             WidgetKind::Commits => "commits",
         }
     }
@@ -744,6 +751,11 @@ pub struct InfoWidgetData {
     pub is_compacting: bool,
     /// Git repository status
     pub git_info: Option<GitInfo>,
+    /// Machine telemetry is only present for native SSH attachments.
+    pub(crate) cloud_info: Option<super::cloud_status::CloudStatusInfo>,
+    /// Live transport startup/reconnect state overrides cached probe readiness.
+    pub(crate) cloud_connection: Option<String>,
+    pub(crate) cloud_working: bool,
     /// Independent local and VM snapshots when this TUI is attached over SSH.
     pub dual_git_info: Option<DualGitInfo>,
     /// Absolute paths the agent edited this session (edit-style tool calls),
@@ -774,6 +786,7 @@ impl InfoWidgetData {
             && self.swarm_info.is_none()
             && self.background_info.is_none()
             && self.diagrams.is_empty()
+            && self.cloud_info.is_none()
             && self.workspace_rows.is_empty()
     }
 
@@ -831,6 +844,9 @@ impl InfoWidgetData {
                 {
                     sections += 1;
                 }
+                if self.cloud_info.is_some() {
+                    sections += 1;
+                }
                 // Only useful as a "join" mode when there are multiple sections.
                 sections >= 2
             }
@@ -871,6 +887,7 @@ impl InfoWidgetData {
                         .map(changes_has_data)
                         .unwrap_or(false)
             }
+            WidgetKind::CloudVm => self.cloud_info.is_some(),
             WidgetKind::Commits => self
                 .git_info
                 .as_ref()
@@ -1688,6 +1705,7 @@ fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -
         WidgetKind::ModelInfo => render_model_widget(data, inner),
         WidgetKind::Tips => render_tips_widget(inner),
         WidgetKind::GitStatus => render_changes_framed(data, inner),
+        WidgetKind::CloudVm => super::info_widget_cloud::render_cloud_widget(data, inner),
         WidgetKind::Commits => render_commits_widget(data, inner),
     };
     framed.settle()
@@ -2196,6 +2214,10 @@ fn render_sections(
         lines.extend(render_git_widget(data, inner));
     }
 
+    lines.extend(super::info_widget_cloud::render_cloud_summary(
+        data,
+        inner.width,
+    ));
     lines
 }
 

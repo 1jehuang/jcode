@@ -29,6 +29,8 @@ pub struct BackgroundTaskRow {
 
 pub mod backend;
 mod cloud_git;
+mod cloud_status;
+mod info_widget_cloud;
 pub(crate) mod color_support;
 mod core;
 pub(crate) mod fuzzy;

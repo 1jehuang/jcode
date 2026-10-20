@@ -1956,6 +1956,12 @@ impl crate::tui::TuiState for App {
                 false
             },
             git_info: gather_git_info(),
+            cloud_info: crate::tui::cloud_status::gather(),
+            cloud_connection: self.remote_startup_phase.as_ref().map(|phase| match phase {
+                super::RemoteStartupPhase::Reconnecting { .. } => "Reconnecting".to_string(),
+                _ => "Connecting".to_string(),
+            }),
+            cloud_working: self.is_processing,
             dual_git_info: crate::tui::cloud_git::gather(),
             agent_edited: self.agent_edited_paths(),
         }

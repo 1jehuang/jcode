@@ -180,6 +180,7 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_usage_height(data)
         + compact_kv_cache_height(data)
         + changes_section_height(data)
+        + u16::from(data.cloud_info.is_some())
 }
 
 fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
