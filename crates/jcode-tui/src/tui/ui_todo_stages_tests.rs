@@ -266,3 +266,30 @@ fn unknown_agent_falls_back_to_name_emoji_and_never_overflows() {
         "{rows:?}"
     );
 }
+
+#[test]
+fn lanes_of_later_phases_are_dimmed() {
+    crate::tui::markdown::set_center_code_blocks(false);
+    let payload = serde_json::json!({ "todos": grid_todos(), "plan": {}, "goals": [] });
+    let msg = DisplayMessage::todos(payload.to_string());
+    let lines = render_pinned_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let style_of = |needle: &str| {
+        let line = lines
+            .iter()
+            .find(|line| line.spans.iter().any(|span| span.content.contains(needle)))
+            .unwrap();
+        line.spans
+            .iter()
+            .find(|span| span.content.contains(needle))
+            .unwrap()
+            .style
+    };
+    let dim = Some(rgb(105, 100, 135));
+    assert_ne!(style_of("parser").fg, dim, "active phase lane stays bright");
+    assert_eq!(
+        style_of("integration").fg,
+        dim,
+        "later phase lane is dimmed"
+    );
+    assert_eq!(style_of("Build and commit").fg, dim);
+}

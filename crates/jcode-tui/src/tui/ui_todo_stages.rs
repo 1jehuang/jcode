@@ -446,19 +446,28 @@ pub(crate) fn push_stage_lines(
     let stages = ordered_layout(todos);
     let current = current_stage(&stages, todos);
     let shown = |index: usize| stages.len() < 2 || !current.is_some_and(|current| index < current);
-    let lanes: Vec<&crate::todo::stages::TodoLane> = stages
+    let lanes: Vec<(bool, &crate::todo::stages::TodoLane)> = stages
         .iter()
         .enumerate()
         .filter(|(index, _)| shown(*index))
-        .flat_map(|(_, stage)| stage.lanes.iter())
+        .flat_map(|(index, stage)| {
+            // Lanes in phases after the active one are dimmed, matching the
+            // dimmed phase labels on the header row.
+            let later = current.is_some_and(|current| index > current);
+            stage.lanes.iter().map(move |lane| (later, lane))
+        })
         .collect();
     let items_of = |lane: &crate::todo::stages::TodoLane| -> Vec<&crate::todo::TodoItem> {
         lane.items.iter().map(|&i| todos[i]).collect()
     };
-    let strip_width = lanes.iter().map(|lane| lane.items.len()).max().unwrap_or(0);
+    let strip_width = lanes
+        .iter()
+        .map(|(_, lane)| lane.items.len())
+        .max()
+        .unwrap_or(0);
     let name_width = lanes
         .iter()
-        .map(|lane| {
+        .map(|(_, lane)| {
             width_of(&lane_name_spans(
                 lane.group.as_deref(),
                 &items_of(lane),
@@ -469,7 +478,7 @@ pub(crate) fn push_stage_lines(
         .unwrap_or(0)
         .min(inner_width / 3);
 
-    for lane in lanes {
+    for (later, lane) in lanes {
         let items = items_of(lane);
         let mut row = lane_strip_spans(&items, strip_width);
         if name_width > 0 {
@@ -497,8 +506,17 @@ pub(crate) fn push_stage_lines(
                 Style::default().fg(todo_meta_color()),
             ));
         }
+        if later {
+            row = row.into_iter().map(dim_span).collect();
+        }
         lines.push(todo_card_line(row, base_indent, inner_width));
     }
+}
+
+/// Grey out a span for a phase that has not started yet, keeping emoji intact.
+fn dim_span(span: Span<'static>) -> Span<'static> {
+    let style = span.style.fg(rgb(105, 100, 135)).not_bold();
+    Span::styled(span.content, style)
 }
 
 /// One todo row for a list without stages, with an optional agent chip.
