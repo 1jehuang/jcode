@@ -24,6 +24,7 @@ fn agent(name: &str, status: &str, activity: Option<&str>, age: Option<u64>) -> 
         status: status.to_string(),
         activity: activity.map(str::to_string),
         age_secs: age,
+        activity_age_secs: age,
     }
 }
 
@@ -96,7 +97,12 @@ fn header_labels_each_phase_with_its_pips() {
     // led by its status.
     assert_eq!(
         &trimmed[1..],
-        &["●  read types", "●  stage field", "●  pinned band", "○  integrate"],
+        &[
+            "●  read types",
+            "●  stage field",
+            "●  pinned band",
+            "○  integrate"
+        ],
         "{rows:?}"
     );
     let joined = rows.join("\n");
@@ -297,4 +303,81 @@ fn lanes_of_later_phases_are_dimmed() {
     assert!(bold(style_of("parser")) && bold(style_of("phase 1")));
     assert_eq!(style_of("integration").fg, style_of("phase 2").fg);
     assert!(!bold(style_of("integration")) && !bold(style_of("phase 2")));
+}
+
+fn live_lane_todos() -> Vec<TodoItem> {
+    let mut todos = grid_todos();
+    todos[1].assigned_to = Some("fox".into()); // parser: in progress
+    todos[3].assigned_to = Some("sheep".into()); // ui: all done
+    todos
+}
+
+#[test]
+fn live_worker_dot_spins_and_quiet_worker_turns_amber() {
+    let agents = vec![
+        agent("fox", "running", Some("justrust test"), Some(12)),
+        agent("sheep", "completed", None, Some(300)),
+    ];
+    let rows = render(&live_lane_todos(), &agents, 120);
+    let parser = rows.iter().find(|r| r.contains("parser")).unwrap();
+    assert!(
+        parser.starts_with("  ●") && parser.contains(LIVE_DOT_SENTINEL),
+        "{rows:?}"
+    );
+    assert!(parser.contains("justrust test · 12s"), "{rows:?}");
+    assert!(
+        !rows
+            .iter()
+            .find(|r| r.contains("ui 🐑"))
+            .unwrap()
+            .contains(LIVE_DOT_SENTINEL),
+        "finished lane does not spin: {rows:?}"
+    );
+
+    // The placeholder is swapped for a spinner frame on draw.
+    crate::tui::markdown::set_center_code_blocks(false);
+    let payload = serde_json::json!({
+        "todos": live_lane_todos(), "plan": {}, "goals": [], "agents": agents
+    });
+    let msg = DisplayMessage::todos(payload.to_string());
+    let mut lines = render_pinned_todos_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    animate_lane_spinners(&mut lines);
+    let text: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+        .collect();
+    assert!(!text.contains(LIVE_DOT_SENTINEL), "sentinel replaced");
+
+    // Quiet for over two minutes: amber age instead of a plain one.
+    let quiet = vec![agent("fox", "running", Some("justrust test"), Some(200))];
+    let rows = render(&live_lane_todos(), &quiet, 120);
+    assert!(
+        rows.iter().any(|r| r.contains("justrust test · quiet 3m")),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn roster_groups_working_agents_before_finished_ones() {
+    let agents = vec![
+        agent("fox", "running", Some("x"), Some(3)),
+        agent("sheep", "completed", None, Some(300)),
+    ];
+    let rows = render(&live_lane_todos(), &agents, 120);
+    let header = &rows[0];
+    let fox = header.find('🦊').unwrap();
+    let done = header.find("· ✓").unwrap();
+    let sheep = header.find('🐑').unwrap();
+    assert!(fox < done && done < sheep, "{header}");
+    // Nobody working: just the done group.
+    let all_done = vec![
+        agent("fox", "completed", None, None),
+        agent("sheep", "completed", None, None),
+    ];
+    let rows = render(&live_lane_todos(), &all_done, 120);
+    assert!(
+        rows[0].contains("✓ 🦊🐑") && !rows[0].contains('·'),
+        "{:?}",
+        rows[0]
+    );
 }

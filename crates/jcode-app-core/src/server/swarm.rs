@@ -801,6 +801,9 @@ async fn broadcast_swarm_status_now(
                         } else {
                             Some(m.runtime.elapsed_secs.unwrap_or(0))
                         },
+                        activity_age_secs: crate::session_metrics::last_activity_age_secs(
+                            &m.session_id,
+                        ),
                     },
                 })
         })

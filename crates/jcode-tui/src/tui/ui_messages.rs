@@ -4,6 +4,7 @@ use gmail_drafts::*;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
+pub(crate) use todo_stages::animate_lane_spinners;
 use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
 
 use super::*;

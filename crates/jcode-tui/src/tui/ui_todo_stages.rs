@@ -26,6 +26,9 @@ pub(crate) struct TodoCardAgent {
     pub activity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub age_secs: Option<u64>,
+    /// Seconds since the worker's last tool event or token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_age_secs: Option<u64>,
 }
 
 impl TodoCardAgent {
@@ -59,6 +62,7 @@ impl TodoCardAgent {
             status: member.status.clone(),
             activity,
             age_secs: member.status_age_secs,
+            activity_age_secs: member.runtime.activity_age_secs,
         }
     }
 
@@ -99,13 +103,16 @@ fn fallback_icon(assigned_to: &str) -> String {
     }
 }
 
-/// Roster of agent emoji for the card header, e.g. `🦊🐑🐢`.
+/// Header roster of swarm agents, split into who is still on the job and who
+/// has finished: `🦊🐑  · ✓ 🦀🐢`. Working agents (running, queued, blocked,
+/// failed) come first with their state marks; agents whose work is done are
+/// grouped after a dim `· ✓`. An agent counts as done when every todo it owns
+/// is finished, or its status is terminal-success.
 pub(crate) fn agent_roster_spans(
     todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
 ) -> Vec<Span<'static>> {
-    let mut seen: Vec<String> = Vec::new();
-    let mut spans = Vec::new();
+    let mut order: Vec<(String, String)> = Vec::new();
     for todo in todos {
         let Some(assigned) = todo.assigned_to.as_deref() else {
             continue;
@@ -114,22 +121,52 @@ pub(crate) fn agent_roster_spans(
         let key = agent
             .map(|agent| agent.session_id.clone())
             .unwrap_or_else(|| assigned.to_string());
-        if seen.contains(&key) {
-            continue;
+        if !order.iter().any(|(existing, _)| *existing == key) {
+            order.push((key, assigned.to_string()));
         }
-        seen.push(key);
+    }
+    let mut working = Vec::new();
+    let mut done = Vec::new();
+    for (_, assigned) in &order {
+        let agent = agents.iter().find(|agent| agent.matches(assigned));
         let icon = agent
             .map(TodoCardAgent::icon)
             .unwrap_or_else(|| fallback_icon(assigned));
-        let failed =
-            agent.is_some_and(|agent| matches!(agent.status.as_str(), "failed" | "crashed"));
-        spans.push(Span::raw(icon));
-        if failed {
-            spans.push(Span::styled("✗", Style::default().fg(todo_failure_color())));
+        let owns_open_work = todos.iter().any(|todo| {
+            !is_done(todo)
+                && todo.assigned_to.as_deref().is_some_and(|owner| {
+                    owner == assigned || agent.is_some_and(|agent| agent.matches(owner))
+                })
+        });
+        let status = agent.map(|agent| agent.status.as_str()).unwrap_or("");
+        let finished = matches!(status, "completed" | "done" | "stopped")
+            || (!owns_open_work && !matches!(status, "failed" | "crashed"));
+        if finished {
+            done.push(Span::raw(icon));
+        } else {
+            working.push(Span::raw(icon));
+            if let Some((mark, color)) = agent_state_mark(status) {
+                working.push(Span::styled(mark, Style::default().fg(color)));
+            }
         }
     }
-    if !spans.is_empty() {
-        spans.insert(0, Span::raw("  "));
+    let mut spans = Vec::new();
+    if working.is_empty() && done.is_empty() {
+        return spans;
+    }
+    spans.push(Span::raw("  "));
+    spans.extend(working.iter().cloned());
+    if !done.is_empty() {
+        let dim = Style::default().fg(later_phase_color());
+        spans.push(Span::styled(
+            if working.is_empty() {
+                "✓ "
+            } else {
+                "  · ✓ "
+            },
+            dim,
+        ));
+        spans.extend(done);
     }
     spans
 }
@@ -195,6 +232,45 @@ fn pip_span(todo: &crate::todo::TodoItem) -> Span<'static> {
         _ => ("○", rgb(90, 90, 105)),
     };
     Span::styled(glyph, Style::default().fg(color))
+}
+
+/// Placeholder written into cached card lines for a dot whose worker is live.
+/// [`animate_lane_spinners`] swaps it for the current spinner frame on every
+/// draw, so the line cache stays valid while the dot still moves. A narrow
+/// one-cell glyph that is also a sensible static fallback (`◍`).
+pub(crate) const LIVE_DOT_SENTINEL: &str = "\u{25CD}";
+
+/// Worker states that mean the agent is actively running right now.
+fn is_live_status(status: &str) -> bool {
+    jcode_tui_render::swarm_gallery::is_active_status(status)
+}
+
+/// No tool event or token for this long reads as "quiet" (amber).
+const QUIET_AFTER_SECS: u64 = 120;
+
+/// Replace live-dot placeholders with the wall-clock spinner frame. Cheap:
+/// only lines that contain the placeholder are touched.
+pub(crate) fn animate_lane_spinners(lines: &mut [Line<'static>]) {
+    let frame = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| {
+            (d.as_millis() / jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAME_MS as u128)
+                as usize
+        })
+        .unwrap_or(0);
+    let frames = jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAMES;
+    let glyph = if crate::perf::tui_policy().enable_decorative_animations {
+        frames[frame % frames.len()]
+    } else {
+        "●"
+    };
+    for line in lines {
+        for span in &mut line.spans {
+            if span.content.contains(LIVE_DOT_SENTINEL) {
+                span.content = span.content.replace(LIVE_DOT_SENTINEL, glyph).into();
+            }
+        }
+    }
 }
 
 /// Header pips labelled per phase: `phase 1 ●●●  phase 2 ●○  phase 3 ○○`.
@@ -356,12 +432,104 @@ fn lane_name_spans(
 fn lane_strip_spans(
     lane_todos: &[&crate::todo::TodoItem],
     strip_width: usize,
+    live: bool,
 ) -> Vec<Span<'static>> {
-    let mut strip: Vec<Span<'static>> = lane_todos.iter().map(|todo| pip_span(todo)).collect();
+    // The lane's active step spins while its worker is running, so a frozen
+    // dot means a frozen worker.
+    let mut strip: Vec<Span<'static>> = lane_todos
+        .iter()
+        .map(|todo| {
+            let mut span = pip_span(todo);
+            if live && todo.status == "in_progress" {
+                span.content = LIVE_DOT_SENTINEL.into();
+            }
+            span
+        })
+        .collect();
     strip.push(Span::raw(
         " ".repeat(strip_width.saturating_sub(lane_todos.len()) + 2),
     ));
     strip
+}
+
+/// The lane's live worker, if any (first assigned agent that is running).
+fn lane_live_agent<'a>(
+    lane_todos: &[&crate::todo::TodoItem],
+    agents: &'a [TodoCardAgent],
+) -> Option<&'a TodoCardAgent> {
+    lane_todos
+        .iter()
+        .filter_map(|todo| todo.assigned_to.as_deref())
+        .filter_map(|assigned| agents.iter().find(|agent| agent.matches(assigned)))
+        .find(|agent| is_live_status(&agent.status))
+}
+
+/// Lane-end note: the worker's current intent and how long since it last did
+/// anything, e.g. `running justrust test · 12s`. Past [`QUIET_AFTER_SECS`]
+/// the age reads `quiet 3m` in amber. Failed / blocked workers say so.
+fn lane_note_spans(
+    lane_todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
+) -> Vec<Span<'static>> {
+    let meta = Style::default().fg(todo_meta_color());
+    let assigned: Vec<&TodoCardAgent> = lane_todos
+        .iter()
+        .filter_map(|todo| todo.assigned_to.as_deref())
+        .filter_map(|assigned| agents.iter().find(|agent| agent.matches(assigned)))
+        .collect();
+    if let Some(agent) = assigned
+        .iter()
+        .find(|agent| matches!(agent.status.as_str(), "failed" | "crashed"))
+    {
+        let reason = agent.activity.clone().unwrap_or_else(|| "failed".into());
+        return vec![Span::styled(
+            format!("✗ {reason}"),
+            Style::default().fg(todo_failure_color()),
+        )];
+    }
+    if let Some(agent) = assigned
+        .iter()
+        .find(|agent| matches!(agent.status.as_str(), "blocked" | "waiting_network"))
+    {
+        let reason = agent
+            .activity
+            .clone()
+            .unwrap_or_else(|| "needs input".into());
+        return vec![Span::styled(
+            format!("⏸ {reason}"),
+            Style::default().fg(rgb(225, 165, 90)),
+        )];
+    }
+    let Some(agent) = lane_live_agent(lane_todos, agents) else {
+        return Vec::new();
+    };
+    let mut spans = Vec::new();
+    if let Some(activity) = agent.activity.as_deref().filter(|a| !a.is_empty()) {
+        spans.push(Span::styled(activity.to_string(), meta));
+    }
+    let age = agent.activity_age_secs.or(agent.age_secs);
+    if let Some(age) = age {
+        let sep = if spans.is_empty() { "" } else { " · " };
+        if age >= QUIET_AFTER_SECS {
+            spans.push(Span::styled(sep, meta));
+            spans.push(Span::styled(
+                format!(
+                    "quiet {}",
+                    jcode_tui_render::swarm_gallery::humanize_age(age)
+                ),
+                Style::default().fg(rgb(225, 165, 90)),
+            ));
+        } else if age >= 2 {
+            spans.push(Span::styled(
+                format!(
+                    "{sep}{}",
+                    jcode_tui_render::swarm_gallery::humanize_age(age)
+                ),
+                meta,
+            ));
+        }
+    }
+    spans
 }
 
 /// Titles never shrink below this many cells before earlier finished titles
@@ -482,7 +650,8 @@ pub(crate) fn push_stage_lines(
         // dimmed (with its titles and dots) while the phase has not started.
         let later = current.is_some_and(|current| phase > current);
         let items = items_of(lane);
-        let mut row = lane_strip_spans(&items, strip_width);
+        let live = lane_live_agent(&items, agents).is_some();
+        let mut row = lane_strip_spans(&items, strip_width, live);
         if name_width > 0 {
             let name = lane_name_spans(
                 lane.group.as_deref(),
@@ -497,21 +666,26 @@ pub(crate) fn push_stage_lines(
             row.push(Span::raw(" ".repeat(pad)));
         }
         let room = inner_width.saturating_sub(width_of(&row));
-        let titles = lane_titles_spans(&items, room);
+        // The live note (intent, liveness) gets up to a third of the row so it
+        // is not always crowded out by titles; titles take the rest. On narrow
+        // rows the note is dropped entirely rather than wrapping.
+        let note = lane_note_spans(&items, agents);
+        let note_width = width_of(&note);
+        let note_budget = if note.is_empty() || room < 40 {
+            0
+        } else {
+            (note_width + 2).min(room / 3).min(40)
+        };
+        let titles = lane_titles_spans(&items, room.saturating_sub(note_budget));
         let titles_width = width_of(&titles);
         row.extend(titles);
-        let (_, note) = lane_agent_chip(&items, agents);
-        let note_room = room.saturating_sub(titles_width + 2);
-        if !note.is_empty() && note_room >= 6 {
-            let shown = if note.width() > note_room {
-                format!("{}…", truncate_to_width(&note, note_room - 1))
-            } else {
-                note
-            };
-            row.push(Span::styled(
-                format!("  {shown}"),
-                Style::default().fg(todo_meta_color()),
-            ));
+        if note_budget >= 8 {
+            let space = room.saturating_sub(titles_width).min(note_budget);
+            let mut note_line = vec![Span::raw("  ")];
+            note_line.extend(note);
+            row.extend(
+                super::truncate_line_with_ellipsis_to_width(&Line::from(note_line), space).spans,
+            );
         }
         if later {
             row = row.into_iter().map(dim_span).collect();

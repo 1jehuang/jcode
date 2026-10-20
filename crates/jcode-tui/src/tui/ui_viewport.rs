@@ -1496,6 +1496,8 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
     if card_lines.is_empty() {
         return (Vec::new(), None);
     }
+    let mut card_lines = card_lines;
+    super::messages::animate_lane_spinners(&mut card_lines);
 
     // Band budget: about a third of the viewport.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);

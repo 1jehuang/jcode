@@ -670,6 +670,10 @@ pub struct SwarmMemberRuntime {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_secs: Option<u64>,
+    /// Seconds since the worker's last tool event or token, so clients can
+    /// tell a working agent from one that has gone quiet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_age_secs: Option<u64>,
 }
 
 impl SwarmMemberRuntime {
@@ -679,6 +683,7 @@ impl SwarmMemberRuntime {
             && self.auth_method.is_none()
             && self.effort.is_none()
             && self.elapsed_secs.is_none()
+            && self.activity_age_secs.is_none()
     }
 }
 
