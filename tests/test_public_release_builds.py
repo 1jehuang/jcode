@@ -120,6 +120,21 @@ class PublicReleaseTests(unittest.TestCase):
                         self.assertNotIn('install_justrust', result.stdout)
                         self.assertNotIn('justrust <build>', result.stdout)
 
+    def test_provenance_check_drains_version_output(self):
+        source = (ROOT / 'scripts/build_linux_compat.sh').read_text()
+        fragment = source[source.index('if [[ -n "$git_hash" ]]; then'):]
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / 'jcode.bin'
+            binary.write_text('#!/usr/bin/env python3\n'
+                              'import sys\n'
+                              'print("version\\tv1.0.0 (abc123)", flush=True)\n'
+                              'sys.stdout.write("details\\t" + "x" * 1000000)\n')
+            binary.chmod(0o755)
+            env = dict(os.environ, git_hash='abc123', out_dir=temp, artifact='jcode')
+            result = subprocess.run(['/bin/bash', '-euo', 'pipefail', '-c', fragment],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_cloud_artifact_gate_rejects_missing_protocol_and_newer_glibc(self):
         source = (ROOT / "scripts/build_linux_compat.sh").read_text()
         fragment = source[source.index('        built="$CARGO_TARGET_DIR/'):]
