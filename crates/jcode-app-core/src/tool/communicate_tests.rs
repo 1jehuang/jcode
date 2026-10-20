@@ -520,7 +520,7 @@ fn canonical_swarm_action_maps_common_synonyms() {
     assert_eq!(canonical_swarm_action("read_messages"), "read");
     assert_eq!(canonical_swarm_action("send"), "message");
     assert_eq!(canonical_swarm_action("msg"), "message");
-    assert_eq!(canonical_swarm_action("direct_message"), "dm");
+    assert_eq!(canonical_swarm_action("direct_message"), "message");
     assert_eq!(canonical_swarm_action("announce"), "broadcast");
     assert_eq!(canonical_swarm_action("agents"), "list");
     assert_eq!(canonical_swarm_action("plan"), "plan_status");
@@ -538,7 +538,7 @@ fn canonical_swarm_action_is_case_insensitive_and_trims() {
 fn canonical_swarm_action_passes_through_known_and_unknown_actions() {
     // Real actions are unchanged.
     assert_eq!(canonical_swarm_action("spawn"), "spawn");
-    assert_eq!(canonical_swarm_action("dm"), "dm");
+    assert_eq!(canonical_swarm_action("dm"), "message");
     assert_eq!(canonical_swarm_action("assign_role"), "assign_role");
     // Genuinely unknown actions are returned unchanged for normal validation.
     assert_eq!(canonical_swarm_action("totally_made_up"), "totally_made_up");
@@ -1062,7 +1062,6 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         "launch",
         "spawn",
         "message",
-        "dm",
         "report",
         "status",
         "plan_status",

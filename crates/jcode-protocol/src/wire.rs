@@ -589,6 +589,11 @@ pub enum Request {
         /// `to_session` is omitted. Channels and broadcasts never cross swarms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_swarm: Option<String>,
+        /// Refuse an untargeted send (no `to_session`, `channel`, or
+        /// `to_swarm`) unless the sender is the swarm coordinator, so a worker
+        /// that forgets `to_session` gets an error instead of broadcasting.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        require_target: bool,
     },
 
     /// List every live swarm (id, label, coordinator, member count) so agents

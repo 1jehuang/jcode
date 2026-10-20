@@ -441,6 +441,7 @@ pub(super) async fn handle_lightweight_control_request(
             wake,
             tldr,
             to_swarm,
+            require_target,
         } => {
             handle_comm_message(
                 id,
@@ -452,6 +453,7 @@ pub(super) async fn handle_lightweight_control_request(
                 wake,
                 tldr,
                 to_swarm,
+                require_target,
                 &client_event_tx,
                 sessions,
                 soft_interrupt_queues,
