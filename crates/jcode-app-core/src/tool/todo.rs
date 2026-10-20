@@ -757,7 +757,7 @@ impl Tool for TodoTool {
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "Task."
+                                "description": "Task. Keep it short, ideally under 40 characters; todos render side by side."
                             },
                             "status": {
                                 "type": "string",
