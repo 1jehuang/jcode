@@ -2312,6 +2312,29 @@ impl Server {
                         }
                     }
                 }
+                BusEvent::LaneEdited(edit) => {
+                    // The coordinator steers a worker by editing its lane; the
+                    // worker's todo list already matches, so just tell it.
+                    let message = format!(
+                        "[lane updated by coordinator] Your todo list (lane {}) changed: {}. Re-read it with the todo tool and continue from it.",
+                        edit.lane, edit.summary
+                    );
+                    if !queue_soft_interrupt_for_session(
+                        &edit.worker,
+                        message,
+                        false,
+                        SoftInterruptSource::System,
+                        &soft_interrupt_queues,
+                        &sessions,
+                    )
+                    .await
+                    {
+                        crate::logging::warn(&format!(
+                            "Failed to notify {} of lane edit {}",
+                            edit.worker, edit.lane
+                        ));
+                    }
+                }
                 BusEvent::BackgroundTaskCompleted(task) => {
                     dispatch_background_task_completion(
                         &task,

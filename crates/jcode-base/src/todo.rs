@@ -436,7 +436,11 @@ fn sync_lanes_after_save(session_id: &str, todos: &[TodoItem]) {
         let result = if link.worker == session_id {
             load_todos(&link.coordinator).and_then(|coordinator_todos| {
                 match stages::merge_worker_lane(&coordinator_todos, &link, todos) {
-                    Some(merged) => write_todos(&link.coordinator, &merged),
+                    Some(merged) => {
+                        write_todos(&link.coordinator, &merged)?;
+                        publish_todos(&link.coordinator, merged);
+                        Ok(())
+                    }
                     None => Ok(()),
                 }
             })
@@ -444,10 +448,20 @@ fn sync_lanes_after_save(session_id: &str, todos: &[TodoItem]) {
             let lane = stages::lane_todos_for_worker(todos, &link.lane);
             load_todos(&link.worker).and_then(|current| {
                 if lane.is_empty() || current == lane {
-                    Ok(())
-                } else {
-                    write_todos(&link.worker, &lane)
+                    return Ok(());
                 }
+                write_todos(&link.worker, &lane)?;
+                let summary = lane_change_summary(&current, &lane);
+                publish_todos(&link.worker, lane);
+                crate::bus::Bus::global().publish(crate::bus::BusEvent::LaneEdited(
+                    crate::bus::LaneEdited {
+                        coordinator: link.coordinator.clone(),
+                        worker: link.worker.clone(),
+                        lane: link.lane.clone(),
+                        summary,
+                    },
+                ));
+                Ok(())
             })
         } else {
             Ok(())
@@ -458,6 +472,50 @@ fn sync_lanes_after_save(session_id: &str, todos: &[TodoItem]) {
                 session_id, link.lane
             ));
         }
+    }
+}
+
+/// Let live views (swarm strip, pinned todos, plan resync) see a mirrored
+/// rewrite exactly like a direct todo-tool save.
+fn publish_todos(session_id: &str, todos: Vec<TodoItem>) {
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::TodoUpdated(crate::bus::TodoEvent {
+        session_id: session_id.to_string(),
+        todos,
+    }));
+}
+
+/// One-line description of how the coordinator changed a worker's lane.
+pub fn lane_change_summary(before: &[TodoItem], after: &[TodoItem]) -> String {
+    let mut parts = Vec::new();
+    let added: Vec<&str> = after
+        .iter()
+        .filter(|todo| !before.iter().any(|old| old.id == todo.id))
+        .map(|todo| todo.content.as_str())
+        .collect();
+    let removed: Vec<&str> = before
+        .iter()
+        .filter(|todo| !after.iter().any(|new| new.id == todo.id))
+        .map(|todo| todo.content.as_str())
+        .collect();
+    let changed: Vec<&str> = after
+        .iter()
+        .filter(|todo| {
+            before
+                .iter()
+                .find(|old| old.id == todo.id)
+                .is_some_and(|old| old != *todo)
+        })
+        .map(|todo| todo.content.as_str())
+        .collect();
+    for (label, items) in [("added", added), ("removed", removed), ("changed", changed)] {
+        if !items.is_empty() {
+            parts.push(format!("{label}: {}", items.join(", ")));
+        }
+    }
+    if parts.is_empty() {
+        "reordered".to_string()
+    } else {
+        parts.join("; ")
     }
 }
 
@@ -475,6 +533,21 @@ mod lane_sync_tests {
             group: Some(group.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn lane_change_summary_names_added_removed_and_changed() {
+        let a = laned("a", 1, "g");
+        let mut b = laned("b", 1, "g");
+        let c = laned("c", 1, "g");
+        let before = vec![a.clone(), b.clone()];
+        b.status = "completed".into();
+        let after = vec![b, c];
+        assert_eq!(
+            lane_change_summary(&before, &after),
+            "added: task c; removed: task a; changed: task b"
+        );
+        assert_eq!(lane_change_summary(&before, &before), "reordered");
     }
 
     #[test]
@@ -535,6 +608,10 @@ mod lane_sync_tests {
         assert!(worker_view.iter().all(|t| t.id != "u1"));
         // No echo: the coordinator list is exactly what it saved.
         assert_eq!(load_todos(boss).unwrap(), edited);
+        assert_eq!(
+            lane_change_summary(&mine, &worker_view),
+            "changed: add lexer + parser tests"
+        );
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
