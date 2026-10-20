@@ -355,10 +355,22 @@ fn dock_is_attention(status: &str) -> bool {
     dock_status_rank(status) == 0
 }
 
-/// What the agent is doing, in the fewest words available: the error or
-/// blocker when it needs attention, otherwise the latest status detail, the
-/// last line it streamed, or the task it was spawned for.
+/// The dock owns lifecycle health and alerts. Task titles and ordinary live
+/// activity belong to the todo lanes, so do not echo them here.
 fn dock_activity(member: &SwarmMemberStatus) -> String {
+    let detail = member.detail.as_deref().unwrap_or_default().trim();
+    let is_message = detail.starts_with("DM from ") || detail.starts_with("Cross-swarm DM from ");
+    if !dock_is_attention(&member.status) && !is_message {
+        if jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+            && let Some(age) = member.runtime.activity_age_secs.filter(|age| *age >= 120)
+        {
+            return format!(
+                "quiet {}",
+                jcode_tui_render::swarm_gallery::humanize_age(age)
+            );
+        }
+        return member.status.replace('_', " ");
+    }
     let nonempty = |s: &Option<String>| {
         s.as_deref()
             .map(str::trim)

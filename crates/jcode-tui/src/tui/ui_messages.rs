@@ -1402,9 +1402,10 @@ fn render_todos_message_with_cap(
             for (group, items) in &groups {
                 let label = group.as_deref().unwrap_or("other");
                 let goal = todo_card_goal_for_group(&goals, group.as_deref());
-                lines.push(render_todo_goal_header(
+                lines.push(todo_stages::render_group_header(
                     label,
                     items,
+                    &agents,
                     base_indent,
                     inner_width,
                 ));
@@ -1604,26 +1605,6 @@ fn push_todo_status_pips<'a>(
     for _ in 0..open_pips {
         spans.push(Span::styled("○", Style::default().fg(rgb(90, 90, 105))));
     }
-}
-
-fn render_todo_goal_header(
-    label: &str,
-    todos: &[&crate::todo::TodoItem],
-    base_indent: &str,
-    inner_width: usize,
-) -> Line<'static> {
-    let label_width = label.width();
-    let mut spans = vec![Span::styled(
-        label.to_string(),
-        Style::default().fg(todo_group_color()).bold(),
-    )];
-    spans.push(Span::raw("  "));
-    push_stage_pips(
-        &mut spans,
-        todos,
-        inner_width.saturating_sub(label_width + 2),
-    );
-    todo_card_line(spans, base_indent, inner_width)
 }
 
 /// Overall card header: progress pips (numbered per stage) plus the roster

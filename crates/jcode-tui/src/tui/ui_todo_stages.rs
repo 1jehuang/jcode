@@ -117,6 +117,25 @@ pub(crate) fn agent_roster_spans(
         let Some(assigned) = todo.assigned_to.as_deref() else {
             continue;
         };
+        // Lane headings carry ownership. Plain lists retain only owners not
+        // already represented by an active task row.
+        if todos.iter().any(|item| item.stage.is_some())
+            || todos.iter().any(|item| {
+                (item.status == "in_progress"
+                    || item
+                        .group
+                        .as_deref()
+                        .is_some_and(|group| !group.trim().is_empty()))
+                    && item.assigned_to.as_deref().is_some_and(|owner| {
+                        owner == assigned
+                            || agents
+                                .iter()
+                                .any(|agent| agent.matches(assigned) && agent.matches(owner))
+                    })
+            })
+        {
+            continue;
+        }
         let agent = agents.iter().find(|agent| agent.matches(assigned));
         let key = agent
             .map(|agent| agent.session_id.clone())
@@ -373,15 +392,27 @@ fn lane_agent_chip(
                 spans.push(Span::styled(mark, Style::default().fg(color)));
             }
             if note.is_empty() && todo.status == "in_progress" {
-                note = agent_note(agent);
+                note = agent_note(agent, lane_todos);
             }
         }
     }
     (spans, note)
 }
 
-fn agent_note(agent: &TodoCardAgent) -> String {
-    let mut note = agent.activity.clone().unwrap_or_default();
+fn activity_matches_title(activity: &str, todos: &[&crate::todo::TodoItem]) -> bool {
+    let normalized = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let activity = normalized(activity);
+    todos
+        .iter()
+        .any(|todo| activity == normalized(&todo.content))
+}
+
+fn agent_note(agent: &TodoCardAgent, todos: &[&crate::todo::TodoItem]) -> String {
+    let mut note = agent
+        .activity
+        .clone()
+        .filter(|activity| !activity_matches_title(activity, todos))
+        .unwrap_or_default();
     if let Some(age) = agent.age_secs.filter(|age| *age >= 2) {
         if !note.is_empty() {
             note.push_str(" · ");
@@ -459,6 +490,7 @@ fn lane_live_agent<'a>(
 ) -> Option<&'a TodoCardAgent> {
     lane_todos
         .iter()
+        .filter(|todo| todo.status == "in_progress")
         .filter_map(|todo| todo.assigned_to.as_deref())
         .filter_map(|assigned| agents.iter().find(|agent| agent.matches(assigned)))
         .find(|agent| is_live_status(&agent.status))
@@ -474,6 +506,7 @@ fn lane_note_spans(
     let meta = Style::default().fg(todo_meta_color());
     let assigned: Vec<&TodoCardAgent> = lane_todos
         .iter()
+        .filter(|todo| !is_done(todo))
         .filter_map(|todo| todo.assigned_to.as_deref())
         .filter_map(|assigned| agents.iter().find(|agent| agent.matches(assigned)))
         .collect();
@@ -481,7 +514,11 @@ fn lane_note_spans(
         .iter()
         .find(|agent| matches!(agent.status.as_str(), "failed" | "crashed"))
     {
-        let reason = agent.activity.clone().unwrap_or_else(|| "failed".into());
+        let reason = agent
+            .activity
+            .clone()
+            .filter(|activity| !activity_matches_title(activity, lane_todos))
+            .unwrap_or_else(|| "failed".into());
         return vec![
             Span::styled(
                 format!("✗ {reason}"),
@@ -497,6 +534,7 @@ fn lane_note_spans(
         let reason = agent
             .activity
             .clone()
+            .filter(|activity| !activity_matches_title(activity, lane_todos))
             .unwrap_or_else(|| "needs input".into());
         return vec![Span::styled(
             format!("⏸ {reason}"),
@@ -507,7 +545,11 @@ fn lane_note_spans(
         return Vec::new();
     };
     let mut spans = Vec::new();
-    if let Some(activity) = agent.activity.as_deref().filter(|a| !a.is_empty()) {
+    if let Some(activity) = agent
+        .activity
+        .as_deref()
+        .filter(|a| !a.trim().is_empty() && !activity_matches_title(a, lane_todos))
+    {
         spans.push(Span::styled(activity.to_string(), meta));
     }
     let age = agent.activity_age_secs.or(agent.age_secs);
@@ -533,6 +575,43 @@ fn lane_note_spans(
         }
     }
     spans
+}
+
+/// Non-phased lanes show ownership once at the heading, never on each task.
+pub(crate) fn render_group_header(
+    label: &str,
+    todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
+    base_indent: &str,
+    inner_width: usize,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        label.to_string(),
+        Style::default().fg(todo_group_color()).bold(),
+    )];
+    let has_group = todos.iter().any(|todo| {
+        todo.group
+            .as_deref()
+            .is_some_and(|group| !group.trim().is_empty())
+    });
+    if has_group {
+        let (chip, _) = lane_agent_chip(todos, agents);
+        if !chip.is_empty() {
+            spans.push(Span::raw(" "));
+            spans.extend(chip);
+        }
+    }
+    spans.push(Span::raw("  "));
+    let room = inner_width.saturating_sub(width_of(&spans));
+    push_stage_pips(&mut spans, todos, room);
+    if has_group {
+        let note = lane_note_spans(todos, agents);
+        if !note.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.extend(note);
+        }
+    }
+    todo_card_line(spans, base_indent, inner_width)
 }
 
 /// Titles never shrink below this many cells before earlier finished titles
@@ -713,6 +792,14 @@ pub(crate) fn render_todo_item_line(
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
+    if todo.status != "in_progress"
+        || todo
+            .group
+            .as_deref()
+            .is_some_and(|group| !group.trim().is_empty())
+    {
+        return render_todo_card_item_line(todo, base_indent, inner_width);
+    }
     let Some(assigned) = todo
         .assigned_to
         .as_deref()
@@ -734,7 +821,7 @@ pub(crate) fn render_todo_item_line(
             chip.push(Span::styled(mark, Style::default().fg(color)));
         }
         if todo.status != "completed" {
-            note = agent_note(agent);
+            note = agent_note(agent, &[todo]);
         }
     }
     let chip_width = width_of(&chip);

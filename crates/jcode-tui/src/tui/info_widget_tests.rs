@@ -924,7 +924,7 @@ fn swarm_dock_surfaces_attention_and_collapses_overflow() {
 }
 
 #[test]
-fn swarm_dock_ignores_todos_and_fills_width_with_activity() {
+fn swarm_dock_shows_health_without_repeating_todo_activity() {
     let mut worker = managed_member("blowfish", "running", None);
     worker.detail = Some("You work across the toolchain and compiler runtime".to_string());
     worker.todo_items = vec![
@@ -964,18 +964,72 @@ fn swarm_dock_ignores_todos_and_fills_width_with_activity() {
         !row.contains("blowfish"),
         "no spelled-out agent name: {row}"
     );
-    assert!(row.contains("You work across"), "activity: {row}");
+    assert!(row.contains("running"), "lifecycle health: {row}");
+    assert!(
+        !row.contains("You work across"),
+        "no duplicate activity: {row}"
+    );
     assert!(
         !row.contains("Build the per-step"),
         "todo must stay out: {row}"
     );
     assert!(!row.contains("..."), "single-char ellipsis: {row}");
-    // Truncated text fills the row instead of backing off to a word boundary.
-    assert_eq!(
-        unicode_width::UnicodeWidthStr::width(row.as_str()),
-        usize::from(width),
+    // The compact health row still respects the available display cells.
+    assert!(
+        unicode_width::UnicodeWidthStr::width(row.as_str()) <= usize::from(width),
         "{row}"
     );
+}
+
+#[test]
+fn swarm_dock_preserves_messages_blockers_and_quiet_health() {
+    for (status, detail, activity_age, expected) in [
+        (
+            "running",
+            "DM from fox: tests ready",
+            0,
+            "DM from fox: tests ready",
+        ),
+        (
+            "running",
+            "Cross-swarm DM from fox: hello",
+            0,
+            "Cross-swarm DM from fox: hello",
+        ),
+        (
+            "blocked",
+            "Need approval to proceed",
+            0,
+            "Need approval to proceed",
+        ),
+        ("failed", "Tests failed", 0, "Tests failed"),
+        ("running", "Implement parser", 180, "quiet 3m"),
+        ("completed", "Implement parser", 180, "completed"),
+    ] {
+        let mut worker = managed_member("fox", status, None);
+        worker.detail = Some(detail.to_string());
+        worker.runtime.activity_age_secs = Some(activity_age);
+        let data = InfoWidgetData {
+            swarm_info: Some(SwarmInfo {
+                managed_members: vec![worker],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let framed = super::render_swarm_widget(&data, Rect::new(0, 0, 80, 5));
+        let row = lines_text_concat(&framed.lines);
+        assert!(row.contains(expected), "{status}: {row}");
+        assert!(!row.contains("streaming some work"), "{row}");
+        for width in [0, 1, 8, 14, 24] {
+            let narrow = super::render_swarm_widget(&data, Rect::new(0, 0, width, 5));
+            assert!(
+                narrow
+                    .lines
+                    .iter()
+                    .all(|line| line.width() <= width as usize)
+            );
+        }
+    }
 }
 
 /// Without managed members the legacy session-list rendering is preserved and
