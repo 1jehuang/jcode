@@ -503,6 +503,8 @@ fn test_default_swarm_prompt_mentions_model_and_list_models() {
     assert!(DEFAULT_SWARM_PROMPT.contains("list_models"));
     assert!(DEFAULT_SWARM_PROMPT.contains("model"));
     assert!(!DEFAULT_SWARM_PROMPT.contains("Pass `effort`"));
+    assert!(DEFAULT_SWARM_PROMPT.contains("Spawn workers to implement"));
+    assert!(DEFAULT_SWARM_PROMPT.contains("Do not spawn reviewers, auditors"));
     assert!(DEFAULT_SWARM_PROMPT.contains("Only the root session may spawn agents"));
     assert!(!DEFAULT_SWARM_PROMPT.contains("swarm-deep"));
 }

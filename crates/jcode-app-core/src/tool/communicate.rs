@@ -1882,7 +1882,7 @@ impl Tool for CommunicateTool {
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn: agent chip label (e.g. 'api reviewer'). For set_swarm_label: the new unique label."
+                    "description": "Required for spawn: agent chip label (e.g. 'auth refactor'). For set_swarm_label: the new unique label."
                 },
                 "working_dir": {
                     "type": "string",
