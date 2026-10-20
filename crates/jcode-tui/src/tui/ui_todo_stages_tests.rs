@@ -292,4 +292,11 @@ fn lanes_of_later_phases_are_dimmed() {
         "later phase lane is dimmed"
     );
     assert_eq!(style_of("Build and commit").fg, dim);
+    // Lane names wear their phase label's colour and weight.
+    let bold =
+        |style: ratatui::style::Style| style.add_modifier.contains(ratatui::style::Modifier::BOLD);
+    assert_eq!(style_of("parser").fg, style_of("phase 1").fg);
+    assert!(bold(style_of("parser")) && bold(style_of("phase 1")));
+    assert_eq!(style_of("integration").fg, style_of("phase 2").fg);
+    assert!(!bold(style_of("integration")) && !bold(style_of("phase 2")));
 }

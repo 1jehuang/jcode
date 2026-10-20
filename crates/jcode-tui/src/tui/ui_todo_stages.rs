@@ -147,10 +147,6 @@ fn stage_color() -> Color {
     rgb(150, 130, 210)
 }
 
-fn lane_header_color() -> Color {
-    todo_group_color()
-}
-
 fn is_done(todo: &crate::todo::TodoItem) -> bool {
     matches!(todo.status.as_str(), "completed" | "cancelled")
 }
@@ -217,11 +213,7 @@ pub(crate) fn push_stage_pips(
     }
     let stages = ordered_layout(todos);
     let current = current_stage(&stages, todos);
-    let label_style = |index: usize| match current {
-        Some(current) if index == current => Style::default().fg(stage_color()).bold(),
-        Some(current) if index > current => Style::default().fg(rgb(105, 100, 135)),
-        _ => Style::default().fg(stage_color()),
-    };
+    let label_style = |index: usize| phase_style(index, current);
     let variant = |prefix: &str, counts: bool| -> Vec<Span<'static>> {
         let mut out = Vec::new();
         for (index, stage) in stages.iter().enumerate() {
@@ -323,18 +315,31 @@ fn agent_note(agent: &TodoCardAgent) -> String {
     note
 }
 
-/// Bold group name followed by the lane's worker emoji.
+/// Style for everything that belongs to one phase: its header label and the
+/// names of its lanes share it, so a lane visibly belongs to its phase. The
+/// active phase is bold, finished phases normal, later phases dimmed.
+fn phase_style(index: usize, current: Option<usize>) -> Style {
+    match current {
+        Some(current) if index == current => Style::default().fg(stage_color()).bold(),
+        Some(current) if index > current => Style::default().fg(later_phase_color()),
+        _ => Style::default().fg(stage_color()),
+    }
+}
+
+fn later_phase_color() -> Color {
+    rgb(105, 100, 135)
+}
+
+/// Group name (styled like its phase label) followed by the worker emoji.
 fn lane_name_spans(
     group: Option<&str>,
+    style: Style,
     lane_todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
 ) -> Vec<Span<'static>> {
     let mut name = Vec::new();
     if let Some(group) = group {
-        name.push(Span::styled(
-            group.to_string(),
-            Style::default().fg(lane_header_color()).bold(),
-        ));
+        name.push(Span::styled(group.to_string(), style));
     }
     let (chip, _) = lane_agent_chip(lane_todos, agents);
     if !chip.is_empty() {
@@ -446,16 +451,11 @@ pub(crate) fn push_stage_lines(
     let stages = ordered_layout(todos);
     let current = current_stage(&stages, todos);
     let shown = |index: usize| stages.len() < 2 || !current.is_some_and(|current| index < current);
-    let lanes: Vec<(bool, &crate::todo::stages::TodoLane)> = stages
+    let lanes: Vec<(usize, &crate::todo::stages::TodoLane)> = stages
         .iter()
         .enumerate()
         .filter(|(index, _)| shown(*index))
-        .flat_map(|(index, stage)| {
-            // Lanes in phases after the active one are dimmed, matching the
-            // dimmed phase labels on the header row.
-            let later = current.is_some_and(|current| index > current);
-            stage.lanes.iter().map(move |lane| (later, lane))
-        })
+        .flat_map(|(index, stage)| stage.lanes.iter().map(move |lane| (index, lane)))
         .collect();
     let items_of = |lane: &crate::todo::stages::TodoLane| -> Vec<&crate::todo::TodoItem> {
         lane.items.iter().map(|&i| todos[i]).collect()
@@ -470,6 +470,7 @@ pub(crate) fn push_stage_lines(
         .map(|(_, lane)| {
             width_of(&lane_name_spans(
                 lane.group.as_deref(),
+                Style::default(),
                 &items_of(lane),
                 agents,
             ))
@@ -478,11 +479,19 @@ pub(crate) fn push_stage_lines(
         .unwrap_or(0)
         .min(inner_width / 3);
 
-    for (later, lane) in lanes {
+    for (phase, lane) in lanes {
+        // A lane wears its phase's colour: bold while its phase is active,
+        // dimmed (with its titles and dots) while the phase has not started.
+        let later = current.is_some_and(|current| phase > current);
         let items = items_of(lane);
         let mut row = lane_strip_spans(&items, strip_width);
         if name_width > 0 {
-            let name = lane_name_spans(lane.group.as_deref(), &items, agents);
+            let name = lane_name_spans(
+                lane.group.as_deref(),
+                phase_style(phase, current),
+                &items,
+                agents,
+            );
             let name =
                 super::truncate_line_with_ellipsis_to_width(&Line::from(name), name_width).spans;
             let pad = name_width.saturating_sub(width_of(&name)) + 2;
@@ -515,7 +524,7 @@ pub(crate) fn push_stage_lines(
 
 /// Grey out a span for a phase that has not started yet, keeping emoji intact.
 fn dim_span(span: Span<'static>) -> Span<'static> {
-    let style = span.style.fg(rgb(105, 100, 135)).not_bold();
+    let style = span.style.fg(later_phase_color()).not_bold();
     Span::styled(span.content, style)
 }
 
