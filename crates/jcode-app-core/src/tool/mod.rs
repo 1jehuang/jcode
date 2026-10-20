@@ -32,7 +32,6 @@ mod goal;
 pub mod inflight;
 mod invalid;
 mod jcode_docs;
-mod ls;
 pub mod mcp;
 mod memory;
 mod name_suggestions;
@@ -419,7 +418,6 @@ impl Registry {
                 "apply_patch",
                 apply_patch::ApplyPatchTool::new,
             );
-            Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
             Self::insert_tool_timed(
                 &mut m,

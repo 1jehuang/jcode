@@ -308,6 +308,19 @@ async fn test_discover_tools_not_registered_when_sponsors_disabled() {
 }
 
 #[tokio::test]
+async fn directory_listings_use_bash_instead_of_a_dedicated_tool() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let names = registry.tool_names().await;
+
+    assert!(names.iter().any(|name| name == "bash"));
+    assert!(!names.iter().any(|name| name == "ls"));
+    let definitions = registry.definitions(None).await;
+    assert!(definitions.iter().any(|tool| tool.name == "bash"));
+    assert!(!definitions.iter().any(|tool| tool.name == "ls"));
+}
+
+#[tokio::test]
 async fn subagent_tool_is_not_registered() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
