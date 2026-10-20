@@ -92,10 +92,10 @@ fn stages_read_as_now_next_with_arrow_pips() {
         &trimmed[1..],
         &[
             "phase 2 · now",
-            "✓ stage field",
-            "● pinned band",
+            "✓  stage field",
+            "●  pinned band",
             "phase 3 · next",
-            "○ integrate"
+            "○  integrate"
         ],
         "{rows:?}"
     );
@@ -129,19 +129,19 @@ fn each_lane_is_one_row_with_tasks_left_to_right() {
     assert_eq!(trimmed[1], "phase 1 · now");
     assert_eq!(
         trimmed[2],
-        "parser       ✓ Extract lexer → ● Update callers → ○ Add lexer tests"
+        "parser       ✓●○  Extract lexer → Update callers → Add lexer tests"
     );
     assert_eq!(
         trimmed[3],
-        "ui           ✓ Rename rails → ✓ Draw lane headers"
+        "ui           ✓✓   Rename rails → Draw lane headers"
     );
-    assert_eq!(trimmed[4], "docs         ✓ Update tool desc");
+    assert_eq!(trimmed[4], "docs         ✓    Update tool desc");
     assert_eq!(trimmed[5], "phase 2 · next");
     assert_eq!(
         trimmed[6],
-        "integration  ○ Wire lanes into plan → ○ End-to-end swarm test"
+        "integration  ○○   Wire lanes into plan → End-to-end swarm test"
     );
-    assert_eq!(trimmed[7], "release      ○ Build and commit");
+    assert_eq!(trimmed[7], "release      ○    Build and commit");
     assert_eq!(rows.len(), 8);
 }
 
@@ -155,7 +155,8 @@ fn narrow_rows_fold_finished_tasks_and_never_wrap() {
     }
     let rows = render(&grid_todos(), &[], 50);
     let parser = rows.iter().find(|r| r.contains("parser")).unwrap();
-    assert!(parser.contains("✓1 → ● Update callers"), "{rows:?}");
+    // Finished titles drop first; the strip still shows them as ✓.
+    assert!(parser.contains("✓●○  Update callers"), "{rows:?}");
     let rows = render(&grid_todos(), &[], 14);
     assert!(rows[0].contains("4/6 → 0/3"), "{rows:?}");
 }

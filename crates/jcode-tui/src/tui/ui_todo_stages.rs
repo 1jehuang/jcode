@@ -416,30 +416,49 @@ fn item_cell_spans(todo: &crate::todo::TodoItem) -> Vec<Span<'static>> {
     spans
 }
 
-/// Task chain for one lane, left to right: `✓ a → ● b → ○ c`. When it does
-/// not fit, leading finished tasks fold into a `✓N` count so the active task
-/// stays visible, and the tail is cut with an ellipsis.
-fn lane_chain_spans(lane_todos: &[&crate::todo::TodoItem], width: usize) -> Vec<Span<'static>> {
+/// One lane's row body: a status strip (`✓●○`) padded to `strip_width` so the
+/// titles of every lane line up, then the titles in order (`a → b → c`),
+/// coloured by status. When too wide, leading finished titles drop first (the
+/// strip still shows them), then the tail is cut with an ellipsis.
+fn lane_chain_spans(
+    lane_todos: &[&crate::todo::TodoItem],
+    strip_width: usize,
+    width: usize,
+) -> Vec<Span<'static>> {
+    // Status glyphs sit together as one strip (`✓●○`), then the titles follow
+    // in the same order, coloured by status. No per-task icon/title pairs.
+    let mut strip: Vec<Span<'static>> = lane_todos
+        .iter()
+        .map(|todo| {
+            let mut glyph = todo_card_item_spans(todo, false);
+            glyph.remove(0);
+            let glyph = glyph.remove(0);
+            Span::styled(glyph.content.trim().to_string(), glyph.style)
+        })
+        .collect();
+    strip.push(Span::raw(
+        " ".repeat(strip_width.saturating_sub(lane_todos.len()) + 2),
+    ));
     let arrow = || Span::styled(" → ", Style::default().fg(rgb(105, 100, 135)));
+    let title = |todo: &crate::todo::TodoItem| -> Span<'static> {
+        todo_card_item_spans(todo, false)
+            .pop()
+            .unwrap_or_else(|| Span::raw(todo.content.clone()))
+    };
+    // Finished titles at the front drop first when the row is too wide; the
+    // strip still shows them as ✓.
+    let done_prefix = lane_todos.iter().take_while(|todo| is_done(todo)).count();
+    let max_skip = done_prefix.min(lane_todos.len().saturating_sub(1));
     let build = |skip: usize| -> Vec<Span<'static>> {
-        let mut spans = Vec::new();
-        if skip > 0 {
-            spans.push(Span::styled(
-                format!("✓{skip}"),
-                Style::default().fg(rgb(100, 180, 100)),
-            ));
-        }
-        for todo in &lane_todos[skip..] {
-            if !spans.is_empty() {
+        let mut spans = strip.clone();
+        for (i, todo) in lane_todos[skip..].iter().enumerate() {
+            if i > 0 {
                 spans.push(arrow());
             }
-            spans.extend(item_cell_spans(todo));
+            spans.push(title(todo));
         }
         spans
     };
-    let done_prefix = lane_todos.iter().take_while(|todo| is_done(todo)).count();
-    // Keep at least the last finished task when everything is done.
-    let max_skip = done_prefix.min(lane_todos.len().saturating_sub(1));
     let mut spans = build(0);
     for skip in 1..=max_skip {
         if width_of(&spans) <= width {
@@ -474,6 +493,14 @@ pub(crate) fn push_stage_lines(
         .unwrap_or(0)
         .min(inner_width / 3);
     let indent = if stages.len() > 1 { "  " } else { "" };
+    let strip_width = stages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| stages.len() < 2 || !current.is_some_and(|current| *index < current))
+        .flat_map(|(_, stage)| stage.lanes.iter())
+        .map(|lane| lane.items.len())
+        .max()
+        .unwrap_or(0);
 
     for (stage_index, stage) in stages.iter().enumerate() {
         // Finished phases are summarised on the header row; the body is for
@@ -510,7 +537,7 @@ pub(crate) fn push_stage_lines(
                 row.push(Span::raw(" ".repeat(pad)));
             }
             let room = inner_width.saturating_sub(width_of(&row));
-            let chain = lane_chain_spans(&items, room);
+            let chain = lane_chain_spans(&items, strip_width, room);
             let chain_width = width_of(&chain);
             row.extend(chain);
             let (_, note) = lane_agent_chip(&items, agents);
