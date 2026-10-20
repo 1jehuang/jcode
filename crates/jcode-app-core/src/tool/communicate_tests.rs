@@ -1168,6 +1168,13 @@ fn schema_advertises_supported_swarm_fields() {
         schema["properties"]["action"]["enum"]
             .as_array()
             .expect("action enum")
+            .contains(&json!("launch")),
+        "launch runs the todo list as one agent per lane"
+    );
+    assert!(
+        schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum")
             .contains(&json!("cleanup"))
     );
     assert!(

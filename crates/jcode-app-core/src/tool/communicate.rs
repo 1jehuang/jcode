@@ -691,14 +691,17 @@ fn try_claim_run_plan_driver(
     })
 }
 
-/// Seed an empty swarm plan from the caller's session todos.
+/// Make the swarm plan mirror the caller's todo list: one item per lane.
 ///
-/// Only runs when the plan has no items, so an explicit `propose_plan` always
-/// wins. Returns quietly when there are no open todos.
-async fn seed_plan_from_todos_if_empty(ctx: &ToolContext) -> Result<()> {
-    if fetch_plan_status(&ctx.session_id)
-        .await
-        .is_ok_and(|summary| summary.item_count > 0)
+/// `launch` calls this every time, so the plan can never drift from the
+/// todos; the server keeps the status and owner of lanes already running.
+/// The legacy `run_plan` only seeds an empty plan, so a hand-written
+/// `propose_plan` still wins there. Returns quietly with no open todos.
+async fn sync_plan_from_todos(ctx: &ToolContext, only_if_empty: bool) -> Result<()> {
+    if only_if_empty
+        && fetch_plan_status(&ctx.session_id)
+            .await
+            .is_ok_and(|summary| summary.item_count > 0)
     {
         return Ok(());
     }
@@ -1825,7 +1828,7 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["share", "share_append", "read", "message", "broadcast", "dm", "channel", "list", "list_channels", "channel_members", "list_swarms", "set_swarm_label",
                              "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
-                             "status", "report", "plan_status", "summary", "read_context", "resync_plan", "assign_task", "assign_next", "fill_slots", "run_plan", "cleanup",
+                             "status", "report", "plan_status", "summary", "read_context", "resync_plan", "assign_task", "assign_next", "fill_slots", "launch", "run_plan", "cleanup",
                              "start", "start_task", "wake", "resume", "retry", "reassign", "replace", "salvage",
                              "subscribe_channel", "unsubscribe_channel", "await_members", "list_models"],
                     "description": "Action. spawn requires label and should include prompt. list_models shows available models/routes."
@@ -1943,7 +1946,7 @@ impl Tool for CommunicateTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "For run_plan: detach as a background task (default true); false blocks until the plan resolves."
+                    "description": "For launch/run_plan: detach as a background task (default true); false blocks until the plan resolves."
                 },
                 "notify": {
                     "type": "boolean",
@@ -1960,7 +1963,7 @@ impl Tool for CommunicateTool {
                 },
                 "retain_agents": {
                     "type": "boolean",
-                    "description": "For run_plan: keep spawned workers after the plan finishes. Defaults to false."
+                    "description": "For launch/run_plan: keep spawned workers after the plan finishes. Defaults to false."
                 },
                 "wake": {
                     "type": "boolean",
@@ -1973,7 +1976,7 @@ impl Tool for CommunicateTool {
                 },
                 "plan_items": {
                     "type": "array",
-                    "description": "Plan items for propose_plan. run_plan with no plan uses your todo list instead: each group in a stage is a lane that runs in order, lanes run in parallel, later stages wait.",
+                    "description": "Plan items for propose_plan. launch runs your todo list instead: each group in a stage is one lane owned by one agent whose todo list is that lane; lanes run in parallel, later stages wait.",
                     "items": {
                         "type": "object",
                         "additionalProperties": true
@@ -2883,11 +2886,13 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "run_plan" => {
-                // No swarm plan yet: use the coordinator's own todo list as the
-                // plan. Stages run in order and each group in a stage is a lane,
-                // so lanes fan out to workers without the model writing ids.
-                seed_plan_from_todos_if_empty(&ctx).await?;
+            "launch" | "run_plan" => {
+                // The coordinator's todo list is the plan: each lane (a group
+                // within a stage) becomes one item owned by one worker, whose
+                // own todo list is the lane. `launch` re-syncs every time so
+                // the plan never drifts; legacy `run_plan` keeps a hand-written
+                // `propose_plan` by only seeding an empty plan.
+                sync_plan_from_todos(&ctx, params.action == "run_plan").await?;
                 // Background-by-default: the plan driver runs as a managed
                 // background task (progress card, bg tool, notify/wake) so the
                 // coordinating agent stays responsive. Pass background=false

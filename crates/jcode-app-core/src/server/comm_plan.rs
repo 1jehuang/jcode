@@ -118,6 +118,22 @@ pub(super) async fn handle_comm_propose_plan(
                 .entry(swarm_id.clone())
                 .or_insert_with(VersionedPlan::new);
             plan.participants.insert(req_session_id.clone());
+            // A lane plan is re-derived from the todo list on every launch;
+            // keep the status and owner of lanes already in flight so the plan
+            // mirrors the todos without forgetting running work.
+            let mut items = items.clone();
+            if !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.id.starts_with(crate::todo::stages::LANE_ID_PREFIX))
+            {
+                for item in &mut items {
+                    if let Some(previous) = plan.items.iter().find(|p| p.id == item.id) {
+                        item.status = previous.status.clone();
+                        item.assigned_to = previous.assigned_to.clone();
+                    }
+                }
+            }
             for item in &items {
                 if let Some(owner) = &item.assigned_to {
                     plan.participants.insert(owner.clone());
