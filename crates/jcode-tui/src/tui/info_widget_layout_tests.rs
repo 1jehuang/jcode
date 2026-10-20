@@ -240,6 +240,85 @@ fn overview_suppresses_mergeable_widgets_under_contention() {
     }
 }
 
+#[test]
+fn high_usage_is_not_duplicated_when_overview_can_fit() {
+    let mut data = contended_data();
+    data.usage_info.as_mut().unwrap().seven_day = 0.94;
+    let area = Rect::new(0, 0, 100, 60);
+    let margins = margins_for(40, 60, false);
+    assert!(
+        data.effective_priority(WidgetKind::UsageLimits)
+            < data.effective_priority(WidgetKind::Overview)
+    );
+
+    // Exercise both a fresh priority-promoted card and a standalone card
+    // carried from a previous frame before Overview had a place.
+    let usage_anchor = WidgetAnchor {
+        placement: WidgetPlacement {
+            kind: WidgetKind::UsageLimits,
+            rect: Rect::new(60, 55, 40, 5),
+            side: Side::Right,
+        },
+        hidden_frames: 0,
+        content_top: margins.scroll_top + 55,
+    };
+    for anchors in [Vec::new(), vec![usage_anchor]] {
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &anchors);
+        assert_placements_sane("high usage", area, &outcome.visible);
+        assert!(
+            outcome
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::Overview)
+        );
+        assert!(
+            !outcome
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::UsageLimits)
+        );
+        assert!(
+            !outcome
+                .anchors
+                .iter()
+                .any(|a| a.placement.kind == WidgetKind::UsageLimits)
+        );
+        let steady = calculate_placements_anchored(area, &margins, &data, true, &outcome.anchors);
+        assert!(
+            steady
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::Overview)
+        );
+        assert!(
+            !steady
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::UsageLimits)
+        );
+    }
+}
+
+#[test]
+fn high_usage_stays_visible_when_overview_cannot_fit() {
+    let mut data = contended_data();
+    data.usage_info.as_mut().unwrap().seven_day = 0.94;
+    let area = Rect::new(0, 0, 100, 7);
+    let outcome = calculate_placements_anchored(area, &margins_for(40, 7, false), &data, true, &[]);
+    assert!(
+        !outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::Overview)
+    );
+    assert!(
+        outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::UsageLimits)
+    );
+}
+
 /// (c) The swarm dock widget is gated on managed members: a session that
 /// manages agents (spawn subtree) gets the dock in layout, while plain swarm
 /// presence data (session counts/names) must never place it. The inline strip
