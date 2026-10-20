@@ -2,6 +2,32 @@ use super::*;
 use crate::tool::Registry;
 use std::collections::HashSet;
 
+#[test]
+fn description_is_compact_and_preserves_execution_contract() {
+    let registry = Registry::empty();
+    let tool = CodemodeTool::new(registry.downgrade());
+    let description = tool.to_definition().description;
+    for clause in [
+        "async function body",
+        "await/return",
+        "tools.<name>(args)",
+        "callTool(name, args)",
+        "failures throw",
+        "Promise.all",
+        "listTools(filter?)",
+        "describeTool(name)",
+        "store(key, value)",
+        "load(key)",
+        "storedKeys()",
+        "console.log",
+        "No direct filesystem, network, timers, or modules",
+        "64 MB heap, 300 s, 2000 tool calls",
+    ] {
+        assert!(description.contains(clause), "Missing contract: {clause}");
+    }
+    assert!(description.len() <= 750);
+}
+
 struct JsonTool;
 
 #[async_trait::async_trait]
