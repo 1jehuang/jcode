@@ -624,7 +624,7 @@ fn hash_todos_payload(
         todo.completion_confidence.hash(&mut hasher);
         todo.blocked_by.hash(&mut hasher);
         todo.assigned_to.hash(&mut hasher);
-        todo.wave.hash(&mut hasher);
+        todo.stage.hash(&mut hasher);
     }
     plan.user_intention.hash(&mut hasher);
     plan.understands_user_intent.hash(&mut hasher);
@@ -686,7 +686,7 @@ mod tests {
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
-            wave: None,
+            stage: None,
         }
     }
 

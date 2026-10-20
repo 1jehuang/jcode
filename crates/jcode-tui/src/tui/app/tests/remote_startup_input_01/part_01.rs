@@ -16,7 +16,7 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Keep going".to_string(),

@@ -315,7 +315,7 @@ mod tests {
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
-            wave: None,
+            stage: None,
         }
     }
 

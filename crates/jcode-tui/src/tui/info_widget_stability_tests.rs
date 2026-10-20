@@ -20,7 +20,7 @@ fn rich_data() -> InfoWidgetData {
         queue_mode: Some(true),
         todos: vec![
             crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 content: "first task".to_string(),
                 status: "in_progress".to_string(),
@@ -33,7 +33,7 @@ fn rich_data() -> InfoWidgetData {
                 confidence_history: Vec::new(),
             },
             crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 content: "second task".to_string(),
                 status: "pending".to_string(),

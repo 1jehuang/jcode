@@ -1973,7 +1973,7 @@ impl Tool for CommunicateTool {
                 },
                 "plan_items": {
                     "type": "array",
-                    "description": "Plan items for propose_plan. run_plan with no plan uses your todo list instead: same-wave todos run in parallel, later waves wait.",
+                    "description": "Plan items for propose_plan. run_plan with no plan uses your todo list instead: each group in a stage is a lane that runs in order, lanes run in parallel, later stages wait.",
                     "items": {
                         "type": "object",
                         "additionalProperties": true
@@ -2885,8 +2885,8 @@ impl Tool for CommunicateTool {
 
             "run_plan" => {
                 // No swarm plan yet: use the coordinator's own todo list as the
-                // plan. Waves become stages, so parallel todos fan out to
-                // workers and later waves wait, without the model writing ids.
+                // plan. Stages run in order and each group in a stage is a lane,
+                // so lanes fan out to workers without the model writing ids.
                 seed_plan_from_todos_if_empty(&ctx).await?;
                 // Background-by-default: the plan driver runs as a managed
                 // background task (progress card, bg tool, notify/wake) so the

@@ -460,32 +460,34 @@ pub struct TodoItem {
     pub blocked_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
-    /// Optional execution wave. Todos that share a wave are independent and
-    /// may run in parallel; a later wave starts only after earlier waves
-    /// finish. `None` means "sequential in list order". Deliberately a plain
-    /// number instead of id-based dependencies so a model cannot create
-    /// cycles or dangling references.
+    /// Optional execution stage. Stages run in order: stage 2 starts only
+    /// after every todo in stage 1 is done. Inside a stage, todos that share a
+    /// `group` form one lane that runs in list order, and different lanes run
+    /// in parallel. `None` means "sequential in list order". Deliberately a
+    /// plain number instead of id-based dependencies so a model cannot create
+    /// cycles or dangling references. Older sessions stored this as `wave`.
     #[serde(
         default,
-        deserialize_with = "deserialize_optional_wave",
+        alias = "wave",
+        deserialize_with = "deserialize_optional_stage",
         skip_serializing_if = "Option::is_none"
     )]
-    pub wave: Option<u32>,
+    pub stage: Option<u32>,
 }
 
-/// Accept `2`, `2.0`, `"2"`, `"wave 2"`, `""`, or `null` for a todo wave.
+/// Accept `2`, `2.0`, `"2"`, `"stage 2"`, `""`, or `null` for a todo stage.
 /// Zero and unparseable values read as absent rather than failing the whole
-/// todo write, so a sloppy wave can never cost the model its plan.
-fn deserialize_optional_wave<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+/// todo write, so a sloppy stage can never cost the model its plan.
+fn deserialize_optional_stage<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| parse_wave_value(&value)))
+    Ok(value.and_then(|value| parse_stage_value(&value)))
 }
 
-pub fn parse_wave_value(value: &serde_json::Value) -> Option<u32> {
-    let wave = match value {
+pub fn parse_stage_value(value: &serde_json::Value) -> Option<u32> {
+    let stage = match value {
         serde_json::Value::Number(n) => n
             .as_u64()
             .or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f.round() as u64)),
@@ -500,7 +502,7 @@ pub fn parse_wave_value(value: &serde_json::Value) -> Option<u32> {
         }
         _ => None,
     }?;
-    u32::try_from(wave).ok().filter(|wave| *wave > 0)
+    u32::try_from(stage).ok().filter(|stage| *stage > 0)
 }
 
 /// Plan-level understanding of what the user actually wants, covering the

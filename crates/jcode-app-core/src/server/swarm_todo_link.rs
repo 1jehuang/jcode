@@ -22,35 +22,35 @@ fn is_open(todo: &TodoItem) -> bool {
 
 /// Convert open todos into swarm plan items.
 ///
-/// Consecutive todos that share a `wave` form one stage; a todo without a wave
-/// is a stage of its own. Every item depends on all items of the previous
-/// stage, which gives "wave 2 starts after wave 1" without exposing ids to the
-/// model. Completed and cancelled todos are skipped and never block anything.
+/// Layout comes from [`crate::todo::stages::stage_layout`]: stages run in
+/// order, and inside a stage each group is a lane. The first item of a lane
+/// waits for every item of the previous stage. Later items in a lane wait for
+/// the item before them in that lane, so a lane runs in order while different
+/// lanes run in parallel. The model never writes ids (no cycles, no dangling
+/// references). Completed and cancelled todos are skipped and never block.
 pub(crate) fn plan_items_from_todos(todos: &[TodoItem]) -> Vec<PlanItem> {
+    let open: Vec<&TodoItem> = todos.iter().filter(|todo| is_open(todo)).collect();
     let mut items = Vec::new();
     let mut previous_stage: Vec<String> = Vec::new();
-    let mut current_stage: Vec<String> = Vec::new();
-    let mut current_wave: Option<u32> = None;
-    let mut first = true;
-
-    for todo in todos.iter().filter(|todo| is_open(todo)) {
-        let continues_stage = !first && todo.wave.is_some() && todo.wave == current_wave;
-        if !continues_stage && !first {
-            previous_stage = std::mem::take(&mut current_stage);
+    for stage in crate::todo::stages::stage_layout(&open) {
+        for lane in &stage.lanes {
+            let mut blocked_by = previous_stage.clone();
+            for &index in &lane.items {
+                let todo = open[index];
+                items.push(PlanItem {
+                    content: todo.content.clone(),
+                    status: "queued".to_string(),
+                    priority: todo.priority.clone(),
+                    id: todo.id.clone(),
+                    subsystem: todo.group.clone(),
+                    file_scope: Vec::new(),
+                    blocked_by: std::mem::take(&mut blocked_by),
+                    assigned_to: None,
+                });
+                blocked_by = vec![todo.id.clone()];
+            }
         }
-        first = false;
-        current_wave = todo.wave;
-        current_stage.push(todo.id.clone());
-        items.push(PlanItem {
-            content: todo.content.clone(),
-            status: "queued".to_string(),
-            priority: todo.priority.clone(),
-            id: todo.id.clone(),
-            subsystem: todo.group.clone(),
-            file_scope: Vec::new(),
-            blocked_by: previous_stage.clone(),
-            assigned_to: None,
-        });
+        previous_stage = stage.item_indices().map(|i| open[i].id.clone()).collect();
     }
     items
 }
@@ -188,15 +188,21 @@ pub(crate) fn sync_plan(coordinator_session: &str, items: &[PlanItem]) {
 mod tests {
     use super::*;
 
-    fn todo(id: &str, status: &str, wave: Option<u32>) -> TodoItem {
+    fn todo(id: &str, status: &str, stage: Option<u32>) -> TodoItem {
         TodoItem {
             id: id.to_string(),
             content: format!("task {id}"),
             status: status.to_string(),
             priority: "high".to_string(),
-            wave,
+            stage,
             ..Default::default()
         }
+    }
+
+    fn laned(id: &str, stage: u32, group: &str) -> TodoItem {
+        let mut item = todo(id, "pending", Some(stage));
+        item.group = Some(group.to_string());
+        item
     }
 
     fn deps(items: &[PlanItem]) -> Vec<(String, Vec<String>)> {
@@ -217,7 +223,36 @@ mod tests {
     }
 
     #[test]
-    fn waves_become_stages_and_completed_todos_are_skipped() {
+    fn groups_are_sequential_lanes_inside_a_stage() {
+        let items = plan_items_from_todos(&[
+            laned("p1", 1, "parser"),
+            laned("u1", 1, "ui"),
+            laned("p2", 1, "parser"),
+            laned("i1", 2, "integration"),
+            laned("i2", 2, "integration"),
+            laned("r1", 2, "release"),
+        ]);
+        assert_eq!(
+            deps(&items),
+            vec![
+                ("p1".into(), vec![]),
+                ("p2".into(), vec!["p1".to_string()]),
+                ("u1".into(), vec![]),
+                (
+                    "i1".into(),
+                    vec!["p1".to_string(), "p2".to_string(), "u1".to_string()]
+                ),
+                ("i2".into(), vec!["i1".to_string()]),
+                (
+                    "r1".into(),
+                    vec!["p1".to_string(), "p2".to_string(), "u1".to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn stages_order_and_completed_todos_are_skipped() {
         let items = plan_items_from_todos(&[
             todo("done", "completed", Some(1)),
             todo("a", "pending", Some(1)),

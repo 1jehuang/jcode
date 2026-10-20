@@ -776,10 +776,10 @@ impl Tool for TodoTool {
                                 "type": "string",
                                 "description": "Optional group label; one group per coherent goal, new direction = new group. Omit for flat list."
                             },
-                            "wave": {
+                            "stage": {
                                 "type": "integer",
                                 "minimum": 1,
-                                "description": "Optional parallel wave (1, 2, 3...). Todos with the same wave are independent and can run at the same time; wave 2 starts after wave 1 is done. Omit when steps must happen in list order."
+                                "description": "Optional stage (1, 2, 3...). Stage 2 starts after stage 1 is done. Inside a stage, todos sharing a group form a lane that runs in order, and different groups run in parallel. Omit when steps must happen in list order."
                             },
                             "confidence": {
                                 "type": "string",

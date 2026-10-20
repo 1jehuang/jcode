@@ -12,7 +12,7 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 id: "open".to_string(),
                 content: "Still open".to_string(),
@@ -2282,7 +2282,7 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Finish the remaining task".to_string(),
@@ -2316,7 +2316,7 @@ fn test_poke_status_reports_current_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Finish the remaining task".to_string(),
@@ -2371,7 +2371,7 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Keep going".to_string(),
@@ -2421,7 +2421,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Finish the remaining task".to_string(),
@@ -2458,7 +2458,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
-                    wave: None,
+                    stage: None,
                     group: None,
                     id: "todo-1".to_string(),
                     content: "Finish the remaining task".to_string(),
@@ -2471,7 +2471,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     confidence_history: Vec::new(),
                 },
                 crate::todo::TodoItem {
-                    wave: None,
+                    stage: None,
                     group: None,
                     id: "todo-2".to_string(),
                     content: "Pick up the newly discovered task".to_string(),
@@ -2525,7 +2525,7 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Keep going".to_string(),
@@ -2558,7 +2558,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
-                    wave: None,
+                    stage: None,
                     group: None,
                     id: "todo-1".to_string(),
                     content: "Finish risky provider path".to_string(),
@@ -2573,7 +2573,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     confidence_history: Vec::new(),
                 },
                 crate::todo::TodoItem {
-                    wave: None,
+                    stage: None,
                     group: None,
                     id: "todo-2".to_string(),
                     content: "Document straightforward behavior".to_string(),
@@ -2843,7 +2843,7 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Done without poke".to_string(),
@@ -2879,7 +2879,7 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Keep going".to_string(),

@@ -893,3 +893,5 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+pub mod stages;

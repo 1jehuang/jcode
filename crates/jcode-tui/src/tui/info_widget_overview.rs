@@ -243,7 +243,7 @@ mod tests {
     fn compute_page_layout_keeps_multiple_expanded_pages_when_height_allows() {
         let data = InfoWidgetData {
             todos: vec![TodoItem {
-                wave: None,
+                stage: None,
                 group: None,
                 content: "ship refactor".to_string(),
                 status: "pending".to_string(),

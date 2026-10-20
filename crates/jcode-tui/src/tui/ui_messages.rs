@@ -1,13 +1,10 @@
 #[path = "ui_messages/gmail_drafts.rs"]
 mod gmail_drafts;
 use gmail_drafts::*;
-#[path = "ui_todo_waves.rs"]
-mod todo_waves;
-pub(crate) use todo_waves::TodoCardAgent;
-use todo_waves::{
-    RailPos, agent_roster_spans, has_parallel_waves, push_wave_pips, render_wave_item_line,
-    wave_rail_positions,
-};
+#[path = "ui_todo_stages.rs"]
+mod todo_stages;
+pub(crate) use todo_stages::TodoCardAgent;
+use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
 
 use super::*;
 #[path = "ui_messages_cache.rs"]
@@ -1370,8 +1367,20 @@ fn render_todos_message_with_cap(
         };
         let has_groups = todos.iter().any(|t| group_of(t).is_some());
         let all_refs: Vec<&crate::todo::TodoItem> = todos.iter().collect();
-        if has_groups {
-            lines.push(render_todo_wave_status_header(
+        if crate::todo::stages::has_stages(todos.iter()) {
+            // Stage grid: groups become lanes inside each stage, so they are
+            // drawn as column headers instead of goal sections.
+            lines.push(render_todo_stage_status_header(
+                &all_refs,
+                &agents,
+                base_indent,
+                inner_width,
+            ));
+            let goal = todo_card_goal_for_group(&goals, None);
+            push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
+            push_stage_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
+        } else if has_groups {
+            lines.push(render_todo_stage_status_header(
                 &all_refs,
                 &agents,
                 base_indent,
@@ -1397,11 +1406,11 @@ fn render_todos_message_with_cap(
                     inner_width,
                 ));
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-                push_wave_item_lines(&mut lines, items, &agents, base_indent, inner_width);
+                push_todo_item_lines(&mut lines, items, &agents, base_indent, inner_width);
             }
         } else {
             let goal = todo_card_goal_for_group(&goals, None);
-            lines.push(render_todo_wave_status_header(
+            lines.push(render_todo_stage_status_header(
                 &all_refs,
                 &agents,
                 base_indent,
@@ -1410,7 +1419,7 @@ fn render_todos_message_with_cap(
             if goal.is_some() {
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
             }
-            push_wave_item_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
+            push_todo_item_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
         }
     }
 
@@ -1594,16 +1603,6 @@ fn push_todo_status_pips<'a>(
     }
 }
 
-fn render_todo_status_header<'a>(
-    todos: impl IntoIterator<Item = &'a crate::todo::TodoItem>,
-    base_indent: &str,
-    inner_width: usize,
-) -> Line<'static> {
-    let mut spans = Vec::new();
-    push_todo_status_pips(&mut spans, todos, inner_width);
-    todo_card_line(spans, base_indent, inner_width)
-}
-
 fn render_todo_goal_header(
     label: &str,
     todos: &[&crate::todo::TodoItem],
@@ -1616,7 +1615,7 @@ fn render_todo_goal_header(
         Style::default().fg(todo_group_color()).bold(),
     )];
     spans.push(Span::raw("  "));
-    push_wave_pips(
+    push_stage_pips(
         &mut spans,
         todos,
         inner_width.saturating_sub(label_width + 2),
@@ -1624,37 +1623,32 @@ fn render_todo_goal_header(
     todo_card_line(spans, base_indent, inner_width)
 }
 
-/// Overall card header: progress pips (split by parallel waves) plus the
-/// roster of swarm agent emoji working on this list.
-fn render_todo_wave_status_header(
+/// Overall card header: progress pips (numbered per stage) plus the roster
+/// of swarm agent emoji working on this list.
+fn render_todo_stage_status_header(
     todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
-    if !has_parallel_waves(todos) && todos.iter().all(|todo| todo.assigned_to.is_none()) {
-        return render_todo_status_header(todos.iter().copied(), base_indent, inner_width);
-    }
     let mut spans = Vec::new();
-    push_wave_pips(&mut spans, todos, inner_width);
-    spans.extend(agent_roster_spans(todos, agents));
+    let roster = agent_roster_spans(todos, agents);
+    let roster_width: usize = roster.iter().map(|span| span.content.width()).sum();
+    push_stage_pips(&mut spans, todos, inner_width.saturating_sub(roster_width));
+    spans.extend(roster);
     todo_card_line(spans, base_indent, inner_width)
 }
 
-fn push_wave_item_lines(
+fn push_todo_item_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
     base_indent: &str,
     inner_width: usize,
 ) {
-    let positions = wave_rail_positions(todos);
-    let any_rails = positions.iter().any(|pos| *pos != RailPos::None);
-    for (todo, pos) in todos.iter().zip(positions) {
-        lines.push(render_wave_item_line(
+    for todo in todos {
+        lines.push(render_todo_item_line(
             todo,
-            pos,
-            any_rails,
             agents,
             base_indent,
             inner_width,

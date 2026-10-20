@@ -88,7 +88,7 @@ fn refresh_todo_card_updates_content_when_todos_change() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
-        wave: None,
+        stage: None,
     };
 
     crate::todo::save_todos(&session_id, &[todo("write the card", "pending")]).unwrap();
@@ -133,7 +133,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
-        wave: None,
+        stage: None,
     }];
     let goal = |score| crate::todo::TodoGoal {
         group: None,
@@ -191,7 +191,7 @@ fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoI
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
-        wave: None,
+        stage: None,
     }
 }
 
@@ -631,20 +631,22 @@ fn pinned_todo_card_shows_tasks_without_expanding() {
 }
 
 #[test]
-fn pinned_band_shows_wave_rails_and_live_swarm_agents_end_to_end() {
+fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
-    let mut a = pinned_band_todo("a", "wave one alpha", "in_progress");
-    a.wave = Some(1);
+    let mut a = pinned_band_todo("a", "stage one alpha", "in_progress");
+    a.stage = Some(1);
+    a.group = Some("alpha lane".into());
     a.assigned_to = Some("session_skunk_1792409785894_1068c05fb6cec63b".into());
-    let mut b = pinned_band_todo("b", "wave one beta", "completed");
-    b.wave = Some(1);
+    let mut b = pinned_band_todo("b", "stage one beta", "completed");
+    b.stage = Some(1);
+    b.group = Some("beta lane".into());
     b.assigned_to = Some("session_raccoon_1792409785942_de9eb8af240e42b7".into());
-    let mut c = pinned_band_todo("c", "wave two gamma", "pending");
-    c.wave = Some(2);
+    let mut c = pinned_band_todo("c", "stage two gamma", "pending");
+    c.stage = Some(2);
     crate::todo::save_todos(&session_id, &[a, b, c]).unwrap();
 
     // Live member status exactly as the server sends it.
@@ -678,13 +680,19 @@ fn pinned_band_shows_wave_rails_and_live_swarm_agents_end_to_end() {
         let backend = ratatui::backend::TestBackend::new(width, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let text = render_and_snap(&app, &mut terminal);
-        let band: Vec<&str> = text.lines().take(6).collect();
+        let band: Vec<&str> = text.lines().take(8).collect();
         let joined = band.join("\n");
-        assert!(joined.contains("┏ ● wave one alpha"), "rail at {width}:\n{text}");
-        assert!(joined.contains("┗ ✓ wave one beta"), "rail end at {width}:\n{text}");
+        assert!(joined.contains("1 ●●  2 ○"), "numbered pips at {width}:\n{text}");
+        assert!(joined.contains("stage one alpha"), "lane item at {width}:\n{text}");
+        assert!(joined.contains("stage one beta"), "lane item at {width}:\n{text}");
         assert!(joined.contains("🦨") && joined.contains("🦝"), "agent emoji at {width}:\n{text}");
         if width == 100 {
-            assert!(joined.contains("counting to 40 · 7s"), "live activity:\n{text}");
+            let row = band
+                .iter()
+                .find(|row| row.contains("stage one alpha"))
+                .unwrap();
+            assert!(row.contains("stage one beta"), "columns side by side:\n{text}");
+            assert!(joined.contains("counting to 40"), "live activity:\n{text}");
         }
     }
 
