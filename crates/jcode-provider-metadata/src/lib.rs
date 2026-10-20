@@ -365,6 +365,26 @@ mod tests {
     }
 
     #[test]
+    fn standardcompute_login_uses_openai_compatible_router_profile() {
+        let provider = resolve_login_selection("standardcompute", &cli_login_providers())
+            .expect("Standard Compute CLI login provider");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("Standard Compute should use the OpenAI-compatible runtime");
+        };
+
+        assert_eq!(profile.id, "standardcompute");
+        assert_eq!(profile.display_name, "Standard Compute");
+        assert_eq!(profile.api_base, "https://api.stdcmpt.com/v1");
+        assert_eq!(profile.api_key_env, "STANDARDCOMPUTE_API_KEY");
+        assert_eq!(profile.env_file, "standardcompute.env");
+        assert_eq!(profile.default_model, Some("StandardCompute"));
+        assert!(profile.requires_api_key);
+
+        let alias = resolve_login_provider("standard-compute").expect("Standard Compute alias");
+        assert_eq!(alias.id, "standardcompute");
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),

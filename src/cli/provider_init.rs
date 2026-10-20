@@ -115,6 +115,8 @@ pub enum ProviderChoice {
     #[value(alias = "celeris-ai", alias = "celeris1", alias = "celeris-1")]
     Celeris,
     YoloAuto,
+    #[value(alias = "standard-compute")]
+    Standardcompute,
     #[value(alias = "lm-studio")]
     Lmstudio,
     Ollama,
@@ -194,6 +196,7 @@ impl ProviderChoice {
             Self::MuseSubscription => "muse-subscription",
             Self::Celeris => "celeris",
             Self::YoloAuto => "yolo-auto",
+            Self::Standardcompute => "standardcompute",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
             Self::Chutes => "chutes",
@@ -378,6 +381,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::YoloAuto,
         crate::provider_catalog::YOLO_AUTO_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Standardcompute,
+        crate::provider_catalog::STANDARDCOMPUTE_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Lmstudio,
@@ -1683,6 +1690,7 @@ async fn init_provider_with_model_policy(
         | ProviderChoice::MetaMuse
         | ProviderChoice::Celeris
         | ProviderChoice::YoloAuto
+        | ProviderChoice::Standardcompute
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
         | ProviderChoice::Chutes
