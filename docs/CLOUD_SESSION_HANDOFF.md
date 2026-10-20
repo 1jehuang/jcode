@@ -7,11 +7,29 @@
 - The destination store uses private permissions and atomic publication. Other accounts and the active selection are preserved. A conflicting identity is not overwritten. Current Jcode processes coordinate account-store transactions with a shared lock.
 - API keys, environment credentials, unrelated accounts, external-tool logins, and operating-system keychains are not included in this OAuth transfer.
 - A dry run stages the ordinary session bundle but does not send credentials or change ownership.
-- Both sides must run a build with the hidden `cloud credentials` command. The client checks support before sending secrets. Updating only the client does not update an already-running cloud installation.
+- Both sides must support the hidden `cloud receive`, `cloud credentials`, and `cloud cancel-return` commands. The client checks all three before snapshotting the session or sending secrets. Managed-host preflight can update the installed CLI, but does not restart an already-running cloud daemon.
 
 `/local` (`jcode cloud return`) brings back the cloud account's refreshed tokens through the same separate channel. The local machine retains only a SHA-256 fingerprint of its departure credential envelope to detect an intervening local login or refresh. If the local account changed while the session was away, return refuses to overwrite it and restores cloud ownership. The fingerprint is removed after a successful return.
 
 OAuth providers can rotate or revoke refresh tokens. Copying a login does not make two independently refreshing copies safe indefinitely. Avoid concurrently using the same account from local and cloud sessions. Store locks protect cooperating Jcode processes on one machine, not other machines, older Jcode binaries, or external credential editors.
+
+## Managed-host release compatibility
+
+For the managed `jcode-cloud` host, a published client selects its own exact runtime release tag for any required upgrade. For example, client `v0.99.123` downloads `v0.99.123`, not a hardcoded old version or an unbounded `latest`. A newer installed stable release is kept when it already supports all three handoff commands. An older installation, or one lacking a required command, is replaced only after the selected release passes verification.
+
+Development clients do not guess a published release or automatically downgrade the cloud host. They can use an already-capable installation. To explicitly select a compatible published release, set `JCODE_CLOUD_RELEASE` on the **local client** before starting the move:
+
+```sh
+JCODE_CLOUD_RELEASE=v0.99.123 jcode cloud move
+```
+
+The tag above is illustrative: choose an existing published release with all required handoff commands. The override must be an exact numeric tag, with an optional `v` prefix. It also overrides the download target for published clients. A newer capable installation is still retained. Missing assets, invalid tags, checksum mismatches, unexpected archive contents, or unsupported commands stop the move before secrets are sent.
+
+Preflight uses the release's existing manylinux-compatible `jcode-linux-x86_64.tar.gz` and its `SHA256SUMS`. It validates the checksum and flat archive layout, then executes the staged wrapper to check its exact release version and all three commands. The wrapper, real executable, and bundled OpenSSL libraries remain together.
+
+The VM's `~/.local/bin/jcode` and service launchers are preserved, including their host-specific environment. The shared `/opt/jcode-cloud/jcode` backend is switched with an atomic rename, and the **effective CLI launcher** is verified afterward. The previous backend is retained beside it as `jcode.previous.<release-directory>`. Failed post-switch verification restores that backend. If rollback itself fails, recovery files are retained and the move reports an error instead of claiming success. Installation needs noninteractive `sudo`; preflight never kills sessions or restarts the service. An existing daemon keeps its current executable until its normal next start.
+
+Automatic upgrades apply only to the managed host. Other SSH targets or custom launchers must already provide compatible commands; their binaries are not automatically replaced.
 
 ## Validation
 
