@@ -1181,7 +1181,9 @@ pub(super) async fn handle_comm_stop(
             // reload keeps re-announcing awaits on it).
             if let Ok(mut session) = crate::session::Session::load(&target_session) {
                 session.mark_closed();
-                if let Err(error) = session.save() {
+                // save_prepared: a worker stopped before it wrote any message
+                // must still persist Closed (plain save skips empty sessions).
+                if let Err(error) = session.save_prepared() {
                     crate::logging::warn(&format!(
                         "stop {target_session}: failed to persist closed status: {error}"
                     ));

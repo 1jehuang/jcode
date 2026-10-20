@@ -617,6 +617,10 @@ pub use crate::plan::{SwarmTaskProgress, VersionedPlan};
 
 pub use self::await_members_state::pending_await_members_for_session;
 #[cfg(test)]
+pub(crate) use self::await_members_state::{
+    PersistedAwaitMembersState, save_state as save_await_state_for_tests,
+};
+#[cfg(test)]
 pub(crate) use self::reload_state::subscribe_reload_signal_for_tests;
 pub use self::reload_state::{
     ReloadAck, ReloadPhase, ReloadSignal, ReloadState, ReloadWaitStatus, acknowledge_reload_signal,

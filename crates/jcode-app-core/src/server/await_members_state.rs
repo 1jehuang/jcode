@@ -165,7 +165,7 @@ pub(super) fn load_state(key: &str) -> Option<PersistedAwaitMembersState> {
     load_json_state(AWAIT_MEMBERS_DIR, key, is_stale)
 }
 
-pub(super) fn save_state(state: &PersistedAwaitMembersState) {
+pub(crate) fn save_state(state: &PersistedAwaitMembersState) {
     save_json_state(AWAIT_MEMBERS_DIR, &state.key, state, "await_members state");
     invalidate_pending_scan();
 }
