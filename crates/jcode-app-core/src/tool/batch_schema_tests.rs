@@ -102,6 +102,65 @@ async fn sdk_unknown_schema_case(schema: Value) {
 }
 
 #[tokio::test]
+async fn dependent_schemas_preserve_native_names_and_independent_sdk_siblings() {
+    for dependency in [
+        json!({"properties":{"name":{"type":"string"}}}),
+        json!({"$ref":"#/$defs/native"}),
+        json!({"$ref":"https://example.invalid/native.json"}),
+    ] {
+        sdk_native_name_case(
+            json!({
+                "type":"object",
+                "properties":{"value":{"type":"string"}},
+                "dependentSchemas":{"value":dependency},
+                "$defs":{"native":{"properties":{"name":{"type":"string"}}}}
+            }),
+            "mcp_call",
+        )
+        .await;
+    }
+}
+
+#[test]
+fn dependent_schema_declarations_follow_local_refs_and_preserve_unknowns() {
+    for (dependency, expected) in [
+        (json!({"properties":{"name":{"type":"string"}}}), Some(true)),
+        (json!({"$ref":"#/$defs/native"}), Some(true)),
+        (json!({"$ref":"#"}), None),
+        (json!({"$ref":"https://example.invalid/native.json"}), None),
+        (
+            json!({"properties":{"payload":{"properties":{"name":{}}}}}),
+            Some(false),
+        ),
+    ] {
+        let schema = json!({
+            "dependentSchemas":{"value":dependency},
+            "$defs":{"native":{"properties":{"name":{"type":"string"}}}}
+        });
+        assert_eq!(
+            super::schema_property_declaration(&schema, "name"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn dependent_schema_traversal_keeps_existing_work_limits() {
+    let mut schema = json!({"properties":{"name":{}}});
+    for _ in 0..20 {
+        schema = json!({"dependentSchemas":{"value":schema}});
+    }
+    assert_eq!(super::schema_property_declaration(&schema, "name"), None);
+    let dependencies: serde_json::Map<String, Value> = (0..300)
+        .map(|index| (index.to_string(), json!({})))
+        .collect();
+    assert_eq!(
+        super::schema_property_declaration(&json!({"dependentSchemas":dependencies}), "name"),
+        None
+    );
+}
+
+#[tokio::test]
 async fn explicitly_open_schemas_preserve_native_names_in_sdk_callbacks() {
     for additional in [json!(true), json!({"type":"string"})] {
         for native_name in ["mcp_call", "opaque"] {

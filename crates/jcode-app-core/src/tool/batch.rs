@@ -189,6 +189,21 @@ fn schema_property_declaration(schema: &Value, property: &str) -> Option<bool> {
                 }
             }
         }
+        // Conditional schemas describe this same input object, not a nested
+        // child. Preserve their native fields even when activation is unknown.
+        if let Some(dependencies) = schema.get("dependentSchemas") {
+            if let Some(dependencies) = dependencies.as_object() {
+                for dependency in dependencies.values() {
+                    match declares(dependency, root, property, depth + 1, budget) {
+                        Some(true) => return Some(true),
+                        Some(false) => {}
+                        None => unknown = true,
+                    }
+                }
+            } else {
+                unknown = true;
+            }
+        }
         if unknown { None } else { Some(false) }
     }
     declares(schema, schema, property, 0, &mut 256)

@@ -437,6 +437,7 @@ fn normalization_preserves_alias_fields_declared_through_combiners_and_refs() {
     for schema in [
         json!({"allOf": [{"properties": {"arguments": {"type": "object"}}}]}),
         json!({"anyOf": [{"type": "null"}, {"properties": {"arguments": {"type": "object"}}}]}),
+        json!({"dependentSchemas": {"kind": {"properties": {"arguments": {"type": "object"}}}}}),
         json!({"$ref": "#/$defs/Input", "$defs": {"Input": {"properties": {"arguments": {"type": "object"}}}}}),
         json!({"$ref": "#"}),
         json!({"$ref": "https://example.invalid/input.schema.json"}),

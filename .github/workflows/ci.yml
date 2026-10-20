@@ -267,13 +267,13 @@ jobs:
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-app-core --lib tool::batch:: -- --nocapture
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-app-core --lib tool::tests::test_definitions_keep_batch_schema_generic -- --exact --nocapture
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-app-core --lib tool::tests::tool_schemas_are_sendable_to_every_provider_dialect -- --exact --nocapture
 
       - name: Run browser session liveness and reuse regressions
