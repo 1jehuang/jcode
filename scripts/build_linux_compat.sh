@@ -170,7 +170,7 @@ docker run --rm \
         done
         # Running inside the baseline image also checks dynamic dependencies;
         # check symbol versions explicitly so a newer accidental sysroot fails.
-        newest_glibc=$(objdump -T "$built" | sed -n "s/.*(GLIBC_\([0-9.]*\)).*/\1/p" | sort -Vu | tail -n1)
+        newest_glibc=$(objdump -T "$built" | sed -n "s/.*GLIBC_\([0-9][0-9.]*\).*/\1/p" | sort -Vu | tail -n1)
         if [[ -z "$newest_glibc" || "$(printf "%s\n" 2.17 "$newest_glibc" | sort -V | tail -n1)" != 2.17 ]]; then
           echo "error: portable binary exceeds the glibc 2.17 baseline: $newest_glibc" >&2
           exit 1

@@ -135,9 +135,9 @@ class PublicReleaseTests(unittest.TestCase):
             )
             binary.chmod(0o755)
             objdump = directory / 'objdump'
-            objdump.write_text('#!/bin/sh\nprintf "0000 DF .text (GLIBC_%s) symbol\\n" "$TEST_GLIBC"\n')
+            objdump.write_text('#!/bin/sh\nprintf "0000 DF .text %s symbol\\n" "$TEST_GLIBC_SYMBOL"\n')
             objdump.chmod(0o755)
-            for glibc, missing in [('2.17', ''), ('2.34', ''), ('2.17', 'receive'),
+            for glibc, missing in [('2.17', ''), ('2.17-legacy', ''), ('2.34-legacy', ''), ('2.34', ''), ('2.17', 'receive'),
                                    ('2.17', 'credentials'), ('2.17', 'cancel-return')]:
                 with self.subTest(glibc=glibc, missing=missing):
                     calls = directory / 'calls'
@@ -145,11 +145,13 @@ class PublicReleaseTests(unittest.TestCase):
                     env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}",
                                CARGO_TARGET_DIR=str(directory / 'target'),
                                JCODE_COMPAT_TARGET='x86_64-unknown-linux-gnu',
-                               JCODE_COMPAT_PROFILE='release', TEST_GLIBC=glibc,
+                               JCODE_COMPAT_PROFILE='release',
+                               TEST_GLIBC_SYMBOL=('GLIBC_' + glibc.removesuffix('-legacy')
+                                                  if glibc.endswith('-legacy') else f'(GLIBC_{glibc})'),
                                FAIL_CLOUD=missing, TEST_CALLS=str(calls))
                     result = subprocess.run(['/bin/bash', '-euo', 'pipefail', '-c', fragment],
                                             env=env, capture_output=True, text=True)
-                    if glibc == '2.17' and not missing:
+                    if glibc.removesuffix('-legacy') == '2.17' and not missing:
                         self.assertEqual(result.returncode, 0, result.stderr)
                         for command in ['receive', 'credentials', 'cancel-return']:
                             self.assertIn(f'cloud {command} --help', calls.read_text())
