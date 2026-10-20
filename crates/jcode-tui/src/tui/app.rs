@@ -943,6 +943,9 @@ struct CostState {
     cached_completion_price: Option<f32>,
     // Cached cache-read pricing ($/1M tokens), when known for the active model.
     cached_cache_read_price: Option<f32>,
+    /// Cached cache-write price when the user's own card or vendor file states
+    /// one. `None` keeps the pre-feature premium for cache creation.
+    cached_cache_write_price: Option<f32>,
     // Currency the cached_*_price values are denominated in.
     cached_price_currency: Option<Currency>,
     // Model the cached_*_price values were resolved for, so we re-resolve on switch.
@@ -1003,6 +1006,14 @@ impl CostState {
     fn set_single_total(&mut self, amount: f32, currency: &Currency) {
         self.total_cost_by_currency.clear();
         self.total_cost_by_currency.insert(currency.clone(), amount);
+    }
+
+    /// Replace the per-currency session totals with authoritative historical
+    /// amounts recorded by the server, so reopening a session restores exactly
+    /// what was billed instead of repricing the aggregate tokens with today's
+    /// model and card.
+    fn set_bucket_totals(&mut self, totals: BTreeMap<Currency, f32>) {
+        self.total_cost_by_currency = totals;
     }
 
     /// Total accrued in one currency; `0.0` when nothing was billed in it.

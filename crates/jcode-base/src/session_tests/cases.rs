@@ -246,6 +246,8 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
             output_tokens: 10,
             cache_read_input_tokens: None,
             cache_creation_input_tokens: None,
+            cost: None,
+            currency: None,
         }),
     );
     session.add_message_ext(
@@ -261,6 +263,8 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
             output_tokens: 20,
             cache_read_input_tokens: Some(150),
             cache_creation_input_tokens: Some(25),
+            cost: None,
+            currency: None,
         }),
     );
 
@@ -2840,6 +2844,8 @@ fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
             output_tokens: 100,
             cache_read_input_tokens: Some(6_000),
             cache_creation_input_tokens: Some(2_000),
+            cost: None,
+            currency: None,
         },
         // Anthropic uncached input: read and write are disjoint.
         StoredTokenUsage {
@@ -2848,6 +2854,8 @@ fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
             output_tokens: 100,
             cache_read_input_tokens: Some(7_000),
             cache_creation_input_tokens: Some(2_000),
+            cost: None,
+            currency: None,
         },
     ] {
         let json = serde_json::to_string(&usage).unwrap();
@@ -3264,4 +3272,32 @@ fn read_compaction_elision_compat_fixture() -> Result<()> {
         session.compaction.is_some()
     );
     Ok(())
+}
+
+#[test]
+fn token_usage_totals_sums_persisted_server_costs_by_currency() {
+    let mut session = Session::create_with_id("server_cost_totals".into(), None, None);
+    for (cost, currency) in [(7.0, "CNY"), (3.0, "USD")] {
+        session.add_message_ext(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "answer".to_string(),
+                cache_control: None,
+            }],
+            None,
+            Some(StoredTokenUsage {
+                prompt_tokens: None,
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                cost: Some(cost),
+                currency: Some(currency.to_string()),
+            }),
+        );
+    }
+
+    let totals = session.token_usage_totals();
+    assert_eq!(totals.costs_by_currency.get("CNY"), Some(&7.0));
+    assert_eq!(totals.costs_by_currency.get("USD"), Some(&3.0));
 }

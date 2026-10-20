@@ -5,7 +5,9 @@
 //! Kept out of `call_rates.rs` and the already-large `mod.rs` test module: the
 //! size ratchet tracks production files only, and this file is excluded.
 
-use super::call_rates::{ConfigCallRates, config_call_rates};
+use super::call_rates::{
+    ConfigCallRates, call_cost, config_call_rates, config_call_rates_with_tier,
+};
 use super::{ModelCost, RuleOutOfEffect, clear_memory_cache_for_tests, save_test_cache};
 use jcode_provider_core::Currency;
 use std::time::SystemTime;
@@ -505,6 +507,153 @@ fn call_cost_is_none_when_no_layer_can_price_the_call() {
             )
             .is_none(),
             "an incomplete foreign-currency card must not be priced"
+        );
+    });
+}
+
+/// An isolated home with one vendor file, for the billing-path regressions.
+fn with_vendor_file<T>(config: &str, file_body: &str, f: impl FnOnce() -> T) -> T {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    clear_memory_cache_for_tests();
+    super::vendor_files::clear_vendor_files_cache_for_tests();
+    let path = temp.path().join("prices.json");
+    std::fs::write(&path, file_body).expect("write vendor file");
+    let config = config.replace("{path}", &path.display().to_string());
+    std::fs::write(temp.path().join("config.toml"), config).expect("write config.toml");
+    crate::config::invalidate_config_cache();
+
+    let out = f();
+
+    clear_memory_cache_for_tests();
+    super::vendor_files::clear_vendor_files_cache_for_tests();
+    crate::config::invalidate_config_cache();
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    out
+}
+
+/// A vendor file's explicit cache-write rate must price cache-creation tokens,
+/// not the Anthropic-style premium over the input rate.
+#[test]
+fn a_vendor_file_cache_write_rate_reaches_call_cost() {
+    let file =
+        r#"{"models":{"deepseek-v4-pro":{"cost":{"input":3.0,"output":6.0,"cache_write":0.9}}}}"#;
+    let config = "[pricing.providers.deepseek]\nfile = \"{path}\"\n";
+    with_vendor_file(config, file, || {
+        let (cost, currency) = call_cost(
+            "deepseek",
+            "deepseek-v4-pro",
+            SystemTime::now(),
+            None,
+            0,
+            0,
+            0,
+            1_000_000,
+            // Anthropic-style split accounting still applies the explicit rate.
+            true,
+            false,
+        )
+        .expect("the file prices the call");
+        assert_eq!(currency, Currency::usd());
+        assert!(
+            (cost - 0.9).abs() < 1e-9,
+            "1M cache-write tokens at 0.9/Mtok must cost 0.9, got {cost}"
+        );
+    });
+}
+
+/// A partial USD inline card takes the rate it omits from the eligible vendor
+/// file before the derived catalogs (the file is the next configured layer).
+#[test]
+fn a_partial_usd_card_takes_its_missing_rate_from_the_vendor_file() {
+    let file = r#"{"models":{"deepseek-v4-pro":{"cost":{"input":1.0,"output":4.0}}}}"#;
+    let config = r#"
+[pricing.providers.deepseek]
+file = "{path}"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 2.0
+"#;
+    with_vendor_file(config, file, || {
+        let ConfigCallRates::Priced(card) =
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None)
+        else {
+            panic!("the partial inline card plus the file must price the call");
+        };
+        assert_eq!(card.input_per_mtok, 2.0, "the inline input override wins");
+        assert_eq!(
+            card.output_per_mtok, 4.0,
+            "the file supplies the output rate"
+        );
+    });
+}
+
+/// A foreign-currency card whose own absolute tariff supplies the missing rate
+/// is complete; it must not be discarded in favour of a derived USD card.
+#[test]
+fn a_foreign_tariff_that_completes_the_card_is_not_discarded() {
+    let config = r#"
+[pricing.providers.deepseek]
+currency = "CNY"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+default_tariff = "active"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".tariffs.active]
+input = 4.5
+output = 13.5
+"#;
+    with_pricing_env(config, DEEPSEEK_CATALOG, || {
+        let ConfigCallRates::Priced(card) =
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None)
+        else {
+            panic!("the active absolute tariff completes the CNY card");
+        };
+        assert_eq!(card.currency, Currency::new("CNY"));
+        assert_eq!(card.input_per_mtok, 4.5);
+        assert_eq!(card.output_per_mtok, 13.5);
+    });
+}
+
+/// A partial card completed from the curated tables must use the tier the call
+/// runs in; standard-tier output would under-bill an Anthropic fast call.
+#[test]
+fn a_partial_card_completes_at_the_active_service_tier() {
+    let config = r#"
+[pricing.providers."claude:api-key".models."claude-opus-4-6".cost]
+input = 7.0
+"#;
+    with_pricing_env(config, &[], || {
+        let standard =
+            config_call_rates("claude:api-key", "claude-opus-4-6", SystemTime::now(), None);
+        let ConfigCallRates::Priced(standard) = standard else {
+            panic!("the curated table completes the partial card");
+        };
+        assert_eq!(standard.output_per_mtok, 25.0);
+
+        let fast = config_call_rates_with_tier(
+            "claude:api-key",
+            "claude-opus-4-6",
+            SystemTime::now(),
+            None,
+            Some("priority"),
+        );
+        let ConfigCallRates::Priced(fast) = fast else {
+            panic!("the curated fast table completes the partial card");
+        };
+        assert_eq!(fast.input_per_mtok, 7.0, "the card's own rate stays");
+        assert_eq!(
+            fast.output_per_mtok, 150.0,
+            "the fast tier's output rate must fill the missing field"
         );
     });
 }

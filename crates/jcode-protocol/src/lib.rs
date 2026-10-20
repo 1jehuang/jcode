@@ -240,7 +240,7 @@ pub struct SessionActivitySnapshot {
     pub current_tool_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TokenUsageTotals {
     /// Sum of full prompt sizes for requests with cache telemetry. None means
     /// legacy records lack per-request accounting, not that the total is zero.
@@ -255,6 +255,12 @@ pub struct TokenUsageTotals {
     pub cache_reported_input_tokens: u64,
     pub cache_read_input_tokens: u64,
     pub cache_creation_input_tokens: u64,
+    /// Authoritative historical spend summed from the server-resolved cost of
+    /// each stored call, keyed by currency code. Empty for legacy sessions that
+    /// predate server-side pricing; clients then fall back to repricing the
+    /// restored token totals.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub costs_by_currency: std::collections::BTreeMap<String, f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

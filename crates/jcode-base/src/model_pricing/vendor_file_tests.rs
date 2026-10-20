@@ -788,18 +788,18 @@ fn a_route_skipped_rule_is_not_labelled_out_of_effect() {
     );
 }
 
-/// F2: a foreign-currency inline card that cannot price the call on its own
-/// loses to the vendor-file layer, not straight to models.dev. The card's
-/// `!owns_price` result must run the same ladder an absent card does (vendor
-/// file first, then the derived chain), otherwise a file that would price the
-/// call is silently skipped and a catalog number is used instead.
+/// F2: a foreign-currency inline card that cannot price the call on its own is
+/// completed by the eligible vendor file first (the user's next configured
+/// layer), in the same currency. Only when the file cannot complete it either
+/// does the call fall through to the derived chain. F1 still forbids borrowing
+/// USD numbers into a CNY card.
 #[test]
 fn an_incomplete_foreign_card_falls_to_the_vendor_file_before_models_dev() {
     let env = Env::new();
     env.save_models_dev();
     let path = env.vendor_path("prices.json", &vendor_body("deepseek-v4-pro", 5.0, 10.0));
-    // A CNY card with only `input`: it can never complete itself from USD
-    // numbers (F1), so it does not own the price.
+    // A CNY card with only `input`: it cannot complete itself from USD numbers
+    // (F1), but the CNY file supplies the missing output rate.
     env.write_config(&format!(
         "[pricing.providers.deepseek]\n\
          file = \"{path}\"\n\
@@ -811,17 +811,21 @@ fn an_incomplete_foreign_card_falls_to_the_vendor_file_before_models_dev() {
     let at = SystemTime::now();
     let (entry, currency) =
         crate::model_pricing::effective_entry("deepseek", "deepseek-v4-pro", at)
-            .expect("the vendor file prices the call the inline card cannot");
+            .expect("the vendor file completes the inline card it shares a currency with");
     assert_eq!(
         entry.cost.input,
-        Some(5.0),
-        "the file's own rate must win, got {entry:?}"
+        Some(4.5),
+        "the inline card's own input rate wins over the file's, got {entry:?}"
     );
-    assert_eq!(entry.cost.output, Some(10.0));
+    assert_eq!(
+        entry.cost.output,
+        Some(10.0),
+        "the file supplies the output rate the card leaves out"
+    );
     assert_eq!(
         currency.as_str(),
         "CNY",
-        "the file's own section currency follows its price"
+        "both configured layers are denominated in CNY"
     );
 
     // Without the file, the same card falls back to the derived chain

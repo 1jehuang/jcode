@@ -621,6 +621,7 @@ fn request_body(
     request_body_for(JevPurpose::Memory, provider, state, questions)
 }
 
+#[cfg(test)]
 fn request_body_for(
     purpose: JevPurpose,
     provider: JevProvider,

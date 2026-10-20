@@ -1749,7 +1749,7 @@ impl crate::tui::TuiState for App {
             None
         };
 
-        let history_cache = self.remote_token_usage_totals;
+        let history_cache = self.remote_token_usage_totals.as_ref();
         let history_prompt = history_cache.map_or(Some(0), |usage| usage.cache_prompt_tokens);
         let history_read = history_cache.map_or(0, |usage| usage.cache_read_input_tokens);
         let history_write = history_cache.map_or(0, |usage| usage.cache_creation_input_tokens);

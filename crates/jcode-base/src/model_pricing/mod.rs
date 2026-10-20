@@ -36,7 +36,7 @@ mod vendor_files;
 pub use crate::config::CostFields;
 pub use call_rates::{
     CallRateCard, ConfigCallRates, PricingNotice, call_cost, config_call_rates,
-    vendor_file_rule_out_of_effect,
+    config_call_rates_with_tier, vendor_file_rule_out_of_effect,
 };
 pub use catalog::ModelCost;
 pub use entry::{ModelPricingEntry, RuleOutOfEffect};
@@ -371,8 +371,19 @@ pub fn effective_entry_at_size(
     match sources::config_price(provider, model, at) {
         sources::ConfigPrice::NoPrice => None,
         sources::ConfigPrice::Hit { entry, currency } => {
-            let resolved =
-                sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
+            let resolved = sources::resolve_card_with_options(
+                *entry,
+                currency,
+                provider,
+                model,
+                at,
+                input_tokens,
+                None,
+                // A partial inline card may take its missing fields from the
+                // eligible vendor file before the derived catalogs (F4); the
+                // file resolver itself does not consult files again.
+                true,
+            );
             if resolved.owns_price {
                 return Some((resolved.entry, resolved.currency));
             }
@@ -445,6 +456,19 @@ pub(crate) fn vendor_file_card_at_size(
     at: SystemTime,
     input_tokens: Option<u64>,
 ) -> Option<VendorFileCard> {
+    vendor_file_card_at_size_with_tier(provider, model, None, at, input_tokens)
+}
+
+/// [`vendor_file_card_at_size`] honoring the active service tier when the file
+/// leaves a rate to the derived layers (Anthropic fast / OpenAI priority or
+/// flex), so a partial file card completes at the tier the call runs in.
+pub(crate) fn vendor_file_card_at_size_with_tier(
+    provider: &str,
+    model: &str,
+    service_tier: Option<&str>,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<VendorFileCard> {
     let config = sources::pricing_config();
     for (vendor, pricing) in &config.providers {
         let Some(path) = pricing.file.as_deref() else {
@@ -467,9 +491,21 @@ pub(crate) fn vendor_file_card_at_size(
         let context_tier = selected.as_ref().and_then(|tier| tier.context_tier);
         let tariff = selected.and_then(|tier| tier.tariff);
         let currency = pricing.currency.clone().unwrap_or_else(Currency::usd);
-        let resolved = sources::resolve_card(entry, currency, provider, model, at, input_tokens);
+        let resolved = sources::resolve_card_with_options(
+            entry,
+            currency,
+            provider,
+            model,
+            at,
+            input_tokens,
+            service_tier,
+            // This resolver *is* the vendor-file layer; consulting it again to
+            // complete a file card would recurse.
+            false,
+        );
         return resolved.owns_price.then_some(VendorFileCard {
             entry: resolved.entry,
+            config_cache_write: resolved.config_cache_write,
             currency: resolved.currency,
             vendor: vendor.clone(),
             path: path.to_path_buf(),
@@ -480,10 +516,29 @@ pub(crate) fn vendor_file_card_at_size(
     None
 }
 
+/// The vendor-file layer's rate card, including the cache-write rate the file
+/// states on its own, for callers outside this crate (the TUI billing path).
+/// `None` when no file prices the model.
+pub fn vendor_file_call_rate_card(
+    provider: &str,
+    model: &str,
+    service_tier: Option<&str>,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<CallRateCard> {
+    let card = vendor_file_card_at_size_with_tier(provider, model, service_tier, at, input_tokens)?;
+    CallRateCard::from_entry(&card.entry, card.config_cache_write, card.currency)
+}
+
 /// The vendor-file layer's card, with what a caller needs to label it.
 pub(crate) struct VendorFileCard {
     pub(crate) entry: ModelPricingEntry,
     pub(crate) currency: Currency,
+    /// The cache-write rate the file states on its own, after its tariff. `None`
+    /// when the file leaves the rate to a lower layer, so billing must keep its
+    /// pre-feature cache-write premium instead of treating a catalog-derived
+    /// figure as the user's configured price.
+    pub(crate) config_cache_write: Option<f64>,
     /// The `[pricing.providers.<vendor>]` key the file hangs under.
     pub(crate) vendor: String,
     /// The resolved local file the rules were read from.

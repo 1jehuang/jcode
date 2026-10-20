@@ -937,12 +937,18 @@ pub(in crate::tui::app) fn handle_server_event(
                     _ => None,
                 };
                 match server_delta {
-                    Some((delta, currency)) if delta > 0.0 => {
+                    Some((delta, currency)) if delta != 0.0 => {
+                        // A revision may be downward: the server's authoritative
+                        // cumulative figure is lower than the baseline, so
+                        // reverse the over-accrued amount instead of only moving
+                        // the baseline. Otherwise a later increase would count
+                        // the corrected spend twice ($5 → $3 → $5 used to show
+                        // $7 instead of $5).
                         app.accrue_server_resolved_call_cost(delta, &currency);
                     }
                     Some(_) => {
-                        // A repeated or revised-down snapshot adds nothing; the
-                        // baseline still moved above.
+                        // A repeated snapshot adds nothing; the baseline still
+                        // moved above.
                     }
                     None => app.accrue_remote_call_cost(
                         input.saturating_sub(previous_input),
@@ -2194,15 +2200,17 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.remote_server_has_update = server_has_update;
             }
             let history_total_tokens = total_tokens.or_else(|| {
-                token_usage_totals.map(|totals| (totals.input_tokens, totals.output_tokens))
+                token_usage_totals
+                    .as_ref()
+                    .map(|totals| (totals.input_tokens, totals.output_tokens))
             });
             if session_changed || history_total_tokens.is_some() {
                 app.remote_total_tokens = history_total_tokens;
             }
             if session_changed || token_usage_totals.is_some() {
-                app.remote_token_usage_totals = token_usage_totals;
+                app.remote_token_usage_totals = token_usage_totals.clone();
             }
-            if let Some(totals) = token_usage_totals {
+            if let Some(totals) = token_usage_totals.as_ref() {
                 app.token_accounting.total_input_tokens = 0;
                 app.token_accounting.total_output_tokens = 0;
                 app.token_accounting.total_cache_reported_input_tokens = 0;
@@ -2216,7 +2224,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 // restored totals once to seed the displayed cost, at the
                 // instant the snapshot arrives: history carries no per-call
                 // instant of its own (F15).
-                app.seed_cost_from_history_totals(&totals, std::time::SystemTime::now());
+                app.seed_cost_from_history_totals(totals, std::time::SystemTime::now());
             }
             if let Some(totals) = token_usage_totals {
                 crate::logging::info(&format!(

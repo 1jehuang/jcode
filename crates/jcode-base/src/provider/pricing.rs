@@ -254,10 +254,17 @@ fn config_price_estimate(
 fn vendor_file_price_estimate(
     source_key: &str,
     model: &str,
+    service_tier: Option<&str>,
     at: std::time::SystemTime,
     input_tokens: Option<u64>,
 ) -> Option<RouteCheapnessEstimate> {
-    let card = crate::model_pricing::vendor_file_card_at_size(source_key, model, at, input_tokens)?;
+    let card = crate::model_pricing::vendor_file_card_at_size_with_tier(
+        source_key,
+        model,
+        service_tier,
+        at,
+        input_tokens,
+    )?;
     let input = card.entry.cost.input?;
     let output = card.entry.cost.output?;
     let (currency, vendor) = (card.currency, card.vendor);
@@ -390,7 +397,9 @@ pub fn derived_pricing_for_source_at_size(
     input_tokens: Option<u64>,
 ) -> Option<RouteCheapnessEstimate> {
     // 1. `[pricing.providers.<vendor>].file` price files.
-    if let Some(estimate) = vendor_file_price_estimate(source_key, model, at, input_tokens) {
+    if let Some(estimate) =
+        vendor_file_price_estimate(source_key, model, service_tier, at, input_tokens)
+    {
         return Some(estimate);
     }
 
@@ -509,10 +518,15 @@ fn derived_layer_estimate(layer: DerivedLayer) -> Option<RouteCheapnessEstimate>
 pub(crate) fn derived_card_for_source_at_size(
     source_key: &str,
     model: &str,
+    service_tier: Option<&str>,
     at: std::time::SystemTime,
 ) -> Option<(crate::model_pricing::ModelCost, Currency)> {
     derived_layer_card(derived_layer_for_source_at_size(
-        source_key, model, None, at, None,
+        source_key,
+        model,
+        service_tier,
+        at,
+        None,
     )?)
 }
 

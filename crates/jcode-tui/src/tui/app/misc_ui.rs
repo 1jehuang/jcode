@@ -401,7 +401,9 @@ impl App {
     /// the same call differently. `amount` is denominated in `currency`, both
     /// reported by the server (never assumed to be USD).
     pub(super) fn accrue_server_resolved_call_cost(&mut self, amount: f64, currency: &Currency) {
-        if !amount.is_finite() || amount <= 0.0 {
+        // A negative amount is a downward revision of the same call's cumulative
+        // cost, so it must reverse previously accrued spend. Zero is a no-op.
+        if !amount.is_finite() || amount == 0.0 {
             return;
         }
         // The server withholds the cost for a subscription (OAuth) session, but
@@ -414,7 +416,12 @@ impl App {
         }
         let amount = amount as f32;
         self.cost.accrue(amount, currency);
-        self.record_api_key_spend(amount, currency);
+        // The spend ledger is append-only and records real API-key spend; a
+        // downward revision must not create a negative ledger entry. The session
+        // total above is still reconciled to the server's figure.
+        if amount > 0.0 {
+            self.record_api_key_spend(amount, currency);
+        }
     }
 
     /// Seed the session cost from token totals restored when resuming a
@@ -435,6 +442,22 @@ impl App {
         at: SystemTime,
     ) {
         if totals.input_tokens == 0 && totals.output_tokens == 0 {
+            return;
+        }
+        // The server persists the cost it resolved for each call. When the
+        // session has any, restore those exact amounts, one bucket per currency:
+        // they are authoritative even if the client's current model, card, or
+        // pricing configuration differs from the one that billed them. Repricing
+        // the aggregate tokens here is only the legacy fallback for sessions
+        // written before server-side pricing existed.
+        if !totals.costs_by_currency.is_empty() {
+            let buckets = totals
+                .costs_by_currency
+                .iter()
+                .filter(|(_, amount)| amount.is_finite())
+                .map(|(code, amount)| (Currency::new(code), *amount as f32))
+                .collect();
+            self.cost.set_bucket_totals(buckets);
             return;
         }
         if !self.remote_call_is_metered() {
@@ -595,7 +618,13 @@ impl App {
         // The expiry marker describes *this* pricing decision, so every arm
         // sets it: a call priced by the user's rule (or by a card that is
         // simply absent) clears whatever the previous call recorded (F8/F20).
-        match crate::model_pricing::config_call_rates(&source_key, model, at, input_tokens) {
+        match crate::model_pricing::config_call_rates_with_tier(
+            &source_key,
+            model,
+            at,
+            input_tokens,
+            self.active_service_tier_for_pricing().as_deref(),
+        ) {
             crate::model_pricing::ConfigCallRates::Priced(card) => {
                 self.cost.pricing_notice = None;
                 return PinnedCallPricing::Priced(ResolvedTokenPricing::from_rate_card(
@@ -638,17 +667,15 @@ impl App {
 
         // No configured rule in effect for this model (`Absent`, or a rule that
         // is out of effect with `on_rule_expiry = "fallback"`): price from the
-        // derived layers. Nothing here falls back to the generic defaults
-        // unless the model is unknown to every source, which is the pre-feature
-        // behaviour. Those layers state no cache-write rate either, so cache
-        // writes keep the premium they always had (F1: the config layer is the
-        // only one that can price a cache write differently).
+        // derived layers. The `[pricing.providers.<vendor>].file` layer is still
+        // the user's configuration, so a file that states a cache-write rate
+        // keeps it; the catalogs below state none and keep the premium.
         self.refresh_cached_pricing(at, model, is_anthropic, is_openai, input_tokens);
         PinnedCallPricing::Priced(ResolvedTokenPricing {
             prompt_price: *self.cost.cached_prompt_price.get_or_insert(15.0),
             completion_price: *self.cost.cached_completion_price.get_or_insert(60.0),
             cache_read_price: self.cost.cached_cache_read_price,
-            cache_write_price: None,
+            cache_write_price: self.cost.cached_cache_write_price,
             is_anthropic,
             is_openai,
             currency: self
@@ -734,6 +761,25 @@ impl App {
             return;
         }
 
+        // The vendor-file layer sits above the catalogs and can state an
+        // explicit cache-write rate, so resolve it as a card first.
+        if let Some(card) = crate::model_pricing::vendor_file_call_rate_card(
+            &source_key,
+            model,
+            service_tier.as_deref(),
+            at,
+            input_tokens,
+        ) {
+            let rate = |value: Option<f64>| value.map(|value| value as f32);
+            self.cost.cached_prompt_price = Some(card.input_per_mtok as f32);
+            self.cost.cached_completion_price = Some(card.output_per_mtok as f32);
+            self.cost.cached_cache_read_price = rate(card.cache_read_per_mtok);
+            self.cost.cached_cache_write_price = rate(card.cache_write_per_mtok);
+            self.cost.cached_price_currency = Some(card.currency);
+            self.cost.cached_price_model = Some(price_key);
+            return;
+        }
+
         let per_mtok = |micros: Option<u64>| micros.map(|m| m as f32 / 1_000_000.0);
         let estimate = crate::provider::pricing::derived_pricing_for_source_at_size(
             &source_key,
@@ -747,6 +793,9 @@ impl App {
             self.cost.cached_prompt_price = per_mtok(estimate.input_price_per_mtok_micros);
             self.cost.cached_completion_price = per_mtok(estimate.output_price_per_mtok_micros);
             self.cost.cached_cache_read_price = per_mtok(estimate.cache_read_price_per_mtok_micros);
+            // The catalogs below the file layer state no cache-write rate, so
+            // keep the pre-feature premium for cache creation.
+            self.cost.cached_cache_write_price = None;
             self.cost.cached_price_currency = Some(estimate.currency);
             self.cost.cached_price_model = Some(price_key);
             return;
@@ -761,6 +810,7 @@ impl App {
             self.cost.cached_prompt_price = None;
             self.cost.cached_completion_price = None;
             self.cost.cached_cache_read_price = None;
+            self.cost.cached_cache_write_price = None;
             self.cost.cached_price_currency = None;
             self.cost.cached_price_model = None;
         }

@@ -1037,3 +1037,48 @@ fn a_server_cost_in_a_new_currency_does_not_cross_buckets() {
         );
     });
 }
+
+/// A downward revision of the same call's cumulative server cost must reverse
+/// the over-accrual: three reports of $5, $3, $5 leave the session at $5, not $7.
+#[test]
+fn downward_server_cost_revisions_reconcile_the_session_total() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        write_pricing_config(CLIENT_EXPENSIVE_CARD_CONFIG);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_deepseek_app();
+
+        send_remote_usage(&mut app, &mut remote, 100, 10, Some(5.0), Some("USD"));
+        send_remote_usage(&mut app, &mut remote, 100, 10, Some(3.0), Some("USD"));
+        send_remote_usage(&mut app, &mut remote, 100, 10, Some(5.0), Some("USD"));
+
+        let cost = session_cost_usd(&app);
+        assert!(
+            (cost - 5.0).abs() < 1e-4,
+            "the session total must reconcile to the server's $5.00, got ${cost:.4}"
+        );
+    });
+}
+
+/// Reopening a session must restore the server's authoritative historical spend
+/// by currency, never reprice the aggregate tokens with today's client card.
+#[test]
+fn history_restores_authoritative_costs_by_currency() {
+    with_temp_jcode_home(|| {
+        let mut app = remote_deepseek_app();
+        let totals = crate::protocol::TokenUsageTotals {
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            costs_by_currency: std::collections::BTreeMap::from([
+                ("CNY".to_string(), 7.0),
+                ("USD".to_string(), 3.0),
+            ]),
+            ..Default::default()
+        };
+        app.seed_cost_from_history_totals(&totals, instant(INSIDE_PEAK));
+
+        assert_eq!(app.cost.total_in(&Currency::new("CNY")), 7.0);
+        assert_eq!(app.cost.total_in(&Currency::usd()), 3.0);
+    });
+}

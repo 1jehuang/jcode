@@ -22,6 +22,8 @@ fn assistant_message(
             output_tokens,
             cache_read_input_tokens,
             cache_creation_input_tokens,
+            cost: None,
+            currency: None,
         }),
     }
 }

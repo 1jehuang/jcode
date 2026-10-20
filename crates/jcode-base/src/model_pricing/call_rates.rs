@@ -110,13 +110,36 @@ pub fn config_call_rates(
     at: SystemTime,
     input_tokens: Option<u64>,
 ) -> ConfigCallRates {
+    config_call_rates_with_tier(provider, model, at, input_tokens, None)
+}
+
+/// [`config_call_rates`] honoring the active service tier when a partial card
+/// is completed from the curated static tables (Anthropic fast, OpenAI
+/// priority or flex).
+pub fn config_call_rates_with_tier(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+    service_tier: Option<&str>,
+) -> ConfigCallRates {
     match sources::config_price(provider, model, at) {
         ConfigPrice::NoPrice => ConfigCallRates::ConfiguredWithoutPrice,
         ConfigPrice::OutOfEffect(reason) => ConfigCallRates::OutOfEffect(reason),
         ConfigPrice::Absent => ConfigCallRates::Absent,
         ConfigPrice::Hit { entry, currency } => {
-            let resolved =
-                sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
+            let resolved = sources::resolve_card_with_options(
+                *entry,
+                currency,
+                provider,
+                model,
+                at,
+                input_tokens,
+                service_tier,
+                // A partial inline card takes missing fields from the eligible
+                // vendor file before the derived catalogs.
+                true,
+            );
             if !resolved.owns_price {
                 // The card lost to the next layer (a foreign-currency card that
                 // cannot be completed, per F1). That is not this layer's answer:
@@ -245,7 +268,7 @@ pub fn call_cost(
 ) -> Option<(f64, Currency)> {
     // Config layer first: a hand-written card states its rates (and, crucially,
     // its own cache-write rate) exactly, and can refuse to price the call.
-    match config_call_rates(provider, model, at, Some(input_tokens)) {
+    match config_call_rates_with_tier(provider, model, at, Some(input_tokens), service_tier) {
         ConfigCallRates::Priced(card) => {
             let amount = usage_cost(
                 card.input_per_mtok,
@@ -265,9 +288,35 @@ pub fn call_cost(
         ConfigCallRates::OutOfEffect(_) | ConfigCallRates::Absent => {}
     }
 
-    // Derived layers: the same entry point the client's `refresh_cached_pricing`
-    // falls through to. Those layers state no cache-write rate, so cache writes
-    // keep the premium heuristic below.
+    // The vendor-file layer is the user's own configuration too, and unlike the
+    // derived catalogs it can state an explicit cache-write rate. Resolve it as
+    // a card so that rate reaches billing instead of the premium heuristic.
+    if let Some(card) = crate::model_pricing::vendor_file_card_at_size_with_tier(
+        provider,
+        model,
+        service_tier,
+        at,
+        Some(input_tokens),
+    ) && let Some(rate_card) =
+        CallRateCard::from_entry(&card.entry, card.config_cache_write, card.currency)
+    {
+        let amount = usage_cost(
+            rate_card.input_per_mtok,
+            rate_card.output_per_mtok,
+            rate_card.cache_read_per_mtok,
+            rate_card.cache_write_per_mtok,
+            is_anthropic,
+            is_openai,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        );
+        return Some((amount, rate_card.currency));
+    }
+
+    // Remaining derived layers (curated tables, OpenRouter caches, models.dev).
+    // They state no cache-write rate, so cache writes keep the premium below.
     let estimate = crate::provider::pricing::derived_pricing_for_source_at_size(
         provider,
         model,

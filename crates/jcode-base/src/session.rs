@@ -1312,6 +1312,14 @@ request in this new forked session, using the inherited conversation only as con
             totals.cache_creation_input_tokens = totals
                 .cache_creation_input_tokens
                 .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0));
+            if let (Some(cost), Some(currency)) = (usage.cost, usage.currency.as_deref())
+                && cost.is_finite()
+            {
+                *totals
+                    .costs_by_currency
+                    .entry(currency.to_string())
+                    .or_insert(0.0) += cost;
+            }
         }
         totals
     }

@@ -1218,6 +1218,10 @@ impl Agent {
             // id would bill the wrong model (P2).
             let model_after_stream = self.provider.model();
 
+            // Keep the server-resolved figure for this call so the persisted
+            // message carries it; history restore can then sum authoritative
+            // spend by currency instead of repricing the totals.
+            let mut resolved_server_cost: Option<(f64, String)> = None;
             if usage_input.is_some()
                 || usage_output.is_some()
                 || usage_cache_read.is_some()
@@ -1280,6 +1284,10 @@ impl Agent {
                     }
                 } else {
                     (None, None)
+                };
+                resolved_server_cost = match (&cost, &currency) {
+                    (Some(amount), Some(currency)) => Some((*amount, currency.clone())),
+                    _ => None,
                 };
 
                 let _ = event_tx.send(ServerEvent::TokenUsage {
@@ -1427,6 +1435,10 @@ impl Agent {
                     output_tokens: self.last_usage.output_tokens,
                     cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
                     cache_creation_input_tokens: self.last_usage.cache_creation_input_tokens,
+                    cost: resolved_server_cost.as_ref().map(|(cost, _)| *cost),
+                    currency: resolved_server_cost
+                        .as_ref()
+                        .map(|(_, currency)| currency.clone()),
                 });
                 let message_id =
                     self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);

@@ -298,6 +298,14 @@ pub struct StoredTokenUsage {
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
+    /// Cost the server resolved for this call, in `currency` (never assumed to
+    /// be USD). Absent on records written before server-side pricing, and on
+    /// subscription calls the server deliberately leaves unmetered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// Currency `cost` is denominated in. Present exactly when `cost` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

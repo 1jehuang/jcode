@@ -1620,6 +1620,7 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
         cache_reported_input_tokens: 1_000,
         cache_read_input_tokens: 40_000,
         cache_creation_input_tokens: 100_000,
+        ..Default::default()
     };
     app.seed_cost_from_history_totals(&totals, std::time::SystemTime::now());
 

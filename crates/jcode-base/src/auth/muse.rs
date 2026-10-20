@@ -176,6 +176,10 @@ impl std::fmt::Debug for DeviceChallenge {
 /// Single poll attempt outcome. [`poll_login`] performs exactly one token
 /// request and never sleeps; the caller loops honoring `interval`.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "approved credentials are returned once; boxing them would complicate every caller"
+)]
 pub enum PollOutcome {
     /// User has not approved yet; poll again after `interval` seconds.
     Pending,

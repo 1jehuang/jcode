@@ -211,22 +211,72 @@ fn sane_rate(value: Option<f64>) -> Option<f64> {
 /// `context_over_200k` rates are **not** merged into a hand-written card: a
 /// lower layer's absolute tier would silently overwrite the fields the user
 /// wrote, and the config layer is authoritative.
+#[cfg(test)]
 pub(super) fn resolve_card(
+    entry: ModelPricingEntry,
+    currency: Currency,
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> ResolvedCard {
+    resolve_card_with_options(
+        entry,
+        currency,
+        provider,
+        model,
+        at,
+        input_tokens,
+        None,
+        false,
+    )
+}
+
+/// [`resolve_card`] with the active service tier and vendor-file completion.
+///
+/// `service_tier` is the tier the call runs in (`/fast on`, OpenAI priority or
+/// flex). A partial card's missing fields are completed from the same derived
+/// layer the call would otherwise use, so completing them at the *standard*
+/// tier would under- or over-bill an active fast call.
+///
+/// `allow_vendor_file_completion` lets a partial inline card take missing
+/// fields from the eligible `[pricing.providers.<vendor>].file` before the
+/// derived catalogs (the file is the user's next configured layer). The
+/// vendor-file resolver itself passes `false`, because consulting the file
+/// layer from inside it would recurse.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_card_with_options(
     mut entry: ModelPricingEntry,
     mut currency: Currency,
     provider: &str,
     model: &str,
     at: SystemTime,
     input_tokens: Option<u64>,
+    service_tier: Option<&str>,
+    allow_vendor_file_completion: bool,
 ) -> ResolvedCard {
-    // The layers this card sits above, in the billing chain's own order
-    // (curated static tables, then OpenRouter's caches, then models.dev). This
-    // is the completion source for a partial card, so a card the curated tables
-    // can complete is not refused just because models.dev has no cache entry
-    // (F4). The vendor-file layer is deliberately not here: `resolve_card`
-    // itself completes vendor-file rules, so consulting that layer would
-    // recurse.
-    let derived = crate::provider::pricing::derived_card_for_source_at_size(provider, model, at);
+    // The layers this card sits above, in the billing chain's own order. A
+    // vendor file is consulted first when this is an inline card (it is the
+    // user's next configured layer); then the derived chain (curated static
+    // tables, OpenRouter caches, models.dev). A card the curated tables can
+    // complete is not refused just because models.dev has no cache entry (F4).
+    let file_fallback = allow_vendor_file_completion
+        .then(|| {
+            crate::model_pricing::vendor_file_card_at_size_with_tier(
+                provider,
+                model,
+                service_tier,
+                at,
+                input_tokens,
+            )
+        })
+        .flatten();
+    let derived = crate::provider::pricing::derived_card_for_source_at_size(
+        provider,
+        model,
+        service_tier,
+        at,
+    );
     let mut owns_price = true;
     // What the `[pricing]` card states for cache writes *on its own*, asked
     // before the merge below can fill the field from the next layer. Only a rate
@@ -236,8 +286,16 @@ pub(super) fn resolve_card(
     let declared_cache_write = declared_cache_write(&entry, at, input_tokens);
 
     if currency.is_usd() {
-        // Same currency as the next layer, so missing fields merge per field.
-        if let Some((fallback, _)) = &derived {
+        // Same currency as the next layers, so missing fields merge per field.
+        if let Some(file) = &file_fallback
+            && file.currency.is_usd()
+            && let Some(cost) = file.entry.to_model_cost()
+        {
+            merge_same_currency(&mut entry, &cost);
+        }
+        if let Some((fallback, fallback_currency)) = &derived
+            && fallback_currency.is_usd()
+        {
             merge_same_currency(&mut entry, fallback);
         }
         // A rate that survived validation could still be non-finite if it
@@ -249,27 +307,42 @@ pub(super) fn resolve_card(
             cache_read: sane_rate(entry.cost.cache_read),
             cache_write: sane_rate(entry.cost.cache_write),
         };
-    } else if entry.cost.input.is_some() && entry.cost.output.is_some() {
-        // A complete foreign-currency card stands on its own.
-    } else if let Some((fallback, fallback_currency)) = &derived {
-        crate::logging::warn(&format!(
-            "pricing rule for {provider}/{model} is incomplete and denominated in {currency}; \
-             using the derived pricing layers ({fallback_currency}) instead of relabelling them"
-        ));
-        entry = ModelPricingEntry::from_model_cost(*fallback);
-        currency = fallback_currency.clone();
-        owns_price = false;
     } else {
-        // Non-USD, incomplete, and nothing underneath it: neither direction may
-        // borrow the other layer's numbers (F1), so this card can never price
-        // the model. Warn rather than let a partial card read as a configured
-        // price (spec 4.4): billing refuses it and display must render
-        // "unknown" instead of a one-sided figure.
-        crate::logging::warn(&format!(
-            "pricing rule for {provider}/{model} is incomplete and denominated in {currency}, \
-             and no fallback price exists; this model cannot be priced until the rule supplies \
-             both input and output"
-        ));
+        // A file in the same foreign currency is a valid completion source,
+        // just like a USD file is for a USD card.
+        if let Some(file) = &file_fallback
+            && file.currency == currency
+            && let Some(cost) = file.entry.to_model_cost()
+        {
+            merge_same_currency(&mut entry, &cost);
+        }
+        // A foreign-currency card is complete when the card (or the file in the
+        // same currency) plus its own active tariff/context tier supplies both
+        // rates. Check after the tariff, not before: an absolute tariff may be
+        // the layer that supplies the missing output rate, and discarding it
+        // would replace a valid configured price with a derived USD one.
+        if effective_cost_complete(&entry, at, input_tokens) {
+            // A complete foreign-currency card stands on its own.
+        } else if let Some((fallback, fallback_currency)) = &derived {
+            crate::logging::warn(&format!(
+                "pricing rule for {provider}/{model} is incomplete and denominated in {currency}; \
+                 using the derived pricing layers ({fallback_currency}) instead of relabelling them"
+            ));
+            entry = ModelPricingEntry::from_model_cost(*fallback);
+            currency = fallback_currency.clone();
+            owns_price = false;
+        } else {
+            // Non-USD, incomplete, and nothing underneath it: neither direction
+            // may borrow the other layer's numbers (F1), so this card can never
+            // price the model. Warn rather than let a partial card read as a
+            // configured price (spec 4.4): billing refuses it and display must
+            // render "unknown" instead of a one-sided figure.
+            crate::logging::warn(&format!(
+                "pricing rule for {provider}/{model} is incomplete and denominated in {currency}, \
+                 and no fallback price exists; this model cannot be priced until the rule supplies \
+                 both input and output"
+            ));
+        }
     }
 
     // Peak/off-peak selection runs on the *effective* card, i.e. after any
@@ -291,14 +364,41 @@ pub(super) fn resolve_card(
 
     // A card that states its own cache-write rate keeps it through the merge
     // (`or` never overwrites) and through the tariff (which scales or overrides
-    // that same card), so the effective rate is the one to honour.
-    let config_cache_write = declared_cache_write.and(entry.cost.cache_write);
+    // that same card), so the effective rate is the one to honour. Once the card
+    // lost to a lower layer, the figure is that layer's, not the user's.
+    let config_cache_write = if owns_price {
+        // Both the inline card and the vendor file are the user's own
+        // configuration. A rate that arrived from a catalog instead must keep the
+        // pre-feature premium, so only a declared rate counts.
+        declared_cache_write
+            .or_else(|| {
+                file_fallback
+                    .as_ref()
+                    .and_then(|file| file.config_cache_write)
+            })
+            .and(entry.cost.cache_write)
+    } else {
+        None
+    };
 
     ResolvedCard {
         entry,
         currency,
         owns_price,
         config_cache_write,
+    }
+}
+
+/// Whether the card supplies both rates once its own active tariff/context tier
+/// is applied.
+fn effective_cost_complete(
+    entry: &ModelPricingEntry,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> bool {
+    match rules::resolve_tier(entry, at, input_tokens) {
+        Some(selected) => selected.cost.input.is_some() && selected.cost.output.is_some(),
+        None => entry.cost.input.is_some() && entry.cost.output.is_some(),
     }
 }
 

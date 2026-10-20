@@ -1,5 +1,5 @@
 {
-  "total": 162,
+  "total": 167,
   "tracked_files": {
     "crates/jcode-app-core/build.rs": 4,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
@@ -10,7 +10,6 @@
     "crates/jcode-app-core/src/tool/browser_fast.rs": 6,
     "crates/jcode-app-core/src/tool/browser_jev.rs": 1,
     "crates/jcode-app-core/src/tool/calendar.rs": 1,
-    "crates/jcode-app-core/src/tool/communicate.rs": 1,
     "crates/jcode-app-core/src/tool/compile_remote.rs": 2,
     "crates/jcode-app-core/src/tool/computer/win.rs": 3,
     "crates/jcode-app-core/src/tool/discover.rs": 1,
@@ -25,7 +24,6 @@
     "crates/jcode-base/src/voice_intent.rs": 5,
     "crates/jcode-harness-api-server/src/translate.rs": 3,
     "crates/jcode-harness-api/examples/harness_repl.rs": 15,
-    "crates/jcode-plan/src/dag/ops.rs": 1,
     "crates/jcode-provider-anthropic/src/wedge_fixture_check.rs": 3,
     "crates/jcode-provider-core/src/model_names.rs": 1,
     "crates/jcode-provider-cursor-runtime/src/wire.rs": 1,
@@ -46,7 +44,6 @@
     "crates/jcode-tui-style/examples/light_bench.rs": 1,
     "crates/jcode-tui-style/src/theme_mode.rs": 1,
     "crates/jcode-tui/src/tui/app/auth.rs": 3,
-    "crates/jcode-tui/src/tui/app/auth_account_picker.rs": 2,
     "crates/jcode-tui/src/tui/app/auth_remote.rs": 12,
     "crates/jcode-tui/src/tui/app/auth_remote/onboarding.rs": 1,
     "crates/jcode-tui/src/tui/app/auth_remote/picker.rs": 1,
@@ -56,6 +53,7 @@
     "src/bin/memory_recall_bench.rs": 14,
     "src/cli/acp.rs": 2,
     "src/cli/commands/menubar.rs": 1,
+    "src/cli/login/device_login.rs": 9,
     "src/cli/ssh.rs": 1,
     "src/cli/tui_launch.rs": 1
   },
