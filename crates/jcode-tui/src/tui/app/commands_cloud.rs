@@ -357,6 +357,16 @@ mod tests {
         let content = &app.display_messages[index].content;
         assert!(content.contains("✓ 2. Checking host"));
         assert!(content.contains("3. Uploading session"));
+        let before = content.clone();
+        app.cloud_job.as_mut().unwrap().started =
+            std::time::Instant::now() - std::time::Duration::from_millis(250);
+        assert!(app.poll_cloud_job());
+        let after = &app.display_messages[index].content;
+        assert_ne!(
+            &before, after,
+            "active spinner must advance without new events"
+        );
+        assert!(after.contains("✓ 2. Checking host"));
         tx.send(CloudEvent::Stderr("Error: test failure".into()))
             .unwrap();
         tx.send(CloudEvent::Done(Ok(std::process::Output {
@@ -373,6 +383,66 @@ mod tests {
                 .contains("✗ 3. Uploading session")
         );
         assert!(!app.poll_cloud_job());
+    }
+
+    #[test]
+    fn cloud_markdown_keeps_steps_and_diagnostics_on_separate_rows() {
+        let steps = vec!["Preparing host".into(), "Uploading session".into()];
+        let content = render_cloud_steps(&steps, 0, None);
+        let rendered = crate::tui::markdown::render_markdown_with_width(&content, Some(80));
+        let rows: Vec<String> = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let completed = rows
+            .iter()
+            .position(|row| row.contains("✓ 1. Preparing host"))
+            .unwrap();
+        let active = rows
+            .iter()
+            .position(|row| row.contains("⠋ 2. Uploading session"))
+            .unwrap();
+        assert!(
+            completed < active,
+            "each step must occupy its own rendered row: {rows:?}"
+        );
+        assert!(!rows[completed].contains("Uploading"));
+
+        let error = format_cloud_failure(
+            "/cloud",
+            "Error: remote failed\n\nCaused by:\n    No OpenAI account with label 'work' found",
+        );
+        let rendered = crate::tui::markdown::render_markdown_with_width(&error, Some(80));
+        let rows: Vec<String> = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let error_row = rows
+            .iter()
+            .position(|row| row.contains("Error: remote failed"))
+            .unwrap();
+        let cause_row = rows
+            .iter()
+            .position(|row| row.contains("Caused by:"))
+            .unwrap();
+        let account_row = rows
+            .iter()
+            .position(|row| row.contains("No OpenAI account"))
+            .unwrap();
+        assert!(
+            error_row < cause_row && cause_row < account_row,
+            "diagnostic lines must not collapse: {rows:?}"
+        );
     }
 
     #[test]
