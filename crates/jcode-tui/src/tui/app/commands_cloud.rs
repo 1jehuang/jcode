@@ -429,6 +429,12 @@ mod tests {
             "each step must occupy its own rendered row: {rows:?}"
         );
         assert!(!rows[completed].contains("Uploading"));
+        println!(
+            "Cloud layout comparison: ordinary notice={} row; cloud report={} rows\n{}",
+            ordinary.len(),
+            rows.len(),
+            rows.join("\n"),
+        );
 
         let error = format_cloud_failure(
             "/cloud",
