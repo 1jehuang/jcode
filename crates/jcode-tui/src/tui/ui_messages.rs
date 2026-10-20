@@ -70,8 +70,10 @@ fn render_single_line_system_notice(
     // Ordinary notices are always compact, not just plain one-line strings.
     // Keep deliberately requested reports, command output and login prompts
     // readable. Markdown or a newline alone is not a reason to expand a notice.
-    if matches!(msg.title.as_deref(), Some("Skills" | "Context" | "Support"))
-        || msg.content.starts_with("Shell command · ")
+    if matches!(
+        msg.title.as_deref(),
+        Some("Skills" | "Context" | "Support" | "Cloud transfer")
+    ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
     {

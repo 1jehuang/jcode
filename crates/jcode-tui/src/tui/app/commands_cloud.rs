@@ -112,7 +112,9 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
     });
     let progress_message = app.display_messages.len();
     let steps = vec!["Starting cloud command".to_string()];
-    app.push_display_message(DisplayMessage::system(render_cloud_steps(&steps, 0, None)));
+    app.push_display_message(
+        DisplayMessage::system(render_cloud_steps(&steps, 0, None)).with_title("Cloud transfer"),
+    );
     app.cloud_job = Some(CloudJob {
         progress_message,
         steps,
@@ -207,7 +209,7 @@ fn render_cloud_steps(steps: &[String], frame: usize, finished: Option<bool>) ->
         };
         lines.push(format!("{marker} {}. {step}", index + 1));
     }
-    lines.join("  \n")
+    lines.join("\n")
 }
 
 /// Keep remote diagnostics literal so Markdown cannot fold their newlines.
@@ -389,7 +391,22 @@ mod tests {
     fn cloud_markdown_keeps_steps_and_diagnostics_on_separate_rows() {
         let steps = vec!["Preparing host".into(), "Uploading session".into()];
         let content = render_cloud_steps(&steps, 0, None);
-        let rendered = crate::tui::markdown::render_markdown_with_width(&content, Some(80));
+        let ordinary = crate::tui::ui::render_system_message(
+            &DisplayMessage::system(content.clone()),
+            80,
+            crate::config::DiffDisplayMode::Off,
+        );
+        assert_eq!(
+            ordinary.len(),
+            1,
+            "ordinary notices are intentionally compact"
+        );
+        let message = DisplayMessage::system(content).with_title("Cloud transfer");
+        let rendered = crate::tui::ui::render_system_message(
+            &message,
+            80,
+            crate::config::DiffDisplayMode::Off,
+        );
         let rows: Vec<String> = rendered
             .iter()
             .map(|line| {
