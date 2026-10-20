@@ -52,6 +52,15 @@ fn command(
     config: Option<&std::path::Path>,
     dir: &str,
 ) -> tokio::process::Command {
+    script_command(host, config, dir, SCRIPT)
+}
+
+pub(crate) fn script_command(
+    host: Option<&str>,
+    config: Option<&std::path::Path>,
+    dir: &str,
+    script: &str,
+) -> tokio::process::Command {
     let mut cmd = if let Some(host) = host {
         let mut cmd = tokio::process::Command::new("ssh");
         if let Some(config) = config {
@@ -65,6 +74,14 @@ fn command(
             "StrictHostKeyChecking=yes",
             "-o",
             "ForwardAgent=no",
+            "-o",
+            "ForwardX11=no",
+            "-o",
+            "Tunnel=no",
+            "-o",
+            "AddKeysToAgent=no",
+            "-o",
+            "UpdateHostKeys=no",
             "-o",
             "ClearAllForwardings=yes",
             "-o",
@@ -86,11 +103,11 @@ fn command(
         ]);
         cmd.arg("--")
             .arg(host)
-            .arg(format!("sh -c {} sh {}", quote(SCRIPT), quote(dir)));
+            .arg(format!("sh -c {} sh {}", quote(script), quote(dir)));
         cmd
     } else {
         let mut cmd = tokio::process::Command::new("sh");
-        cmd.args(["-c", SCRIPT, "sh", dir]);
+        cmd.args(["-c", script, "sh", dir]);
         cmd
     };
     cmd.stdin(std::process::Stdio::null())
@@ -104,8 +121,21 @@ async fn probe(command: tokio::process::Command) -> RepoState {
     probe_with_timeout(command, Duration::from_secs(12)).await
 }
 
-async fn probe_with_timeout(mut command: tokio::process::Command, deadline: Duration) -> RepoState {
-    const LIMIT: usize = 1024 * 1024;
+async fn probe_with_timeout(command: tokio::process::Command, deadline: Duration) -> RepoState {
+    match bounded_output(command, deadline, 1024 * 1024).await {
+        Some((status, _)) if status.code() == Some(42) => RepoState::NoRepository,
+        Some((status, bytes)) if status.success() => parse(&bytes)
+            .map(RepoState::Ready)
+            .unwrap_or(RepoState::Unavailable),
+        _ => RepoState::Unavailable,
+    }
+}
+
+pub(crate) async fn bounded_output(
+    mut command: tokio::process::Command,
+    deadline: Duration,
+    limit: usize,
+) -> Option<(std::process::ExitStatus, Vec<u8>)> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -128,33 +158,27 @@ async fn probe_with_timeout(mut command: tokio::process::Command, deadline: Dura
         }
     }
     let Ok(mut child) = command.spawn() else {
-        return RepoState::Unavailable;
+        return None;
     };
     let Some(stdout) = child.stdout.take() else {
-        return RepoState::Unavailable;
+        return None;
     };
     let result = tokio::time::timeout(deadline, async {
         let mut bytes = Vec::new();
         stdout
-            .take((LIMIT + 1) as u64)
+            .take((limit + 1) as u64)
             .read_to_end(&mut bytes)
             .await
             .ok()?;
-        if bytes.len() > LIMIT {
+        if bytes.len() > limit {
             return None;
         }
         let status = child.wait().await.ok()?;
-        if status.code() == Some(42) {
-            return Some(RepoState::NoRepository);
-        }
-        if !status.success() {
-            return None;
-        }
-        parse(&bytes).map(RepoState::Ready)
+        Some((status, bytes))
     })
     .await;
     match result {
-        Ok(Some(state)) => state,
+        Ok(Some(output)) => Some(output),
         _ => {
             #[cfg(unix)]
             if let Some(pid) = child.id() {
@@ -165,7 +189,7 @@ async fn probe_with_timeout(mut command: tokio::process::Command, deadline: Dura
             }
             let _ = child.kill().await;
             let _ = child.wait().await;
-            RepoState::Unavailable
+            None
         }
     }
 }
@@ -415,5 +439,9 @@ mod tests {
         assert_eq!(&args[..2], ["-F", "/private/config"]);
         assert!(args.last().unwrap().ends_with("'/repo/a'\\''b'"));
         assert!(args.iter().any(|s| s == "BatchMode=yes"));
+        assert!(args.iter().any(|s| s == "ForwardX11=no"));
+        assert!(args.iter().any(|s| s == "Tunnel=no"));
+        assert!(args.iter().any(|s| s == "AddKeysToAgent=no"));
+        assert!(args.iter().any(|s| s == "UpdateHostKeys=no"));
     }
 }
