@@ -72,6 +72,106 @@ fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
     }
 }
 
+/// Turn incremental edits into a full `todos` list so every downstream rule
+/// (status validation, confidence history, gates, lane and plan sync) runs on
+/// one path. `update` changes only the given fields of todos matched by `id`;
+/// `add` appends new todos (or inserts each after its `after` id); `remove`
+/// drops ids. Only applies when `todos` is absent: a full list always wins.
+fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(input);
+    };
+    let patching = ["update", "add", "remove"]
+        .iter()
+        .any(|key| obj.get(*key).is_some_and(|value| !value.is_null()));
+    if !patching {
+        return Ok(input);
+    }
+    if obj.get("todos").is_some_and(|value| !value.is_null()) {
+        bail!("send either a full `todos` list or `update`/`add`/`remove` edits, not both");
+    }
+    let parse_list = |value: Option<Value>| -> Result<Vec<Value>> {
+        match value {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Array(items)) => Ok(items),
+            Some(Value::String(raw)) if raw.trim().is_empty() => Ok(Vec::new()),
+            Some(Value::String(raw)) => match serde_json::from_str::<Value>(raw.trim()) {
+                Ok(Value::Array(items)) => Ok(items),
+                Ok(single @ Value::Object(_)) => Ok(vec![single]),
+                _ => bail!("expected a list"),
+            },
+            Some(single @ Value::Object(_)) => Ok(vec![single]),
+            Some(other) => bail!("expected a list, got {other}"),
+        }
+    };
+    let updates = parse_list(obj.remove("update"))?;
+    let adds = parse_list(obj.remove("add"))?;
+    let removes: Vec<String> = parse_list(obj.remove("remove"))?
+        .into_iter()
+        .filter_map(|value| match value {
+            Value::String(id) => Some(id),
+            Value::Object(fields) => fields.get("id").and_then(Value::as_str).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+
+    let Value::Array(mut todos) = stored() else {
+        bail!("stored todos are not a list");
+    };
+    let id_of = |todo: &Value| todo.get("id").and_then(Value::as_str).map(str::to_string);
+
+    for update in updates {
+        let Some(fields) = update.as_object() else {
+            bail!("each update must be an object with an id");
+        };
+        let Some(id) = fields.get("id").and_then(Value::as_str) else {
+            bail!("each update needs an `id`");
+        };
+        let Some(todo) = todos
+            .iter_mut()
+            .find(|todo| id_of(todo).as_deref() == Some(id))
+        else {
+            bail!("no todo with id {id:?}; use `add` for new todos");
+        };
+        let target = todo.as_object_mut().expect("stored todo is an object");
+        for (key, value) in fields {
+            if key != "id" {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    for mut add in adds {
+        let Some(fields) = add.as_object_mut() else {
+            bail!("each added todo must be an object");
+        };
+        let after = fields
+            .remove("after")
+            .and_then(|v| v.as_str().map(str::to_string));
+        let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
+        if let Some(id) = &id
+            && todos.iter().any(|todo| id_of(todo).as_deref() == Some(id))
+        {
+            bail!("todo id {id:?} already exists; use `update` to change it");
+        }
+        match after.and_then(|after| {
+            todos
+                .iter()
+                .position(|t| id_of(t).as_deref() == Some(&after))
+        }) {
+            Some(index) => todos.insert(index + 1, add),
+            None => todos.push(add),
+        }
+    }
+
+    if !removes.is_empty() {
+        todos.retain(|todo| !id_of(todo).is_some_and(|id| removes.contains(&id)));
+    }
+
+    obj.insert("todos".to_string(), Value::Array(todos));
+    Ok(input)
+}
+
 #[derive(Deserialize)]
 struct TodoInput {
     todos: Option<Vec<TodoItem>>,
@@ -740,7 +840,9 @@ impl Tool for TodoTool {
          more than one step: write the full plan before starting, mark an item \
          in_progress before working on it, mark it completed the moment it is done \
          (never batch completions), and add newly discovered work as soon as you find it. \
-         Expect to call this after nearly every meaningful step."
+         Write the full list once with `todos`; after that use `update` (by id) to change \
+         status or fields, `add` for new work, and `remove` rarely, instead of resending \
+         the whole list. Expect to call this after nearly every meaningful step."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -748,9 +850,33 @@ impl Tool for TodoTool {
             "type": "object",
             "properties": {
                 "intent": super::intent_schema_property(),
+                "update": {
+                    "type": "array",
+                    "description": "Edit existing todos by id: each entry is {id, ...fields to change}; other fields and todos are untouched. Prefer this for status changes instead of resending the list.",
+                    "items": {
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {"id": {"type": "string"}},
+                        "additionalProperties": true
+                    }
+                },
+                "add": {
+                    "type": "array",
+                    "description": "Append new todos (same fields as todos). Optional `after`: id to insert after.",
+                    "items": {
+                        "type": "object",
+                        "required": ["content", "status", "priority", "id", "confidence"],
+                        "additionalProperties": true
+                    }
+                },
+                "remove": {
+                    "type": "array",
+                    "description": "Ids of todos to delete. Prefer marking status cancelled.",
+                    "items": {"type": "string"}
+                },
                 "todos": {
                     "type": "array",
-                    "description": "Todo list to save.",
+                    "description": "Full todo list; replaces the whole list. Use for the initial plan or a real restructure, otherwise prefer update/add/remove.",
                     "items": {
                         "type": "object",
                         "required": ["content", "status", "priority", "id", "confidence"],
@@ -881,6 +1007,10 @@ impl Tool for TodoTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let input = apply_todo_patch(input, || {
+            serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
+                .unwrap_or(Value::Array(Vec::new()))
+        })?;
         let params = parse_todo_input(input)?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
         let operation = if is_write { "write" } else { "read" };
@@ -993,11 +1123,17 @@ mod tests {
             .get("properties")
             .and_then(|v| v.as_object())
             .expect("todo schema should have properties");
-        assert_eq!(props.len(), 4);
+        assert_eq!(props.len(), 7);
         assert!(props.contains_key("intent"));
         assert!(props.contains_key("todos"));
         assert!(props.contains_key("plan"));
         assert!(props.contains_key("goals"));
+        for patch in ["update", "add", "remove"] {
+            assert!(
+                props.contains_key(patch),
+                "{patch} patch mode should be offered"
+            );
+        }
 
         let item = props["todos"]
             .get("items")
@@ -1688,6 +1824,84 @@ mod tests {
     /// ungrouped goal unconditionally (not only as a group header), so an
     /// ungrouped goal left over from a previous flat todo list is exactly what
     /// the reporter saw frozen in the panel.
+    #[tokio::test]
+    async fn patch_mode_updates_adds_and_removes_without_resending_the_list() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "todo-patch-mode";
+        let tool = TodoTool::new();
+
+        tool.execute(
+            json!({"todos": [
+                {"content": "a", "status": "pending", "priority": "high", "id": "a",
+                 "confidence": "plausible", "stage": 1, "group": "lane", "details": "keep me"},
+                {"content": "b", "status": "pending", "priority": "high", "id": "b",
+                 "confidence": "plausible", "stage": 1, "group": "lane"},
+            ]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("initial write");
+
+        // Status change by id: every other field and todo is untouched.
+        tool.execute(
+            json!({"update": [{"id": "a", "status": "completed",
+                               "completion_confidence": "validated"}]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("update");
+        let todos = load_todos(session).unwrap();
+        assert_eq!(todos[0].status, "completed");
+        assert_eq!(todos[0].stage, Some(1));
+        assert_eq!(todos[0].group.as_deref(), Some("lane"));
+        assert_eq!(todos[0].details.as_deref(), Some("keep me"));
+        assert_eq!(todos[1].status, "pending");
+
+        // Insert after a given id, then remove one.
+        tool.execute(
+            json!({"add": [{"content": "between", "status": "pending", "priority": "high",
+                            "id": "m", "confidence": "plausible", "after": "a"}],
+                   "remove": ["b"]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("add + remove");
+        let ids: Vec<String> = load_todos(session)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, ["a", "m"]);
+
+        // Mistakes are rejected instead of silently doing something else.
+        for bad in [
+            json!({"update": [{"id": "nope", "status": "completed"}]}),
+            json!({"add": [{"content": "dup", "status": "pending", "priority": "high",
+                            "id": "a", "confidence": "plausible"}]}),
+            json!({"update": [{"id": "a", "status": "finished-ish"}]}),
+            json!({"todos": [], "update": [{"id": "a", "status": "pending"}]}),
+        ] {
+            assert!(
+                tool.execute(bad.clone(), test_ctx(session)).await.is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            load_todos(session).unwrap().len(),
+            2,
+            "failed patches change nothing"
+        );
+
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     #[tokio::test]
     async fn an_ungrouped_goal_does_not_survive_into_a_grouped_next_task() {
         let _guard = crate::storage::lock_test_env();
