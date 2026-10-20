@@ -122,12 +122,6 @@ Spawn two or more agents in the same repo, and they will automatically be manage
 Agents are also able to spawn their own swarms autonomously. They have a swarm tool which allows them to spawn in their own teamates to accomplish tasks in parallel. Doing so turns the main agent into a coordinator and the spawned agents into workers. Groups of agents, their messaging channels, their completion statuses, etc are all automatically managed. This can be done headlessly or headed.
 
 
-## Token optimization
-
-### agentgrep
-
-agentgrep is jcode's grep tool, built for agents. Each match comes back with the file's structure, like its functions and where they sit, so the agent can understand a file without reading all of it. The harness also adaptively trims results based on what the agent has already seen, so it never pays for the same code twice. This saves a lot of context.
-
 ## OAuth and Providers
 
 Supports a [wide range of providers](https://jcode.sh/docs#providers), including Claude OAuth and OpenAI Codex OAuth.
