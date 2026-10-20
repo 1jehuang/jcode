@@ -5,6 +5,7 @@
 //! In centered mode, widgets can appear on both left and right margins.
 //! In left-aligned mode, widgets only appear on the right margin.
 
+pub use super::cloud_git::{DualGitInfo, RepoState};
 use super::color_support::rgb;
 #[path = "info_widget_commits.rs"]
 mod commits;
@@ -75,6 +76,9 @@ use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
 pub(super) fn changes_section_height(data: &InfoWidgetData) -> u16 {
+    if let Some(dual) = &data.dual_git_info {
+        return git::dual_git_height(dual);
+    }
     data.git_info.as_ref().map(changes_height).unwrap_or(0)
 }
 
@@ -740,6 +744,8 @@ pub struct InfoWidgetData {
     pub is_compacting: bool,
     /// Git repository status
     pub git_info: Option<GitInfo>,
+    /// Independent local and VM snapshots when this TUI is attached over SSH.
+    pub dual_git_info: Option<DualGitInfo>,
     /// Absolute paths the agent edited this session (edit-style tool calls),
     /// used to mark agent changes in the Changes widget.
     pub agent_edited: std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>,
@@ -816,11 +822,12 @@ impl InfoWidgetData {
                 if self.compaction_info.is_some() {
                     sections += 1;
                 }
-                if self
-                    .git_info
-                    .as_ref()
-                    .map(changes_has_data)
-                    .unwrap_or(false)
+                if self.dual_git_info.is_some()
+                    || self
+                        .git_info
+                        .as_ref()
+                        .map(changes_has_data)
+                        .unwrap_or(false)
                 {
                     sections += 1;
                 }
@@ -856,11 +863,14 @@ impl InfoWidgetData {
             WidgetKind::KvCache => self.cache_hit_info.is_some(),
             WidgetKind::ModelInfo => runtime_has_data(self),
             WidgetKind::Tips => false,
-            WidgetKind::GitStatus => self
-                .git_info
-                .as_ref()
-                .map(changes_has_data)
-                .unwrap_or(false),
+            WidgetKind::GitStatus => {
+                self.dual_git_info.is_some()
+                    || self
+                        .git_info
+                        .as_ref()
+                        .map(changes_has_data)
+                        .unwrap_or(false)
+            }
             WidgetKind::Commits => self
                 .git_info
                 .as_ref()
@@ -2182,7 +2192,7 @@ fn render_sections(
     }
 
     // Changed files (the detail behind the line's git counts).
-    if data.git_info.as_ref().is_some_and(changes_has_data) {
+    if data.dual_git_info.is_some() || data.git_info.as_ref().is_some_and(changes_has_data) {
         lines.extend(render_git_widget(data, inner));
     }
 

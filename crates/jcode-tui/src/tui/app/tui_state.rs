@@ -1956,6 +1956,7 @@ impl crate::tui::TuiState for App {
                 false
             },
             git_info: gather_git_info(),
+            dual_git_info: crate::tui::cloud_git::gather(),
             agent_edited: self.agent_edited_paths(),
         }
     }

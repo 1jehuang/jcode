@@ -71,6 +71,25 @@ async fn run_unix(args: Args) -> Result<()> {
     )
     .await?;
     let working_dir = connection.remote_working_dir().to_owned();
+    // The TUI stays local. Preserve its workspace separately from the VM's,
+    // and share the exact managed-host config with read-only metadata probes.
+    let explicit_source = std::env::var_os("JCODE_SSH_LOCAL_WORKING_DIR").is_some();
+    crate::env::set_var(
+        "JCODE_SSH_LOCAL_IS_SOURCE",
+        if explicit_source { "1" } else { "0" },
+    );
+    if let Some(local_dir) = std::env::var_os("JCODE_SSH_LOCAL_WORKING_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+    {
+        crate::env::set_var("JCODE_SSH_LOCAL_WORKING_DIR", local_dir);
+    }
+    if super::cloud_managed::is_managed(host) {
+        let _ = super::cloud_managed::ssh_args()?;
+        crate::env::set_var("JCODE_SSH_CONFIG", super::cloud_managed::ssh_config_path()?);
+    } else {
+        crate::env::remove_var("JCODE_SSH_CONFIG");
+    }
     crate::env::set_var("JCODE_SSH_REMOTE", host);
     crate::env::set_var("JCODE_SSH_BINARY", binary);
     crate::env::set_var("JCODE_SSH_WORKING_DIR", &working_dir);
