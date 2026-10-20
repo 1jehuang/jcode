@@ -13,8 +13,8 @@ cleanup() {
     tmux -S "$TMUX_SOCK" kill-server 2>/dev/null || true
     if [[ -f $W/ssh/pid ]]; then kill "$(cat "$W/ssh/pid")" 2>/dev/null || true; fi
     if [[ -n ${MODEL_PID:-} ]]; then kill "$MODEL_PID" 2>/dev/null || true; fi
-    JCODE_HOME="$W/local-home" JCODE_RUNTIME_DIR="$W/local-run" "$JCODE_BIN" --no-update server stop >/dev/null 2>&1 || true
-    JCODE_HOME="$W/remote-home" JCODE_RUNTIME_DIR="$W/remote-run" "$JCODE_BIN" --no-update server stop >/dev/null 2>&1 || true
+    env -u JCODE_SOCKET -u JCODE_SESSION_ID JCODE_HOME="$W/local-home" JCODE_RUNTIME_DIR="$W/local-run" "$JCODE_BIN" --no-update server stop >/dev/null 2>&1 || true
+    env -u JCODE_SOCKET -u JCODE_SESSION_ID JCODE_HOME="$W/remote-home" JCODE_RUNTIME_DIR="$W/remote-run" "$JCODE_BIN" --no-update server stop >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 fail() {
