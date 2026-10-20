@@ -133,5 +133,8 @@ fn expanded_prompt_preview_lists_recent_offscreen_prompts_oldest_first() {
     let items = super::expanded_prompt_preview_items(&starts, &texts, 75, 0);
     assert_eq!(items.len(), super::EXPANDED_PROMPT_PREVIEW_COUNT);
     assert_eq!(items.first().unwrap().0, "3");
-    assert_eq!(items.last().unwrap(), &("8".to_string(), "prompt 7 line".to_string()));
+    assert_eq!(
+        items.last().unwrap(),
+        &("8".to_string(), "prompt 7 line".to_string())
+    );
 }

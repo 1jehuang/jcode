@@ -568,7 +568,10 @@ fn vertical_strip_unfocused_keeps_live_card_details_in_chat() {
     );
     // The compact row names the active step in place of the spawn prompt,
     // but stays a single row: the full todo card is chat/focus-only.
-    assert!(all.contains("test token refresh flow"), "active step: {all}");
+    assert!(
+        all.contains("test token refresh flow"),
+        "active step: {all}"
+    );
     assert!(
         !all.contains("review authentication changes"),
         "spawn prompt should yield to the active todo: {all}"

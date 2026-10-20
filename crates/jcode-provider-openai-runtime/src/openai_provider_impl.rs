@@ -320,9 +320,7 @@ impl Provider for OpenAIProvider {
             ],
         );
         let usage_diag = match self.credentials.try_read() {
-            Ok(credentials) => {
-                super::openai_stream_runtime::serving_account_diag(&credentials).0
-            }
+            Ok(credentials) => super::openai_stream_runtime::serving_account_diag(&credentials).0,
             Err(_) => "account=unknown (credentials busy)".to_string(),
         };
         log_openai_stream_lifecycle(
