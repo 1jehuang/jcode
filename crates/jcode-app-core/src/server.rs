@@ -2063,8 +2063,8 @@ impl Server {
         file_touch: FileTouchService,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
         swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-        _swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
-        _swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
+        swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
+        swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
         _shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
         sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
         soft_interrupt_queues: SessionInterruptQueues,
@@ -2371,6 +2371,27 @@ impl Server {
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
+                    // A coordinator's todo list is its lane plan: keep a
+                    // running plan mirroring every save, so new or reshaped
+                    // lanes are picked up without relaunching.
+                    if let Some(swarm_id) = self::swarm_todo_link::resync_plan_after_todo_save(
+                        &event.session_id,
+                        &event.todos,
+                        &swarm_members,
+                        &swarm_plans,
+                        &swarm_coordinators,
+                    )
+                    .await
+                    {
+                        self::swarm::broadcast_swarm_plan(
+                            &swarm_id,
+                            Some("todos_changed".to_string()),
+                            &swarm_plans,
+                            &swarm_members,
+                            &swarms_by_id,
+                        )
+                        .await;
+                    }
                 }
                 BusEvent::SwarmOutputTail(tail) => {
                     dispatch_swarm_output_tail(&tail, &swarm_members, &swarms_by_id).await;

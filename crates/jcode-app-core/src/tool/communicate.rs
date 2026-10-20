@@ -1673,6 +1673,30 @@ impl CommunicateTool {
     }
 }
 
+/// Swarm actions advertised to models. Real usage is dominated by messaging,
+/// reports, listing and spawning; the plan/task-graph actions (propose_plan,
+/// assign_task, assign_next, fill_slots, run_plan, resync_plan, ...) are
+/// subsumed by `launch` and lane-owning `spawn`. Unlisted actions still
+/// execute for old transcripts and scripts, they are just not offered.
+const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
+    "launch",
+    "spawn",
+    "message",
+    "dm",
+    "report",
+    "status",
+    "plan_status",
+    "list",
+    "summary",
+    "await_members",
+    "stop",
+    "resume",
+    "retry",
+    "list_models",
+    "list_swarms",
+    "set_swarm_label",
+];
+
 #[derive(Clone, Deserialize)]
 struct CommunicateInput {
     action: String,
@@ -1830,19 +1854,8 @@ impl Tool for CommunicateTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["share", "share_append", "read", "message", "broadcast", "dm", "channel", "list", "list_channels", "channel_members", "list_swarms", "set_swarm_label",
-                             "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
-                             "status", "report", "plan_status", "summary", "read_context", "resync_plan", "assign_task", "assign_next", "fill_slots", "launch", "run_plan", "cleanup",
-                             "start", "start_task", "wake", "resume", "retry", "reassign", "replace", "salvage",
-                             "subscribe_channel", "unsubscribe_channel", "await_members", "list_models"],
-                    "description": "Action. spawn requires label and should include prompt. list_models shows available models/routes."
-                },
-                "key": {
-                    "type": "string",
-                    "description": "Shared-context key for share/share_append/read. Discouraged: prefer the repo and DMs."
-                },
-                "value": {
-                    "type": "string"
+                    "enum": ADVERTISED_SWARM_ACTIONS,
+                    "description": "Action. launch runs your todo list (one agent per lane). spawn starts one worker on a lane; spawn requires label and should include prompt. message sends to to_session, a channel, or everyone. list_models shows available models/routes."
                 },
                 "message": {
                     "type": "string",
@@ -1876,15 +1889,9 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "description": "Channel name for channel actions. Discouraged: prefer DMs."
                 },
-                "proposer_session": { "type": "string" },
-                "reason": { "type": "string" },
                 "target_session": {
                     "type": "string",
                     "description": "Session ID or unique friendly name for management actions. Alias of to_session."
-                },
-                "role": {
-                    "type": "string",
-                    "enum": ["agent", "coordinator"]
                 },
                 "label": {
                     "type": "string",
@@ -1916,14 +1923,6 @@ impl Tool for CommunicateTool {
                 "task_id": {
                     "type": "string",
                     "description": "Optional plan task ID. When omitted the coordinator picks or resumes the relevant task."
-                },
-                "spawn_if_needed": {
-                    "type": "boolean",
-                    "description": "For assign_task: spawn a fresh agent when no reusable one is available."
-                },
-                "prefer_spawn": {
-                    "type": "boolean",
-                    "description": "For assign_task: prefer spawning fresh over reusing an idle worker."
                 },
                 "spawn_mode": {
                     "type": "string",
@@ -1964,7 +1963,7 @@ impl Tool for CommunicateTool {
                 "concurrency_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max live workers. Required for fill_slots; optional override for run_plan."
+                    "description": "Max live workers for launch."
                 },
                 "force": {
                     "type": "boolean",
@@ -1983,14 +1982,6 @@ impl Tool for CommunicateTool {
                     "enum": ["notify", "interrupt", "wake"],
                     "description": "Optional delivery mode for dm/channel messaging."
                 },
-                "plan_items": {
-                    "type": "array",
-                    "description": "Plan items for propose_plan. launch runs your todo list instead: each lane in a phase is owned by one agent whose todo list is that lane; lanes run in parallel, later phases wait.",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": true
-                    }
-                }
             }
         });
 

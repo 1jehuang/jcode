@@ -471,6 +471,37 @@ mod tests {
     }
 
     #[test]
+    fn lane_plan_resyncs_from_todos_keeping_running_state() {
+        let mut todos = vec![laned("p1", 1, "parser"), laned("u1", 1, "ui")];
+        let mut plan = plan_items_from_todos(&todos);
+        plan[0].status = "running".into();
+        plan[0].assigned_to = Some("session_fox_1".into());
+        // A lane added mid-run shows up; the running lane keeps its state.
+        todos.push(laned("d1", 1, "docs"));
+        let next = resync_lane_plan(&todos, &plan).expect("plan changed");
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["lane:1:parser", "lane:1:ui", "lane:1:docs"]);
+        assert_eq!(next[0].status, "running");
+        assert_eq!(next[0].assigned_to.as_deref(), Some("session_fox_1"));
+        // Same todos again: nothing to do.
+        assert_eq!(resync_lane_plan(&todos, &next), None);
+        // A finished lane leaving the open todos is kept as done.
+        let mut done = next.clone();
+        done[1].status = "done".into();
+        todos.retain(|t| t.id != "u1");
+        let after = resync_lane_plan(&todos, &done).expect("plan changed");
+        assert!(
+            after
+                .iter()
+                .any(|i| i.id == "lane:1:ui" && i.status == "done")
+        );
+        // Hand-written plans are left alone.
+        let mut hand = plan.clone();
+        hand[0].id = "custom".into();
+        assert_eq!(resync_lane_plan(&todos, &hand), None);
+    }
+
+    #[test]
     fn lane_brief_lists_steps_with_details_and_rules() {
         let mut todos = vec![laned("p1", 1, "parser"), laned("p2", 1, "parser")];
         todos[1].details = Some("touch src/lexer.rs".into());
@@ -534,4 +565,68 @@ mod tests {
         apply_plan(&mut todos, &items);
         assert_eq!(todos[0].status, "completed");
     }
+}
+
+/// Re-derive a lane plan from the coordinator's todos, keeping the status and
+/// owner of lanes already in `existing`. `None` when `existing` is not a lane
+/// plan (hand-written plans stay authoritative) or nothing changed.
+pub(crate) fn resync_lane_plan(todos: &[TodoItem], existing: &[PlanItem]) -> Option<Vec<PlanItem>> {
+    if existing.is_empty() || !existing.iter().all(|item| is_lane_task(&item.id)) {
+        return None;
+    }
+    let mut items = plan_items_from_todos(todos);
+    for item in &mut items {
+        if let Some(previous) = existing.iter().find(|previous| previous.id == item.id) {
+            item.status = previous.status.clone();
+            item.assigned_to = previous.assigned_to.clone();
+        }
+    }
+    // Keep finished lanes that dropped out of the open todos, so a completed
+    // lane is not forgotten and its dependants stay satisfied.
+    for previous in existing {
+        if !items.iter().any(|item| item.id == previous.id)
+            && crate::plan::is_completed_status(&previous.status)
+        {
+            items.push(previous.clone());
+        }
+    }
+    (items.as_slice() != existing).then_some(items)
+}
+
+/// Keep a running lane plan mirroring the coordinator's todo list on every
+/// todo save, so lanes added or reshaped mid-run are picked up without a
+/// relaunch. Returns the swarm id when the plan changed.
+pub(crate) async fn resync_plan_after_todo_save(
+    session_id: &str,
+    todos: &[TodoItem],
+    swarm_members: &std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, super::SwarmMember>>,
+    >,
+    swarm_plans: &std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, super::VersionedPlan>>,
+    >,
+    swarm_coordinators: &std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    >,
+) -> Option<String> {
+    let swarm_id = swarm_members
+        .read()
+        .await
+        .get(session_id)
+        .and_then(|member| member.swarm_id.clone())?;
+    if swarm_coordinators
+        .read()
+        .await
+        .get(&swarm_id)
+        .map(String::as_str)
+        != Some(session_id)
+    {
+        return None;
+    }
+    let mut plans = swarm_plans.write().await;
+    let plan = plans.get_mut(&swarm_id)?;
+    let items = resync_lane_plan(todos, &plan.items)?;
+    plan.replace_items(items);
+    plan.version += 1;
+    Some(swarm_id)
 }

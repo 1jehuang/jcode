@@ -1047,142 +1047,94 @@ fn format_swarm_model_list_handles_empty_catalog() {
 }
 
 #[test]
-fn schema_advertises_supported_swarm_fields() {
+fn schema_advertises_a_lean_lane_first_action_set() {
     let schema = CommunicateTool::new().parameters_schema();
     let props = schema["properties"]
         .as_object()
         .expect("swarm schema should have properties");
-
-    assert!(props.contains_key("action"));
-    assert!(props.contains_key("key"));
-    assert!(props.contains_key("value"));
-    assert!(props.contains_key("message"));
-    assert!(props.contains_key("to_session"));
-    assert_eq!(
-        props["to_session"]["description"],
-        json!("Session ID or unique friendly name of one agent. Alias of target_session.")
-    );
-    assert!(props.contains_key("channel"));
-    assert!(props.contains_key("proposer_session"));
-    assert!(props.contains_key("reason"));
-    assert!(props.contains_key("target_session"));
-    assert_eq!(
-        props["target_session"]["description"],
-        json!("Session ID or unique friendly name for management actions. Alias of to_session.")
-    );
-    assert!(props.contains_key("role"));
-    assert!(props.contains_key("prompt"));
-    assert!(props.contains_key("working_dir"));
-    assert!(props.contains_key("limit"));
-    assert!(props.contains_key("task_id"));
-    assert!(props.contains_key("spawn_if_needed"));
-    assert!(props.contains_key("prefer_spawn"));
-    assert!(props.contains_key("session_ids"));
-    assert!(props.contains_key("mode"));
-    assert_eq!(props["mode"]["enum"], json!(["all", "any"]));
-    for removed in ["node_id", "gate_id", "nodes", "artifact"] {
-        assert!(!props.contains_key(removed), "{removed} should be gone");
+    let actions: Vec<&str> = schema["properties"]["action"]["enum"]
+        .as_array()
+        .expect("action enum")
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    for kept in [
+        "launch",
+        "spawn",
+        "message",
+        "dm",
+        "report",
+        "status",
+        "plan_status",
+        "list",
+        "summary",
+        "await_members",
+        "stop",
+        "resume",
+        "retry",
+        "list_models",
+    ] {
+        assert!(
+            actions.contains(&kept),
+            "{kept} should be offered: {actions:?}"
+        );
     }
-    let actions = schema["properties"]["action"]["enum"].to_string();
-    for removed in ["task_graph", "expand_node", "complete_node", "inject_gap"] {
-        assert!(!actions.contains(removed), "{removed} should be gone");
+    for hidden in [
+        "propose_plan",
+        "approve_plan",
+        "reject_plan",
+        "assign_task",
+        "assign_next",
+        "fill_slots",
+        "run_plan",
+        "resync_plan",
+        "share",
+        "read",
+        "start_task",
+        "salvage",
+        "subscribe_channel",
+        "task_graph",
+    ] {
+        assert!(!actions.contains(&hidden), "{hidden} should not be offered");
     }
-    assert!(props.contains_key("target_status"));
-    assert!(props.contains_key("timeout_minutes"));
-    assert!(props.contains_key("concurrency_limit"));
-    assert!(props.contains_key("wake"));
-    assert!(props.contains_key("delivery"));
-    assert!(props.contains_key("plan_items"));
-    assert!(props.contains_key("initial_message"));
-    assert!(props.contains_key("force"));
-    assert!(props.contains_key("retain_agents"));
-    assert!(props.contains_key("background"));
     assert!(
-        props["background"]["description"]
-            .as_str()
-            .expect("background description")
-            .contains("run_plan"),
-        "background flag should document run_plan support"
+        actions.len() <= 16,
+        "keep the swarm tool small: {actions:?}"
     );
-    assert!(props.contains_key("notify"));
-    assert!(props.contains_key("status"));
-    assert!(props.contains_key("validation"));
-    assert!(props.contains_key("follow_up"));
-    assert_eq!(
-        props["delivery"]["enum"],
-        json!(["notify", "interrupt", "wake"])
-    );
-    assert_eq!(
-        props["plan_items"]["items"]["additionalProperties"],
-        json!(true)
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("status"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("report"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("plan_status"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("start"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("start_task"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("assign_next"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("fill_slots"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("run_plan"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("launch")),
-        "launch runs the todo list as one agent per lane"
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("cleanup"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("salvage"))
-    );
+    for kept in [
+        "message",
+        "to_session",
+        "target_session",
+        "channel",
+        "label",
+        "phase",
+        "prompt",
+        "model",
+        "session_ids",
+        "background",
+        "concurrency_limit",
+        "retain_agents",
+        "delivery",
+        "wake",
+        "status",
+        "validation",
+        "follow_up",
+    ] {
+        assert!(props.contains_key(kept), "{kept} param should be offered");
+    }
+    for dropped in [
+        "key",
+        "value",
+        "proposer_session",
+        "reason",
+        "role",
+        "plan_items",
+    ] {
+        assert!(
+            !props.contains_key(dropped),
+            "{dropped} belongs to hidden actions"
+        );
+    }
 }
 
 struct EnvGuard {
