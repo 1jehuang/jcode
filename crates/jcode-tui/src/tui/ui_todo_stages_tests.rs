@@ -77,7 +77,7 @@ fn unstaged_list_renders_as_plain_checklist() {
 }
 
 #[test]
-fn stages_get_numbered_pips_and_gutter_numbers() {
+fn stages_read_as_now_next_with_arrow_pips() {
     let todos = vec![
         todo("1", "read types", "completed", Some(1)),
         todo("2", "stage field", "completed", Some(2)),
@@ -86,24 +86,25 @@ fn stages_get_numbered_pips_and_gutter_numbers() {
     ];
     let rows = render(&todos, &[], 60);
     eprintln!("{}", rows.join("\n"));
-    assert!(
-        rows[0].contains("1 ●  2 ●●  3 ○"),
-        "numbered pips: {rows:?}"
+    assert_eq!(rows[0].trim(), "● → ●● → ○", "{rows:?}");
+    let trimmed: Vec<&str> = rows.iter().map(|r| r.trim()).collect();
+    assert_eq!(
+        &trimmed[1..],
+        &[
+            "done",
+            "✓ read types",
+            "now",
+            "✓ stage field",
+            "● pinned band",
+            "next",
+            "○ integrate"
+        ],
+        "{rows:?}"
     );
     let joined = rows.join("\n");
     for glyph in ['┏', '┃', '┗', '│', '─'] {
         assert!(!joined.contains(glyph), "no lines ({glyph}): {joined}");
     }
-    assert!(
-        rows.iter()
-            .any(|r| r.trim_start().starts_with("✓ read types")),
-        "{rows:?}"
-    );
-    let parallel = rows.iter().find(|r| r.contains("stage field")).unwrap();
-    assert!(
-        parallel.trim_start().starts_with("✓ stage field") && parallel.contains("● pinned band"),
-        "ungrouped parallel items sit side by side: {rows:?}"
-    );
 }
 
 fn grid_todos() -> Vec<TodoItem> {
@@ -121,98 +122,48 @@ fn grid_todos() -> Vec<TodoItem> {
 }
 
 #[test]
-fn wide_stage_lays_lanes_out_as_columns_under_group_names() {
+fn each_lane_is_one_row_with_tasks_left_to_right() {
     let rows = render(&grid_todos(), &[], 100);
     eprintln!("{}", rows.join("\n"));
     assert_fits(&rows, 100);
-    assert!(rows[0].contains("1 ●●○●●●  2 ○○○"), "{rows:?}");
-    let header = rows.iter().find(|r| r.contains("parser")).unwrap();
-    assert!(
-        header.contains("ui") && header.contains("docs"),
-        "one header row: {rows:?}"
+    let trimmed: Vec<&str> = rows.iter().map(|r| r.trim()).collect();
+    assert_eq!(trimmed[0], "●●○●●● → ○○○");
+    assert_eq!(trimmed[1], "now");
+    assert_eq!(
+        trimmed[2],
+        "parser       ✓ Extract lexer → ● Update callers → ○ Add lexer tests"
     );
-    let first = rows.iter().find(|r| r.contains("Extract lexer")).unwrap();
-    assert!(
-        first.contains("Rename rails") && first.contains("Update tool desc"),
-        "lanes side by side: {rows:?}"
+    assert_eq!(
+        trimmed[3],
+        "ui           ✓ Rename rails → ✓ Draw lane headers"
     );
-    let col = |row: &str, text: &str| row[..row.find(text).unwrap()].width();
-    let second = rows.iter().find(|r| r.contains("Update callers")).unwrap();
-    assert_eq!(col(first, "Rename rails"), col(second, "Draw lane headers"));
-    assert_eq!(col(header, "ui"), col(first, "✓ Rename") + 0);
-    // Stage two has its own lanes, so it gets fresh headers.
-    let header2 = rows.iter().find(|r| r.contains("integration")).unwrap();
-    assert!(
-        header2.contains("release") && header2.trim_start().starts_with("integration"),
-        "{rows:?}"
+    assert_eq!(trimmed[4], "docs         ✓ Update tool desc");
+    assert_eq!(trimmed[5], "next");
+    assert_eq!(
+        trimmed[6],
+        "integration  ○ Wire lanes into plan → ○ End-to-end swarm test"
     );
-    // Grid is shorter than a stacked list.
-    assert_eq!(rows.len(), 1 + 4 + 3, "compact grid: {rows:?}");
-    // Stage numbers appear only on the header pips, never as a gutter.
-    assert!(
-        rows[1..]
-            .iter()
-            .all(|r| !r.trim_start().starts_with(|c: char| c.is_ascii_digit())),
-        "{rows:?}"
-    );
-    // Columns hug their content: two-cell gap after the longest parser item.
-    let gap = &first[first.find("Extract lexer").unwrap()..first.find("✓ Rename").unwrap()];
-    assert!(
-        gap.width()
-            <= "Extract lexer".width() + "Add lexer tests".width() - "Extract lexer".width()
-                + 2
-                + 0,
-        "{rows:?}"
-    );
+    assert_eq!(trimmed[7], "release      ○ Build and commit");
+    assert_eq!(rows.len(), 8);
 }
 
 #[test]
-fn narrow_stage_stacks_lanes_under_headings() {
-    for width in [50u16, 30, 18] {
+fn narrow_rows_fold_finished_tasks_and_never_wrap() {
+    for width in [60u16, 40, 24, 14] {
         let rows = render(&grid_todos(), &[], width);
         eprintln!("--- {width}\n{}", rows.join("\n"));
         assert_fits(&rows, width);
+        assert_eq!(rows.len(), 8, "one row per lane at {width}");
     }
     let rows = render(&grid_todos(), &[], 50);
-    let parser = rows
-        .iter()
-        .position(|r| r.trim_start().starts_with("parser"))
-        .unwrap();
-    assert!(rows[parser + 1].contains("Extract lexer"), "{rows:?}");
-    assert!(rows.iter().any(|r| r.trim() == "ui"), "{rows:?}");
-    // Numbered pips collapse to per-stage counts when they do not fit.
+    let parser = rows.iter().find(|r| r.contains("parser")).unwrap();
+    assert!(parser.contains("✓1 → ● Update callers"), "{rows:?}");
     let rows = render(&grid_todos(), &[], 14);
-    assert!(
-        rows[0].contains("1 4/6") || rows[0].contains('●'),
-        "{rows:?}"
-    );
+    assert!(rows[0].contains("4/6 → 0/3"), "{rows:?}");
 }
 
 #[test]
-fn long_lane_folds_into_more_line_keeping_active_item() {
-    let mut todos: Vec<TodoItem> = (0..10)
-        .map(|i| {
-            laned(
-                &format!("step {i}"),
-                if i < 7 { "completed" } else { "pending" },
-                1,
-                "long",
-            )
-        })
-        .collect();
-    todos[7].status = "in_progress".into();
-    todos.push(laned("other", "pending", 1, "short"));
-    let rows = render(&todos, &[], 100);
-    eprintln!("{}", rows.join("\n"));
-    let joined = rows.join("\n");
-    assert!(
-        joined.contains("step 7") && joined.contains("+5 more"),
-        "{joined}"
-    );
-}
-
-#[test]
-fn lane_header_shows_agent_emoji_and_activity() {
+fn lane_row_shows_agent_emoji_and_activity() {
     let mut todos = grid_todos();
     todos[1].assigned_to = Some("fox".into());
     todos[3].assigned_to = Some("sheep".into());
@@ -232,9 +183,10 @@ fn lane_header_shows_agent_emoji_and_activity() {
         );
     }
     let rows = render(&todos, &agents, 120);
-    let header = rows.iter().find(|r| r.contains("parser")).unwrap();
-    assert!(header.contains("parser 🦊 justrust test"), "{rows:?}");
-    assert!(header.contains("docs 🦀✗"), "{rows:?}");
+    let parser = rows.iter().find(|r| r.contains("parser")).unwrap();
+    assert!(parser.contains("parser 🦊"), "{rows:?}");
+    assert!(parser.contains("justrust test · 1m"), "{rows:?}");
+    assert!(rows.iter().any(|r| r.contains("docs 🦀✗")), "{rows:?}");
 }
 
 #[test]

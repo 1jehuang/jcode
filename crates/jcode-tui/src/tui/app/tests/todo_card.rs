@@ -682,17 +682,14 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
         let text = render_and_snap(&app, &mut terminal);
         let band: Vec<&str> = text.lines().take(8).collect();
         let joined = band.join("\n");
-        assert!(joined.contains("1 ●●  2 ○"), "numbered pips at {width}:\n{text}");
-        assert!(joined.contains("stage one alpha"), "lane item at {width}:\n{text}");
-        assert!(joined.contains("stage one beta"), "lane item at {width}:\n{text}");
-        assert!(joined.contains("🦨") && joined.contains("🦝"), "agent emoji at {width}:\n{text}");
+        assert!(joined.contains("●● → ○"), "stage pips at {width}:\n{text}");
+        assert!(joined.contains("now"), "stage word at {width}:\n{text}");
+        let alpha = band.iter().find(|row| row.contains("stage one alpha")).unwrap();
+        assert!(alpha.contains("alpha lane 🦨"), "lane row at {width}:\n{text}");
+        let beta = band.iter().find(|row| row.contains("stage one beta")).unwrap();
+        assert!(beta.contains("beta lane 🦝"), "lane row at {width}:\n{text}");
         if width == 100 {
-            let row = band
-                .iter()
-                .find(|row| row.contains("stage one alpha"))
-                .unwrap();
-            assert!(row.contains("stage one beta"), "columns side by side:\n{text}");
-            assert!(joined.contains("counting to 40"), "live activity:\n{text}");
+            assert!(alpha.contains("counting to 40"), "live activity:\n{text}");
         }
     }
 
