@@ -96,7 +96,7 @@ fn header_labels_each_phase_with_its_pips() {
     // their own, each led by its status.
     assert_eq!(
         &trimmed[1..],
-        &["✓  stage field", "●  pinned band", "○  integrate"],
+        &["●  stage field", "●  pinned band", "○  integrate"],
         "{rows:?}"
     );
     let joined = rows.join("\n");
@@ -129,9 +129,9 @@ fn each_lane_row_leads_with_dots_then_name_then_titles() {
     assert_eq!(
         &trimmed[1..],
         &[
-            "✓●○  parser       Extract lexer → Update callers → Add lexer tests",
-            "✓✓   ui           Rename rails → Draw lane headers",
-            "✓    docs         Update tool desc",
+            "●●○  parser       Extract lexer → Update callers → Add lexer tests",
+            "●●   ui           Rename rails → Draw lane headers",
+            "●    docs         Update tool desc",
             "○○   integration  Wire lanes into plan → End-to-end swarm test",
             "○    release      Build and commit",
         ],

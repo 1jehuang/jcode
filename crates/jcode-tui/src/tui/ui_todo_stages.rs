@@ -352,15 +352,7 @@ fn lane_strip_spans(
     lane_todos: &[&crate::todo::TodoItem],
     strip_width: usize,
 ) -> Vec<Span<'static>> {
-    let mut strip: Vec<Span<'static>> = lane_todos
-        .iter()
-        .map(|todo| {
-            let mut glyph = todo_card_item_spans(todo, false);
-            glyph.remove(0);
-            let glyph = glyph.remove(0);
-            Span::styled(glyph.content.trim().to_string(), glyph.style)
-        })
-        .collect();
+    let mut strip: Vec<Span<'static>> = lane_todos.iter().map(|todo| pip_span(todo)).collect();
     strip.push(Span::raw(
         " ".repeat(strip_width.saturating_sub(lane_todos.len()) + 2),
     ));
