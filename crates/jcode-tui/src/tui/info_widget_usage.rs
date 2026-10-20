@@ -118,11 +118,12 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
     }
 }
 
-/// Masked account email on the right of the top border. The frame drops it
-/// rather than wrapping when the title row is too narrow.
+/// Masked account email on the bottom-right border. The top border already
+/// holds the provider title, and the usual ~29-column widget cannot fit both;
+/// the lone footer slot truncates with an ellipsis instead of wrapping.
 fn with_account_hint(framed: Framed, info: &UsageInfo) -> Framed {
     match info.account_hint.as_deref().filter(|hint| !hint.is_empty()) {
-        Some(hint) => framed.title_right(frame::dim(hint.to_string())),
+        Some(hint) => framed.footer_right(frame::dim(hint.to_string())),
         None => framed,
     }
 }
@@ -438,6 +439,38 @@ mod tests {
         let framed = render_usage_widget(&exhausted, Rect::new(0, 0, 40, 3));
         let all = framed.all_lines().iter().map(line_text).collect::<Vec<_>>();
         assert!(all.iter().any(|line| line == "j***5@gmail.com"));
+    }
+
+    #[test]
+    fn usage_widget_account_hint_survives_the_real_narrow_widget_width() {
+        let data = InfoWidgetData {
+            usage_info: Some(UsageInfo {
+                provider: UsageProvider::Anthropic,
+                primary_limit_label: Some("5-hour".to_string()),
+                five_hour: 0.4,
+                available: true,
+                account_hint: Some("j***5@gmail.com".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // Live layout places the usage widget at 29 columns.
+        let framed = render_usage_widget(&data, Rect::new(0, 0, 27, 2));
+        let backend = ratatui::backend::TestBackend::new(29, 4);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let block = framed.apply(ratatui::widgets::Block::bordered(), 29);
+                f.render_widget(block, Rect::new(0, 0, 29, 4));
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..4)
+            .map(|y| (0..29).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        assert!(rows[0].contains("Anthropic limits"), "{rows:?}");
+        assert!(rows[3].contains("j***5@gmail.com"), "{rows:?}");
+        assert!(rows[3].ends_with("j***5@gmail.com ┘"), "{rows:?}");
     }
 }
 
