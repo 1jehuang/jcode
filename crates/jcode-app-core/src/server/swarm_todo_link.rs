@@ -404,6 +404,17 @@ mod tests {
     }
 
     #[test]
+    fn plain_plan_items_keep_details_brief() {
+        let mut todos = vec![todo("plain", "pending", None)];
+        todos[0].details = Some("Edit src/a.rs only.".into());
+        assert!(!is_lane_task("plain"));
+        assert_eq!(
+            details_for(&mut todos, "plain", "task plain").as_deref(),
+            Some("Edit src/a.rs only.")
+        );
+    }
+
+    #[test]
     fn assignment_matches_by_id_then_content() {
         let mut todos = vec![todo("a", "pending", None), todo("b", "pending", None)];
         assert!(apply_assignment(&mut todos, "a", "task a", "session_fox_1"));
