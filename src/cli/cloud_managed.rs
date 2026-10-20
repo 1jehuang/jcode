@@ -80,7 +80,55 @@ pub(crate) fn ssh_args() -> Result<Vec<String>> {
         }
     }
     let exe = std::env::current_exe().context("locate the jcode binary")?;
-    let config = format!(
+    let namespace = account()
+        .ok()
+        .and_then(|account| control_namespace(&account.key, &account.base));
+    let config = managed_ssh_config(&dir, &key, &known_hosts_path()?, &exe, namespace.as_deref());
+    let path = ssh_config_path()?;
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(config.as_str()) {
+        write_private(&path, &config)?;
+    }
+    Ok(vec!["-F".into(), path.to_string_lossy().into_owned()])
+}
+
+fn control_namespace(key: &str, base: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(key.as_bytes());
+    hash.update([0]);
+    hash.update(base.trim_end_matches('/').as_bytes());
+    Some(format!("{:x}", hash.finalize())[..16].to_string())
+}
+
+fn managed_ssh_config(
+    dir: &std::path::Path,
+    key: &std::path::Path,
+    known: &std::path::Path,
+    exe: &std::path::Path,
+    namespace: Option<&str>,
+) -> String {
+    // Keep the socket in the mode-0700 managed directory, never a shared temp
+    // directory. %C keeps its name short and keys it to the SSH destination.
+    // Escape literal percent signs in the directory before adding SSH's token.
+    let multiplexing = if let Some(namespace) = namespace {
+        let control = format!(
+            "{}/{namespace}-%C",
+            dir.to_string_lossy().replace('%', "%%")
+        );
+        format!(
+            "  ControlMaster auto\n  ControlPath {}\n  ControlPersist 60\n",
+            ssh_quote(&control)
+        )
+    } else {
+        // Never reuse an earlier account's authenticated connection when signed out.
+        "  ControlMaster no\n  ControlPath none\n  ControlPersist no\n".to_string()
+    };
+    format!(
         "# Managed by jcode. Rewritten on every use.\n\
          Host {HOST}\n\
          \x20 HostName {HOST}\n\
@@ -93,17 +141,13 @@ pub(crate) fn ssh_args() -> Result<Vec<String>> {
          \x20 StrictHostKeyChecking yes\n\
          \x20 HostKeyAlias {HOST}\n\
          \x20 ProxyCommand {exe} --no-update --no-selfdev cloud proxy\n\
+         {multiplexing}\
          \x20 ServerAliveInterval 30\n\
          \x20 ServerAliveCountMax 3\n",
         key = ssh_quote(&key.to_string_lossy()),
-        known = ssh_quote(&known_hosts_path()?.to_string_lossy()),
+        known = ssh_quote(&known.to_string_lossy()),
         exe = ssh_quote(&exe.to_string_lossy()),
-    );
-    let path = ssh_config_path()?;
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(config.as_str()) {
-        write_private(&path, &config)?;
-    }
-    Ok(vec!["-F".into(), path.to_string_lossy().into_owned()])
+    )
 }
 
 fn ssh_quote(value: &str) -> String {
@@ -657,6 +701,55 @@ mod tests {
         assert!(script.contains("want='v0.99.123'"));
         assert!(script.contains("'/home/me'"));
         assert!(script.contains("cloud receive --help"));
+    }
+
+    #[test]
+    fn managed_config_multiplexes_in_private_directory() {
+        let dir = std::path::Path::new("/home/test user/100%/cloud");
+        let config = managed_ssh_config(
+            dir,
+            &dir.join("id_ed25519"),
+            &dir.join("known_hosts"),
+            std::path::Path::new("/opt/jcode"),
+            Some("0123456789abcdef"),
+        );
+        assert!(config.contains("  ControlMaster auto\n"));
+        assert!(
+            config.contains("  ControlPath \"/home/test user/100%%/cloud/0123456789abcdef-%C\"\n")
+        );
+        assert!(config.contains("  ControlPersist 60\n"));
+        assert!(config.contains("  StrictHostKeyChecking yes\n"));
+        assert!(config.contains("  IdentityAgent none\n"));
+    }
+
+    #[test]
+    fn control_namespace_is_account_and_endpoint_scoped() {
+        let namespace = control_namespace("secret-a", DEFAULT_API_BASE).unwrap();
+        assert_eq!(namespace.len(), 16);
+        assert!(namespace.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(
+            Some(namespace.clone()),
+            control_namespace(" secret-a ", DEFAULT_API_BASE)
+        );
+        assert_ne!(
+            Some(namespace.clone()),
+            control_namespace("secret-b", DEFAULT_API_BASE)
+        );
+        assert_ne!(
+            Some(namespace),
+            control_namespace("secret-a", "https://other.example/v1")
+        );
+        assert_eq!(control_namespace("  ", DEFAULT_API_BASE), None);
+    }
+
+    #[test]
+    fn managed_config_disables_multiplexing_without_account() {
+        let path = std::path::Path::new("/private/cloud");
+        let config = managed_ssh_config(path, path, path, path, None);
+        assert!(config.contains("  ControlMaster no\n"));
+        assert!(config.contains("  ControlPath none\n"));
+        assert!(config.contains("  ControlPersist no\n"));
+        assert!(!config.contains("%C"));
     }
 
     #[test]

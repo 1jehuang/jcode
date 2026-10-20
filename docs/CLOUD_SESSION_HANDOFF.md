@@ -7,7 +7,7 @@
 - The destination store uses private permissions and atomic publication. Other accounts and the active selection are preserved. A conflicting identity is not overwritten. Current Jcode processes coordinate account-store transactions with a shared lock.
 - API keys, environment credentials, unrelated accounts, external-tool logins, and operating-system keychains are not included in this OAuth transfer.
 - A dry run stages the ordinary session bundle but does not send credentials or change ownership.
-- Both sides must support the hidden `cloud receive`, `cloud credentials`, and `cloud cancel-return` commands. The client checks all three before snapshotting the session or sending secrets. Managed-host preflight can update the installed CLI, but does not restart an already-running cloud daemon.
+- Both sides must support the hidden `cloud receive`, `cloud credentials`, and `cloud cancel-return` commands. The client checks all three before uploading or sending secrets. Local snapshot preparation overlaps these checks. Managed-host preflight can update the installed CLI, but does not restart an already-running cloud daemon.
 
 `/local` (`jcode cloud return`) brings back the cloud account's refreshed tokens through the same separate channel. The local machine retains only a SHA-256 fingerprint of its departure credential envelope to detect an intervening local login or refresh. If the local account changed while the session was away, return refuses to overwrite it and restores cloud ownership. The fingerprint is removed after a successful return.
 
@@ -30,6 +30,28 @@ Preflight uses the release's existing manylinux-compatible `jcode-linux-x86_64.t
 The VM's `~/.local/bin/jcode` and service launchers are preserved, including their host-specific environment. The shared `/opt/jcode-cloud/jcode` backend is switched with an atomic rename, and the **effective CLI launcher** is verified afterward. The previous backend is retained beside it as `jcode.previous.<release-directory>`. Failed post-switch verification restores that backend. If rollback itself fails, recovery files are retained and the move reports an error instead of claiming success. Installation needs noninteractive `sudo`; preflight never kills sessions or restarts the service. An existing daemon keeps its current executable until its normal next start.
 
 Automatic upgrades apply only to the managed host. Other SSH targets or custom launchers must already provide compatible commands; their binaries are not automatically replaced.
+
+## Transfer performance and recovery
+
+Host preparation and local snapshot preparation run concurrently. SSH protocol
+checks share one connection, and managed-host connections reuse a private SSH
+control socket for up to 60 idle seconds instead of repeating authorization and
+the SSH handshake for every operation. Custom transports retain their individual
+protocol checks.
+
+For an existing SSH checkout, the client searches up to 128 remote commits for a
+locally known common ancestor. When possible, the repository bundle excludes that
+history. New checkouts, unavailable probes, and repositories without a suitable
+common ancestor use a self-contained bundle. The branch tip is always included
+for compatibility with older receivers. The receiver verifies incremental bundle
+prerequisites before restoring the checkout. Logs include elapsed times for each
+major transfer stage and the bundle's byte count.
+
+Unreturned cloud edits are never silently overwritten. If another session left
+changes in the same cloud checkout, recover that session first with
+`jcode cloud return --session <id>` from the local machine. The conflict error
+identifies the earlier session when a single snapshot owner is recorded. This is
+not a reason to reset or clean the cloud checkout: doing so could discard work.
 
 ## Validation
 
