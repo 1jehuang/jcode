@@ -2610,7 +2610,12 @@ pub(super) fn handle_visible_copy_shortcut(
         // Some terminals report Alt+Shift+E as Alt+lowercase `e` with no
         // explicit SHIFT modifier. Keep the relaxed fallback scoped to the
         // expand badge so plain Alt+letter copy shortcuts do not become active.
-        if c.eq_ignore_ascii_case(&'e') && handle_expand_edit_badge_shortcut(app, c) {
+        // Plain Alt+E toggles the expanded prompt history, so only treat it as
+        // the expand badge when that badge is actually on screen.
+        if c.eq_ignore_ascii_case(&'e')
+            && crate::tui::ui::visible_expand_edit_badge()
+            && handle_expand_edit_badge_shortcut(app, c)
+        {
             return true;
         }
         return false;
