@@ -318,3 +318,134 @@ fn named_profiles_keep_distinct_disk_cache_namespaces() {
         .expect("second profile should find its own cache");
     assert_eq!(second_entry.models[0].id, "second-only-model");
 }
+
+/// Built-in runtimes must not follow another profile's process-global cache
+/// namespace. Otherwise an NVIDIA fetch can overwrite minimax_models.json
+/// with NVIDIA provenance even though readers correctly reject that mismatch.
+#[test]
+fn builtin_profiles_keep_distinct_disk_cache_namespaces() {
+    let _lock = ENV_LOCK.lock();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_str().expect("utf8 temp path"));
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "minimax");
+    let _minimax_key = EnvVarGuard::set("MINIMAX_API_KEY", "test-key");
+    let _nvidia_key = EnvVarGuard::set("NVIDIA_API_KEY", "test-key");
+
+    for id in ["minimax", "nvidia-nim"] {
+        let profile = openai_compatible_profile_by_id(id).expect("built-in profile");
+        let provider = OpenRouterProvider::new_openai_compatible_profile_runtime(profile)
+            .expect("built-in runtime");
+        assert!(!provider.is_user_named_profile());
+        assert_eq!(provider.foreground_cache_namespace().as_deref(), Some(id));
+
+        let model = ModelInfo {
+            id: format!("{id}-only-model"),
+            ..Default::default()
+        };
+        save_disk_cache_with_source_for_namespace(id, &[model], Some(&provider.api_base));
+
+        // Simulate another provider changing the env after construction. Even
+        // a matching-source cache in the wrong namespace must not be selected.
+        let _other_namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "other");
+        save_disk_cache_with_source_for_namespace(
+            "other",
+            &[ModelInfo {
+                id: "wrong-namespace-model".to_string(),
+                ..Default::default()
+            }],
+            Some(&provider.api_base),
+        );
+        let cache = provider
+            .load_usable_model_disk_cache_entry()
+            .expect("own cache");
+        assert_eq!(cache.models[0].id, format!("{id}-only-model"));
+    }
+}
+
+/// Exercise the real fetch/write path with a built-in runtime and a different
+/// global namespace, without making any requests to an actual provider.
+#[tokio::test]
+async fn builtin_fetch_models_writes_own_namespace() {
+    let _lock = ENV_LOCK.lock();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_str().expect("utf8 temp path"));
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "other");
+    let _key = EnvVarGuard::set("MINIMAX_API_KEY", "test-key");
+    let profile = openai_compatible_profile_by_id("minimax").expect("built-in profile");
+    let mut provider = OpenRouterProvider::new_openai_compatible_profile_runtime(profile)
+        .expect("built-in runtime");
+    assert!(!provider.is_user_named_profile());
+
+    // Keep the real constructor/profile identity, but send catalog HTTP only
+    // to this local server, never to MiniMax or another actual provider.
+    provider.api_base = spawn_models_server(r#"{"data":[{"id":"minimax-live-model"}]}"#);
+    save_disk_cache_with_source_for_namespace(
+        "other",
+        &[ModelInfo {
+            id: "other-model".to_string(),
+            ..Default::default()
+        }],
+        Some("https://other.example.test/v1"),
+    );
+    let other_path = temp.path().join("cache/other_models.json");
+    let other_before = std::fs::read(&other_path).expect("other cache before fetch");
+    assert!(jcode_provider_openrouter::load_disk_cache_entry_for_namespace("minimax").is_none());
+
+    let models = tokio::time::timeout(std::time::Duration::from_secs(5), provider.fetch_models())
+        .await
+        .expect("catalog request timeout")
+        .expect("catalog fetch");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "minimax-live-model");
+    let own_cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace("minimax")
+        .expect("fetch must write the builtin profile cache");
+    assert_eq!(
+        own_cache.source_api_base.as_deref(),
+        Some(provider.api_base.as_str())
+    );
+    assert_eq!(own_cache.models[0].id, "minimax-live-model");
+    assert_eq!(
+        std::fs::read(&other_path).expect("other cache after fetch"),
+        other_before,
+        "fetch must not overwrite the process-global namespace's cache"
+    );
+}
+
+/// The provenance guard already exists: a fresh but cross-endpoint cache
+/// must be ignored, fetched again, and replaced with the current source.
+#[tokio::test]
+async fn mismatched_catalog_source_is_refetched() {
+    let _lock = ENV_LOCK.lock();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_str().expect("utf8 temp path"));
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let api_base = spawn_models_server(r#"{"data":[{"id":"correct-live-model"}]}"#);
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: api_base.clone(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        model_catalog: true,
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("source-test", &profile)
+        .expect("named profile");
+    save_disk_cache_with_source_for_namespace(
+        "source-test",
+        &[ModelInfo {
+            id: "foreign-model".to_string(),
+            ..Default::default()
+        }],
+        Some("https://integrate.api.nvidia.com/v1"),
+    );
+    assert!(provider.load_usable_model_disk_cache_entry().is_none());
+    let models = tokio::time::timeout(std::time::Duration::from_secs(5), provider.fetch_models())
+        .await
+        .expect("catalog request timeout")
+        .expect("catalog fetch");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "correct-live-model");
+    let cache = provider
+        .load_usable_model_disk_cache_entry()
+        .expect("refetched cache");
+    assert_eq!(cache.source_api_base.as_deref(), Some(api_base.as_str()));
+    assert_eq!(cache.models[0].id, "correct-live-model");
+}
