@@ -299,6 +299,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             message,
             json,
             ndjson,
+            parent,
         }) => {
             register_on_demand_server_spawner_for_run(
                 args.provider,
@@ -312,6 +313,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 &message,
                 json,
                 ndjson,
+                parent.as_deref(),
             )
             .await?;
         }

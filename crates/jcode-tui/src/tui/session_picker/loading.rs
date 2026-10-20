@@ -1254,6 +1254,8 @@ struct SessionSummary {
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
+    hook_trigger: Option<String>,
+    #[serde(default)]
     title: Option<String>,
     #[serde(default)]
     custom_title: Option<String>,
@@ -1811,6 +1813,7 @@ fn parse_jcode_session_info(
         server_name: None,
         server_icon: None,
         source,
+        hook_trigger: session.hook_trigger,
         resume_target: ResumeTarget::JcodeSession {
             session_id: stem.to_string(),
         },
@@ -2052,6 +2055,7 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
                 server_name: None,
                 server_icon: None,
                 source: SessionSource::ClaudeCode,
+                hook_trigger: None,
                 resume_target: ResumeTarget::ClaudeCodeSession {
                     session_id,
                     session_path: session.full_path.clone(),
@@ -2206,6 +2210,7 @@ fn load_codex_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         server_name: None,
         server_icon: None,
         source: SessionSource::Codex,
+        hook_trigger: None,
         resume_target: ResumeTarget::CodexSession {
             session_id,
             session_path: path.to_string_lossy().to_string(),
@@ -2403,6 +2408,7 @@ fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         server_name: None,
         server_icon: None,
         source: SessionSource::Pi,
+        hook_trigger: None,
         resume_target: ResumeTarget::PiSession {
             session_path: path.to_string_lossy().to_string(),
         },
@@ -2567,6 +2573,7 @@ fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         server_name: None,
         server_icon: None,
         source: SessionSource::Pi,
+        hook_trigger: None,
         resume_target: ResumeTarget::PiSession {
             session_path: path.to_string_lossy().to_string(),
         },
@@ -2676,6 +2683,7 @@ fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         server_name: None,
         server_icon: None,
         source: SessionSource::OpenCode,
+        hook_trigger: None,
         resume_target: ResumeTarget::OpenCodeSession {
             session_id,
             session_path: path.to_string_lossy().to_string(),
@@ -2826,6 +2834,7 @@ fn load_opencode_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         server_name: None,
         server_icon: None,
         source: SessionSource::OpenCode,
+        hook_trigger: None,
         resume_target: ResumeTarget::OpenCodeSession {
             session_id,
             session_path: path.to_string_lossy().to_string(),
@@ -3001,6 +3010,7 @@ fn load_cursor_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         server_name: None,
         server_icon: None,
         source: SessionSource::Cursor,
+        hook_trigger: None,
         resume_target: ResumeTarget::CursorSession {
             session_id,
             session_path: path.to_string_lossy().to_string(),

@@ -45,6 +45,10 @@ pub enum SessionFilterMode {
     /// annotated with whether each is still streaming a response or is ready
     /// for input. Backs the opt-in "active sessions manager" view.
     Active,
+    /// Sessions spawned by another session: swarm workers, scheduled children,
+    /// hook runs. Matches any session with a parent_id set, so automation
+    /// stays out of the main list when you want it to.
+    Worker,
     ClaudeCode,
     Codex,
     Pi,
@@ -63,7 +67,8 @@ impl SessionFilterMode {
             Self::CurrentDir => Self::CatchUp,
             Self::CatchUp => Self::Saved,
             Self::Saved => Self::Active,
-            Self::Active => Self::ClaudeCode,
+            Self::Active => Self::Worker,
+            Self::Worker => Self::ClaudeCode,
             Self::ClaudeCode => Self::Codex,
             Self::Codex => Self::Pi,
             Self::Pi => Self::OpenCode,
@@ -82,7 +87,8 @@ impl SessionFilterMode {
             Self::CatchUp => Self::CurrentDir,
             Self::Saved => Self::CatchUp,
             Self::Active => Self::Saved,
-            Self::ClaudeCode => Self::Active,
+            Self::Worker => Self::Active,
+            Self::ClaudeCode => Self::Worker,
             Self::Codex => Self::ClaudeCode,
             Self::Pi => Self::Codex,
             Self::OpenCode => Self::Pi,
@@ -98,6 +104,7 @@ impl SessionFilterMode {
             Self::CatchUp => Some("⏭ catch up"),
             Self::Saved => Some("📌 saved"),
             Self::Active => Some("⚡ active"),
+            Self::Worker => Some("🤖 workers"),
             Self::ClaudeCode => Some("🧵 Claude Code"),
             Self::Codex => Some("🧠 Codex"),
             Self::Pi => Some("π Pi"),
@@ -144,6 +151,9 @@ pub struct SessionInfo {
     pub server_icon: Option<String>,
     /// Human/session source classification shown in the UI.
     pub source: SessionSource,
+    /// Hook event that spawned this session, if any. The picker shows a
+    /// badge for hook runs so automation reads apart from typed sessions.
+    pub hook_trigger: Option<String>,
     /// How this entry should be resumed when selected.
     pub resume_target: ResumeTarget,
     /// Backing external transcript/storage path when available.
