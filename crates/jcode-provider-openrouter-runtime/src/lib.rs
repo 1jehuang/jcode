@@ -69,10 +69,10 @@ const DEFAULT_API_KEY_NAME: &str = "OPENROUTER_API_KEY";
 const DEFAULT_ENV_FILE: &str = "openrouter.env";
 const OPENROUTER_TRANSPORT_STATE_ENV: &str = "JCODE_OPENROUTER_TRANSPORT_STATE";
 
-/// Default model (Claude Sonnet via OpenRouter). Placeholder only: once the
-/// live catalog loads, [`OpenRouterProvider::promote_placeholder_default_model`]
-/// replaces it with the newest flagship OpenRouter serves.
-const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
+/// Default model (Claude Opus via OpenRouter). Once the live catalog loads,
+/// [`OpenRouterProvider::promote_placeholder_default_model`] can replace it
+/// with a newer flagship OpenRouter serves.
+const DEFAULT_MODEL: &str = "anthropic/claude-opus-5.5";
 
 /// Which model should replace the placeholder default, if any. Pure so it can
 /// be tested without a network catalog.
@@ -2860,18 +2860,24 @@ mod placeholder_default_tests {
     use super::*;
 
     #[test]
+    fn placeholder_default_is_current_flagship() {
+        assert_eq!(DEFAULT_MODEL, "anthropic/claude-opus-5.5");
+    }
+
+    #[test]
     fn placeholder_default_promotes_to_newest_flagship() {
         let catalog = [
             "anthropic/claude-sonnet-4",
             "anthropic/claude-haiku-4.5",
             "anthropic/claude-opus-4.6",
             "anthropic/claude-opus-5.5",
+            "anthropic/claude-opus-5.6",
             "openai/gpt-5.5",
             "deepseek/deepseek-v4-pro",
         ];
         assert_eq!(
             select_promoted_default(DEFAULT_MODEL, &catalog).as_deref(),
-            Some("anthropic/claude-opus-5.5")
+            Some("anthropic/claude-opus-5.6")
         );
     }
 
@@ -2891,5 +2897,9 @@ mod placeholder_default_tests {
             None
         );
         assert_eq!(select_promoted_default(DEFAULT_MODEL, &[]), None);
+        assert_eq!(
+            select_promoted_default(DEFAULT_MODEL, &[DEFAULT_MODEL]),
+            None
+        );
     }
 }
