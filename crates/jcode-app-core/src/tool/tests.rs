@@ -8,6 +8,14 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::ffi::OsString;
 
+#[test]
+fn base_tools_do_not_expose_invalid_reporting_tool() {
+    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
+    let tools = Registry::base_tools(&skills);
+    assert!(!tools.contains_key("invalid"));
+    assert!(tools.contains_key("bash"));
+}
+
 struct TestHomeGuard {
     previous: Option<OsString>,
 }

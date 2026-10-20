@@ -30,7 +30,6 @@ pub mod applet;
 #[allow(dead_code)]
 mod goal;
 pub mod inflight;
-mod invalid;
 mod jcode_docs;
 pub mod mcp;
 mod memory;
@@ -446,7 +445,6 @@ impl Registry {
                 "websearch",
                 websearch::WebSearchTool::new,
             );
-            Self::insert_tool_timed(&mut m, &mut timings, "invalid", invalid::InvalidTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
