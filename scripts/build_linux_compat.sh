@@ -75,6 +75,7 @@ echo "Embedding git metadata: hash=${git_hash:-<none>} tag=${git_tag:-<none>} di
 docker run --rm \
   -e CARGO_TERM_COLOR=always \
   -e CARGO_PROFILE_RELEASE_OPT_LEVEL \
+  -e CARGO_BUILD_JOBS \
   -e JCODE_CI_BUILD \
   -e JCODE_RELEASE_BUILD="${JCODE_RELEASE_BUILD:-1}" \
   -e JCODE_BUILD_SEMVER="${JCODE_BUILD_SEMVER:-}" \
@@ -159,6 +160,21 @@ docker run --rm \
 	    fi
 	    "${build_command[@]}" --locked --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" \
 	      -p jcode --bin jcode --features linux-compat-vendored-openssl
+
+        # Exercise the exact portable binary before packaging. Cloud upgrades
+        # must not publish an artifact that cannot complete the handoff protocol.
+        built="$CARGO_TARGET_DIR/$JCODE_COMPAT_TARGET/$JCODE_COMPAT_PROFILE/jcode"
+        "$built" --no-update --no-selfdev --version
+        for command in receive credentials cancel-return; do
+          "$built" --no-update --no-selfdev cloud "$command" --help >/dev/null
+        done
+        # Running inside the baseline image also checks dynamic dependencies;
+        # check symbol versions explicitly so a newer accidental sysroot fails.
+        newest_glibc=$(objdump -T "$built" | sed -n "s/.*(GLIBC_\([0-9.]*\)).*/\1/p" | sort -Vu | tail -n1)
+        if [[ -z "$newest_glibc" || "$(printf "%s\n" 2.17 "$newest_glibc" | sort -V | tail -n1)" != 2.17 ]]; then
+          echo "error: portable binary exceeds the glibc 2.17 baseline: $newest_glibc" >&2
+          exit 1
+        fi
 
 	    cp "$CARGO_TARGET_DIR/$JCODE_COMPAT_TARGET/$JCODE_COMPAT_PROFILE/jcode" "/out/'"$artifact"'.bin"
 	    chmod +x "/out/'"$artifact"'.bin"

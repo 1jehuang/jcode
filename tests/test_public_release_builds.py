@@ -77,10 +77,11 @@ class PublicReleaseTests(unittest.TestCase):
     def test_compatibility_ci_and_local_selection(self):
         source = (ROOT / "scripts/build_linux_compat.sh").read_text()
         self.assertIn('-e CARGO_PROFILE_RELEASE_OPT_LEVEL', source)
+        self.assertIn('-e CARGO_BUILD_JOBS', source)
         self.assertIn('-e JCODE_CI_BUILD', source)
         # Execute exactly the command-selection block passed to Docker.
         fragment = source[source.index('build_command=(cargo build)'):]
-        fragment = fragment[:fragment.index('\n\n\t    cp ')]
+        fragment = fragment[:fragment.index('\n\n        # Exercise the exact portable binary')]
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             for name in ('cargo', 'justrust', 'bash'):
@@ -118,6 +119,42 @@ class PublicReleaseTests(unittest.TestCase):
                         self.assertIn('cargo <build>', result.stdout)
                         self.assertNotIn('install_justrust', result.stdout)
                         self.assertNotIn('justrust <build>', result.stdout)
+
+    def test_cloud_artifact_gate_rejects_missing_protocol_and_newer_glibc(self):
+        source = (ROOT / "scripts/build_linux_compat.sh").read_text()
+        fragment = source[source.index('        built="$CARGO_TARGET_DIR/'):]
+        fragment = fragment[:fragment.index('\n\n\t    cp ')]
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            binary = directory / 'target/x86_64-unknown-linux-gnu/release/jcode'
+            binary.parent.mkdir(parents=True)
+            binary.write_text(
+                '#!/bin/sh\n'
+                'printf "%s\\n" "$*" >> "$TEST_CALLS"\n'
+                'case "$*" in *"cloud ${FAIL_CLOUD:-never} --help"*) exit 1 ;; esac\n'
+            )
+            binary.chmod(0o755)
+            objdump = directory / 'objdump'
+            objdump.write_text('#!/bin/sh\nprintf "0000 DF .text (GLIBC_%s) symbol\\n" "$TEST_GLIBC"\n')
+            objdump.chmod(0o755)
+            for glibc, missing in [('2.17', ''), ('2.34', ''), ('2.17', 'receive'),
+                                   ('2.17', 'credentials'), ('2.17', 'cancel-return')]:
+                with self.subTest(glibc=glibc, missing=missing):
+                    calls = directory / 'calls'
+                    calls.write_text('')
+                    env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}",
+                               CARGO_TARGET_DIR=str(directory / 'target'),
+                               JCODE_COMPAT_TARGET='x86_64-unknown-linux-gnu',
+                               JCODE_COMPAT_PROFILE='release', TEST_GLIBC=glibc,
+                               FAIL_CLOUD=missing, TEST_CALLS=str(calls))
+                    result = subprocess.run(['/bin/bash', '-euo', 'pipefail', '-c', fragment],
+                                            env=env, capture_output=True, text=True)
+                    if glibc == '2.17' and not missing:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        for command in ['receive', 'credentials', 'cancel-return']:
+                            self.assertIn(f'cloud {command} --help', calls.read_text())
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == '__main__':

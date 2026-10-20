@@ -266,21 +266,21 @@ impl Target {
             let home = dirs::home_dir()
                 .map(|h| h.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            self.run_shell(host, &super::cloud_managed::prepare_script(&home))
+            self.run_shell(host, &super::cloud_managed::prepare_script(&home)?)
                 .context("prepare the Jcode Cloud machine")?;
         }
-        match self.run_remote(host, &["cloud", "receive", "--help"], None) {
-            Ok(_) => Ok(()),
-            Err(error) => {
+        for command in ["receive", "credentials", "cancel-return"] {
+            if let Err(error) = self.run_remote(host, &["cloud", command, "--help"], None) {
                 let text = format!("{error:#}");
-                if text.contains("unrecognized subcommand") || text.contains("unrecognized") {
+                if text.contains("unrecognized") {
                     bail!(
-                        "jcode on `{host}` does not support `cloud move` yet. Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build)"
+                        "jcode on `{host}` does not support the complete cloud handoff protocol (`{command}`). Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build)"
                     );
                 }
-                Err(error.context(format!("could not run jcode on `{host}`")))
+                return Err(error.context(format!("could not run jcode on `{host}`")));
             }
         }
+        Ok(())
     }
 
     /// `ssh` with the options every cloud call uses, including the private
@@ -480,8 +480,6 @@ pub(crate) fn run_move(
         label: credentials.label().to_string(),
     });
     if let Some(account) = &auth_account {
-        target.run_remote(&host, &["cloud", "credentials", "--help"], None)
-            .context("cloud host needs a newer jcode with secure OAuth transfer support; update its binary before retrying")?;
         // Pin an implicit OAuth route to the exact account being transferred.
         sess.route_api_method = Some(account.route());
     }
