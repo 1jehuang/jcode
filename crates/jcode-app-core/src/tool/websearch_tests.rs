@@ -1,3 +1,26 @@
+#[test]
+fn websearch_schema_exposes_only_search_controls() {
+    let schema = WebSearchTool::new().parameters_schema();
+    let properties = schema["properties"].as_object().unwrap();
+    let mut keys: Vec<_> = properties.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["intent", "num_results", "query"]);
+    assert_eq!(schema["required"], json!(["query"]));
+}
+
+#[test]
+fn websearch_ignores_legacy_provider_overrides() {
+    let input: WebSearchInput = serde_json::from_value(json!({
+        "query": "rust",
+        "num_results": 3,
+        "engine": "not-an-engine",
+        "bing_market": "en-US"
+    }))
+    .unwrap();
+    assert_eq!(input.query, "rust");
+    assert_eq!(input.num_results, Some(3));
+}
+
 fn custom_config() -> CustomWebSearchConfig {
     CustomWebSearchConfig {
         endpoint: "https://example.test/search?keep=yes&q=old".into(),
