@@ -3183,6 +3183,10 @@ struct CompactSwarmNotification<'a> {
 fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_>> {
     let (sender, marker, marker_before_icon, text_color, file_activity) =
         if let Some(sender) = title.strip_prefix("DM from ") {
+            let sender = sender
+                .split_once(" (swarm '")
+                .filter(|_| sender.ends_with("')"))
+                .map_or(sender, |(name, _)| name);
             (sender, String::new(), false, rgb(130, 130, 140), false)
         } else if let Some(sender) = title.strip_prefix("Task · ") {
             (sender, String::new(), false, rgb(220, 236, 255), false)

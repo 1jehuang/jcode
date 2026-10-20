@@ -1303,6 +1303,124 @@ fn assert_no_long_rows(app: &crate::tui::app::App) {
 }
 
 #[test]
+fn injected_cross_swarm_dm_is_deduped_with_real_sender_icon() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let body = "Details: literal '): delimiter. ".repeat(40);
+    let wire = format!("Cross-swarm DM from tulip (swarm 'review: parser'): {body}");
+    let mut notification = swarm_dm_notification("tulip", &body, Some("report done"));
+    if let ServerEvent::Notification { message, .. } = &mut notification {
+        *message = wire.clone();
+    }
+    handle_server_event(&mut app, notification, &mut remote);
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(&wire, Some("system")),
+        &mut remote,
+    );
+    let rows: Vec<_> = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role == "swarm")
+        .collect();
+    assert_eq!(rows.len(), 1, "one logical DM row: {rows:?}");
+    assert_eq!(
+        rows[0].title.as_deref(),
+        Some("DM from tulip (swarm 'review: parser')")
+    );
+    assert_eq!(
+        super::super::remote_notifications::swarm_display_full_body(&rows[0].content),
+        body.trim()
+    );
+    let rendered =
+        crate::tui::ui::render_swarm_message(rows[0], 100, crate::config::DiffDisplayMode::Off);
+    let text: String = rendered[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.contains(crate::id::session_icon("tulip")), "{text}");
+    assert!(!text.contains('💫'), "{text}");
+    assert_no_long_rows(&app);
+}
+
+#[test]
+fn cross_swarm_dm_injected_and_restored_preserve_sender_and_swarm_identity() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let body = "Details: literal '): delimiter. ".repeat(40);
+    for (sender, swarm) in [
+        ("tulip", "review: parser"),
+        ("tulip", "other"),
+        ("fox", "other"),
+    ] {
+        let wire = format!("Cross-swarm DM from {sender} (swarm '{swarm}'): {body}");
+        if swarm == "other" {
+            let mut notification = swarm_dm_notification(sender, &body, None);
+            if let ServerEvent::Notification { message, .. } = &mut notification {
+                *message = wire.clone();
+            }
+            handle_server_event(&mut app, notification, &mut remote);
+        }
+        handle_server_event(
+            &mut app,
+            soft_interrupt_injected(&wire, Some("system")),
+            &mut remote,
+        );
+    }
+    let rows: Vec<_> = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role == "swarm")
+        .cloned()
+        .collect();
+    assert_eq!(rows.len(), 3, "distinct senders or swarms must not merge");
+    for (row, sender) in rows.iter().zip(["tulip", "tulip", "fox"]) {
+        assert_eq!(
+            super::super::remote_notifications::swarm_display_full_body(&row.content),
+            body.trim()
+        );
+        let lines =
+            crate::tui::ui::render_swarm_message(row, 100, crate::config::DiffDisplayMode::Off);
+        let text: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains(crate::id::session_icon(sender)), "{text}");
+        assert!(!text.contains('💫'), "{text}");
+    }
+    app.replace_display_messages(vec![
+        crate::tui::DisplayMessage::system(format!(
+            "Cross-swarm DM from tulip (swarm 'review: parser'): {body}"
+        )),
+        crate::tui::DisplayMessage::user(
+            "Cross-swarm DM from my boss (swarm 'work'): please review",
+        ),
+        crate::tui::DisplayMessage::user("DM from my boss: please review"),
+    ]);
+    let restored = &app.display_messages()[0];
+    assert_eq!(restored.title, rows[0].title);
+    assert_eq!(restored.content, rows[0].content);
+    assert_eq!(app.display_messages()[1].role, "user");
+    assert_eq!(app.display_messages()[2].role, "user");
+    let lines =
+        crate::tui::ui::render_swarm_message(restored, 100, crate::config::DiffDisplayMode::Off);
+    let text: String = lines[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.contains(crate::id::session_icon("tulip")), "{text}");
+}
+
+#[test]
 fn injected_swarm_dm_is_deduped_against_its_notification_card() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
