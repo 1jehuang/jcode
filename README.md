@@ -79,7 +79,7 @@ curl -fsSL https://jcode.sh/install | bash
 | **Claude Code** | 272.9 MB | ~169.3 MB | **26.5× more RAM** |
 | **Codex CLI** | 398.6 MB | ~194.1 MB | **30.3× more RAM** |
 
-Each session completes 5 real model turns with tool calls, then total PSS of every process is measured at 1, 5, and 10 concurrent sessions, averaged over two runs. jcode, OpenCode, pi, and Codex CLI used `gpt-5.4`; Claude Code used Claude Sonnet. [Reproduce](scripts/bench_headless_memory.py).
+[Reproduce](scripts/bench_headless_memory.py).
 
 ### Time to first input
 
