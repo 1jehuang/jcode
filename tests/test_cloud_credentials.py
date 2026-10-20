@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Cloud handoff acceptance using only synthetic OAuth accounts and local pipes.
+
+Run: python3 tests/test_cloud_credentials.py /absolute/path/to/jcode
+No real account, network connection, or shared daemon is used.
+"""
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+
+BINARY = None
+ACCESS = "synthetic-cloud-access-not-a-real-secret"
+REFRESH = "synthetic-cloud-refresh-not-a-real-secret"
+
+
+class CloudCredentials(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="jcode-cloud-auth-test-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.local = self.root / "local"
+        self.remote = self.root / "remote"
+        self.work = self.root / "work"
+        for path in (self.local, self.remote, self.work):
+            path.mkdir(mode=0o700)
+        self.transport = self.root / "transport"
+        self.transport.write_text(
+            "#!/bin/sh\nexport HOME=" + shlex.quote(str(self.root)) + "\n"
+            "export JCODE_HOME=" + shlex.quote(str(self.remote)) + "\n"
+            'exec /bin/sh -c "$1"\n'
+        )
+        self.transport.chmod(0o700)
+        self.env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(self.root), "JCODE_HOME": str(self.local),
+            "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off",
+            "HTTPS_PROXY": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9",
+        }
+
+    def invoke(self, *args, success=True):
+        result = subprocess.run(
+            [BINARY, "--no-update", "--no-selfdev", "cloud", *args],
+            cwd=self.work, env=self.env, capture_output=True, timeout=30,
+        )
+        for secret in (ACCESS, REFRESH, "synthetic-refreshed-access", "synthetic-refreshed-refresh"):
+            self.assertNotIn(secret.encode(), result.stdout + result.stderr)
+        if success:
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+        else:
+            self.assertNotEqual(result.returncode, 0)
+        return result
+
+    def seed(self, provider="openai", expiry=4102444800000):
+        self.provider = provider
+        self.label = provider + "-fox"
+        self.filename = "openai-auth.json" if provider == "openai" else "auth.json"
+        self.accounts = "openai_accounts" if provider == "openai" else "anthropic_accounts"
+        self.active = "active_openai_account" if provider == "openai" else "active_anthropic_account"
+        account = {"label": self.label, "email": "test@example.invalid"}
+        if provider == "openai":
+            account.update(access_token=ACCESS, refresh_token=REFRESH,
+                           expires_at=expiry, account_id="synthetic-account-id")
+        else:
+            account.update(access=ACCESS, refresh=REFRESH, expires=expiry, scopes=["user:inference"])
+        (self.local / self.filename).write_text(json.dumps({self.accounts: [account], self.active: self.label}))
+        (self.local / self.filename).chmod(0o600)
+        sessions = self.local / "sessions"
+        sessions.mkdir()
+        (sessions / "cloud-auth-test.json").write_text(json.dumps({
+            "id": "cloud-auth-test", "parent_id": None, "title": "Cloud auth test",
+            "created_at": "2026-10-20T00:00:00Z", "updated_at": "2026-10-20T00:00:00Z",
+            "messages": [], "working_dir": str(self.work),
+            "provider_key": "openai" if provider == "openai" else "anthropic",
+            "model": "gpt-test" if provider == "openai" else "claude-test",
+            "route_api_method": ("openai-oauth@" if provider == "openai" else "claude-oauth@") + self.label,
+        }))
+
+    def move(self, *extra, success=True):
+        return self.invoke("move", "--session", "cloud-auth-test", "--host", "test-cloud",
+                           "--remote-binary", BINARY, "--transport", str(self.transport), "--json",
+                           *extra, success=success)
+
+    def return_home(self, success=True):
+        return self.invoke("return", "--session", "cloud-auth-test", "--host", "test-cloud",
+                           "--remote-binary", BINARY, "--transport", str(self.transport), "--json",
+                           success=success)
+
+    def assert_archives_secret_free(self):
+        for archive in self.remote.rglob("*.tar"):
+            with tarfile.open(archive) as tar:
+                for member in tar.getmembers():
+                    if member.isfile():
+                        contents = tar.extractfile(member).read()
+                        self.assertNotIn(ACCESS.encode(), contents)
+                        self.assertNotIn(REFRESH.encode(), contents)
+
+    def roundtrip(self, provider):
+        self.seed(provider)
+        self.move()
+        store = self.remote / self.filename
+        data = json.loads(store.read_text())
+        self.assertEqual(data[self.accounts][0]["label"], self.label)
+        self.assertEqual(store.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.remote.stat().st_mode & 0o777, 0o700)
+        self.assert_archives_secret_free()
+        account = data[self.accounts][0]
+        account["access_token" if provider == "openai" else "access"] = "synthetic-refreshed-access"
+        account["refresh_token" if provider == "openai" else "refresh"] = "synthetic-refreshed-refresh"
+        store.write_text(json.dumps(data))
+        self.return_home()
+        returned = json.loads((self.local / self.filename).read_text())[self.accounts][0]
+        self.assertEqual(returned["refresh_token" if provider == "openai" else "refresh"], "synthetic-refreshed-refresh")
+
+    def test_openai_roundtrip(self):
+        self.roundtrip("openai")
+
+    def test_claude_roundtrip(self):
+        self.roundtrip("claude")
+
+    def test_dry_run_does_not_copy_credentials(self):
+        self.seed()
+        self.move("--dry-run")
+        self.assertFalse((self.remote / self.filename).exists())
+        self.assert_archives_secret_free()
+        self.assertFalse((self.local / "session_leases" / "cloud-auth-test.json").exists())
+
+    def test_expired_access_token_can_be_transferred_for_refresh(self):
+        self.seed(expiry=1)
+        self.move()
+        self.assertTrue((self.remote / self.filename).exists())
+
+    def test_identityless_refresh_roundtrip_uses_departure_fingerprint(self):
+        self.seed()
+        store = self.local / self.filename
+        data = json.loads(store.read_text())
+        data[self.accounts][0].pop("account_id")
+        data[self.accounts][0].pop("email")
+        store.write_text(json.dumps(data))
+        self.move()
+        remote_store = self.remote / self.filename
+        data = json.loads(remote_store.read_text())
+        data[self.accounts][0]["refresh_token"] = "synthetic-refreshed-refresh"
+        remote_store.write_text(json.dumps(data))
+        self.return_home()
+        self.assertEqual(json.loads(store.read_text())[self.accounts][0]["refresh_token"], "synthetic-refreshed-refresh")
+
+    def test_broken_transport_cannot_echo_secret_to_diagnostics(self):
+        self.seed()
+        original = self.transport.read_text()
+        self.transport.write_text(original.replace(
+            'exec /bin/sh -c "$1"',
+            'case "$1" in *credentials*--help*) ;; *credentials*) cat >&2; exit 1 ;; esac\nexec /bin/sh -c "$1"',
+        ))
+        self.move(success=False)
+
+    def test_local_refresh_is_not_silently_overwritten_on_return(self):
+        self.seed()
+        self.move()
+        store = self.local / self.filename
+        data = json.loads(store.read_text())
+        data[self.accounts][0]["refresh_token"] = "newer-local-refresh"
+        store.write_text(json.dumps(data))
+        result = self.return_home(success=False)
+        self.assertIn(b"local OAuth account changed", result.stderr)
+        self.assertEqual(json.loads(store.read_text())[self.accounts][0]["refresh_token"], "newer-local-refresh")
+
+    def test_conflicting_cloud_account_never_replaces_existing_login(self):
+        self.seed()
+        data = json.loads((self.local / self.filename).read_text())
+        data[self.accounts][0]["account_id"] = "different-user"
+        data[self.accounts][0]["access_token"] = "different-access"
+        data[self.accounts][0]["refresh_token"] = "different-refresh"
+        store = self.remote / self.filename
+        original = json.dumps(data)
+        store.write_text(original)
+        store.chmod(0o600)
+        self.move(success=False)
+        self.assertEqual(store.read_text(), original)
+        self.assertEqual(json.loads(self.invoke("where", "--session", "cloud-auth-test", "--json").stdout), [])
+
+    def test_return_conflict_restores_cloud_ownership(self):
+        self.seed()
+        self.move()
+        store = self.local / self.filename
+        data = json.loads(store.read_text())
+        data[self.accounts][0]["account_id"] = "different-local-user"
+        store.write_text(json.dumps(data))
+        result = self.return_home(success=False)
+        self.assertIn(b"remains on the cloud host", result.stderr)
+        remote_env = dict(self.env, JCODE_HOME=str(self.remote))
+        where = subprocess.run([BINARY, "--no-update", "--no-selfdev", "cloud", "where", "--session",
+                                "cloud-auth-test", "--json"], env=remote_env, capture_output=True, timeout=10)
+        self.assertEqual(where.returncode, 0, where.stderr.decode())
+        self.assertEqual(json.loads(where.stdout)[0]["location"], "local")
+        remote_session = json.loads((self.remote / "sessions" / "cloud-auth-test.json").read_text())
+        self.assertEqual(remote_session["migration_epoch"], json.loads(where.stdout)[0]["epoch"])
+        self.assertEqual(json.loads(store.read_text())[self.accounts][0]["account_id"], "different-local-user")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: test_cloud_credentials.py /path/to/jcode")
+    BINARY = str(Path(sys.argv.pop(1)).resolve())
+    unittest.main()

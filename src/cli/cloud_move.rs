@@ -15,19 +15,24 @@
 //!   the local checkout looks like now, so local edits made meanwhile survive.
 //!   Conflicts are ordinary git conflicts.
 //! - **Staged, local-coordinated handoff.** prepare → transfer → verify →
-//!   commit. Until commit the local session remains the owner and nothing
-//!   changes locally, so any failure is a no-op and the agent (still running
-//!   locally) can read the error and fix it.
+//!   commit. Until commit the local session remains the owner, so a failure
+//!   leaves the conversation local. A staged repo and an imported account may
+//!   already exist remotely, but no remote turns have been activated.
 //!
 //! The remote half is the hidden `jcode cloud receive|activate|export`
 //! commands, invoked over `ssh <host>` (or `--transport` for tests).
+//! The selected Jcode-owned OpenAI/Claude OAuth account travels separately over
+//! SSH, never in the repository/session tarball. Moving is consent to copy that
+//! account to the chosen host. Other accounts and external logins stay local.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::auth::transfer::{self, CloudCredentialTransfer, TransferProvider};
 use crate::{session, storage};
 
 const FORMAT_VERSION: u32 = 1;
@@ -70,6 +75,131 @@ pub(crate) struct MoveManifest {
     pub toolchain_hints: Vec<String>,
     pub not_transferred: Vec<String>,
     pub mcp_servers: Vec<String>,
+    /// Account identity only. Tokens never enter this manifest or its tarball.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_account: Option<CloudAccount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CloudAccount {
+    provider: TransferProvider,
+    label: String,
+}
+
+/// Only a hash of high-entropy credentials is retained locally, never another
+/// token copy. It proves that the local login did not change while away.
+#[derive(Serialize, Deserialize)]
+struct CloudAuthBaseline {
+    account: CloudAccount,
+    fingerprint: String,
+}
+
+fn credential_fingerprint(payload: &CloudCredentialTransfer) -> String {
+    format!("{:x}", Sha256::digest(payload.as_bytes()))
+}
+
+fn baseline_path(session_id: &str) -> Result<PathBuf> {
+    if session_id.is_empty()
+        || session_id.starts_with('.')
+        || !session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+    {
+        bail!("invalid session ID for cloud credential baseline");
+    }
+    Ok(storage::jcode_dir()?
+        .join("cloud_auth")
+        .join(format!("{session_id}.json")))
+}
+
+fn import_return_credentials(session_id: &str, account: &CloudAccount, bytes: &[u8]) -> Result<()> {
+    let home = storage::jcode_dir()?;
+    let path = baseline_path(session_id)?;
+    if path.exists() {
+        let baseline: CloudAuthBaseline = read_json(&path)?;
+        if baseline.account == *account {
+            let local =
+                transfer::export_cloud_account_at(&home, account.provider, Some(&account.label))?;
+            if credential_fingerprint(&local) != baseline.fingerprint {
+                // Allow an idempotent return, but never replace a credential
+                // refreshed or re-authenticated locally while the session was away.
+                if local.as_bytes() == bytes {
+                    return Ok(());
+                }
+                bail!(
+                    "the local OAuth account changed while this session was on the cloud; it was not overwritten"
+                );
+            }
+            return transfer::import_cloud_return_at(
+                &home,
+                account.provider,
+                &account.label,
+                bytes,
+                &local,
+            )
+            .map_err(Into::into);
+        }
+    }
+    transfer::import_cloud_at(&home, account.provider, &account.label, bytes).map_err(Into::into)
+}
+
+impl CloudAccount {
+    fn route(&self) -> String {
+        let method = match self.provider {
+            TransferProvider::OpenAi => "openai-oauth",
+            TransferProvider::Claude => "claude-oauth",
+        };
+        format!("{method}@{}", self.label)
+    }
+}
+
+/// Never infer OAuth from a bare provider name: it may actually use an API key.
+fn oauth_selection(sess: &session::Session) -> Result<Option<(TransferProvider, Option<&str>)>> {
+    let route = sess.route_api_method.as_deref().or_else(|| {
+        sess.model
+            .as_deref()
+            .and_then(|model| model.split_once(':').map(|(route, _)| route))
+    });
+    let Some(route) = route else { return Ok(None) };
+    let method = route.split('@').next().unwrap_or(route);
+    let provider = match method {
+        "openai-oauth" => TransferProvider::OpenAi,
+        "claude-oauth" => TransferProvider::Claude,
+        _ => return Ok(None),
+    };
+    let label = crate::provider::oauth_account_label(route);
+    if route.contains('@') && label.is_none() {
+        bail!("session has an invalid saved OAuth account route");
+    }
+    Ok(Some((provider, label)))
+}
+
+fn session_credentials(sess: &session::Session) -> Result<Option<CloudCredentialTransfer>> {
+    let Some((provider, label)) = oauth_selection(sess)? else {
+        return Ok(None);
+    };
+    Ok(Some(transfer::export_cloud_account_at(
+        &storage::jcode_dir()?,
+        provider,
+        label,
+    )?))
+}
+
+fn run_credentials(provider: &str, account: &str, export: bool) -> Result<()> {
+    let provider = provider.parse::<TransferProvider>()?;
+    let home = storage::jcode_dir()?;
+    if export {
+        let payload = transfer::export_cloud_account_at(&home, provider, Some(account))?;
+        std::io::stdout().write_all(payload.as_bytes())?;
+        std::io::stdout().flush()?;
+    } else {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take((transfer::MAX_TRANSFER_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        transfer::import_cloud_at(&home, provider, account, &bytes)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,15 +316,14 @@ impl Target {
         Ok(())
     }
 
-    /// Run `jcode <args>` on the target, feeding `stdin` and returning stdout.
-    fn run_remote(&self, host: &str, args: &[&str], stdin: Option<&Path>) -> Result<Vec<u8>> {
+    fn remote_command(&self, host: &str, args: &[&str]) -> Result<Command> {
         let binary = shell_quote(&self.remote_binary());
         let quoted: Vec<String> = args.iter().map(|arg| shell_quote(arg)).collect();
         let remote_cmd = format!(
             "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {binary} --no-update --no-selfdev {}",
             quoted.join(" ")
         );
-        let mut command = match self.transport.as_deref() {
+        let command = match self.transport.as_deref() {
             Some(transport) => {
                 let mut parts = transport.split_whitespace();
                 let program = parts
@@ -210,6 +339,12 @@ impl Target {
                 command
             }
         };
+        Ok(command)
+    }
+
+    /// Run `jcode <args>` on the target, feeding `stdin` and returning stdout.
+    fn run_remote(&self, host: &str, args: &[&str], stdin: Option<&Path>) -> Result<Vec<u8>> {
+        let mut command = self.remote_command(host, args)?;
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         command.stdin(match stdin {
             Some(path) => Stdio::from(
@@ -229,6 +364,77 @@ impl Target {
             );
         }
         Ok(output.stdout)
+    }
+
+    /// Secrets travel only in an SSH pipe, never argv, a temporary file, or the
+    /// session archive. Discard remote stderr: even a broken transport must not
+    /// reflect a credential into the local transcript or logs.
+    fn exchange_credentials(
+        &self,
+        host: &str,
+        account: &CloudAccount,
+        payload: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        let mut args = vec![
+            "cloud",
+            "credentials",
+            "--provider",
+            account.provider.as_str(),
+            "--account",
+            account.label.as_str(),
+        ];
+        if payload.is_none() {
+            args.push("--export");
+        }
+        let mut command = self.remote_command(host, &args)?;
+        command.stdin(if payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+        command.stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = command
+            .spawn()
+            .context("start private cloud credential transfer")?;
+        let result = std::thread::scope(|scope| -> Result<Vec<u8>> {
+            let writer = payload.map(|bytes| {
+                let mut stdin = child.stdin.take().expect("piped credential stdin");
+                scope.spawn(move || stdin.write_all(bytes))
+            });
+            let mut bytes = Vec::new();
+            child
+                .stdout
+                .take()
+                .context("cloud credential stdout")?
+                .take((transfer::MAX_TRANSFER_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|_| anyhow::anyhow!("could not read cloud credential response"))?;
+            if bytes.len() > transfer::MAX_TRANSFER_BYTES {
+                let _ = child.kill();
+                bail!("cloud credential response exceeds the size limit");
+            }
+            if let Some(writer) = writer {
+                writer
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("cloud credential writer failed"))?
+                    .map_err(|_| anyhow::anyhow!("could not send cloud credentials"))?;
+            }
+            let status = child.wait().context("wait for cloud credential transfer")?;
+            if !status.success() {
+                bail!(
+                    "cloud credential transfer failed ({status}); destination credentials were not accepted"
+                );
+            }
+            if payload.is_some() && !bytes.is_empty() {
+                bail!("unexpected cloud credential import response");
+            }
+            Ok(bytes)
+        });
+        if result.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        result
     }
 }
 
@@ -269,6 +475,16 @@ pub(crate) fn run_move(
     step("prepare", "snapshotting session, repo and environment");
     let mut sess = session::Session::load(&session_id)
         .with_context(|| format!("load session {session_id}"))?;
+    let auth_account = session_credentials(&sess)?.map(|credentials| CloudAccount {
+        provider: credentials.provider(),
+        label: credentials.label().to_string(),
+    });
+    if let Some(account) = &auth_account {
+        target.run_remote(&host, &["cloud", "credentials", "--help"], None)
+            .context("cloud host needs a newer jcode with secure OAuth transfer support; update its binary before retrying")?;
+        // Pin an implicit OAuth route to the exact account being transferred.
+        sess.route_api_method = Some(account.route());
+    }
     let epoch = storage::read_session_lease(&session_id)
         .map(|lease| lease.epoch)
         .unwrap_or(0)
@@ -302,6 +518,7 @@ pub(crate) fn run_move(
         toolchain_hints: toolchain_hints(repo.as_ref().map(|r| Path::new(&r.root))),
         not_transferred,
         mcp_servers: configured_mcp_servers(),
+        auth_account: auth_account.clone(),
     };
 
     // The shipped transcript: current conversation plus a hidden notice that
@@ -382,6 +599,28 @@ pub(crate) fn run_move(
             "dry run: cloud copy staged and verified, ownership unchanged",
         );
         return Ok(report);
+    }
+
+    if let Some(account) = &auth_account {
+        step(
+            "credentials",
+            "securely transferring the session's OAuth account",
+        );
+        // Snapshotting a large repository may take long enough for another
+        // local session to refresh the account. Do not ship the earlier token.
+        let credentials = transfer::export_cloud_account_at(
+            &storage::jcode_dir()?,
+            account.provider,
+            Some(&account.label),
+        )?;
+        target.exchange_credentials(&host, account, Some(credentials.as_bytes()))?;
+        storage::write_json_secret(
+            &baseline_path(&session_id)?,
+            &CloudAuthBaseline {
+                account: account.clone(),
+                fingerprint: credential_fingerprint(&credentials),
+            },
+        )?;
     }
 
     // ---- commit ----------------------------------------------------------
@@ -500,6 +739,41 @@ pub(crate) fn run_return(
         bail!("cloud returned the wrong session/epoch");
     }
 
+    // The cloud has stopped running turns, so export its final refreshed tokens.
+    // On conflict, restore cloud ownership rather than strand the conversation.
+    if let Some(account) = &manifest.auth_account {
+        step(
+            "credentials",
+            "bringing refreshed OAuth credentials back securely",
+        );
+        let imported = target
+            .exchange_credentials(&host, account, None)
+            .and_then(|bytes| import_return_credentials(&session_id, account, &bytes));
+        if let Err(error) = imported {
+            target
+                .run_remote(
+                    &host,
+                    &[
+                        "cloud",
+                        "cancel-return",
+                        "--session",
+                        &session_id,
+                        "--epoch",
+                        &epoch_arg,
+                    ],
+                    None,
+                )
+                .context("credential return failed and cloud ownership could not be restored")?;
+            storage::write_session_lease(&storage::SessionLease {
+                epoch,
+                ..lease.clone()
+            })?;
+            return Err(
+                error.context("credential return refused; the session remains on the cloud host")
+            );
+        }
+    }
+
     // ---- code: fetch cloud snapshot as refs, then 3-way merge -----------
     let merge = match (&manifest.repo, lease.repo_root.as_deref()) {
         (Some(remote_repo), Some(root)) => {
@@ -551,6 +825,7 @@ pub(crate) fn run_return(
         last_sync_head: manifest.repo.as_ref().map(|r| r.head.clone()),
         updated_at: chrono::Utc::now().to_rfc3339(),
     })?;
+    let _ = std::fs::remove_file(baseline_path(&session_id)?);
     step("done", "session is local again");
     Ok(ReturnReport {
         session_id,
@@ -643,6 +918,13 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
     if sess.migration_epoch != epoch {
         bail!("staged transcript epoch mismatch");
     }
+    if let Some(account) = &manifest.auth_account {
+        let credentials =
+            session_credentials(&sess)?.context("staged session lost its OAuth route")?;
+        if credentials.provider() != account.provider || credentials.label() != account.label {
+            bail!("staged OAuth account does not match the session route");
+        }
+    }
     install_session(&sess, &dir)?;
     storage::write_session_lease(&storage::SessionLease {
         session_id: session_id.to_string(),
@@ -707,6 +989,12 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
             toolchain_hints: Vec::new(),
             not_transferred: describe_local_only_state(session_id),
             mcp_servers: Vec::new(),
+            auth_account: session_credentials(&sess)?
+                .as_ref()
+                .map(|credentials| CloudAccount {
+                    provider: credentials.provider(),
+                    label: credentials.label().to_string(),
+                }),
         };
         std::fs::write(stage.join("session.json"), serde_json::to_vec(&sess)?)?;
         std::fs::write(
@@ -1351,9 +1639,29 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             Ok(())
         }
         C::Proxy => super::cloud_managed::run_proxy(),
+        C::Credentials {
+            provider,
+            account,
+            export,
+        } => run_credentials(&provider, &account, export),
         C::Receive { .. } => run_receive(),
         C::Activate { session, epoch } => run_activate(&session, epoch),
         C::Export { session, epoch } => run_export(&session, epoch),
+        C::CancelReturn { session, epoch } => {
+            let lease =
+                storage::read_session_lease(&session).context("missing cloud session lease")?;
+            if lease.epoch != epoch || lease.away_host.as_deref() != Some("returned") {
+                bail!("cloud return can no longer be cancelled");
+            }
+            let mut sess = session::Session::load(&session)?;
+            sess.migration_epoch = epoch;
+            let empty = tempfile::tempdir()?;
+            install_session(&sess, empty.path())?;
+            storage::write_session_lease(&storage::SessionLease {
+                away_host: None,
+                ..lease
+            })
+        }
     }
 }
 

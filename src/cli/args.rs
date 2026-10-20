@@ -728,6 +728,8 @@ pub(crate) enum CloudCommand {
     /// Move a live session (transcript, repo state, env notes) to a cloud host
     /// and keep working there. Your local files stay editable. Git reconciles
     /// both sides when the session comes back with `jcode cloud return`.
+    /// Copies the session's Jcode-owned OpenAI/Claude OAuth login securely to
+    /// the chosen host. Other accounts and external credentials stay local.
     Move {
         /// Session ID or name. Defaults to the session this command runs in.
         #[arg(long)]
@@ -789,6 +791,18 @@ pub(crate) enum CloudCommand {
     #[command(hide = true)]
     Proxy,
 
+    /// Internal: transfer one named OAuth account over the private SSH channel.
+    #[command(hide = true)]
+    Credentials {
+        #[arg(long = "provider", id = "cloud_credential_provider")]
+        provider: String,
+        #[arg(long = "account", id = "cloud_credential_account")]
+        account: String,
+        /// Export to stdout instead of importing from stdin.
+        #[arg(long)]
+        export: bool,
+    },
+
     /// Internal: remote side of `cloud move` (reads a bundle tarball on stdin).
     #[command(hide = true)]
     Receive {
@@ -808,6 +822,15 @@ pub(crate) enum CloudCommand {
     /// Internal: remote side of `cloud return` (writes a bundle tarball to stdout).
     #[command(hide = true)]
     Export {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
+    },
+
+    /// Internal: restore cloud ownership after a rejected credential return.
+    #[command(hide = true)]
+    CancelReturn {
         #[arg(long)]
         session: String,
         #[arg(long)]
