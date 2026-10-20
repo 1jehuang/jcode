@@ -926,8 +926,8 @@ impl Tool for BashTool {
 }
 
 const FILE_EDIT_HINT: &str = "Note: this command edits files in place. Next time use `edit` \
-(exact replacements, all-or-nothing, pass `edits` for several), `replace` (regex or multi-file, \
-with expected_count), or `apply_patch` (multi-file patches). They fail loudly on a missed match \
+(exact replacements, all-or-nothing, pass `edits` for several) or `apply_patch` \
+(multi-file patches). They fail loudly on a missed match \
 instead of silently writing nothing, and show a reviewable diff.";
 
 /// Detect shell commands that rewrite source files in place, where a missed

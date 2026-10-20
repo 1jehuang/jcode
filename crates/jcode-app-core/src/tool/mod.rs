@@ -38,7 +38,6 @@ mod open;
 mod panel;
 mod patch;
 mod read;
-mod replace;
 pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
@@ -433,7 +432,6 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
             // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
             // Both old names still resolve through `resolve_tool_name`.
-            Self::insert_tool_timed(&mut m, &mut timings, "replace", replace::ReplaceTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,

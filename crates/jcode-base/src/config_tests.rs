@@ -731,6 +731,8 @@ fn tool_config_acp_profile_allows_core_coding_plus_batch() {
     assert!(allowed.contains("agentgrep"));
     assert!(allowed.contains("batch"));
     assert!(allowed.contains("mcp"));
+    assert!(allowed.contains("edit"));
+    assert!(!allowed.contains("replace"));
     assert!(!allowed.contains("swarm"));
     assert!(!allowed.contains("subagent"));
     assert!(!allowed.contains("side_panel"));
@@ -759,6 +761,8 @@ fn tool_config_minimal_profile_allows_core_coding_tools() {
     assert!(allowed.contains("apply_patch"));
     assert!(allowed.contains("agentgrep"));
     assert!(!allowed.contains("browser"));
+    assert!(allowed.contains("edit"));
+    assert!(!allowed.contains("replace"));
     assert!(!allowed.contains("swarm"));
 }
 

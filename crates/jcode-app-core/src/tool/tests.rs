@@ -16,6 +16,16 @@ fn base_tools_do_not_expose_invalid_reporting_tool() {
     assert!(tools.contains_key("bash"));
 }
 
+#[test]
+fn base_tools_exclude_replace_and_keep_other_editing_tools() {
+    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
+    let tools = Registry::base_tools(&skills);
+    assert!(!tools.contains_key("replace"));
+    for name in ["edit", "write", "apply_patch"] {
+        assert!(tools.contains_key(name), "missing editing tool: {name}");
+    }
+}
+
 struct TestHomeGuard {
     previous: Option<OsString>,
 }
