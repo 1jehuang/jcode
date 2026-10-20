@@ -111,7 +111,7 @@ fn resource(label: &str, used: Option<f64>, width: u16, display_used: bool) -> L
 }
 fn bytes(value: Option<u64>) -> String {
     value
-        .map(|v| format!("{:.1}GiB", v as f64 / 1_073_741_824.0))
+        .map(|v| format!("{:.0}", v as f64 / 1_073_741_824.0))
         .unwrap_or_else(|| "unknown".into())
 }
 fn used_ratio(total: Option<u64>, available: Option<u64>) -> Option<f64> {
@@ -184,7 +184,7 @@ pub(super) fn render_cloud_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
         .and_then(|(t, a)| t.checked_sub(a));
     lines.push(row(
         format!(
-            "RAM {}/{} · disk {} free",
+            "RAM {}/{} GiB · disk {} GiB free",
             bytes(used),
             bytes(total),
             bytes(machine.and_then(|m| m.disk_available_bytes))
@@ -399,6 +399,20 @@ mod tests {
         assert_eq!(
             compute_page_layout(&data, 40, 55).max_page_height,
             super::super::info_widget::changes_section_height(&data) + 1
+        );
+    }
+    #[test]
+    fn cloud_capacity_fits_default_width() {
+        let mut data = fixture();
+        let m = data.cloud_info.as_mut().unwrap().machine.as_mut().unwrap();
+        let gib = 1_073_741_824;
+        m.memory_total_bytes = Some(62 * gib);
+        m.memory_available_bytes = Some(42 * gib);
+        m.disk_available_bytes = Some(290 * gib);
+        let card = render_cloud_widget(&data, Rect::new(0, 0, 38, 20));
+        assert_eq!(
+            card.lines[4].to_string(),
+            "RAM 20/62 GiB · disk 290 GiB free"
         );
     }
     #[test]
