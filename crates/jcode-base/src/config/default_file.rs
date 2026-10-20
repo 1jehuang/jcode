@@ -390,7 +390,7 @@ disable_base_tools = false
 # MCP tool exposure. "auto" never changes the cached tool list when MCP
 # servers connect, reconnect, or register late, so the provider prompt cache
 # survives: Claude and OpenAI (gpt-5.4+) load MCP tools natively as deferred
-# definitions; other providers use fixed mcp_search/mcp_call tools and learn
+# definitions; other providers use mcp action=search/call and learn
 # new tools' schemas from the transcript. "deferred" behaves like "auto".
 # "eager" sends every server tool definition in the tool list; adding a
 # server mid-session then invalidates the whole prompt cache.

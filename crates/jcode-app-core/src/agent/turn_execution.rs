@@ -362,7 +362,7 @@ impl Agent {
     pub(super) fn unlock_tools_if_needed(&mut self, tool_name: &str) {
         // Only explicit `eager` exposes per-server definitions in the cached
         // tool list. Every other mode keeps that list fixed (native deferred
-        // loading or the `mcp_search`/`mcp_call` surface), so an `mcp`
+        // loading or the `mcp` search/call surface), so an `mcp`
         // connect/disconnect must not unlock it: that would be a needless
         // full prompt-cache miss.
         if tool_name == "mcp" && self.mcp_tools_mode == crate::config::McpToolsMode::Eager {
@@ -513,14 +513,8 @@ impl Agent {
         // not rescan the registry on every subsequent turn.
         // Every mode except explicit `eager` keeps a cache-stable MCP surface:
         // per-server tools registering later never change the locked list.
-        let locked_uses_fixed_mcp_surface = self.mcp_tools_mode
-            != crate::config::McpToolsMode::Eager
-            || self.locked_tools.as_ref().is_some_and(|locked| {
-                locked
-                    .iter()
-                    .any(|tool| matches!(tool.name.as_str(), "mcp_search" | "mcp_call"))
-                    && !locked.iter().any(|tool| tool.name.starts_with("mcp__"))
-            });
+        let locked_uses_fixed_mcp_surface =
+            self.mcp_tools_mode != crate::config::McpToolsMode::Eager;
         if locked_uses_fixed_mcp_surface && let Some(locked) = self.locked_tools.clone() {
             // Per-server tools may continue registering in the background, but
             // the fixed surface cannot change as a result. Avoid a provider
@@ -581,7 +575,7 @@ impl Agent {
     /// loading (see [`ToolDefinition::defer_loading`]). Eager mode keeps
     /// top-level definitions; every other mode prefers the native path when
     /// the active provider supports it, and falls back to the fixed
-    /// `mcp_search`/`mcp_call` surface otherwise.
+    /// `mcp` search/call surface otherwise.
     pub(crate) fn native_deferred_mcp(&self) -> bool {
         self.mcp_tools_mode != crate::config::McpToolsMode::Eager
             && self.provider.supports_deferred_tools()
@@ -674,17 +668,10 @@ impl Agent {
     /// serialized, already-filtered definitions the provider would receive.
     fn apply_mcp_tool_exposure(&self, tools: &mut Vec<ToolDefinition>) {
         if self.native_deferred_mcp() {
-            // Keep `mcp_search` eager for discovery (its results load the
-            // matching definitions via tool references). Every MCP definition
-            // is deferred, and so is `mcp_call`: discovered tools are called
-            // natively, but a stable deferred entry matters for caching. Some
-            // models (observed on Opus 4.8) rebuild the prefix when the
-            // deferred set goes from empty to non-empty, while changes within
-            // a non-empty deferred set keep the cache. `mcp_call` stays in the
-            // set for the whole session, so the first server connecting later
-            // is still cache-neutral.
+            // Keep the unified MCP tool eager for discovery and management.
+            // Search results load matching server definitions via references.
             for tool in tools.iter_mut() {
-                if tool.name.starts_with("mcp__") || tool.name == "mcp_call" {
+                if tool.name.starts_with("mcp__") {
                     tool.defer_loading = true;
                 }
             }
@@ -695,14 +682,12 @@ impl Agent {
         // change (late connect, `mcp connect`, crossing the threshold) then
         // rewrote the tool list and busted the whole prompt cache. On
         // providers without native deferred loading, `auto` therefore always
-        // uses the fixed `mcp_search`/`mcp_call` surface; the definitions
+        // uses the fixed `mcp` search/call surface; the definitions
         // reach the model through the transcript instead.
         let deferred = !matches!(self.mcp_tools_mode, crate::config::McpToolsMode::Eager);
 
         if deferred {
             tools.retain(|tool| !tool.name.starts_with("mcp__"));
-        } else {
-            tools.retain(|tool| !matches!(tool.name.as_str(), "mcp_search" | "mcp_call"));
         }
     }
 
@@ -747,7 +732,7 @@ impl Agent {
     /// Announce MCP tools that became available after the tool list locked,
     /// by appending a note to the transcript before the next user message.
     ///
-    /// Only used on the fixed `mcp_search`/`mcp_call` surface (providers
+    /// Only used on the fixed `mcp` search/call surface (providers
     /// without native deferred loading, in any mode but `eager`). The cached
     /// tool list must never change, so this appended note, which carries
     /// each tool's input schema, is how the model learns about servers that
@@ -769,7 +754,7 @@ impl Agent {
         }
         let mut text = String::from(
             "<system-reminder>\nNew MCP tools are available. They are not in your tool list; \
-             call them with mcp_call (server, tool, arguments matching input_schema).\n",
+             call them with mcp action=call (server, tool, arguments matching input_schema).\n",
         );
         for tool in fresh.iter().take(MAX_ANNOUNCED_MCP_TOOLS) {
             let (server, raw) = self
@@ -788,7 +773,7 @@ impl Agent {
         }
         if fresh.len() > MAX_ANNOUNCED_MCP_TOOLS {
             text.push_str(&format!(
-                "... and {} more; use mcp_search to find them.\n",
+                "... and {} more; use mcp action=search to find them.\n",
                 fresh.len() - MAX_ANNOUNCED_MCP_TOOLS
             ));
         }
@@ -886,7 +871,7 @@ impl Agent {
     }
 
     /// Mark MCP tools the transcript already describes as announced: tools
-    /// loaded by a tool reference (`mcp connect` / `mcp_search` results carry
+    /// loaded by a tool reference (`mcp connect` / `mcp search` results carry
     /// their schemas) and tools named in earlier announcements (which matters
     /// after a session restore, when the in-memory set starts empty).
     fn seed_announced_mcp_tools_from_transcript(&mut self) {
@@ -971,8 +956,8 @@ impl Agent {
     /// overlay applied) just to count names took up to ~40ms on the bootstrap
     /// History path that gates the client's first settled frame.
     pub async fn visible_mcp_tool_names(&self) -> Vec<String> {
-        // Mirrors `apply_mcp_tool_exposure`: on the fixed `mcp_search` /
-        // `mcp_call` surface per-server definitions are not exposed.
+        // Mirrors `apply_mcp_tool_exposure`: on the unified `mcp` surface
+        // per-server definitions are not exposed.
         if !self.native_deferred_mcp()
             && !matches!(self.mcp_tools_mode, crate::config::McpToolsMode::Eager)
         {

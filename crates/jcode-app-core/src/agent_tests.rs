@@ -1964,16 +1964,33 @@ impl crate::tool::Tool for VerboseFakeMcpTool {
 }
 
 async fn register_fake_deferred_mcp_surface(registry: &Registry) {
-    for name in ["mcp_search", "mcp_call"] {
-        registry
-            .register(
-                name.to_string(),
-                Arc::new(FakeMcpTool {
-                    name: name.to_string(),
-                }) as Arc<dyn crate::tool::Tool>,
-            )
-            .await;
-    }
+    let manager = Arc::new(tokio::sync::RwLock::new(
+        crate::mcp::McpManager::with_config(Default::default()),
+    ));
+    registry
+        .register(
+            "mcp".into(),
+            Arc::new(
+                crate::tool::mcp::McpManagementTool::new(manager.clone())
+                    .with_registry(registry.clone()),
+            ),
+        )
+        .await;
+    registry
+        .register(
+            "mcp_search".into(),
+            Arc::new(
+                crate::tool::mcp::McpSearchTool::new(manager.clone())
+                    .with_registry(registry.clone()),
+            ),
+        )
+        .await;
+    registry
+        .register(
+            "mcp_call".into(),
+            Arc::new(crate::tool::mcp::McpCallTool::new(manager).with_registry(registry.clone())),
+        )
+        .await;
 }
 
 async fn agent_with_fake_mcp_surface(
@@ -2021,8 +2038,12 @@ async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
         .map(|tool| tool.name)
         .collect();
     assert!(!deferred_names.iter().any(|name| name.starts_with("mcp__")));
-    assert!(deferred_names.iter().any(|name| name == "mcp_search"));
-    assert!(deferred_names.iter().any(|name| name == "mcp_call"));
+    assert!(deferred_names.iter().any(|name| name == "mcp"));
+    assert!(
+        !deferred_names
+            .iter()
+            .any(|name| name == "mcp_search" || name == "mcp_call")
+    );
 
     // `auto` never exposes per-server definitions on providers without
     // native deferred loading, even for a tiny catalog: any later change to
@@ -2040,8 +2061,7 @@ async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
             .iter()
             .any(|name| name.starts_with("mcp__"))
     );
-    assert!(auto_small_names.iter().any(|name| name == "mcp_search"));
-    assert!(auto_small_names.iter().any(|name| name == "mcp_call"));
+    assert!(auto_small_names.iter().any(|name| name == "mcp"));
 
     let mut auto_deferred = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, 1).await;
     let auto_deferred_names: Vec<String> = auto_deferred
@@ -2055,8 +2075,7 @@ async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
             .iter()
             .any(|name| name.starts_with("mcp__"))
     );
-    assert!(auto_deferred_names.iter().any(|name| name == "mcp_search"));
-    assert!(auto_deferred_names.iter().any(|name| name == "mcp_call"));
+    assert!(auto_deferred_names.iter().any(|name| name == "mcp"));
     let stable_auto_names: Vec<String> = auto_deferred
         .tool_definitions()
         .await
@@ -2116,8 +2135,7 @@ async fn auto_mode_never_changes_the_tool_list_for_late_mcp_tools() {
     agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
 
     let before = agent.tool_definitions().await;
-    assert!(before.iter().any(|tool| tool.name == "mcp_search"));
-    assert!(before.iter().any(|tool| tool.name == "mcp_call"));
+    assert!(before.iter().any(|tool| tool.name == "mcp"));
     agent
         .registry
         .register(

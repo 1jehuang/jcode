@@ -720,7 +720,7 @@ impl Default for AcpConfig {
 pub enum McpToolsMode {
     /// Never change the cached tool list for MCP changes. Providers with
     /// native deferred loading (Claude, OpenAI gpt-5.4+) get MCP tools as
-    /// deferred definitions; others get the fixed `mcp_search`/`mcp_call`
+    /// deferred definitions; others get the fixed `mcp` search/call
     /// surface, with new tools described in the transcript.
     #[default]
     Auto,

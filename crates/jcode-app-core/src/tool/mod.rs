@@ -65,7 +65,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) fn tool_name_is_allowed(allowed: &HashSet<String>, name: &str) -> bool {
     allowed.contains(name)
         || (allowed.contains("mcp") && is_mcp_tool_name(name))
+        || (name == "mcp" && allowed.iter().any(|tool| is_mcp_tool_name(tool)))
         || (is_fixed_mcp_tool(name) && allowed.iter().any(|tool| tool.starts_with("mcp__")))
+}
+
+/// The unified schema may be exposed for a restricted MCP allowlist. That
+/// must not grant management privileges or bypass a disabled legacy surface.
+fn ensure_mcp_action_allowed(session_id: &str, surface: &str) -> Result<()> {
+    if let Some(policy) = session_tool_policy(session_id) {
+        let allowed = policy.allowed_tools.as_ref().is_none_or(|allowed| {
+            if surface == "mcp" {
+                allowed.contains("mcp")
+            } else {
+                tool_name_is_allowed(allowed, surface)
+            }
+        });
+        anyhow::ensure!(allowed, "MCP action '{}' is not allowed", surface);
+        anyhow::ensure!(
+            !tool_name_is_disabled(&policy.disabled_tools, surface),
+            "MCP action '{}' is disabled",
+            surface
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn tool_name_is_disabled(disabled: &HashSet<String>, name: &str) -> bool {
@@ -288,6 +310,7 @@ pub struct Registry {
 ///
 /// A tool cannot strongly own the registry containing it without creating an
 /// Arc cycle. Upgrade this handle only for the duration of a tool call.
+#[derive(Clone)]
 pub(super) struct WeakRegistry {
     tools: std::sync::Weak<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     mcp_policy: Arc<StdRwLock<McpPolicyIndex>>,
@@ -616,8 +639,9 @@ impl Registry {
 
     /// Tool definitions a session may call, honoring its registered allow and
     /// deny policy. Per-server MCP tools are always listed individually and
-    /// the fixed `mcp_search`/`mcp_call` surface is omitted, because scripts
-    /// address MCP tools directly. Used by `codemode`.
+    /// legacy `mcp_search`/`mcp_call` aliases stay hidden. Scripts may use
+    /// unified `mcp` discovery/calls or address server tools directly.
+    /// Used by `codemode`.
     pub(crate) async fn definitions_for_session(&self, session_id: &str) -> Vec<ToolDefinition> {
         let policy = session_tool_policy(session_id);
         let allowed = policy.as_ref().and_then(|p| p.allowed_tools.clone());

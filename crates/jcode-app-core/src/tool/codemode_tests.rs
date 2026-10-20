@@ -101,6 +101,54 @@ async fn registry() -> Registry {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn codemode_exposes_only_unified_mcp_and_can_search() {
+    let registry = registry().await;
+    let manager = Arc::new(tokio::sync::RwLock::new(
+        crate::mcp::McpManager::with_config(Default::default()),
+    ));
+    registry
+        .register(
+            "mcp".into(),
+            Arc::new(
+                super::super::mcp::McpManagementTool::new(manager.clone())
+                    .with_registry(registry.clone()),
+            ),
+        )
+        .await;
+    registry
+        .register(
+            "mcp_search".into(),
+            Arc::new(
+                super::super::mcp::McpSearchTool::new(manager.clone())
+                    .with_registry(registry.clone()),
+            ),
+        )
+        .await;
+    registry
+        .register(
+            "mcp_call".into(),
+            Arc::new(super::super::mcp::McpCallTool::new(manager).with_registry(registry.clone())),
+        )
+        .await;
+    let out = registry
+        .execute(
+            "codemode",
+            json!({"code": r#"
+        const names = listTools().map(t => t.name).filter(n => n.startsWith('mcp'));
+        const found = await tools.mcp({action: 'search'});
+        return {names, found};
+    "#}),
+            ctx("codemode-unified-mcp"),
+        )
+        .await
+        .unwrap();
+    assert!(out.output.contains("\"mcp\""), "{}", out.output);
+    assert!(!out.output.contains("mcp_search"), "{}", out.output);
+    assert!(!out.output.contains("mcp_call"), "{}", out.output);
+    assert!(out.output.contains("\"found\": []"), "{}", out.output);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn script_composes_registry_tools() {
     let registry = registry().await;
     let out = registry

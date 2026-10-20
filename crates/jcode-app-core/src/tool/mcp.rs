@@ -173,6 +173,10 @@ impl McpSearchTool {
 
 #[async_trait]
 impl Tool for McpSearchTool {
+    fn model_visible(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &str {
         "mcp_search"
     }
@@ -289,7 +293,7 @@ impl Tool for McpSearchTool {
         // Ask the agent to load the matched definitions natively. With
         // provider-native deferred loading these become directly callable
         // tools without changing the cached prompt prefix; other providers
-        // ignore the references and use `mcp_call` with the schemas above.
+        // ignore the references and use `mcp action=call` with these schemas.
         let references: Vec<&str> = matches[..detailed]
             .iter()
             .take(MAX_SEARCH_TOOL_REFERENCES)
@@ -331,12 +335,16 @@ impl McpCallTool {
 
 #[async_trait]
 impl Tool for McpCallTool {
+    fn model_visible(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &str {
         "mcp_call"
     }
 
     fn description(&self) -> &str {
-        "Call an MCP server tool discovered with mcp_search."
+        "Internal compatibility alias for mcp action=call."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -348,7 +356,7 @@ impl Tool for McpCallTool {
                 "arguments": {
                     "type": "object",
                     "additionalProperties": true,
-                    "description": "Arguments matching the input schema returned by mcp_search."
+                    "description": "Arguments matching the input schema returned by MCP search."
                 }
             },
             "required": ["server", "tool", "arguments"]
@@ -591,7 +599,7 @@ impl Tool for McpManagementTool {
     }
 
     fn description(&self) -> &str {
-        "Manage MCP (Model Context Protocol) servers, including HTTP/SSE connections and local OAuth status/logout. Interactive login requires the explicit CLI command `jcode mcp login <configured-server>`."
+        "Search and call MCP (Model Context Protocol) tools, or manage servers. Search returns tool names and input schemas. Interactive OAuth login is CLI-only: `jcode mcp login <configured-server>`."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -601,13 +609,16 @@ impl Tool for McpManagementTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["list", "connect", "disconnect", "reload", "status", "logout"],
+                    "enum": ["search", "call", "list", "connect", "disconnect", "reload", "status", "logout"],
                     "description": "Action."
                 },
                 "server": {
                     "type": "string",
-                    "description": "Server name."
+                    "description": "Server name. Optional exact filter for search, required for call."
                 },
+                "query": {"type": "string", "description": "Search: optional name or description keywords."},
+                "tool": {"type": "string", "description": "Call: required raw tool name returned by search."},
+                "arguments": {"type": "object", "additionalProperties": true, "description": "Call: arguments matching the discovered input schema."},
                 "command": {
                     "type": "string",
                     "description": "Stdio server command. Mutually exclusive with url."
@@ -642,6 +653,33 @@ impl Tool for McpManagementTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        // Reuse the internal surfaces, including their identity, SDK override,
+        // output-budget and per-tool policy checks. Do not route back through
+        // Registry::execute: this call already owns the in-flight marker.
+        let surface = match input.get("action").and_then(Value::as_str) {
+            Some("search") => Some("mcp_search"),
+            Some("call") => Some("mcp_call"),
+            _ => None,
+        };
+        if let Some(surface) = surface {
+            super::ensure_mcp_action_allowed(&ctx.session_id, surface)?;
+            return if surface == "mcp_search" {
+                McpSearchTool {
+                    manager: self.manager.clone(),
+                    registry: self.registry.clone(),
+                }
+                .execute(input, ctx)
+                .await
+            } else {
+                McpCallTool {
+                    manager: self.manager.clone(),
+                    registry: self.registry.clone(),
+                }
+                .execute(input, ctx)
+                .await
+            };
+        }
+        super::ensure_mcp_action_allowed(&ctx.session_id, "mcp")?;
         let params: McpToolInput = serde_json::from_value(input)?;
         let started = std::time::Instant::now();
         let action = params.action.clone();
@@ -667,7 +705,7 @@ impl Tool for McpManagementTool {
                 "Interactive MCP OAuth login is CLI-only. Run `jcode mcp login <configured-server>` in a terminal (add --no-browser to print the authorization URL). No browser was opened."
             ),
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'list', 'connect', 'disconnect', 'reload', 'status', or 'logout'.",
+                "Unknown action: {}. Use 'search', 'call', 'list', 'connect', 'disconnect', 'reload', 'status', or 'logout'.",
                 params.action
             ))),
         };
@@ -793,7 +831,7 @@ impl McpManagementTool {
         }
 
         // Names only: full descriptions for every tool of every server cost
-        // tens of thousands of tokens. `mcp_search` returns descriptions and
+        // tens of thousands of tokens. `mcp action=search` returns descriptions and
         // schemas for the tools the agent actually needs.
         let mut output = String::new();
         output.push_str(&format!(
@@ -836,7 +874,7 @@ impl McpManagementTool {
         }
         if !servers.is_empty() {
             output.push_str(
-                "Use mcp_search with a server or query for descriptions and input schemas.\n\n",
+                "Use mcp action=search with a server or query for descriptions and input schemas.\n\n",
             );
         }
 
@@ -930,7 +968,7 @@ impl McpManagementTool {
                     // The schema is part of the result on purpose: on providers
                     // without native deferred loading the cached tool list never
                     // changes, so this transcript entry is the only place the
-                    // model learns how to call the new tool (via `mcp_call`).
+                    // model learns how to call the new tool (via `mcp action=call`).
                     output.push_str(&format!(
                         "  - {}: {}\n    tool: {}  input_schema: {}\n",
                         name,
@@ -944,7 +982,7 @@ impl McpManagementTool {
                 references.truncate(MAX_SEARCH_TOOL_REFERENCES);
                 output.push_str(&format!(
                     "\nCall these tools directly by name if they appear in your tool list; \
-                     otherwise use mcp_call with server=\"{}\", tool=<tool>, and arguments \
+                     otherwise use mcp action=call with server=\"{}\", tool=<tool>, and arguments \
                      matching input_schema.\n",
                     server_name
                 ));
