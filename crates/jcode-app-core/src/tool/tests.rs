@@ -1844,8 +1844,9 @@ fn the_dialect_sweep_catches_the_issue_754_schema() {
 async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode() {
     /// Built-ins that legitimately cannot be strict. Verified against master
     /// before the #711/#713 eligibility changes, so this is pre-existing.
-    // applet's view is a recursive, open-ended node tree.
-    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["applet", "batch", "browser", "swarm"];
+    // applet and swarm used to be ineligible only because of a root combiner;
+    // root combiners are now flattened (OpenAI rejects them outright).
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
