@@ -71,8 +71,6 @@ curl -fsSL https://jcode.sh/install | bash
 
 ### RAM per additional session (headless)
 
-Swarm workers run headless, so this is the number that matters when you fan out agents.
-
 | Tool | First session | Each additional session | Comparison (additional) |
 |---|---|---|---|
 | **jcode** | **32.9 MB** | **~6.4 MB** | baseline |
