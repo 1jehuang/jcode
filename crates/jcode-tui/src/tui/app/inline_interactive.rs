@@ -1091,6 +1091,7 @@ impl App {
         }
         self.remote_available_entries = snapshot.available_models;
         if replace_routes {
+            super::register_remote_chatgpt_web_reasoning(&snapshot.model_routes);
             self.remote_model_options = snapshot.model_routes;
         }
         if let Some(model) = self.remote_provider_model.clone() {
@@ -1311,6 +1312,7 @@ impl App {
             self.remote_available_entries = snapshot.available_models;
         }
         jcode_provider_core::register_copilot_route_metadata(&snapshot.model_routes);
+        super::register_remote_chatgpt_web_reasoning(&snapshot.model_routes);
         self.remote_model_options = snapshot.model_routes;
         self.invalidate_model_picker_cache();
         true

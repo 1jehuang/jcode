@@ -11,6 +11,10 @@ pub struct ModelMetadata {
     pub max_output_tokens: Option<usize>,
     pub max_non_streaming_output_tokens: Option<usize>,
     pub reasoning_efforts: Vec<String>,
+    /// Provider labels for the selectable reasoning values, such as ChatGPT's
+    /// `none` = Instant and `max` = Pro. Older catalogs omit these labels.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub reasoning_effort_labels: HashMap<String, String>,
     pub supports_image_input: Option<bool>,
     pub supports_tool_calls: Option<bool>,
     pub supports_parallel_tool_calls: Option<bool>,
@@ -64,6 +68,7 @@ mod tests {
             max_output_tokens: Some(128_000),
             supports_image_input: Some(true),
             reasoning_efforts: vec!["low".into(), "max".into()],
+            reasoning_effort_labels: HashMap::from([("max".into(), "Pro".into())]),
             ..ModelMetadata::default()
         };
         let encoded = serde_json::to_vec(&metadata).unwrap();
