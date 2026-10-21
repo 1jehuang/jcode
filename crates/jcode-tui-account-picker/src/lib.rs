@@ -1,4 +1,4 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AccountProviderKind {
     Anthropic,
@@ -9,6 +9,8 @@ pub enum AccountProviderKind {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AccountPickerCommand {
     SubmitInput(String),
+    /// Open provider-wide controls without mixing them into the account list.
+    OpenProviderSettings,
     OpenAccountCenter {
         provider_filter: Option<String>,
     },
@@ -105,7 +107,8 @@ pub struct AccountPickerSummary {
 
 pub fn action_kind_label(command: &AccountPickerCommand) -> &'static str {
     match command {
-        AccountPickerCommand::OpenAccountCenter { .. } => "overview",
+        AccountPickerCommand::OpenAccountCenter { .. }
+        | AccountPickerCommand::OpenProviderSettings => "overview",
         AccountPickerCommand::OpenAddReplaceFlow { .. } => "account",
         AccountPickerCommand::SubmitInput(input) if input.ends_with(" settings") => "overview",
         AccountPickerCommand::SubmitInput(input) if input.contains(" remove ") => "danger",

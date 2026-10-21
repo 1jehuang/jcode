@@ -56,14 +56,13 @@ impl App {
                 _ => claude_accounts.len() + openai_accounts.len(),
             };
             let detail = if scoped_saved_accounts == 0 {
-                "Choose a provider to sign in. Existing saved accounts are kept.".to_string()
+                "Choose a provider to add another saved login. Existing accounts are kept."
+                    .to_string()
             } else if provider_scope.is_some() {
-                format!(
-                    "{scoped_saved_accounts} saved logins. Add a new login or refresh a saved one."
-                )
+                format!("{scoped_saved_accounts} saved logins. Sign in to add another account.")
             } else {
                 format!(
-                    "Saved logins: Claude {}, OpenAI {}. Add or refresh an account.",
+                    "Saved logins: Claude {}, OpenAI {}. Choose a provider to add another account.",
                     claude_accounts.len(),
                     openai_accounts.len()
                 )
@@ -71,7 +70,7 @@ impl App {
             items.push(AccountPickerItem::action(
                 "account-flow",
                 "Accounts",
-                "Add or reauthenticate account",
+                "Add account",
                 detail,
                 AccountPickerCommand::OpenAddReplaceFlow {
                     provider_filter: provider_scope.clone(),
@@ -353,7 +352,7 @@ impl App {
             Some(provider_id) => format!(" {} account center ", provider_id),
             None => " Accounts ".to_string(),
         };
-        let mut picker = AccountPicker::with_summary(title, items, summary);
+        let mut picker = AccountPicker::with_summary(title, items, summary).with_account_menus();
         let current_provider = if self.is_remote {
             self.remote_provider_name.as_deref().unwrap_or_default()
         } else {
@@ -369,7 +368,7 @@ impl App {
         self.inline_interactive_state = None;
         self.input.clear();
         self.cursor_pos = 0;
-        self.set_status_notice("Account center: choose an action");
+        self.set_status_notice("Accounts: choose an account to manage, or add an account");
     }
 
     pub(crate) fn poll_account_picker_usage(&mut self) -> bool {

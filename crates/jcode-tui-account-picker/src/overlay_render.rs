@@ -43,7 +43,8 @@ pub(super) enum ActionSection {
 
 pub(super) fn action_section(item: &AccountPickerItem) -> ActionSection {
     match &item.command {
-        AccountPickerCommand::OpenAccountCenter { .. } => ActionSection::Overview,
+        AccountPickerCommand::OpenAccountCenter { .. }
+        | AccountPickerCommand::OpenProviderSettings => ActionSection::Overview,
         AccountPickerCommand::OpenAddReplaceFlow { .. } => ActionSection::Add,
         AccountPickerCommand::Switch { .. } => ActionSection::Switch,
         AccountPickerCommand::SetDefault { .. } => ActionSection::Setting,
@@ -110,6 +111,9 @@ fn extract_account_label(title: &str) -> Option<String> {
 }
 
 pub(super) fn compact_item_title(item: &AccountPickerItem) -> String {
+    if matches!(item.command, AccountPickerCommand::OpenProviderSettings) {
+        return item.title.clone();
+    }
     if let AccountPickerCommand::Rename { label, .. } = &item.command {
         return format!("Rename {label}");
     }
@@ -181,11 +185,14 @@ pub(super) fn action_kind_badge(command: &AccountPickerCommand) -> (&'static str
 
 pub(super) fn action_kind_help(command: &AccountPickerCommand) -> &'static str {
     match command {
+        AccountPickerCommand::OpenProviderSettings => {
+            "Opens provider authentication, diagnostics, and global settings. Saved-account actions stay with each account."
+        }
         AccountPickerCommand::OpenAccountCenter { .. } => {
             "Returns to the main account center with all provider and saved-auth actions."
         }
         AccountPickerCommand::OpenAddReplaceFlow { .. } => {
-            "Opens a focused chooser to add another Claude/OpenAI login or refresh a saved login. Other saved accounts are kept."
+            "Opens a provider chooser to add another saved login. Reauthenticate an existing login from that account's actions. Other saved accounts are kept."
         }
         AccountPickerCommand::SubmitInput(input) if input.ends_with(" settings") => {
             "Opens a detailed text summary for this provider, including the exact commands you can run manually."
@@ -237,14 +244,15 @@ pub(super) fn action_kind_help(command: &AccountPickerCommand) -> &'static str {
 
 pub(super) fn command_preview(command: &AccountPickerCommand) -> String {
     match command {
+        AccountPickerCommand::OpenProviderSettings => "Open provider settings".to_string(),
         AccountPickerCommand::SubmitInput(input) => input.clone(),
         AccountPickerCommand::OpenAccountCenter { provider_filter } => match provider_filter {
             Some(provider_id) => format!("Open /accounts {}", provider_id),
             None => "Open /accounts".to_string(),
         },
         AccountPickerCommand::OpenAddReplaceFlow { provider_filter } => match provider_filter {
-            Some(provider_id) => format!("Open add/replace flow for {}", provider_id),
-            None => "Open add/replace flow".to_string(),
+            Some(provider_id) => format!("Add an account for {}", provider_id),
+            None => "Add an account".to_string(),
         },
         AccountPickerCommand::PromptValue {
             command_prefix,

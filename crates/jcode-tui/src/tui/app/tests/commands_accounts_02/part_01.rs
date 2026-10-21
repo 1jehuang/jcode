@@ -1068,6 +1068,19 @@ fn test_account_ux_center_does_not_duplicate_provider_settings() {
         picker
             .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
             .unwrap();
+        for character in "Provider settings".chars() {
+            picker
+                .handle_overlay_key(KeyCode::Char(character), KeyModifiers::empty())
+                .unwrap();
+        }
+        assert_eq!(picker.debug_memory_profile()["filtered_count"], 1);
+        assert!(matches!(
+            picker
+                .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                .unwrap(),
+            crate::tui::account_picker::OverlayAction::Continue
+        ));
+        assert_eq!(picker.debug_memory_profile()["view"], "provider_settings");
         for character in "Usage & provider settings".chars() {
             picker
                 .handle_overlay_key(KeyCode::Char(character), KeyModifiers::empty())
@@ -1125,14 +1138,24 @@ fn test_account_ux_add_and_refresh_render_exact_target_and_masked_identity() {
                     Some(format!("/accounts {provider} add")),
                 ),
                 (
-                    format!("Refresh account {label}"),
-                    format!(
-                        "Sign in again as {masked_email}. Replaces the saved login for {label}."
-                    ),
+                    format!("Re-login account `{label}`"),
+                    masked_email.to_string(),
                     None,
                 ),
             ] {
-                app.open_account_add_replace_flow(Some(provider));
+                if command.is_some() {
+                    app.open_account_add_replace_flow(Some(provider));
+                } else {
+                    app.open_account_center(Some(provider));
+                    let mut picker = app.account_picker_overlay.as_ref().unwrap().borrow_mut();
+                    picker.select_account(provider, Some(&label));
+                    assert!(matches!(
+                        picker
+                            .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                            .unwrap(),
+                        crate::tui::account_picker::OverlayAction::Continue
+                    ));
+                }
                 {
                     let mut picker = app.account_picker_overlay.as_ref().unwrap().borrow_mut();
                     for character in filter.chars() {
@@ -1153,21 +1176,36 @@ fn test_account_ux_add_and_refresh_render_exact_target_and_masked_identity() {
                 );
                 assert!(!text.contains(email), "raw email exposed:\n{text}");
                 // Inspect the emitted command without dispatching it or starting OAuth.
-                let action = app.account_picker_overlay
+                let action = app
+                    .account_picker_overlay
                     .as_ref()
                     .unwrap()
                     .borrow_mut()
                     .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
                     .unwrap();
-                use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind, OverlayAction};
+                use crate::tui::account_picker::{
+                    AccountPickerCommand, AccountProviderKind, OverlayAction,
+                };
                 match (command, action) {
-                    (Some(expected), OverlayAction::Execute(AccountPickerCommand::SubmitInput(actual))) => {
+                    (
+                        Some(expected),
+                        OverlayAction::Execute(AccountPickerCommand::SubmitInput(actual)),
+                    ) => {
                         assert_eq!(actual, expected);
                     }
-                    (None, OverlayAction::Execute(AccountPickerCommand::Login { provider: actual_provider, label: actual_label })) => {
+                    (
+                        None,
+                        OverlayAction::Execute(AccountPickerCommand::Login {
+                            provider: actual_provider,
+                            label: actual_label,
+                        }),
+                    ) => {
                         assert_eq!(actual_label, label);
-                        assert!(matches!((provider, actual_provider),
-                            ("claude", AccountProviderKind::Anthropic) | ("openai", AccountProviderKind::OpenAi)));
+                        assert!(matches!(
+                            (provider, actual_provider),
+                            ("claude", AccountProviderKind::Anthropic)
+                                | ("openai", AccountProviderKind::OpenAi)
+                        ));
                     }
                     _ => panic!("unexpected account action"),
                 }

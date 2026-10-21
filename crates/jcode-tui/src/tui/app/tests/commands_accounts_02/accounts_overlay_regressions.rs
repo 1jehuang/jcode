@@ -1,8 +1,6 @@
-// Full-overlay assertions deliberately inspect emitted actions without starting OAuth
-// or removing credentials. Filtering also brings each action into the rendered frame.
+// Inspect emitted actions without starting OAuth or changing saved credentials.
 fn assert_accounts_overlay_actions(app: &mut App, providers: &[&str]) {
     use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind, OverlayAction};
-
     assert!(app.inline_interactive_state.is_none());
     assert!(app.account_picker_overlay.is_some());
     let _render_lock = crate::tui::ui::render_state_test_lock();
@@ -21,120 +19,137 @@ fn assert_accounts_overlay_actions(app: &mut App, providers: &[&str]) {
             _ => unreachable!(),
         };
         assert!(!labels.is_empty());
-        let descriptor = crate::provider_catalog::login_providers()
-            .iter()
-            .find(|provider| provider.id == *provider_id)
-            .copied()
-            .unwrap();
-        let mut items = Vec::new();
-        match *provider_id {
-            "claude" => app.append_anthropic_account_picker_items(&mut items, descriptor),
-            "openai" => app.append_openai_account_picker_items(&mut items, descriptor),
-            _ => unreachable!(),
-        }
-        let items = &items;
-        for (filter, title, label) in std::iter::once((
-            format!("{provider_id} Add new account"),
-            "Add new account",
-            None,
-        ))
-        .chain(labels.iter().flat_map(|label| {
-            [
+        app.open_account_center(Some(provider_id));
+        let profile = app
+            .account_picker_overlay
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .debug_memory_profile();
+        assert_eq!(profile["view"], "accounts");
+        let rows = profile["visible_items"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["command"].as_str().unwrap().starts_with("Switch {"))
+                .count(),
+            labels.len()
+        );
+        assert!(rows.iter().all(
+            |row| !row["command"].as_str().unwrap().starts_with("Rename {")
+                && !row["command"].as_str().unwrap().starts_with("Login {")
+                && !row["command"].as_str().unwrap().starts_with("Remove {")
+        ));
+        for label in &labels {
+            for title in [
                 "Use",
                 "Rename account",
                 "Re-login account",
                 "Remove account",
-            ]
-            .into_iter()
-            .map(move |title| {
-                let filter = if title == "Use" {
-                    let item = items
-                        .iter()
-                        .find(|item| {
-                            matches!(&item.command,
-                            AccountPickerCommand::Switch { label: target, .. } if target == label)
-                        })
-                        .unwrap();
-                    // A generic provider row can share this display title. Include
-                    // the saved identity metadata, then verify the exact typed
-                    // provider and stored label after Enter below.
-                    format!("{} {}", item.title, item.subtitle)
-                } else {
-                    format!("{provider_id} {title} {label}")
-                };
-                (filter, title, Some(label))
-            })
-        })) {
-            {
+                "Make default",
+            ] {
+                app.open_account_center(Some(provider_id));
+                {
+                    let mut picker = app.account_picker_overlay.as_ref().unwrap().borrow_mut();
+                    picker.select_account(provider_id, Some(label));
+                    assert!(matches!(
+                        picker
+                            .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                            .unwrap(),
+                        OverlayAction::Continue
+                    ));
+                    let profile = picker.debug_memory_profile();
+                    assert_eq!(profile["view"], "account");
+                    assert_eq!(profile["filtered_count"], 5);
+                    if title == "Use" {
+                        picker.select_account(provider_id, Some(label));
+                    } else {
+                        for c in title.chars() {
+                            picker
+                                .handle_overlay_key(KeyCode::Char(c), KeyModifiers::empty())
+                                .unwrap();
+                        }
+                        assert_eq!(
+                            picker.debug_memory_profile()["filtered_count"],
+                            1,
+                            "{title}"
+                        );
+                    }
+                }
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(240, 50)).unwrap();
+                terminal
+                    .draw(|frame| crate::tui::ui::draw(frame, app))
+                    .unwrap();
+                let text = buffer_to_text(&terminal);
+                assert!(text.contains(title), "missing {title}:\n{text}");
                 let mut picker = app.account_picker_overlay.as_ref().unwrap().borrow_mut();
-                picker
-                    .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+                let mut action = picker
+                    .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
                     .unwrap();
-                for character in filter.chars() {
-                    picker
-                        .handle_overlay_key(KeyCode::Char(character), KeyModifiers::empty())
+                if title == "Remove account" {
+                    assert!(matches!(action, OverlayAction::Continue));
+                    action = picker
+                        .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
                         .unwrap();
                 }
-                assert_eq!(
-                    picker.debug_memory_profile()["filtered_count"],
-                    1,
-                    "filter: {filter}"
-                );
+                let OverlayAction::Execute(command) = action else {
+                    panic!("expected {title}")
+                };
+                let (actual_provider, actual_label) = match (title, command) {
+                    ("Use", AccountPickerCommand::Switch { provider, label })
+                    | ("Rename account", AccountPickerCommand::Rename { provider, label })
+                    | ("Re-login account", AccountPickerCommand::Login { provider, label })
+                    | ("Remove account", AccountPickerCommand::Remove { provider, label })
+                    | ("Make default", AccountPickerCommand::SetDefault { provider, label }) => {
+                        (provider, label)
+                    }
+                    _ => panic!("wrong typed action for {title}"),
+                };
+                assert_eq!(&actual_label, label);
+                assert!(matches!(
+                    (*provider_id, actual_provider),
+                    ("claude", AccountProviderKind::Anthropic)
+                        | ("openai", AccountProviderKind::OpenAi)
+                ));
             }
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(240, 50)).unwrap();
-            terminal
-                .draw(|frame| crate::tui::ui::draw(frame, app))
-                .unwrap();
-            let text = buffer_to_text(&terminal);
-            assert!(text.contains(title), "missing {title}:\n{text}");
-            let mut action = app
-                .account_picker_overlay
-                .as_ref()
-                .unwrap()
-                .borrow_mut()
-                .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
-                .unwrap();
-            if title == "Remove account" {
-                assert!(
-                    matches!(action, OverlayAction::Continue),
-                    "removal must require confirmation"
-                );
-                action = app
-                    .account_picker_overlay
-                    .as_ref()
-                    .unwrap()
-                    .borrow_mut()
-                    .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
-                    .unwrap();
-            }
-            let OverlayAction::Execute(command) = action else {
-                panic!("expected executable {filter}");
-            };
-            if title == "Add new account" {
-                assert!(
-                    matches!(command, AccountPickerCommand::SubmitInput(ref input)
-                    if input == &format!("/accounts {provider_id} add"))
-                );
-                continue;
-            }
-            let (actual_provider, actual_label) = match (title, command) {
-                ("Use", AccountPickerCommand::Switch { provider, label })
-                | ("Rename account", AccountPickerCommand::Rename { provider, label })
-                | ("Re-login account", AccountPickerCommand::Login { provider, label })
-                | ("Remove account", AccountPickerCommand::Remove { provider, label }) => {
-                    (provider, label)
-                }
-                _ => panic!("wrong typed action for {filter}"),
-            };
-            assert_eq!(actual_label, *label.unwrap());
-            assert!(matches!(
-                (*provider_id, actual_provider),
-                ("claude", AccountProviderKind::Anthropic)
-                    | ("openai", AccountProviderKind::OpenAi)
-            ));
         }
+        app.open_account_add_replace_flow(Some(provider_id));
+        let mut picker = app.account_picker_overlay.as_ref().unwrap().borrow_mut();
+        assert_eq!(picker.debug_memory_profile()["filtered_count"], 2);
+        for c in "Add new account".chars() {
+            picker
+                .handle_overlay_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        assert!(
+            matches!(picker.handle_overlay_key(KeyCode::Enter,KeyModifiers::empty()).unwrap(), OverlayAction::Execute(AccountPickerCommand::SubmitInput(command)) if command == format!("/accounts {provider_id} add"))
+        );
     }
+}
+
+#[test]
+fn test_accounts_four_anthropic_accounts_have_separate_scoped_actions() {
+    with_temp_jcode_home(|| {
+        store_two_claude_accounts();
+        for n in 3..=4 {
+            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                label: format!("work {n}"),
+                access: format!("access-{n}"),
+                refresh: format!("refresh-{n}"),
+                expires: chrono::Utc::now().timestamp_millis() + 60_000,
+                email: Some(format!("work{n}@example.invalid")),
+                scopes: Vec::new(),
+                subscription_type: Some("max".into()),
+            })
+            .unwrap();
+        }
+        assert_eq!(crate::auth::claude::list_accounts().unwrap().len(), 4);
+        let mut app = create_test_app();
+        app.input = "/accounts claude".into();
+        app.submit_input();
+        assert_accounts_overlay_actions(&mut app, &["claude"]);
+        assert_eq!(crate::auth::claude::list_accounts().unwrap().len(), 4);
+    });
 }
 
 #[test]
@@ -231,12 +246,16 @@ fn test_accounts_suggestions_and_registry_use_unique_plural_command() {
         let mut app = create_test_app();
         app.set_input_for_test("/acc");
         let suggestions = app.command_suggestions();
-        assert!(suggestions
-            .iter()
-            .any(|(command, _)| command == "/accounts"));
-        assert!(!suggestions
-            .iter()
-            .any(|(command, _)| command.split_whitespace().next() == Some("/account")));
+        assert!(
+            suggestions
+                .iter()
+                .any(|(command, _)| command == "/accounts")
+        );
+        assert!(
+            !suggestions
+                .iter()
+                .any(|(command, _)| command.split_whitespace().next() == Some("/account"))
+        );
     });
 }
 
@@ -259,10 +278,12 @@ fn test_accounts_rename_prompt_cancel_empty_and_spaced_name() {
         app.input = "/cancel".into();
         app.submit_input();
         assert!(app.pending_account_input.is_none());
-        assert!(crate::auth::claude::list_accounts()
-            .unwrap()
-            .iter()
-            .any(|a| a.label == original));
+        assert!(
+            crate::auth::claude::list_accounts()
+                .unwrap()
+                .iter()
+                .any(|a| a.label == original)
+        );
         prompt(&mut app, &original);
         app.input = "   ".into();
         app.submit_input();
@@ -282,10 +303,12 @@ fn test_accounts_rename_prompt_cancel_empty_and_spaced_name() {
         app.input = "Final  Account Name".into();
         app.submit_input();
         assert!(app.pending_account_input.is_none());
-        assert!(crate::auth::claude::list_accounts()
-            .unwrap()
-            .iter()
-            .any(|a| a.label == "Final  Account Name"));
+        assert!(
+            crate::auth::claude::list_accounts()
+                .unwrap()
+                .iter()
+                .any(|a| a.label == "Final  Account Name")
+        );
         assert!(app.pending_login.is_none());
         app.input = "/accounts claude".into();
         app.submit_input();
@@ -310,13 +333,17 @@ fn test_accounts_direct_rename_preserves_spaces_and_uses_longest_saved_label() {
             assert_eq!(accounts.len(), 2);
             assert!(accounts.iter().any(|account| account.label == "Work"
                 && account.email.as_deref() == Some("first@example.com")));
-            assert!(accounts
-                .iter()
-                .any(|account| account.label == "New  Personal Name"
-                    && account.email.as_deref() == Some("second@example.com")));
-            assert!(!accounts
-                .iter()
-                .any(|account| account.label == "Work  Research Team"));
+            assert!(
+                accounts
+                    .iter()
+                    .any(|account| account.label == "New  Personal Name"
+                        && account.email.as_deref() == Some("second@example.com"))
+            );
+            assert!(
+                !accounts
+                    .iter()
+                    .any(|account| account.label == "Work  Research Team")
+            );
         });
     }
 }
