@@ -7,6 +7,9 @@ use crate::provider::{AccountPin, AccountProviderKind};
 use std::collections::BTreeMap;
 use std::sync::Mutex as StdMutex;
 
+#[path = "account_rename.rs"]
+mod account_rename;
+
 /// `set_account_pin` calls recorded by the fake provider.
 type PinCalls = Arc<StdMutex<Vec<(AccountProviderKind, Option<String>)>>>;
 
