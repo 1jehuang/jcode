@@ -12,6 +12,34 @@ fn test_context_limit_error_detection() {
 }
 
 #[test]
+fn test_context_limit_error_detection_ntl_and_canonical_codes() {
+    for error in [
+        r#"HTTP 400: {"error":"The chat context is too large. Start a new chat or summarize the current one.","code":"prompt_too_large"}"#,
+        "The chat context is too large. Start a new chat or summarize the current one.",
+        "prompt_too_large",
+        "context_length_exceeded",
+        "CONTEXT_LENGTH_EXCEEDED",
+    ] {
+        assert!(is_context_limit_error(error), "{error}");
+    }
+}
+
+#[test]
+fn test_context_limit_error_detection_keeps_unrelated_size_failures_separate() {
+    for error in [
+        "HTTP 413: Payload Too Large",
+        r#"HTTP 413: {"error":{"type":"request_too_large","message":"Request exceeds the maximum size"}}"#,
+        "HTTP 400: image is too large",
+        "HTTP 400: invalid image data",
+        "HTTP 400: message exceeds the 50,000 character limit",
+        "HTTP 400: invalid_request_error",
+        "rate limit exceeded, retry after 20s",
+    ] {
+        assert!(!is_context_limit_error(error), "{error}");
+    }
+}
+
+#[test]
 fn test_request_payload_too_large_error_detection() {
     assert!(is_request_payload_too_large_error(
         "Anthropic API error (413 Payload Too Large): {\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum size\"}}"
