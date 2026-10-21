@@ -155,8 +155,19 @@ pub fn build_chatgpt_web_route(
     available: bool,
     detail: impl Into<String>,
 ) -> ModelRoute {
+    let choices: Vec<_> = super::chatgpt_web::cached_reasoning_options(model)
+        .into_iter()
+        .filter(|choice| choice.available)
+        .collect();
     ModelRoute {
-        catalog_metadata: None,
+        catalog_metadata: Some(jcode_provider_core::ModelMetadata {
+            reasoning_efforts: choices.iter().map(|choice| choice.value.clone()).collect(),
+            reasoning_effort_labels: choices
+                .into_iter()
+                .map(|choice| (choice.value, choice.label))
+                .collect(),
+            ..Default::default()
+        }),
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "chatgpt-web".to_string(),
