@@ -199,14 +199,14 @@ fn non_model_pickers_still_reserve_inline_panel_height() {
 fn account_picker_rows_survive_late_command_overlay() {
     for preview in [true, false] {
         let mut state = model_picker_state();
-        state.input = "/account openai".to_string();
+        state.input = "/accounts openai".to_string();
         state.command_suggestions = vec![
             (
-                "/account openai add".to_string(),
+                "/accounts openai add".to_string(),
                 "Add a new OpenAI account",
             ),
-            ("/account openai login".to_string(), "Refresh login"),
-            ("/account openai settings".to_string(), "Provider settings"),
+            ("/accounts openai login".to_string(), "Refresh login"),
+            ("/accounts openai settings".to_string(), "Provider settings"),
         ];
         let picker = state.inline_interactive_state.as_mut().unwrap();
         picker.kind = crate::tui::PickerKind::Account;
@@ -237,7 +237,7 @@ fn account_picker_rows_survive_late_command_overlay() {
             .join("\n");
         assert!(text.contains("openai-otter"), "preview={preview}:\n{text}");
         assert!(
-            !text.contains("/account openai add"),
+            !text.contains("/accounts openai add"),
             "preview={preview}:\n{text}"
         );
     }
@@ -246,15 +246,15 @@ fn account_picker_rows_survive_late_command_overlay() {
 #[test]
 fn generic_slash_suggestions_remain_visible_without_picker() {
     let state = TestState {
-        input: "/account openai".to_string(),
+        input: "/accounts openai".to_string(),
         command_suggestions: vec![(
-            "/account openai add".to_string(),
+            "/accounts openai add".to_string(),
             "Add a new OpenAI account",
         )],
         ..Default::default()
     };
     let text = render_model_suggestions(&state, 100, 20, 18).join("\n");
-    assert!(text.contains("/account openai add"), "{text}");
+    assert!(text.contains("/accounts openai add"), "{text}");
     assert!(text.contains("Add a new OpenAI account"), "{text}");
 }
 

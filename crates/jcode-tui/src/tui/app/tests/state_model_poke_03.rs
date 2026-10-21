@@ -1475,7 +1475,7 @@ fn test_local_model_picker_selection_failure_keeps_picker_open_and_shows_next_st
         assert!(last.content.contains("credentials expired"));
         assert!(last.content.contains("/model"));
         assert!(last.content.contains("/login"));
-        assert!(last.content.contains("/account"));
+        assert!(last.content.contains("/accounts"));
     });
 }
 

@@ -424,7 +424,7 @@ impl App {
     /// failed route and to recognize same-model/different-method alternatives.
     pub(super) fn current_route_api_method(&self) -> Option<String> {
         // Session route metadata records a past selection, not necessarily the
-        // credential now in use (e.g. after /account or a remote route switch).
+        // credential now in use (e.g. after /accounts or a remote route switch).
         // Prefer the same authoritative credential that drives billing identity
         // so we never offer the active route as its own fallback.
         let provider =

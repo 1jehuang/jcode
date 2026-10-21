@@ -8,12 +8,12 @@ The initial UX commit was rechecked against this interpretation. Its production 
 
 ## Account management
 
-- `/account` focuses the account this window uses. Claude Code instances are included when configured or when the current window uses Claude Code.
+- `/accounts` is the sole account slash command. It opens the full account center, focused on this window's saved login, with add, rename, reauthentication, removal, switching, and per-account usage. Explicit account searches retain the inline quick-switch picker. Claude Code instances are included in quick switching when configured or when the current window uses Claude Code.
 - Enter uses a saved account in this window. Ctrl+D makes a saved Claude/OpenAI login the default for new and unpinned windows, from either the command preview or the focused picker. A pinned window keeps its account. Ctrl+D on another action or an empty result preserves the query and explains that a saved login must be selected.
 - Plain letters, including `d`, `j`, `k`, `g`, and `q`, search instead of triggering account actions or closing the account center. Arrow keys navigate. In the account center, Left/Right jump provider groups and Home/End and PageUp/PageDown navigate the list.
 - Add-login and refresh-login descriptions distinguish creating another saved login from refreshing a particular saved login. Provider settings are not duplicated in the account center.
 - Removing an account from the account center opens a confirmation showing the exact target. Only lowercase `y` with no modifiers confirms. Enter does not delete. Escape, navigation, search, or a mouse event cancels confirmation.
-- Removal deletes saved Jcode credentials, not the external provider account. Direct `/account <provider> remove <label>` commands retain their existing behavior.
+- Removal deletes saved Jcode credentials, not the external provider account. Direct `/accounts <provider> remove <label>` commands retain their existing behavior.
 - Compact terminals use a full-width account center. Provider headers, scrolling, and mouse hit testing share the same physical-row calculation so the selected action remains visible.
 - The inline account picker reserves space for its hint even when search leaves just one account or no matches. Hints describe the selected action, and an empty search result shows how to clear the filter. Enter with no matches keeps the account or model preview open without discarding the query. Generic slash-command suggestions cannot overwrite an open picker's rows.
 - Per-window native login pins remain visible when the active model uses a direct compatible API runtime. Account-change events, catalog responses, and history agree with the saved session pin. A live runtime's resolved pin or default still wins during failover and unpinning. This does not change the compatible endpoint's API credentials.

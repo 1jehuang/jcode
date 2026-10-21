@@ -145,6 +145,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     }
     needs_redraw |= app.poll_ssh_login(remote).await;
     needs_redraw |= app.poll_oauth_account_telemetry();
+    needs_redraw |= app.poll_account_picker_usage();
     needs_redraw |= app.poll_ssh_login_onboarding();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();

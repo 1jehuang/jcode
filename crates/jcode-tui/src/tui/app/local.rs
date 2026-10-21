@@ -93,6 +93,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // happen to trigger (~4fps in practice).
     let mut needs_redraw = reset_redraw | crate::tui::periodic_redraw_required(app);
     needs_redraw |= app.poll_oauth_account_telemetry();
+    needs_redraw |= app.poll_account_picker_usage();
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();

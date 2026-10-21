@@ -885,6 +885,10 @@ async fn handle_remote_key_internal(
         }
     }
 
+    if input::is_alternate_enter(code, modifiers) && app.pending_account_input.is_some() {
+        return submit_remote_enter_input(app, remote).await;
+    }
+
     if input::is_alternate_enter(code, modifiers) && input::try_queue_command(app) {
         return Ok(());
     }
@@ -1063,6 +1067,18 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
     app: &mut App,
     remote: &mut RemoteConnection,
 ) -> Result<()> {
+    // Account names and settings belong to the local credential manager, not
+    // the model. Consume them before slash routing, preview activation or the
+    // nonempty-input guard, so empty values and /cancel work here too.
+    if let Some(pending) = app.pending_account_input.take() {
+        let value = app.expand_paste_placeholders(&app.input);
+        app.input.clear();
+        app.cursor_pos = 0;
+        app.pasted_contents.clear();
+        app.clear_input_undo_history();
+        app.handle_pending_account_input(pending, value);
+        return Ok(());
+    }
     if app.activate_picker_from_preview() {
         return Ok(());
     }

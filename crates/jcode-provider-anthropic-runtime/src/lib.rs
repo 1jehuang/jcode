@@ -1545,7 +1545,7 @@ impl Provider for AnthropicProvider {
     }
 
     /// Saved-account binding (model picker `claude-oauth@label` routes) is the
-    /// same per-window pin `/account switch` and failover use.
+    /// same per-window pin `/accounts switch` and failover use.
     fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
         let pin = match label {
             Some(label) => {
@@ -2347,7 +2347,7 @@ async fn run_stream_with_retries(
 /// The stored credential is re-read on every call (a few small local file
 /// reads, no network). The in-memory cache is only reused while it was
 /// derived from the credential that is stored right now, so a same-label
-/// relogin, `/account switch`, or an external Claude Code relogin reaches
+/// relogin, `/accounts switch`, or an external Claude Code relogin reaches
 /// every live session, fork, and retry without a restart.
 async fn resolve_oauth_access_token(
     credentials: &Arc<RwLock<Option<CachedCredentials>>>,

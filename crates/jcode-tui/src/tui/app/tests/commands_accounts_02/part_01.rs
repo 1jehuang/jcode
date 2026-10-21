@@ -189,42 +189,10 @@ fn test_account_openai_command_opens_account_picker() {
         .unwrap();
 
         let mut app = create_test_app();
-        app.input = "/account openai".to_string();
+        app.input = "/accounts openai".to_string();
         app.submit_input();
 
-        assert!(app.account_picker_overlay.is_none());
-        let picker = app
-            .inline_interactive_state
-            .as_ref()
-            .expect("/account openai should open the inline account picker");
-        assert_eq!(picker.kind, crate::tui::PickerKind::Account);
-        assert!(picker.entries.iter().any(|entry| {
-            matches!(
-                entry.action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
-                    ref provider_id,
-                    ..
-                }) if provider_id == "openai"
-            )
-        }));
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "new account")
-        );
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "replace account")
-        );
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "account center")
-        );
+        assert_accounts_overlay_actions(&mut app, &["openai"]);
     });
 }
 
@@ -256,62 +224,10 @@ fn test_account_command_opens_account_picker() {
         .unwrap();
 
         let mut app = create_test_app();
-        app.input = "/account".to_string();
+        app.input = "/accounts".to_string();
         app.submit_input();
 
-        assert!(app.account_picker_overlay.is_none());
-        let picker = app
-            .inline_interactive_state
-            .as_ref()
-            .expect("/account should open the inline account picker");
-        assert!(picker.entries.iter().any(|entry| {
-            matches!(
-                entry.action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
-                    ref provider_id,
-                    ref label
-                }) if provider_id == "claude" && label == "claude-otter"
-            )
-        }));
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "Claude · claude@example.com")
-        );
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "OpenAI · user@example.com")
-        );
-        assert!(picker.entries.iter().any(|entry| {
-            matches!(
-                entry.action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
-                    ref provider_id,
-                    ..
-                }) if provider_id == "openai"
-            )
-        }));
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "new Claude account")
-        );
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "new OpenAI account")
-        );
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "account center")
-        );
+        assert_accounts_overlay_actions(&mut app, &["claude", "openai"]);
     });
 }
 
@@ -342,8 +258,7 @@ fn test_account_picker_arrows_navigate_and_bare_letters_search() {
         .unwrap();
 
         let mut app = create_test_app();
-        app.input = "/account openai".to_string();
-        app.submit_input();
+        app.open_account_picker(Some("openai"));
 
         let initial_selected = app
             .inline_interactive_state
@@ -406,7 +321,7 @@ fn test_account_picker_preview_from_input_filters_accounts() {
         .unwrap();
 
         let mut app = create_test_app();
-        for c in "/account openai sec".chars() {
+        for c in "/accounts openai sec".chars() {
             app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
                 .unwrap();
         }
@@ -419,7 +334,7 @@ fn test_account_picker_preview_from_input_filters_accounts() {
         assert_eq!(picker.kind, crate::tui::PickerKind::Account);
         assert_eq!(picker.filter, "sec");
         assert!(app.account_picker_overlay.is_none());
-        assert_eq!(app.input(), "/account openai sec");
+        assert_eq!(app.input(), "/accounts openai sec");
     });
 }
 
@@ -427,13 +342,13 @@ fn test_account_picker_preview_from_input_filters_accounts() {
 fn test_account_picker_preview_stays_closed_for_explicit_subcommands() {
     let mut app = create_test_app();
 
-    for c in "/account openai settings".chars() {
+    for c in "/accounts openai settings".chars() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
             .unwrap();
     }
 
     assert!(app.inline_interactive_state.is_none());
-    assert_eq!(app.input(), "/account openai settings");
+    assert_eq!(app.input(), "/accounts openai settings");
 }
 
 #[test]
@@ -463,37 +378,10 @@ fn test_account_command_combines_claude_and_openai_accounts() {
         .unwrap();
 
         let mut app = create_test_app();
-        app.input = "/account".to_string();
+        app.input = "/accounts".to_string();
         app.submit_input();
 
-        let picker = app
-            .inline_interactive_state
-            .as_ref()
-            .expect("inline account picker should open");
-        assert!(picker.entries.iter().any(|entry| {
-            matches!(
-                entry.action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
-                    ref provider_id,
-                    ref label
-                }) if provider_id == "claude" && label == "claude-otter"
-            )
-        }));
-        assert!(picker.entries.iter().any(|entry| {
-            matches!(
-                entry.action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
-                    ref provider_id,
-                    ref label
-                }) if provider_id == "openai" && label == "openai-otter"
-            )
-        }));
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "account center")
-        );
+        assert_accounts_overlay_actions(&mut app, &["claude", "openai"]);
     });
 }
 
@@ -580,13 +468,14 @@ fn test_account_command_uses_fast_auth_snapshot_without_running_cursor_status() 
         crate::auth::AuthStatus::invalidate_cache();
         let _ = std::fs::remove_file(&marker);
 
-        app.input = "/account".to_string();
+        app.input = "/accounts".to_string();
         app.submit_input();
 
-        assert!(app.inline_interactive_state.is_some());
+        assert!(app.account_picker_overlay.is_some());
+        assert!(app.inline_interactive_state.is_none());
         assert!(
             !marker.exists(),
-            "/account should not execute `cursor-agent status` on open"
+            "/accounts should not execute `cursor-agent status` on open"
         );
 
         match prev_cursor_cli_path {
@@ -617,7 +506,7 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
 
         // Two accounts, because a single account is auto-activated on insert:
         // switching to the account that is already active would pass even if the
-        // `/account switch` command did nothing. The first insert stays active
+        // `/accounts switch` command did nothing. The first insert stays active
         // and the switch below has to move it to the second.
         let first =
             crate::auth::codex::upsert_account(open_account("acct_first", "first@example.com"))
@@ -636,7 +525,7 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
         let mut app = create_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            app.input = format!("/account switch {second}");
+            app.input = format!("/accounts switch {second}");
             app.submit_input();
 
             // Per-window accounts: the switch pins THIS window only. The
@@ -644,7 +533,7 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
                 Some(first.as_str()),
-                "/account switch must not change the default for other windows"
+                "/accounts switch must not change the default for other windows"
             );
             let window = app.window_account("openai").expect("window account");
             assert_eq!(window.label.as_deref(), Some(second.as_str()));
@@ -664,12 +553,12 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
                 "{last}"
             );
 
-            app.input = format!("/account default {second}");
+            app.input = format!("/accounts default {second}");
             app.submit_input();
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
                 Some(second.as_str()),
-                "/account default changes the stored default"
+                "/accounts default changes the stored default"
             );
         });
     });
@@ -709,7 +598,7 @@ fn test_login_command_opens_inline_login_picker() {
 #[test]
 fn test_account_openai_compatible_settings_renders_provider_settings() {
     let mut app = create_test_app();
-    app.input = "/account openai-compatible settings".to_string();
+    app.input = "/accounts openai-compatible settings".to_string();
     app.submit_input();
 
     let msg = app
@@ -726,7 +615,7 @@ fn test_account_openai_compatible_settings_renders_provider_settings() {
 fn test_account_default_provider_command_saves_config() {
     let _guard = crate::storage::lock_test_env();
     let mut app = create_test_app();
-    app.input = "/account default-provider openai".to_string();
+    app.input = "/accounts default-provider openai".to_string();
     app.submit_input();
 
     let cfg = crate::config::Config::load();
@@ -1040,7 +929,7 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
             assert!(
                 item.details
                     .iter()
-                    .any(|(_, value)| value == "/account openai settings")
+                    .any(|(_, value)| value == "/accounts openai settings")
             );
             for row in crate::provider_activity::openai_oauth_usage_summary(label) {
                 assert!(item.details.contains(&row));
@@ -1074,9 +963,9 @@ fn test_account_switch_short_form_runs_on_one_enter() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
 
-        // The suggestion list offers `/account claude switch <label>`, a
+        // The suggestion list offers `/accounts claude switch <label>`, a
         // different spelling of the same command. One Enter must run it.
-        app.set_input_for_test(format!("/account switch {second}"));
+        app.set_input_for_test(format!("/accounts switch {second}"));
         app.handle_key(KeyCode::Enter, KeyModifiers::empty())
             .unwrap();
         assert!(app.input.is_empty(), "command ran, input: {:?}", app.input);
@@ -1088,7 +977,7 @@ fn test_account_switch_short_form_runs_on_one_enter() {
         app.set_input_for_test("/acc");
         app.handle_key(KeyCode::Enter, KeyModifiers::empty())
             .unwrap();
-        assert!(app.input.starts_with("/account"), "{:?}", app.input);
+        assert!(app.input.starts_with("/accounts"), "{:?}", app.input);
         assert_ne!(app.input, "/acc");
     });
 }
@@ -1191,7 +1080,7 @@ fn test_account_ux_center_does_not_duplicate_provider_settings() {
                 .unwrap(),
             crate::tui::account_picker::OverlayAction::Execute(
                 crate::tui::account_picker::AccountPickerCommand::SubmitInput(command)
-            ) if command == "/account openai settings"
+            ) if command == "/accounts openai settings"
         ));
     });
 }
@@ -1233,14 +1122,14 @@ fn test_account_ux_add_and_refresh_render_exact_target_and_masked_identity() {
                 (
                     "Add new account".to_string(),
                     "Existing saved accounts are kept.".to_string(),
-                    format!("/account {provider} add"),
+                    Some(format!("/accounts {provider} add")),
                 ),
                 (
                     format!("Refresh account {label}"),
                     format!(
                         "Sign in again as {masked_email}. Replaces the saved login for {label}."
                     ),
-                    format!("/account {provider} add {label}"),
+                    None,
                 ),
             ] {
                 app.open_account_add_replace_flow(Some(provider));
@@ -1264,17 +1153,24 @@ fn test_account_ux_add_and_refresh_render_exact_target_and_masked_identity() {
                 );
                 assert!(!text.contains(email), "raw email exposed:\n{text}");
                 // Inspect the emitted command without dispatching it or starting OAuth.
-                assert!(matches!(
-                    app.account_picker_overlay
-                        .as_ref()
-                        .unwrap()
-                        .borrow_mut()
-                        .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
-                        .unwrap(),
-                    crate::tui::account_picker::OverlayAction::Execute(
-                        crate::tui::account_picker::AccountPickerCommand::SubmitInput(actual)
-                    ) if actual == command
-                ));
+                let action = app.account_picker_overlay
+                    .as_ref()
+                    .unwrap()
+                    .borrow_mut()
+                    .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                    .unwrap();
+                use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind, OverlayAction};
+                match (command, action) {
+                    (Some(expected), OverlayAction::Execute(AccountPickerCommand::SubmitInput(actual))) => {
+                        assert_eq!(actual, expected);
+                    }
+                    (None, OverlayAction::Execute(AccountPickerCommand::Login { provider: actual_provider, label: actual_label })) => {
+                        assert_eq!(actual_label, label);
+                        assert!(matches!((provider, actual_provider),
+                            ("claude", AccountProviderKind::Anthropic) | ("openai", AccountProviderKind::OpenAi)));
+                    }
+                    _ => panic!("unexpected account action"),
+                }
             }
         }
         assert_eq!(crate::auth::claude::list_accounts().unwrap().len(), 2);
@@ -1379,3 +1275,5 @@ fn test_account_ux_empty_search_shows_no_matches_in_full_frame() {
         );
     });
 }
+
+include!("accounts_overlay_regressions.rs");

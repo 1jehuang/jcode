@@ -1,5 +1,137 @@
 use super::*;
 
+/// Querying a saved login must authenticate as that login without selecting it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_account_usage_uses_target_headers_without_changing_active_account() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _env_lock = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    struct Restore {
+        home: Option<std::ffi::OsString>,
+        active_override: Option<String>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            auth::codex::set_active_account_override(self.active_override.take());
+            match self.home.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = Restore {
+        home: std::env::var_os("JCODE_HOME"),
+        active_override: auth::codex::get_active_account_override(),
+    };
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let nonce = uuid::Uuid::new_v4();
+    let active_token = format!("usage-wrapper-active-{nonce}");
+    let target_token = format!("usage-wrapper-target-{nonce}");
+    let account = |label: &str, access: &str, identity: &str| auth::codex::OpenAiAccount {
+        label: label.into(),
+        access_token: access.into(),
+        refresh_token: format!("refresh-{identity}"),
+        id_token: None,
+        account_id: Some(identity.into()),
+        expires_at: Some(chrono::Utc::now().timestamp_millis() + 3_600_000),
+        email: Some(format!("{identity}@example.com")),
+    };
+    let stored = auth::codex::JcodeOpenAiAuthFile {
+        openai_accounts: vec![
+            account("usage-active", &active_token, "active-identity"),
+            account("usage-target", &target_token, "target-identity"),
+        ],
+        active_openai_account: Some("usage-active".into()),
+    };
+    auth::codex::save_auth_file(&stored).unwrap();
+    auth::codex::set_active_account_override(Some("usage-active".into()));
+    let stored_before = serde_json::to_value(auth::codex::load_auth_file().unwrap()).unwrap();
+    assert_eq!(
+        auth::codex::active_account_label().as_deref(),
+        Some("usage-active")
+    );
+    assert_eq!(
+        auth::codex::default_account_label().as_deref(),
+        Some("usage-active")
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _url_guard = override_openai_usage_url_for_tests(format!(
+        "http://{}/wham/usage",
+        listener.local_addr().unwrap()
+    ));
+    let request_task = tokio::spawn(async move {
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 4096];
+            let count = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(count > 0, "usage request ended before its headers");
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = serde_json::json!({
+            "plan_type": "plus", "rate_limit": { "allowed": true,
+                "primary_window": { "used_percent": 25.0, "reset_at": 4_000_000_000u64 },
+                "secondary_window": { "used_percent": 75.0, "reset_at": 4_000_604_800u64 }
+            }
+        })
+        .to_string();
+        stream.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+        ).as_bytes()).await.unwrap();
+        String::from_utf8(request).unwrap()
+    });
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        fetch_saved_account_usage("openai", "usage-target"),
+    )
+    .await
+    .expect("saved-account usage fetch must finish");
+    let request = request_task.await.unwrap();
+    assert!(request.starts_with("GET /wham/usage HTTP/1.1\r\n"));
+    let headers: Vec<_> = request.lines().map(str::to_ascii_lowercase).collect();
+    assert!(headers.contains(&format!("authorization: bearer {target_token}")));
+    assert!(headers.contains(&"chatgpt-account-id: target-identity".to_string()));
+    assert!(!request.contains(&active_token));
+    assert!(!headers.contains(&"chatgpt-account-id: active-identity".to_string()));
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(report.limits.len(), 2);
+    assert_eq!(report.limits[0].usage_percent, 25.0);
+    assert_eq!(report.limits[1].usage_percent, 75.0);
+    assert!(
+        report
+            .extra_info
+            .contains(&("Account label".into(), "usage-target".into()))
+    );
+    assert_eq!(
+        auth::codex::active_account_label().as_deref(),
+        Some("usage-active")
+    );
+    assert_eq!(
+        auth::codex::default_account_label().as_deref(),
+        Some("usage-active")
+    );
+    assert_eq!(
+        auth::codex::get_active_account_override().as_deref(),
+        Some("usage-active")
+    );
+    assert_eq!(
+        serde_json::to_value(auth::codex::load_auth_file().unwrap()).unwrap(),
+        stored_before
+    );
+}
+
 #[test]
 fn test_usage_data_default() {
     let data = UsageData::default();

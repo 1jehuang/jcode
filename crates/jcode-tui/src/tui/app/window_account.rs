@@ -200,7 +200,7 @@ impl PendingAccountRequest {
 pub(crate) fn use_in_window_message(label: &str, default: Option<&str>) -> String {
     match default {
         Some(default) if default != label => format!(
-            "This window now uses {label}. The default for new windows is still {default} (/account default {label} to change it)."
+            "This window now uses {label}. The default for new windows is still {default} (/accounts default {label} to change it)."
         ),
         _ => format!("This window now uses {label}, which is also the default for new windows."),
     }
@@ -209,7 +209,7 @@ pub(crate) fn use_in_window_message(label: &str, default: Option<&str>) -> Strin
 pub(crate) fn set_default_message(label: &str, window: Option<&SessionAccountInfo>) -> String {
     match window.and_then(|info| info.label.as_deref().map(|l| (l, info.pinned))) {
         Some((current, true)) if current != label => format!(
-            "New windows now use {label}. This window stays pinned to {current} (/account switch {label} to move it)."
+            "New windows now use {label}. This window stays pinned to {current} (/accounts switch {label} to move it)."
         ),
         _ => format!("New windows and windows without a pin now use {label}, including this one."),
     }
@@ -561,7 +561,7 @@ impl App {
             "openai" => crate::auth::codex::set_active_account(label),
             CLAUDE_CODE_FAMILY => {
                 return Err(format!(
-                    "the default Claude Code instance comes from [provider.claude_code].default_instance in config.toml (currently {}); use /account claude-code switch {label} for this window",
+                    "the default Claude Code instance comes from [provider.claude_code].default_instance in config.toml (currently {}); use /accounts claude-code switch {label} for this window",
                     crate::auth::claude_code::default_instance_id()
                 ));
             }
@@ -936,7 +936,7 @@ impl App {
             )
     }
 
-    /// `/account failover status`: this window's account, the default, the
+    /// `/accounts failover status`: this window's account, the default, the
     /// rotation order, and each account's exhaustion as far as this client knows.
     pub(crate) fn render_account_failover_status(&self) -> String {
         let enabled = self.effective_account_failover();
@@ -998,7 +998,7 @@ impl App {
             lines.push("No saved Claude or OpenAI accounts.".to_string());
         }
         lines.push(String::new());
-        lines.push("Change it: /account failover on|off|default".to_string());
+        lines.push("Change it: /accounts failover on|off|default".to_string());
         lines.join("\n")
     }
 }
@@ -1061,7 +1061,7 @@ mod tests {
     fn scope_messages_name_the_window_and_the_default() {
         assert_eq!(
             use_in_window_message("claude-fox", Some("claude-otter")),
-            "This window now uses claude-fox. The default for new windows is still claude-otter (/account default claude-fox to change it)."
+            "This window now uses claude-fox. The default for new windows is still claude-otter (/accounts default claude-fox to change it)."
         );
         assert!(
             use_in_window_message("claude-fox", Some("claude-fox")).contains("also the default")

@@ -118,6 +118,8 @@ fn pending_prompt_transition_invalidates_the_memo() {
     app.pending_login = Some(PendingLogin::ClaudeAccount {
         verifier: "test-verifier".to_string(),
         label: "test-account".to_string(),
+        expected_existing: false,
+        expected_identity: None,
         redirect_uri: None,
     });
     let pending = app.command_suggestions();
