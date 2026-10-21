@@ -133,6 +133,24 @@ pub struct LoginCompleted {
     pub message: String,
 }
 
+/// A saved-login replacement belongs to one window and one OAuth attempt.
+#[derive(Clone, Debug)]
+pub struct SavedAccountLoginCompleted {
+    pub origin_session_id: String,
+    pub request_id: String,
+    pub label: String,
+    pub old_identity: Option<String>,
+    pub new_identity: Option<String>,
+    pub replace: bool,
+    pub commit_claimed: bool,
+    pub exchange_claimed: bool,
+    /// 0 = waiting, 1 = persistence claimed, 2 = cancelled, 3 = failed,
+    /// 4 = token exchange in progress. Shared by both
+    /// completion paths so manual paste and loopback can never both commit.
+    pub attempt: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    pub login: LoginCompleted,
+}
+
 /// Result of the first-run onboarding default-model validation ping. Published
 /// after the new-session screen runs a lightweight live check of the
 /// auto-selected default model so the UI can show a single "ready"/"failed"
@@ -426,6 +444,7 @@ pub enum BusEvent {
     UsageReportProgress(jcode_usage_types::ProviderUsageProgress),
     /// OAuth/login flow completed in the background
     LoginCompleted(LoginCompleted),
+    SavedAccountLoginCompleted(SavedAccountLoginCompleted),
     /// First-run onboarding finished validating the auto-selected default model.
     OnboardingModelValidated(OnboardingModelValidated),
     /// Local `!cmd` shell command completed from the input line

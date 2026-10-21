@@ -456,86 +456,14 @@ where
 }
 
 pub(in crate::tui::app) mod newline;
+mod paste_dispatch;
 mod paste_guard;
+pub(super) use paste_dispatch::handle_paste;
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
 use paste_guard::load_dropped_image;
 #[cfg(test)]
 pub(crate) use paste_guard::tiny_png_bytes_for_test;
-
-pub(super) fn handle_paste(app: &mut App, text: String) {
-    if app.append_ssh_login_input(&text) {
-        return;
-    }
-    paste_guard::note_paste();
-    if crate::tui::is_ssh_remote() {
-        // Text paths refer to the remote machine. Do not stat/read laptop
-        // files or download image URLs automatically while attached over SSH.
-        handle_text_paste(app, text);
-        app.set_status_notice("SSH paste: text only. File paths refer to the remote host; paste image bytes from the clipboard to attach an image.");
-        return;
-    }
-    // Note: clipboard_image() is NOT checked here. Bracketed paste events from the
-    // terminal always deliver text. Checking clipboard_image() here caused a bug where
-    // text pastes were misidentified as images when the clipboard also had image data
-    // (common on Wayland where apps advertise multiple MIME types). Image pasting is
-    // handled by explicit clipboard shortcuts instead (Ctrl+V/Alt+V/Cmd+V smart-paste).
-    if let Some(paths) = parse_dropped_paths(&text) {
-        let item_count = paths.len();
-        let mut image_count = 0;
-        let mut file_count = 0;
-
-        for (index, path) in paths.into_iter().enumerate() {
-            if index > 0 {
-                insert_input_text(app, " ");
-            }
-
-            if let Some((media_type, data)) = load_dropped_image(&path) {
-                attach_image(
-                    app,
-                    media_type,
-                    base64::engine::general_purpose::STANDARD.encode(data),
-                );
-                image_count += 1;
-            } else {
-                insert_input_text(app, &format_dropped_path(&path, item_count > 1));
-                file_count += 1;
-            }
-        }
-
-        let notice = match (image_count, file_count) {
-            (images, 0) => format!(
-                "Dropped {images} image{}",
-                if images == 1 { "" } else { "s" }
-            ),
-            (0, files) => format!("Dropped {files} file{}", if files == 1 { "" } else { "s" }),
-            (images, files) => format!(
-                "Dropped {images} image{} and {files} file{}",
-                if images == 1 { "" } else { "s" },
-                if files == 1 { "" } else { "s" }
-            ),
-        };
-        app.set_status_notice(notice);
-    } else if let Some(url) = super::extract_image_url(&text) {
-        crate::logging::info(&format!("Downloading image from pasted URL: {}", url));
-        app.set_status_notice("Downloading image...");
-        let session_id = active_clipboard_session_id(app);
-        spawn_blocking_or_thread(move || {
-            let content = download_image_url_content(&url).unwrap_or_else(|| {
-                ClipboardPasteContent::Error("Failed to download image".to_string())
-            });
-            publish_clipboard_result(
-                session_id,
-                ClipboardPasteKind::ImageUrl {
-                    fallback_text: Some(text),
-                },
-                content,
-            );
-        });
-    } else {
-        handle_text_paste(app, text);
-    }
-}
 
 fn format_dropped_path(path: &std::path::Path, quote_for_batch: bool) -> String {
     let value = path.to_string_lossy();

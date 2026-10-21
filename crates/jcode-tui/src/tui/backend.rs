@@ -1195,46 +1195,6 @@ impl RemoteConnection {
             .await
     }
 
-    /// Pin this session (window) to `label`, or unpin it with `None`.
-    /// Returns the request id; the server answers it with Done or Error.
-    pub async fn set_session_account(
-        &mut self,
-        provider: &str,
-        label: Option<&str>,
-    ) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::SetSessionAccount {
-            id,
-            provider: provider.to_string(),
-            label: label.map(str::to_string),
-        })
-        .await?;
-        Ok(id)
-    }
-
-    /// Change the default account for new and unpinned sessions.
-    pub async fn set_default_account(&mut self, provider: &str, label: &str) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::SetDefaultAccount {
-            id,
-            provider: provider.to_string(),
-            label: label.to_string(),
-        })
-        .await?;
-        Ok(id)
-    }
-
-    /// Per-session same-provider account failover (`None` = config default).
-    pub async fn set_account_failover(&mut self, enabled: Option<bool>) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::SetAccountFailover { id, enabled })
-            .await?;
-        Ok(id)
-    }
-
     /// Read the next event from the server.
     ///
     /// This is **cancellation safe** and may be used directly as a branch in a
@@ -1644,6 +1604,9 @@ impl RemoteEventState for ReplayRemoteState {
 
     fn mark_history_loaded(&mut self) {}
 }
+
+#[path = "backend_accounts.rs"]
+mod accounts;
 
 #[cfg(test)]
 #[path = "backend_tests.rs"]

@@ -476,6 +476,35 @@ impl Agent {
         Ok(())
     }
 
+    /// Conditionally migrate this session's pin and failover home from
+    /// `expected` to `replacement` (see `session_accounts::migrate_pin_identity`).
+    /// Returns whether anything changed. A non-matching session is a no-op, so
+    /// a newer user choice or a failover move is never stomped.
+    pub fn replace_account_pin_identity(
+        &mut self,
+        kind: crate::provider::AccountProviderKind,
+        expected: &crate::provider::AccountPin,
+        replacement: &crate::provider::AccountPin,
+    ) -> Result<bool> {
+        if expected == replacement {
+            return Ok(false);
+        }
+        let changed = crate::session_accounts::migrate_pin_identity(
+            self.provider.as_ref(),
+            &mut self.session,
+            kind,
+            expected,
+            replacement,
+        )?;
+        if changed {
+            self.record_observed_account_pins();
+            self.sync_bound_account_route();
+            self.log_env_snapshot("replace_account_pin_identity");
+            self.session.save()?;
+        }
+        Ok(changed)
+    }
+
     /// Per-session same-provider account failover toggle (`None` = config).
     pub fn set_account_failover(&mut self, enabled: Option<bool>) -> Result<()> {
         self.provider.set_account_failover(enabled);

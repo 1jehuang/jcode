@@ -51,7 +51,9 @@ pub(super) fn action_section(item: &AccountPickerItem) -> ActionSection {
         AccountPickerCommand::Unpin { .. } | AccountPickerCommand::ToggleFailover => {
             ActionSection::Setting
         }
-        AccountPickerCommand::Login { .. } => ActionSection::Login,
+        AccountPickerCommand::Login { .. } | AccountPickerCommand::Replace { .. } => {
+            ActionSection::Login
+        }
         AccountPickerCommand::Rename { .. } => ActionSection::Setting,
         AccountPickerCommand::Remove { .. } => ActionSection::Remove,
         AccountPickerCommand::PromptNew { .. } => ActionSection::Add,
@@ -227,6 +229,9 @@ pub(super) fn action_kind_help(command: &AccountPickerCommand) -> &'static str {
         AccountPickerCommand::Login { .. } => {
             "Refreshes the selected account by starting the provider login flow again."
         }
+        AccountPickerCommand::Replace { .. } => {
+            "Replaces this exact saved login only after OAuth succeeds. A different identity is allowed. Enter reviews the target, then y confirms replacement."
+        }
         AccountPickerCommand::Rename { .. } => {
             "Changes this saved account's name without changing its login or subscription."
         }
@@ -275,6 +280,10 @@ pub(super) fn command_preview(command: &AccountPickerCommand) -> String {
         AccountPickerCommand::Login { provider, label } => match provider {
             AccountProviderKind::Anthropic => format!("/accounts claude reauth {}", label),
             AccountProviderKind::OpenAi => format!("/accounts openai reauth {}", label),
+        },
+        AccountPickerCommand::Replace { provider, label } => match provider {
+            AccountProviderKind::Anthropic => format!("/accounts claude replace {}", label),
+            AccountProviderKind::OpenAi => format!("/accounts openai replace {}", label),
         },
         AccountPickerCommand::Rename { provider, label } => match provider {
             AccountProviderKind::Anthropic => {

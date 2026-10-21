@@ -678,6 +678,7 @@ impl Request {
             Request::SetSessionAccount { id, .. } => *id,
             Request::SetDefaultAccount { id, .. } => *id,
             Request::SetAccountFailover { id, .. } => *id,
+            Request::ReplaceSessionAccountIdentity { id, .. } => *id,
             Request::InvalidateOpenAiUsage { id, .. } => *id,
             Request::InvalidateAnthropicUsage { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,

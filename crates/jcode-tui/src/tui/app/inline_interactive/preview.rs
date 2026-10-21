@@ -46,8 +46,10 @@ impl App {
 
         match first {
             "switch" | "use" | "add" | "login" | "remove" | "rm" | "delete" | "rename"
-            | "reauth" | "reauthenticate" | "refresh" | "default" | "unpin" | "failover"
-            | "doctor" | "default-provider" | "default-model" | "list" | "ls" => return None,
+            | "replace" | "reauth" | "reauthenticate" | "refresh" | "default" | "unpin"
+            | "failover" | "doctor" | "default-provider" | "default-model" | "list" | "ls" => {
+                return None;
+            }
             _ => {}
         }
 
@@ -67,9 +69,9 @@ impl App {
             let subcommand = remainder.split_whitespace().next().unwrap_or_default();
             match subcommand {
                 "settings" | "login" | "add" | "switch" | "use" | "remove" | "rm" | "delete"
-                | "rename" | "reauth" | "reauthenticate" | "refresh" | "default" | "unpin"
-                | "doctor" | "list" | "ls" | "transport" | "effort" | "fast" | "premium"
-                | "api-base" | "api-key-name" | "env-file" | "default-model" => None,
+                | "rename" | "replace" | "reauth" | "reauthenticate" | "refresh" | "default"
+                | "unpin" | "doctor" | "list" | "ls" | "transport" | "effort" | "fast"
+                | "premium" | "api-base" | "api-key-name" | "env-file" | "default-model" => None,
                 _ => Some(InlinePickerPreviewRequest::Account {
                     provider_filter: Some(provider_filter),
                     filter: remainder.to_string(),

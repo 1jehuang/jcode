@@ -39,8 +39,8 @@ use super::comm_sync::{
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
 };
 use super::provider_control::{
-    apply_subscribe_account_pins, handle_set_account_failover, handle_set_default_account,
-    handle_set_session_account_request,
+    apply_subscribe_account_pins, handle_replace_session_account_identity,
+    handle_set_account_failover, handle_set_default_account, handle_set_session_account_request,
 };
 use super::provider_control::{
     handle_cycle_model, handle_invalidate_anthropic_usage, handle_invalidate_openai_usage,
@@ -85,6 +85,10 @@ const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 mod subscribe_context;
 use subscribe_context::*;
 
+#[path = "client_lifecycle_watchdog.rs"]
+mod watchdog;
+use watchdog::{RequestHandlerWatchdog, RequestHandlerWatchdogContext};
+
 struct ProcessingMessage {
     id: u64,
     content: String,
@@ -114,81 +118,6 @@ fn should_start_idle_soft_interrupt(
     session_connection_busy: bool,
 ) -> bool {
     !client_is_processing && !active_turn_registered && !session_connection_busy
-}
-
-struct RequestHandlerWatchdog {
-    done: Arc<AtomicBool>,
-}
-
-struct RequestHandlerWatchdogContext {
-    request_id: u64,
-    request_kind: String,
-    client_session_id: String,
-    client_connection_id: String,
-    client_instance_id: Option<String>,
-    client_is_processing: bool,
-    message_id: Option<u64>,
-    processing_session_id: Option<String>,
-    line_bytes: usize,
-    lifecycle_logged: bool,
-}
-
-impl RequestHandlerWatchdog {
-    fn spawn(ctx: RequestHandlerWatchdogContext) -> Self {
-        let done = Arc::new(AtomicBool::new(false));
-        let done_for_task = Arc::clone(&done);
-        tokio::spawn(async move {
-            let started = Instant::now();
-            let mut previous_threshold = Duration::ZERO;
-            for threshold_ms in REQUEST_HANDLER_STALL_THRESHOLDS_MS {
-                let threshold = Duration::from_millis(threshold_ms);
-                tokio::time::sleep(threshold.saturating_sub(previous_threshold)).await;
-                previous_threshold = threshold;
-                if done_for_task.load(Ordering::Acquire) {
-                    return;
-                }
-                crate::logging::event_warn(
-                    "SERVER_REQUEST_HANDLER_STALLED",
-                    vec![
-                        ("request_id", ctx.request_id.to_string()),
-                        ("request_kind", ctx.request_kind.clone()),
-                        ("session_id", ctx.client_session_id.clone()),
-                        ("client_connection_id", ctx.client_connection_id.clone()),
-                        (
-                            "client_instance_id",
-                            ctx.client_instance_id
-                                .clone()
-                                .unwrap_or_else(|| "none".to_string()),
-                        ),
-                        ("client_processing", ctx.client_is_processing.to_string()),
-                        (
-                            "message_id",
-                            ctx.message_id
-                                .map(|id| id.to_string())
-                                .unwrap_or_else(|| "none".to_string()),
-                        ),
-                        (
-                            "processing_session_id",
-                            ctx.processing_session_id
-                                .clone()
-                                .unwrap_or_else(|| "none".to_string()),
-                        ),
-                        ("line_bytes", ctx.line_bytes.to_string()),
-                        ("lifecycle_logged", ctx.lifecycle_logged.to_string()),
-                        ("threshold_ms", threshold_ms.to_string()),
-                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                    ],
-                );
-            }
-        });
-        Self { done }
-    }
-}
-
-impl Drop for RequestHandlerWatchdog {
-    fn drop(&mut self) {
-        self.done.store(true, Ordering::Release);
-    }
 }
 
 fn log_request_lifecycle_handled(
@@ -2197,6 +2126,26 @@ pub(super) async fn handle_client(
 
             Request::SetAccountFailover { id, enabled } => {
                 handle_set_account_failover(id, enabled, &agent, &client_event_tx).await;
+            }
+
+            Request::ReplaceSessionAccountIdentity {
+                id,
+                provider,
+                label,
+                old_identity,
+                new_identity,
+            } => {
+                handle_replace_session_account_identity(
+                    id,
+                    provider,
+                    label,
+                    old_identity,
+                    new_identity,
+                    &agent,
+                    &client_event_tx,
+                    supports_session_accounts.load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .await;
             }
 
             Request::InvalidateOpenAiUsage { id, account_label } => {

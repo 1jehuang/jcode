@@ -57,6 +57,8 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("RefreshModels", ClientInternal),
     ("Reload", ClientInternal),
     ("RenameSession", Covered),
+    // OAuth "Replace login" bookkeeping for the TUI's own pinned session.
+    ("ReplaceSessionAccountIdentity", ClientInternal),
     ("ResumeAllSessions", ClientInternal),
     ("ResumeSession", ClientInternal),
     ("Rewind", Covered),

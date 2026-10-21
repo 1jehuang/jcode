@@ -24,6 +24,20 @@ fn test_session_account_requests_roundtrip() -> Result<()> {
             id: 9,
             enabled: None,
         },
+        Request::ReplaceSessionAccountIdentity {
+            id: 12,
+            provider: "claude".to_string(),
+            label: "claude-fox".to_string(),
+            old_identity: Some("old@example.com".to_string()),
+            new_identity: Some("new@example.com".to_string()),
+        },
+        Request::ReplaceSessionAccountIdentity {
+            id: 13,
+            provider: "openai".to_string(),
+            label: "openai-otter".to_string(),
+            old_identity: None,
+            new_identity: None,
+        },
     ];
     for req in requests {
         let json = serde_json::to_string(&req)?;
@@ -33,7 +47,12 @@ fn test_session_account_requests_roundtrip() -> Result<()> {
     }
 
     let json = r#"{"type":"set_session_account","id":11,"provider":"claude"}"#;
-    let Request::SetSessionAccount { id, provider, label } = parse_request_json(json)? else {
+    let Request::SetSessionAccount {
+        id,
+        provider,
+        label,
+    } = parse_request_json(json)?
+    else {
         return Err(anyhow!("expected SetSessionAccount"));
     };
     assert_eq!((id, provider.as_str(), label), (11, "claude", None));

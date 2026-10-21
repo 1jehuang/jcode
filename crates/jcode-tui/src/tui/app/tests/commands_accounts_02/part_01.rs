@@ -1315,3 +1315,7 @@ fn test_account_ux_empty_search_shows_no_matches_in_full_frame() {
 }
 
 include!("accounts_overlay_regressions.rs");
+
+mod persistent_accounts {
+    include!("accounts_persistent_workflow.rs");
+}

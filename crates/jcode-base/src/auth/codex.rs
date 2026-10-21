@@ -264,15 +264,19 @@ pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
         anyhow::bail!("New account name cannot be empty");
     }
     if matches!(new_label, "default" | "main")
-        || new_label.strip_prefix("openai-").is_some_and(|suffix| {
-            !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
-        })
+        || new_label
+            .strip_prefix("openai-")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
     {
         anyhow::bail!("That name is reserved for legacy account migration; choose a custom name");
     }
     let mut auth = load_auth_file()?;
     if new_label == old_label {
-        if auth.openai_accounts.iter().any(|account| account.label == old_label) {
+        if auth
+            .openai_accounts
+            .iter()
+            .any(|account| account.label == old_label)
+        {
             return Ok(());
         }
         anyhow::bail!("No OpenAI account with label '{}' found", old_label);
@@ -347,6 +351,63 @@ pub fn update_account_tokens(
         );
     }
 }
+
+/// Replace exactly one existing saved login, without adding a label or moving defaults.
+pub fn replace_account_if_unchanged(
+    label: &str,
+    expected_identity: Option<&str>,
+    replacement: OpenAiAccount,
+) -> Result<()> {
+    let mut auth = load_auth_file()?;
+    replace_saved_login(&mut auth, label, expected_identity, replacement)?;
+    save_auth_file(&auth)
+}
+
+fn replace_saved_login(
+    auth: &mut JcodeOpenAiAuthFile,
+    label: &str,
+    expected_identity: Option<&str>,
+    mut replacement: OpenAiAccount,
+) -> Result<()> {
+    let index = auth
+        .openai_accounts
+        .iter()
+        .position(|a| a.label == label)
+        .ok_or_else(|| {
+            anyhow::anyhow!("The saved login was removed or renamed. No credentials were replaced.")
+        })?;
+    if account_identity(&auth.openai_accounts[index]).as_deref() != expected_identity {
+        anyhow::bail!(
+            "The saved login changed while authentication was pending. No credentials were replaced."
+        );
+    }
+    // Only claims from the new login establish its identity, never old metadata
+    // or the refresh-token fingerprint used as a last-resort session pin.
+    let identity = account_identity(&replacement)
+        .filter(|id| !id.starts_with("rt:"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not verify the replacement login identity. No credentials were replaced."
+            )
+        })?;
+    if auth
+        .openai_accounts
+        .iter()
+        .enumerate()
+        .any(|(i, a)| i != index && account_identity(a).as_deref() == Some(identity.as_str()))
+    {
+        anyhow::bail!(
+            "This identity is already saved under another account. Use that saved login instead. No credentials were replaced."
+        );
+    }
+    replacement.label = label.to_string();
+    auth.openai_accounts[index] = replacement;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "codex_replacement_tests.rs"]
+mod replacement_tests;
 
 pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> {
     let mut auth = load_auth_file()?;

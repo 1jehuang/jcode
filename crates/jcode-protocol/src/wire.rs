@@ -541,6 +541,24 @@ pub enum Request {
         enabled: Option<bool>,
     },
 
+    /// Conditionally move this session from a replaced OAuth login to its new
+    /// identity. The session's pin for `provider` and its failover home are each
+    /// migrated only when they exactly equal `{ label, old_identity }`; anything
+    /// else (another label, another identity, no pin) is left untouched. Never
+    /// changes the stored default, other sessions, or an unrelated pin/home, and
+    /// never clears the failover home the way `set_session_account` does.
+    #[serde(rename = "replace_session_account_identity")]
+    ReplaceSessionAccountIdentity {
+        id: u64,
+        /// "claude" | "openai"
+        provider: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_identity: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_identity: Option<String>,
+    },
+
     /// Invalidate daemon-local usage and quota cooldown state after a banked reset.
     /// This never redeems a reset or switches accounts. `None` pins the default
     /// account scope, not whichever account is active when the request arrives.

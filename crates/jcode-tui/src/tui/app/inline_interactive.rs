@@ -2762,21 +2762,14 @@ impl App {
                     self.execute_window_account_command_local(command);
                 }
             }
+            // Reuse the named-account form so another login is easy to identify.
             AccountPickerAction::Add { provider_id } => match provider_id.as_str() {
-                "claude" => match crate::auth::claude::next_account_label() {
-                    Ok(label) => self.start_claude_login_for_account(&label),
-                    Err(e) => self.push_display_message(DisplayMessage::error(format!(
-                        "Failed to prepare Claude account: {}",
-                        e
-                    ))),
-                },
-                "openai" => match crate::auth::codex::next_account_label() {
-                    Ok(label) => self.start_openai_login_for_account(&label),
-                    Err(e) => self.push_display_message(DisplayMessage::error(format!(
-                        "Failed to prepare OpenAI account: {}",
-                        e
-                    ))),
-                },
+                "claude" => self.prompt_new_account_label(
+                    crate::tui::account_picker::AccountProviderKind::Anthropic,
+                ),
+                "openai" => self.prompt_new_account_label(
+                    crate::tui::account_picker::AccountProviderKind::OpenAi,
+                ),
                 _ => self.push_display_message(DisplayMessage::error(format!(
                     "Provider `{}` does not support multiple accounts.",
                     provider_id

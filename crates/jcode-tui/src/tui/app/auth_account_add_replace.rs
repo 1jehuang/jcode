@@ -28,10 +28,10 @@ impl App {
             ));
         }
 
-        self.account_picker_overlay = Some(std::cell::RefCell::new(AccountPicker::new(
-            " Add account ",
-            items,
-        )));
+        self.account_picker_overlay = Some(std::cell::RefCell::new(
+            AccountPicker::new(" Add account ", items)
+                .with_manager_scope(provider_filter.map(str::to_owned)),
+        ));
         self.inline_interactive_state = None;
         self.input.clear();
         self.cursor_pos = 0;
