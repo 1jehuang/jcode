@@ -56,6 +56,7 @@ pub(super) struct ClientConnectionInfo {
     /// kitty/DISPLAY/...). Used to route spawn/focus hooks to the client's
     /// terminal instead of the long-lived server's stale startup env (#405).
     pub(super) terminal_env: Vec<(String, String)>,
+    pub(super) supports_user_response: bool,
     pub(super) disconnect_tx: mpsc::UnboundedSender<()>,
 }
 

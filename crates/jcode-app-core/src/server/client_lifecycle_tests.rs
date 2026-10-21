@@ -1573,10 +1573,8 @@ async fn sdk_socket_configure_list_callback_and_busy_rejection() {
     sdk_socket_workflow(false).await;
 }
 
-#[tokio::test]
-async fn user_response_socket_registration_follows_explicit_capability() {
-    sdk_socket_workflow(true).await;
-}
+#[path = "client_response_capability_tests.rs"]
+mod response_capability;
 
 async fn sdk_socket_workflow(response_only: bool) {
     let _lock = crate::storage::lock_test_env();

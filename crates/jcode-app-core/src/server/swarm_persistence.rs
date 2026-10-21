@@ -31,6 +31,7 @@ static SWARM_OPERATION_LOCKS: LazyLock<StdMutex<HashMap<String, Weak<tokio::sync
 static SWARM_FILE_LOCKS: LazyLock<StdMutex<HashMap<String, Weak<StdMutex<()>>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SwarmStateFileVersion(Option<Vec<u8>>);
 
@@ -244,10 +245,12 @@ fn state_path(swarm_id: &str) -> PathBuf {
     state_dir().join(format!("{}.json", sanitized))
 }
 
+#[cfg(test)]
 fn read_primary_version(swarm_id: &str) -> SwarmStateFileVersion {
     SwarmStateFileVersion(std::fs::read(state_path(swarm_id)).ok())
 }
 
+#[cfg(test)]
 pub(super) fn capture_swarm_state_version(swarm_id: &str) -> SwarmStateFileVersion {
     let file_lock = swarm_file_lock(swarm_id);
     let _guard = file_lock
@@ -686,6 +689,7 @@ pub(super) fn remove_swarm_state(swarm_id: &str) {
     let _ = remove_snapshot_files(swarm_id);
 }
 
+#[cfg(test)]
 pub(super) fn remove_swarm_state_if_version(
     swarm_id: &str,
     expected: &SwarmStateFileVersion,

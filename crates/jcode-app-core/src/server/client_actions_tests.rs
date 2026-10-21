@@ -606,6 +606,7 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            supports_user_response: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
@@ -724,6 +725,7 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            supports_user_response: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
