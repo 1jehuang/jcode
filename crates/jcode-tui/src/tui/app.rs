@@ -1622,13 +1622,13 @@ pub struct App {
     /// Attachments discarded by each Ctrl+C draft clear, keyed by the undo
     /// depth of that clear's snapshot, so Ctrl+Z restores images with text.
     cleared_draft_images: Vec<(usize, Vec<(String, String)>)>,
-
     /// Anchor (byte offset into `input`) of the editable composer selection;
     /// the other end is `cursor_pos`. `None` means no selection.
     input_selection_anchor: Option<input_selection::InputSelectionAnchor>,
     /// Derives double/triple clicks for word/line selection in the composer.
     input_selection_clicks: input_selection::ClickCounter,
     input_typing_undo: Option<(Instant, usize)>,
+    terminal_reply_filter: input::terminal_replies::OscColorReplyFilter,
     // Ctrl+Up's draft, restored when Down passes the newest history entry.
     history_draft: Option<input_images::InputUndoSnapshot>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
