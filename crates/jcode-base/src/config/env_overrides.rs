@@ -363,6 +363,11 @@ impl Config {
                 self.features.mermaid = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_ENABLE_D2") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.d2 = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_CHECK_UPDATES") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.check_updates = parsed;

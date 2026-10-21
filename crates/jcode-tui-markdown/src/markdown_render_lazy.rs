@@ -29,6 +29,7 @@ pub fn render_markdown_lazy(
     let mut in_code_block = false;
     let mut code_block_lang: Option<String> = None;
     let mut code_block_content = String::new();
+    let mut code_block_closed = false;
     let mut code_block_start_line: usize = 0;
     let mut heading_level: Option<u8> = None;
     let mut blockquote_depth = 0usize;
@@ -64,7 +65,7 @@ pub fn render_markdown_lazy(
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
     let parser = Parser::new_ext(text, options);
 
-    for event in parser {
+    for (event, event_range) in parser.into_offset_iter() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 flush_current_line_with_alignment(
@@ -377,6 +378,7 @@ pub fn render_markdown_lazy(
                 enter_centered_structured_block(&mut centered_blocks, lines.len());
                 in_code_block = true;
                 code_block_start_line = lines.len();
+                code_block_closed = fenced_block_is_closed(&text[event_range]);
                 code_block_lang = match kind {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
                     _ => None,
@@ -387,7 +389,17 @@ pub fn render_markdown_lazy(
             Event::End(TagEnd::CodeBlock) => {
                 let is_mermaid = should_render_mermaid_block(code_block_lang.as_deref());
 
-                if is_mermaid {
+                let (d2_lines, d2_error) = render_d2_block(
+                    code_block_lang.as_deref(),
+                    &code_block_content,
+                    max_width,
+                    mermaid_should_register_active(),
+                    None,
+                    code_block_closed,
+                );
+                if let Some(d2_lines) = d2_lines {
+                    lines.extend(d2_lines);
+                } else if is_mermaid {
                     let terminal_width = max_width.and_then(|w| u16::try_from(w).ok());
                     let result = if deferred_mermaid_mode {
                         mermaid::render_mermaid_deferred_with_registration(
@@ -470,6 +482,12 @@ pub fn render_markdown_lazy(
                         Line::from(Span::styled("└─", Style::default().fg(md_dim_color())))
                             .left_aligned(),
                     );
+                }
+                if let Some(error) = d2_error {
+                    lines.push(d2_notice_line(
+                        &format!("D2: {error} (showing source)"),
+                        max_width,
+                    ));
                 }
                 exit_centered_structured_block(&mut centered_blocks, lines.len());
                 in_code_block = false;

@@ -301,29 +301,108 @@ pub(super) fn write_output_png_cached_fonts(
     render_cfg: &RenderConfig,
     theme: &Theme,
 ) -> anyhow::Result<()> {
-    let opt = usvg::Options {
-        font_family: primary_font_family_in_db(&theme.font_family, &SVG_FONT_DB),
-        default_size: usvg::Size::from_wh(render_cfg.width, render_cfg.height)
+    write_svg_png(
+        svg,
+        output,
+        SvgRasterOptions {
+            font_family: primary_font_family_in_db(&theme.font_family, &SVG_FONT_DB),
+            default_size: (render_cfg.width, render_cfg.height),
+            background: theme.background.clone(),
+            target_width: None,
+            deny_images: false,
+        },
+    )
+    .map(|_| ())
+}
+
+#[cfg(feature = "renderer")]
+struct SvgRasterOptions {
+    font_family: String,
+    default_size: (f32, f32),
+    background: String,
+    target_width: Option<u32>,
+    deny_images: bool,
+}
+
+#[cfg(feature = "renderer")]
+pub(super) fn write_d2_png(
+    svg: &str,
+    output: &Path,
+    target_width: u32,
+) -> anyhow::Result<(u32, u32)> {
+    super::d2::validate_d2_svg(svg).map_err(anyhow::Error::msg)?;
+    write_svg_png(
+        svg,
+        output,
+        SvgRasterOptions {
+            font_family: primary_font_family_in_db(
+                "Inter, DejaVu Sans, Liberation Sans, sans-serif",
+                &SVG_FONT_DB,
+            ),
+            default_size: (800.0, 600.0),
+            background: "#00000000".into(),
+            target_width: Some(target_width),
+            deny_images: true,
+        },
+    )
+}
+
+#[cfg(feature = "renderer")]
+fn write_svg_png(
+    svg: &str,
+    output: &Path,
+    options: SvgRasterOptions,
+) -> anyhow::Result<(u32, u32)> {
+    let mut opt = usvg::Options {
+        font_family: options.font_family,
+        default_size: usvg::Size::from_wh(options.default_size.0, options.default_size.1)
             .or_else(|| usvg::Size::from_wh(800.0, 600.0))
-            .ok_or_else(|| anyhow::anyhow!("invalid mermaid render size"))?,
+            .ok_or_else(|| anyhow::anyhow!("invalid diagram render size"))?,
         fontdb: SVG_FONT_DB.clone(),
         ..Default::default()
     };
-
+    if options.deny_images {
+        // resources_dir=None alone still permits absolute local file reads.
+        opt.image_href_resolver = usvg::ImageHrefResolver {
+            resolve_string: Box::new(|_, _| None),
+            resolve_data: Box::new(|_, _, _| None),
+        };
+    }
     let tree = usvg::Tree::from_str(svg, &opt)?;
-    let size = tree.size().to_int_size();
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
+    let natural = tree.size();
+    let (width, height, scale) = if let Some(target_width) = options.target_width {
+        let width = f64::from(natural.width());
+        let height = f64::from(natural.height());
+        anyhow::ensure!(
+            width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0,
+            "invalid D2 SVG geometry"
+        );
+        let scale = (f64::from(target_width.max(1)) / width)
+            .min(4096.0 / width)
+            .min(4096.0 / height);
+        let output_width = (width * scale).round().max(1.0) as u32;
+        let output_height = (height * scale).round().max(1.0) as u32;
+        anyhow::ensure!(
+            output_width <= 4096
+                && output_height <= 4096
+                && u64::from(output_width) * u64::from(output_height) <= 16 * 1024 * 1024,
+            "D2 raster exceeds pixel budget"
+        );
+        (output_width, output_height, scale as f32)
+    } else {
+        let size = natural.to_int_size();
+        (size.width(), size.height(), 1.0)
+    };
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| anyhow::anyhow!("Failed to allocate pixmap"))?;
-    if let Some(color) = parse_hex_color_for_png(&theme.background) {
+    if let Some(color) = parse_hex_color_for_png(&options.background) {
         pixmap.fill(color);
     }
-
-    let mut pixmap_mut = pixmap.as_mut();
     resvg::render(
         &tree,
-        resvg::tiny_skia::Transform::default(),
-        &mut pixmap_mut,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
     );
     pixmap.save_png(output)?;
-    Ok(())
+    Ok((width, height))
 }

@@ -56,6 +56,7 @@ pub fn clear_cache() -> Result<(), String> {
         cache.width_miss_floor.clear();
     }
     clear_layout_cache();
+    super::diagram_engine::clear_d2_state();
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.clear();
     }

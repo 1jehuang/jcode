@@ -34,23 +34,59 @@ pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
 /// Prompt guidance for the optional Mermaid rendering capability.
 pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks inline.";
 
+/// Guidance for the self-contained subset accepted by the local D2 renderer.
+pub const D2_PROMPT: &str = "# D2\n\nPrefer fenced `d2` blocks for diagrams. Use self-contained nodes, edges, and simple text labels. Imports, icons, images, substitutions, block labels, and backslash escapes are not supported by the inline renderer. Explicit Mermaid fences retain their syntax when Mermaid is enabled.";
+
 /// Harness capabilities that conditionally contribute prompt modules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptCapabilities {
     pub mermaid: bool,
+    pub d2: bool,
+    pub diagram_engine: crate::config::DiagramEngine,
+    pub d2_layout: crate::config::D2Layout,
 }
 
 impl Default for PromptCapabilities {
     fn default() -> Self {
-        Self { mermaid: true }
+        Self {
+            mermaid: true,
+            d2: true,
+            diagram_engine: crate::config::DiagramEngine::Mermaid,
+            d2_layout: crate::config::D2Layout::Dagre,
+        }
     }
 }
 
 impl PromptCapabilities {
     fn current() -> Self {
+        let config = crate::config::config();
+        Self::from_config(&config)
+    }
+
+    fn from_config(config: &crate::config::Config) -> Self {
         Self {
-            mermaid: crate::config::config().features.mermaid,
+            mermaid: config.features.mermaid,
+            d2: config.features.d2,
+            diagram_engine: config.diagrams.preferred_engine,
+            d2_layout: config.diagrams.d2_layout,
         }
+    }
+}
+
+fn diagram_prompt(capabilities: PromptCapabilities) -> Option<String> {
+    use crate::config::DiagramEngine;
+
+    let use_d2 = capabilities.d2
+        && (capabilities.diagram_engine == DiagramEngine::D2 || !capabilities.mermaid);
+    if use_d2 {
+        Some(format!(
+            "{D2_PROMPT}\n\nThe configured local D2 layout is `{}`. Do not override the layout in diagram source.",
+            capabilities.d2_layout.as_str()
+        ))
+    } else if capabilities.mermaid {
+        Some(MERMAID_PROMPT.to_string())
+    } else {
+        None
     }
 }
 
@@ -59,8 +95,8 @@ fn base_system_prompt_parts(
     working_dir: Option<&Path>,
 ) -> Vec<String> {
     let mut parts = vec![load_base_system_prompt(working_dir)];
-    if capabilities.mermaid {
-        parts.push(MERMAID_PROMPT.to_string());
+    if let Some(diagram_prompt) = diagram_prompt(capabilities) {
+        parts.push(diagram_prompt);
     }
     parts
 }

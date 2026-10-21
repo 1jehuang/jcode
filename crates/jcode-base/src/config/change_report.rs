@@ -47,10 +47,19 @@ const RESTART_REQUIRED_SECTIONS: &[&str] = &[
     "launch_hotkeys",
 ];
 
+// `install_jcode_mermaid_hooks` captures D2 renderer options once per TUI.
+// The model's syntax preference is deliberately not part of this snapshot.
+const RESTART_REQUIRED_KEYS: &[&str] = &[
+    "features.d2",
+    "diagrams.d2_layout",
+    "diagrams.d2_binary",
+    "diagrams.d2_timeout_secs",
+];
+
 /// Liveness of a dotted config key such as `keybindings.scroll_up`.
 pub fn liveness_for_key(key: &str) -> Liveness {
     let section = key.split('.').next().unwrap_or(key);
-    if RESTART_REQUIRED_SECTIONS.contains(&section) {
+    if RESTART_REQUIRED_SECTIONS.contains(&section) || RESTART_REQUIRED_KEYS.contains(&key) {
         Liveness::NeedsRestart
     } else {
         Liveness::Live

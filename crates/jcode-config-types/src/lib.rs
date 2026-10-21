@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+mod diagrams;
 mod display;
 mod menubar;
 mod power;
 mod session;
+pub use diagrams::{D2Layout, DiagramConfig, DiagramEngine};
 pub use session::{HibernationMode, SessionConfig};
 pub use {display::DisplayConfig, menubar::MenubarConfig, power::PowerConfig};
 pub mod keybindings;
@@ -1204,6 +1206,8 @@ pub struct FeatureConfig {
     pub swarm: bool,
     /// Enable Mermaid rendering and Mermaid-specific model guidance (default: true)
     pub mermaid: bool,
+    /// Enable self-contained D2 fences with a local D2 executable (default: true).
+    pub d2: bool,
     /// Default state of auto-poke (automatic follow-up when the model stops with
     /// incomplete todos). `/poke on` / `/poke off` still override this per session
     /// (default: true)
@@ -1230,6 +1234,7 @@ impl Default for FeatureConfig {
             memory: true,
             swarm: true,
             mermaid: true,
+            d2: true,
             auto_poke: true,
             message_timestamps: true,
             persist_memory_injections: false,

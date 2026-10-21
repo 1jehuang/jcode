@@ -195,12 +195,13 @@ impl App {
             crate::tui::ui::inline_image_ui::ImageExpandLevel::Full => "full",
         };
         crate::tui::mermaid::set_mermaid_inline_expand_level(image_id, level as u8);
-        if let Some(source) = crate::tui::mermaid::mermaid_source_for_hash(image_id) {
-            let copied = super::helpers::copy_to_clipboard(&source);
+        if let Some(source) = crate::tui::mermaid::diagram_source_for_hash(image_id) {
+            let copied = super::helpers::copy_to_clipboard(&source.source);
+            let language = source.language.label();
             self.set_status_notice(if copied {
-                format!("Image size: {size} · Mermaid code copied")
+                format!("Image size: {size} · {language} code copied")
             } else {
-                format!("Image size: {size} · Could not copy Mermaid code")
+                format!("Image size: {size} · Could not copy {language} code")
             });
         } else if let Some((media_type, data)) =
             super::super::ui::inline_image_ui::payload_for_copy(image_id)

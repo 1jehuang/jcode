@@ -304,6 +304,8 @@ memory = true
 swarm = true
 # Mermaid: render Mermaid code blocks and tell the model that diagrams are supported
 mermaid = true
+# D2: render self-contained D2 fences using an installed local d2 executable.
+d2 = true
 # Auto-poke: automatically nudge the model to continue when it stops with
 # incomplete todos. /poke on and /poke off still override this per session.
 auto_poke = true
@@ -318,6 +320,17 @@ kv_cache_miss_notices = true
 # Update channel: "stable" (releases only) or "main" (latest commits on push)
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
+
+[diagrams]
+# Generation preference: "mermaid" (default) or "d2". Both fence languages work.
+preferred_engine = "mermaid"
+# D2 layout: "dagre" (default), "elk", or "tala". No automatic layout fallback.
+d2_layout = "dagre"
+# Executable name or path, not a shell command. Never downloaded automatically.
+d2_binary = "d2"
+# Render deadline, clamped to 1-30 seconds. Restart the TUI after render changes.
+d2_timeout_secs = 10
+# D2/TALA setup and supported source subset: docs/d2-diagrams.md
 
 [websearch]
 # Use the model provider's own server-side search (Anthropic web_search on the

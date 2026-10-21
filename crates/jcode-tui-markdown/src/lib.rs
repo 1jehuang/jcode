@@ -126,6 +126,10 @@ pub use math_copy::{
     InlineMathSpan, inline_math_spans, inline_math_spans_for_plain_line,
     record_inline_math_for_line,
 };
+#[path = "markdown_d2.rs"]
+mod d2_render;
+use d2_render::{d2_notice_line, fenced_block_is_closed, render_d2_block};
+
 #[path = "markdown_render_full.rs"]
 mod render_full;
 #[path = "markdown_render_lazy.rs"]
@@ -627,7 +631,10 @@ pub fn line_is_mermaid_pending_placeholder(line: &Line<'_>) -> bool {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    joined.trim().starts_with(MERMAID_PENDING_MATCH_PREFIX)
+    let joined = joined.trim();
+    let narrow = joined.trim_end_matches('…');
+    joined.starts_with(MERMAID_PENDING_MATCH_PREFIX)
+        || (narrow.starts_with('↻') && MERMAID_PENDING_MATCH_PREFIX.starts_with(narrow))
 }
 
 fn apply_inline_decorations(mut style: Style, strike: bool, in_link: bool) -> Style {

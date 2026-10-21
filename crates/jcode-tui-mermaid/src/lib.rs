@@ -207,6 +207,14 @@ pub use active::{
     set_streaming_preview_diagram, snapshot_active_diagrams,
 };
 
+pub mod d2;
+mod diagram_engine;
+pub use d2::{D2Layout, D2Options};
+pub use diagram_engine::{
+    DiagramLanguage, DiagramSource, configure_d2, d2_rendering_enabled, diagram_source_for_hash,
+    is_d2_lang, render_d2_deferred_with_registration, render_d2_sized_with_options,
+};
+
 #[path = "mermaid_model.rs"]
 mod model;
 pub use model::{
