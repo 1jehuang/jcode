@@ -241,7 +241,9 @@ fn request(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<
         if let Some(body) = body {
             req = req.json(&body);
         }
-        let response = req.send().context("could not reach Jcode Cloud")?;
+        let response = req
+            .send()
+            .context("could not reach Jcode Cloud (check your network or DNS connection)")?;
         let status = response.status();
         let text = response.text()?;
         if status.is_success() {

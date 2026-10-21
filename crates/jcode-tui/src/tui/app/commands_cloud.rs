@@ -479,6 +479,42 @@ fn format_cloud_failure(command: &str, stderr: &str) -> String {
     message
 }
 
+/// Append one record per /cloud failure to `~/.jcode/logs/cloud-problems.jsonl`
+/// so recurring handoff problems can be reviewed and fixed later.
+fn record_cloud_problem(command: &str, session_id: &str, exit: Option<i32>, stderr: &str) {
+    use std::io::Write;
+    if cfg!(test) {
+        return;
+    }
+    let Ok(dir) = crate::storage::logs_dir() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let tail: String = {
+        let chars: Vec<char> = stderr.trim().chars().collect();
+        chars[chars.len().saturating_sub(4000)..].iter().collect()
+    };
+    let record = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "command": command,
+        "session_id": session_id,
+        "exit_code": exit,
+        "stderr": tail,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("cloud-problems.jsonl"))
+    {
+        let _ = writeln!(file, "{record}");
+    }
+    crate::logging::warn(&format!(
+        "cloud problem: {command} failed: {}",
+        tail.lines().last().unwrap_or("")
+    ));
+}
+
 fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Output) {
     if matches!(job.command, CloudCommand::Prepare { .. }) {
         // Canceled or replaced requests must never inherit stale host preparation.
@@ -507,6 +543,12 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
             }
         } else {
             app.pending_cloud_handoff = None;
+            record_cloud_problem(
+                "prepare",
+                &job.session_id,
+                output.status.code(),
+                &job.stderr,
+            );
             app.push_display_message(DisplayMessage::error(format_cloud_failure(
                 "Cloud host preparation",
                 &job.stderr,
@@ -525,6 +567,7 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
     let trimmed = trimmed.as_str();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
+        record_cloud_problem(trimmed, session_id, output.status.code(), &stderr);
         app.push_display_message(DisplayMessage::error(format_cloud_failure(
             trimmed, &stderr,
         )));
