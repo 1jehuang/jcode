@@ -2947,6 +2947,14 @@ pub(super) async fn handle_client(
                     Some(&swarm_event_tx),
                 )
                 .await;
+                super::client_lightweight_control::persist_reported_member_swarm(
+                    &req_session_id,
+                    &swarm_members,
+                    &swarms_by_id,
+                    &swarm_plans,
+                    &swarm_coordinators,
+                )
+                .await;
                 let _ = client_event_tx.send(ServerEvent::CommReportResponse {
                     id,
                     status,
