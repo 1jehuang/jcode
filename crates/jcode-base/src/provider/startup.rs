@@ -400,7 +400,9 @@ impl MultiProvider {
     /// initial provider owns routing instead. This is deliberately a local
     /// model/account binding: never promote the fallback or change active logins.
     fn select_fresh_session_pool_route(&self, config_default_applied: bool) {
-        if self.initial_provider.is_some() || config_default_applied {
+        if self.initial_provider.is_some()
+            || (config_default_applied && !self.active_oauth_account_known_exhausted())
+        {
             return;
         }
         // A reconnect burst forks one provider per client. Each choice reads every
@@ -450,6 +452,25 @@ impl MultiProvider {
                 spec,
             });
         }
+    }
+
+    /// Whether the OAuth login the configured default bound is known to be out of
+    /// usage (local cooldown or cached usage snapshot). A spent login must not
+    /// pin every fresh session while other pool accounts are ready, so the pool
+    /// route selection runs instead (it still prefers the configured model).
+    fn active_oauth_account_known_exhausted(&self) -> bool {
+        let provider = self.active_provider();
+        let (key, kind) = match provider {
+            ActiveProvider::Claude => ("claude", crate::usage::MultiAccountProviderKind::Anthropic),
+            ActiveProvider::OpenAI => ("openai", crate::usage::MultiAccountProviderKind::OpenAI),
+            _ => return false,
+        };
+        let Some(label) = super::account_failover::active_account_label_for_provider(provider)
+        else {
+            return false;
+        };
+        models::provider_unavailability_detail_for_account_label(key, Some(&label)).is_some()
+            || crate::usage::account_known_exhausted(kind, &label)
     }
 
     /// Bind the first ready pool route and return its spec (None if nothing bound).
