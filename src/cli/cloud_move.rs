@@ -32,6 +32,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::auth::router_transfer;
 use crate::auth::transfer::{self, CloudCredentialTransfer, TransferProvider};
 use crate::{session, storage};
 
@@ -44,6 +45,16 @@ mod repo_tests;
 mod latency_tests;
 
 const FORMAT_VERSION: u32 = 1;
+
+/// Hidden remote subcommands a cloud host must support before anything is
+/// uploaded. Probing all of them up front means an older host fails clearly at
+/// preflight instead of after a partial credential transfer.
+const REQUIRED_REMOTE_COMMANDS: [&str; 4] = [
+    "receive",
+    "credentials",
+    "router-credentials",
+    "cancel-return",
+];
 const SNAPSHOT_REF_PREFIX: &str = "refs/jcode-cloud";
 /// Environment variables worth carrying. Everything else (DISPLAY, WAYLAND_*,
 /// SSH_AUTH_SOCK, DBUS_*, XDG_RUNTIME_DIR, secrets) is machine-local.
@@ -208,6 +219,54 @@ fn session_credentials(sess: &session::Session) -> Result<Option<CloudCredential
     )?))
 }
 
+/// Router credential sources (API-key env files, non-pool OAuth stores and the
+/// auto-switch order) that exist locally. See `auth::router_transfer`.
+fn export_router_credentials() -> Result<router_transfer::RouterBundle> {
+    let config = crate::config::Config::load();
+    let named: Vec<String> = config
+        .providers
+        .values()
+        .filter_map(|profile| profile.env_file.clone())
+        .collect();
+    let names = router_transfer::env_file_names(named.iter().map(String::as_str));
+    router_transfer::export_at(&storage::jcode_dir()?, &storage::app_config_dir()?, &names)
+        .map_err(Into::into)
+}
+
+fn run_router_credentials() -> Result<()> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take((router_transfer::MAX_BUNDLE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    router_transfer::import_at(&storage::jcode_dir()?, &storage::app_config_dir()?, &bytes)?;
+    notify_daemon_auth_changed();
+    Ok(())
+}
+
+/// Best effort: make an already-running daemon re-read every provider's
+/// credentials. OpenAI/Claude OAuth stores are re-read per request, but API
+/// keys and other providers are initialized when auth changes. No daemon means
+/// the next start reads the new files anyway.
+fn notify_daemon_auth_changed() {
+    let _ = std::thread::spawn(|| {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        runtime.block_on(async {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                let mut client = crate::server::Client::connect().await?;
+                client.notify_auth_changed().await?;
+                anyhow::Ok(())
+            })
+            .await;
+        });
+    })
+    .join();
+}
+
 fn cloud_accounts() -> Result<Vec<CloudAccount>> {
     Ok(transfer::cloud_accounts_at(&storage::jcode_dir()?)?
         .into_iter()
@@ -309,7 +368,7 @@ impl Target {
                 let binary = shell_quote(&self.remote_binary());
                 let mut script =
                     String::from("PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH\n");
-                for command in ["receive", "credentials", "cancel-return"] {
+                for command in REQUIRED_REMOTE_COMMANDS {
                     script.push_str(&format!(
                     "{binary} --no-update --no-selfdev cloud {command} --help || {{ printf '%s\\n' 'cloud protocol probe failed: {command}' >&2; exit 1; }}\n"
                 ));
@@ -341,7 +400,7 @@ impl Target {
                 }
                 return Ok(());
             }
-            for command in ["receive", "credentials", "cancel-return"] {
+            for command in REQUIRED_REMOTE_COMMANDS {
                 if let Err(error) = self.run_remote(host, &["cloud", command, "--help"], None) {
                     let text = format!("{error:#}");
                     if text.contains("unrecognized") {
@@ -437,6 +496,31 @@ impl Target {
             );
         }
         Ok(output.stdout)
+    }
+
+    /// Same private channel as [`Self::exchange_credentials`], for the router
+    /// bundle. Remote stderr is discarded and output is not expected.
+    fn send_router_credentials(&self, host: &str, payload: &[u8]) -> Result<()> {
+        let mut command = self.remote_command(host, &["cloud", "router-credentials"])?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command
+            .spawn()
+            .context("start private router credential transfer")?;
+        let written = child
+            .stdin
+            .take()
+            .context("router credential stdin")?
+            .write_all(payload);
+        let status = child
+            .wait()
+            .context("wait for router credential transfer")?;
+        if written.is_err() || !status.success() {
+            bail!("provider key transfer failed ({status}); the session was not moved");
+        }
+        Ok(())
     }
 
     /// Secrets travel only in an SSH pipe, never argv, a temporary file, or the
@@ -740,6 +824,18 @@ pub(crate) fn run_move(
             account: account.clone(),
             fingerprint: credential_fingerprint(&credentials),
         });
+    }
+    // API keys, other providers' token stores and the auto-switch order are
+    // one-way: the cloud copy is never imported back.
+    let router = export_router_credentials()?;
+    if !router.is_empty() {
+        step(
+            "credentials",
+            "securely transferring provider keys and routing",
+        );
+        timed_move_stage("router credential transfer", || {
+            target.send_router_credentials(&host, router.as_bytes())
+        })?;
     }
     storage::write_json_secret(&baseline_path(&session_id)?, &baselines)?;
 
@@ -1964,6 +2060,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             account,
             export,
         } => run_credentials(&provider, &account, export),
+        C::RouterCredentials => run_router_credentials(),
         C::Receive { .. } => run_receive(),
         C::Activate { session, epoch } => run_activate(&session, epoch),
         C::Export { session, epoch } => run_export(&session, epoch),

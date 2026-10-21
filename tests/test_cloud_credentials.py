@@ -17,6 +17,7 @@ import unittest
 BINARY = None
 ACCESS = "synthetic-cloud-access-not-a-real-secret"
 REFRESH = "synthetic-cloud-refresh-not-a-real-secret"
+ROUTER_KEY = "synthetic-router-api-key-not-a-real-secret"
 
 
 class CloudCredentials(unittest.TestCase):
@@ -39,6 +40,7 @@ class CloudCredentials(unittest.TestCase):
         self.env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(self.root), "JCODE_HOME": str(self.local),
+            "JCODE_RUNTIME_DIR": str(self.root),
             "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off",
             "HTTPS_PROXY": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9",
         }
@@ -48,7 +50,7 @@ class CloudCredentials(unittest.TestCase):
             [BINARY, "--no-update", "--no-selfdev", "cloud", *args],
             cwd=self.work, env=self.env, capture_output=True, timeout=30,
         )
-        for secret in (ACCESS, REFRESH, "synthetic-refreshed-access", "synthetic-refreshed-refresh"):
+        for secret in (ACCESS, REFRESH, ROUTER_KEY, "synthetic-refreshed-access", "synthetic-refreshed-refresh"):
             self.assertNotIn(secret.encode(), result.stdout + result.stderr)
         if success:
             self.assertEqual(result.returncode, 0, result.stderr.decode())
@@ -249,6 +251,81 @@ class CloudCredentials(unittest.TestCase):
         remote_session = json.loads((self.remote / "sessions" / "cloud-auth-test.json").read_text())
         self.assertEqual(remote_session["migration_epoch"], json.loads(where.stdout)[0]["epoch"])
         self.assertEqual(json.loads(store.read_text())[self.accounts][0]["account_id"], "different-local-user")
+
+    def seed_router(self):
+        config = self.local / "config" / "jcode"
+        config.mkdir(parents=True)
+        (config / "openrouter.env").write_text("OPENROUTER_API_KEY=" + ROUTER_KEY + "\n")
+        (config / "bedrock.env").write_text("AWS_BEARER_TOKEN_BEDROCK=" + ROUTER_KEY + "\n")
+        (config / "unlisted.env").write_text("X=" + ROUTER_KEY + "\n")
+        (config / "config.toml").write_text("")
+        (self.local / "gemini_oauth.json").write_text(json.dumps(
+            {"access_token": ROUTER_KEY, "refresh_token": ROUTER_KEY, "expires_at": 1}))
+        (self.local / "account-pool.json").write_text(json.dumps(
+            {"members": ["gemini", "openrouter"], "excluded": []}))
+        remote_config = self.remote / "config" / "jcode"
+        remote_config.mkdir(parents=True)
+        (remote_config / "openrouter.env").write_text("OPENROUTER_API_KEY=stale\n")
+        (remote_config / "groq.env").write_text("GROQ_API_KEY=cloud-only\n")
+        (self.remote / "account-pool.json").write_text(json.dumps(
+            {"members": ["cloud-only"], "excluded": ["xai"]}))
+        return remote_config
+
+    def test_router_credentials_transfer_one_way(self):
+        self.seed()
+        remote_config = self.seed_router()
+        result = self.move()
+        self.assertNotIn(ROUTER_KEY.encode(), result.stdout + result.stderr)
+        self.assert_archives_secret_free()
+        for archive in self.remote.rglob("*.tar"):
+            with tarfile.open(archive) as tar:
+                for member in tar.getmembers():
+                    if member.isfile():
+                        self.assertNotIn(ROUTER_KEY.encode(), tar.extractfile(member).read())
+        for name in ("openrouter.env", "bedrock.env"):
+            path = remote_config / name
+            self.assertIn(ROUTER_KEY, path.read_text())
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(remote_config.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((remote_config / "groq.env").read_text(), "GROQ_API_KEY=cloud-only\n")
+        self.assertFalse((remote_config / "unlisted.env").exists())
+        self.assertFalse((remote_config / "config.toml").exists())
+        gemini = self.remote / "gemini_oauth.json"
+        self.assertEqual(json.loads(gemini.read_text())["refresh_token"], ROUTER_KEY)
+        self.assertEqual(gemini.stat().st_mode & 0o777, 0o600)
+        pool = json.loads((self.remote / "account-pool.json").read_text())
+        self.assertEqual(pool["members"], ["gemini", "openrouter", "cloud-only"])
+        self.assertEqual(pool["excluded"], ["xai"])
+        # Keys are one-way: return brings back OAuth only and leaves local keys alone.
+        (remote_config / "openrouter.env").write_text("OPENROUTER_API_KEY=cloud-changed\n")
+        self.return_home()
+        self.assertIn(ROUTER_KEY, (self.local / "config" / "jcode" / "openrouter.env").read_text())
+
+    def test_router_credentials_without_oauth_account(self):
+        self.seed()
+        (self.local / self.filename).unlink()
+        session = self.local / "sessions" / "cloud-auth-test.json"
+        data = json.loads(session.read_text())
+        data.update(provider_key="openrouter", model="synthetic/test", route_api_method=None)
+        session.write_text(json.dumps(data))
+        remote_config = self.seed_router()
+        self.move()
+        self.assertIn(ROUTER_KEY, (remote_config / "openrouter.env").read_text())
+
+    def test_old_remote_without_router_command_fails_before_transfer(self):
+        self.seed()
+        remote_config = self.seed_router()
+        original = self.transport.read_text()
+        self.transport.write_text(original.replace(
+            'exec /bin/sh -c "$1"',
+            'case "$1" in *router-credentials*) echo "error: unrecognized subcommand router-credentials" >&2; exit 2 ;; esac\nexec /bin/sh -c "$1"',
+        ))
+        result = self.move(success=False)
+        self.assertIn(b"does not support the complete cloud handoff protocol", result.stderr)
+        self.assertFalse((self.remote / self.filename).exists())
+        self.assertFalse((self.remote / "gemini_oauth.json").exists())
+        self.assertEqual((remote_config / "openrouter.env").read_text(), "OPENROUTER_API_KEY=stale\n")
+        self.assertFalse(list(self.remote.rglob("*.tar")))
 
 
 if __name__ == "__main__":

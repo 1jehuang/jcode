@@ -812,6 +812,11 @@ pub(crate) enum CloudCommand {
         export: bool,
     },
 
+    /// Internal: import the account router's API keys, provider token stores
+    /// and auto-switch pool from stdin over the private SSH channel.
+    #[command(hide = true)]
+    RouterCredentials,
+
     /// Internal: remote side of `cloud move` (reads a bundle tarball on stdin).
     #[command(hide = true)]
     Receive {
