@@ -40,8 +40,29 @@ pub(crate) fn resolved_bound_account_label(session: &Session) -> Option<String> 
     (pin.label == expected || resolved == expected).then_some(resolved)
 }
 
+/// Advance a pin's presentation label only when its identity resolves to it.
+pub(crate) fn sync_bound_account_pin_label(
+    session: &mut Session,
+    method: &str,
+    label: &str,
+) -> bool {
+    let kind = match method {
+        "claude-oauth" => AccountProviderKind::Claude,
+        "openai-oauth" => AccountProviderKind::OpenAi,
+        _ => return false,
+    };
+    let Some(pin) = session.account_pins.get_mut(kind.key()) else {
+        return false;
+    };
+    if pin.label == label || resolve_pin(kind, pin).as_deref() != Some(label) {
+        return false;
+    }
+    pin.label = label.to_owned();
+    true
+}
+
 /// Canonicalize a saved route before selecting its model on session restore.
-/// This changes presentation metadata only, never the credential or account pin.
+/// Only presentation labels change, never credentials or the pinned identity.
 pub(crate) fn refresh_bound_account_route(session: &mut Session) {
     let Some(label) = resolved_bound_account_label(session) else {
         return;
@@ -57,6 +78,7 @@ pub(crate) fn refresh_bound_account_route(session: &mut Session) {
     let Some((method, expected)) = old.split_once('@') else {
         return;
     };
+    sync_bound_account_pin_label(session, method, &label);
     if label == expected {
         return;
     }
@@ -165,7 +187,18 @@ mod tests {
             session.model.as_deref(),
             Some("openai-oauth@Final name:gpt-5.5")
         );
-        assert_eq!(session.account_pins["openai"], pin);
+        assert_eq!(session.account_pins["openai"].identity, pin.identity);
+        assert_eq!(session.account_pins["openai"].label, "Final name");
+        assert!(!sync_bound_account_pin_label(
+            &mut session,
+            "openai-oauth",
+            "unrelated"
+        ));
+        crate::auth::codex::rename_account("Final name", "Daily work").unwrap();
+        assert!(ensure_bound_account_route(&LabelProvider("Daily work"), &session).is_ok());
+        refresh_bound_account_route(&mut session);
+        assert_eq!(session.account_pins["openai"].label, "Daily work");
+        assert_eq!(session.account_pins["openai"].identity, pin.identity);
         session.route_api_method = Some("openai-oauth@unrelated".into());
         assert_eq!(resolved_bound_account_label(&session), None);
         refresh_bound_account_route(&mut session);

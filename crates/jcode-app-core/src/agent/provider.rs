@@ -101,7 +101,15 @@ impl Agent {
             return;
         };
         let route = format!("{method}@{label}");
+        let pin_label_changed = crate::session_accounts::sync_bound_account_pin_label(
+            &mut self.session,
+            method,
+            &label,
+        );
         if self.session.route_api_method.as_deref() == Some(route.as_str()) {
+            if pin_label_changed {
+                self.persist_session_best_effort("observed saved account label");
+            }
             return;
         }
         self.session.route_api_method = Some(route);
