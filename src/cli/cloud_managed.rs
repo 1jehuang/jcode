@@ -95,7 +95,7 @@ pub(crate) fn ssh_args() -> Result<Vec<String>> {
             );
         }
     }
-    let exe = std::env::current_exe().context("locate the jcode binary")?;
+    let exe = proxy_executable(std::env::current_exe().context("locate the jcode binary")?);
     let namespace = account()
         .ok()
         .and_then(|account| control_namespace(&account.key, &account.base));
@@ -105,6 +105,27 @@ pub(crate) fn ssh_args() -> Result<Vec<String>> {
         write_private(&path, &config)?;
     }
     Ok(vec!["-F".into(), path.to_string_lossy().into_owned()])
+}
+
+/// Pick the binary SSH runs as `ProxyCommand`. A long-lived daemon whose
+/// binary was replaced by an update reports `/path/jcode (deleted)` (or a path
+/// that no longer exists). Writing that into the config would break every
+/// later cloud connection, so fall back to the stable launcher.
+fn proxy_executable(exe: PathBuf) -> PathBuf {
+    let text = exe.to_string_lossy();
+    let stale = text.ends_with(" (deleted)") || !exe.is_file();
+    if !stale {
+        return exe;
+    }
+    let trimmed = PathBuf::from(text.trim_end_matches(" (deleted)"));
+    if trimmed.is_file() {
+        return trimmed;
+    }
+    let launcher = dirs::home_dir().map(|h| h.join(".local/bin/jcode"));
+    match launcher {
+        Some(launcher) if launcher.is_file() => launcher,
+        _ => trimmed,
+    }
 }
 
 fn control_namespace(key: &str, base: &str) -> Option<String> {
@@ -704,6 +725,24 @@ mod upgrade_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_executable_survives_replaced_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("jcode");
+        std::fs::write(&live, b"x").unwrap();
+        assert_eq!(proxy_executable(live.clone()), live);
+        // Updated in place: kernel reports "(deleted)" but the path has a new file.
+        let deleted = PathBuf::from(format!("{} (deleted)", live.display()));
+        assert_eq!(proxy_executable(deleted), live);
+        // Gone entirely: never return the deleted marker path.
+        let gone = PathBuf::from(format!("{} (deleted)", dir.path().join("old").display()));
+        assert!(
+            !proxy_executable(gone)
+                .to_string_lossy()
+                .ends_with("(deleted)")
+        );
+    }
 
     #[test]
     fn host_keys_reject_injection() {
