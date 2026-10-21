@@ -1,5 +1,8 @@
 [build]
 # Plain Cargo must not require a POSIX shell, particularly on native Windows.
+# Keep compiler wrappers out of this shared config, including target tables:
+# wrapper selection belongs to the opt-in Unix dev script, not the target OS.
+# Source-only guard: sh scripts/check_cargo_wrapper_portability.sh
 # The recommended scripts/dev_cargo.sh path still enables the parallel rustc
 # front-end for local unoptimized crates, alongside memory/concurrency gates.
 # POSIX users of plain Cargo or rust-analyzer can opt in explicitly with
