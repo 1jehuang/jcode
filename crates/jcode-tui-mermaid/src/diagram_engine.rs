@@ -67,7 +67,6 @@ static ERRORS: LazyLock<Mutex<HashMap<u64, String>>> = LazyLock::new(|| Mutex::n
 type RequestKey = (u64, u32);
 struct Pending {
     cancel: Arc<AtomicBool>,
-    stream_scope: Option<u64>,
 }
 static PENDING: LazyLock<Mutex<HashMap<RequestKey, Pending>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -219,7 +218,7 @@ pub fn render_d2_deferred_with_registration(
     source: &str,
     terminal_width: Option<u16>,
     register: bool,
-    stream_scope: Option<u64>,
+    _stream_scope: Option<u64>,
 ) -> Option<RenderResult> {
     if !d2_rendering_enabled() {
         return Some(RenderResult::Error(
@@ -247,16 +246,9 @@ pub fn render_d2_deferred_with_registration(
     }
     let key = (hash, width);
     let mut pending = PENDING.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(scope) = stream_scope {
-        pending.retain(|old_key, request| {
-            if request.stream_scope == Some(scope) && *old_key != key {
-                request.cancel.store(true, Ordering::Release);
-                false
-            } else {
-                true
-            }
-        });
-    }
+    // Closed fences are immutable while surrounding prose streams. A caller's
+    // block ordinal is not a global stream identity, so it must never cancel
+    // a different artifact from another renderer. Deduplicate only by key.
     if pending.contains_key(&key) {
         return None;
     }
@@ -270,7 +262,6 @@ pub fn render_d2_deferred_with_registration(
         key,
         Pending {
             cancel: cancel.clone(),
-            stream_scope,
         },
     );
     let worker = WORKER.get_or_init(|| {
