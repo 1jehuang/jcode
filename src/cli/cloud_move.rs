@@ -326,6 +326,40 @@ fn ssh_connection_failed(status: &std::process::ExitStatus) -> bool {
     status.code() == Some(SSH_CONNECTION_FAILURE)
 }
 
+/// Marks an SSH transport drop (exit 255) so idempotent steps can retry.
+#[derive(Debug)]
+struct SshDropped(String);
+
+impl std::fmt::Display for SshDropped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SshDropped {}
+
+/// Retry an idempotent remote step when only the SSH connection dropped.
+fn retry_ssh<T>(host: &str, what: &str, mut op: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut attempt = 1;
+    loop {
+        match op() {
+            Err(error)
+                if error.downcast_ref::<SshDropped>().is_some() && attempt < SSH_ATTEMPTS =>
+            {
+                step(
+                    "transfer",
+                    &format!(
+                        "connection to `{host}` dropped during {what}, retrying ({attempt}/{SSH_ATTEMPTS})"
+                    ),
+                );
+                std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Run an idempotent remote command, retrying connection-level SSH failures
 /// with a short backoff. Remote command failures are returned immediately.
 fn output_with_ssh_retry(
@@ -552,7 +586,10 @@ impl Target {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             if ssh_connection_failed(&output.status) {
-                bail!("lost the connection to cloud host `{host}`: {stderr}");
+                return Err(SshDropped(format!(
+                    "lost the connection to cloud host `{host}`: {stderr}"
+                ))
+                .into());
             }
             bail!(
                 "remote `jcode {}` on `{host}` failed ({}):\n{stderr}",
@@ -582,6 +619,12 @@ impl Target {
         let status = child
             .wait()
             .context("wait for router credential transfer")?;
+        if written.is_ok() && ssh_connection_failed(&status) {
+            return Err(SshDropped(format!(
+                "lost the connection to cloud host `{host}` during provider key transfer"
+            ))
+            .into());
+        }
         if written.is_err() || !status.success() {
             bail!("provider key transfer failed ({status}); the session was not moved");
         }
@@ -642,6 +685,12 @@ impl Target {
                     .map_err(|_| anyhow::anyhow!("could not send cloud credentials"))?;
             }
             let status = child.wait().context("wait for cloud credential transfer")?;
+            if ssh_connection_failed(&status) {
+                return Err(SshDropped(format!(
+                    "lost the connection to cloud host `{host}` during credential transfer"
+                ))
+                .into());
+            }
             if !status.success() {
                 bail!(
                     "cloud credential transfer failed ({status}); destination credentials were not accepted"
@@ -825,7 +874,9 @@ pub(crate) fn run_move(
     // ---- transfer + verify ---------------------------------------------
     step("transfer", &format!("uploading to `{host}`"));
     let out = timed_move_stage("upload and receive", || {
-        target.run_remote(&host, &["cloud", "receive", "--json"], Some(&tarball))
+        retry_ssh(&host, "upload", || {
+            target.run_remote(&host, &["cloud", "receive", "--json"], Some(&tarball))
+        })
     })?;
     let verify: ReceiveReport = serde_json::from_slice(&out).with_context(|| {
         format!(
@@ -883,7 +934,9 @@ pub(crate) fn run_move(
             Some(&account.label),
         )?;
         timed_move_stage("credential transfer", || {
-            target.exchange_credentials(&host, account, Some(credentials.as_bytes()))
+            retry_ssh(&host, "credential transfer", || {
+                target.exchange_credentials(&host, account, Some(credentials.as_bytes()))
+            })
         })?;
         baselines.push(CloudAuthBaseline {
             account: account.clone(),
@@ -899,7 +952,9 @@ pub(crate) fn run_move(
             "securely transferring provider keys and routing",
         );
         timed_move_stage("router credential transfer", || {
-            target.send_router_credentials(&host, router.as_bytes())
+            retry_ssh(&host, "provider key transfer", || {
+                target.send_router_credentials(&host, router.as_bytes())
+            })
         })?;
     }
     storage::write_json_secret(&baseline_path(&session_id)?, &baselines)?;
@@ -920,18 +975,20 @@ pub(crate) fn run_move(
     })?;
     let epoch_arg = epoch.to_string();
     if let Err(error) = timed_move_stage("activation", || {
-        target.run_remote(
-            &host,
-            &[
-                "cloud",
-                "activate",
-                "--session",
-                &session_id,
-                "--epoch",
-                &epoch_arg,
-            ],
-            None,
-        )
+        retry_ssh(&host, "activation", || {
+            target.run_remote(
+                &host,
+                &[
+                    "cloud",
+                    "activate",
+                    "--session",
+                    &session_id,
+                    "--epoch",
+                    &epoch_arg,
+                ],
+                None,
+            )
+        })
     }) {
         match previous {
             Some(lease) => storage::write_session_lease(&lease)?,
@@ -1214,6 +1271,14 @@ pub(crate) fn run_receive() -> Result<()> {
 pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
     let dir = inbox_dir()?.join(format!("{session_id}.{epoch}"));
     if !dir.is_dir() {
+        // A retried activation whose first attempt succeeded but lost its
+        // SSH connection finds the move already installed. Report success.
+        if storage::read_session_lease(session_id)
+            .is_some_and(|lease| lease.epoch == epoch && lease.is_here())
+        {
+            eprintln!("{session_id} already active at epoch {epoch}");
+            return Ok(());
+        }
         bail!("no staged move for {session_id} at epoch {epoch}");
     }
     let manifest: MoveManifest = read_json(&dir.join("manifest.json"))?;
