@@ -182,6 +182,15 @@ fn telemetry_settings_lines(
     let check_style = Style::default()
         .fg(rgb(126, 211, 159))
         .add_modifier(Modifier::BOLD);
+    // Left-align the rows inside a centered block: pad every row to the
+    // widest one so centering shifts them all by the same amount.
+    use unicode_width::UnicodeWidthStr;
+    let block_width = TelemetryCategory::ALL
+        .iter()
+        .flat_map(|c| [4 + c.label().width(), 4 + c.caption().width()])
+        .max()
+        .unwrap_or(0);
+    let pad = |used: usize| " ".repeat(block_width.saturating_sub(used));
     for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
         let focused = page.cursor == i + 1;
         let checked = page.checked[i];
@@ -202,10 +211,18 @@ fn telemetry_settings_lines(
                     Span::styled("○ ", dim)
                 },
                 Span::styled(category.label(), label_style),
+                Span::raw(pad(4 + category.label().width())),
             ])
             .alignment(align),
         );
-        lines.push(Line::from(Span::styled(category.caption(), dim)).alignment(align));
+        lines.push(
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(category.caption(), dim),
+                Span::raw(pad(4 + category.caption().width())),
+            ])
+            .alignment(align),
+        );
     }
     lines.push(Line::from(""));
 
