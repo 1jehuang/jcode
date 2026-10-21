@@ -1285,16 +1285,6 @@ async fn refresh_openai_tokens_at(
     refresh_token: &str,
     label: Option<String>,
 ) -> Result<OAuthTokens> {
-    if label.is_some() {
-        // A token the provider already rejected as unrecoverable cannot start
-        // working again. Fail fast so callers fall through to their fallback
-        // instead of paying a doomed round-trip on every catalog sweep and turn.
-        crate::auth::refresh_state::ensure_refresh_allowed(
-            "openai",
-            refresh_token,
-            "Run `jcode login --provider openai` to mint a fresh token.",
-        )?;
-    }
     let token_url = token_url.to_string();
     let observed_refresh = refresh_token.to_string();
     // The per-account single-flight lock lives inside the transaction task, so
@@ -1324,6 +1314,14 @@ async fn refresh_openai_tokens_at(
                     .map(|tokens| tokens.refresh_token)
                     .filter(|token| !token.is_empty())
                     .unwrap_or(observed_refresh);
+                // A long-lived daemon may still remember a rejected token after
+                // /cloud imported a rotated credential. Check the effective
+                // disk token, not the stale caller snapshot, after reloading.
+                crate::auth::refresh_state::ensure_refresh_allowed(
+                    "openai",
+                    &token,
+                    "Run `jcode login --provider openai` to mint a fresh token.",
+                )?;
                 refresh_openai_tokens_inner(&token_url, timeout, &token, Some(&label)).await
             },
         )
@@ -1420,7 +1418,14 @@ async fn refresh_openai_tokens_inner(
         let oauth_tokens = request_openai_token_refresh(token_url, timeout, refresh_token).await?;
 
         if let Some(label) = label {
-            save_openai_tokens_for_account(&oauth_tokens, label)?;
+            crate::auth::codex::update_account_tokens(
+                label,
+                &oauth_tokens.access_token,
+                &oauth_tokens.refresh_token,
+                oauth_tokens.id_token.clone(),
+                None,
+                Some(oauth_tokens.expires_at),
+            )?;
         } else {
             crate::logging::info(
                 "Refreshed OpenAI/Codex tokens from an external source without storing them in jcode auth",

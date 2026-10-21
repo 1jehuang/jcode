@@ -58,6 +58,25 @@ fn save_account(label: &str, token: &str, refresh: &str, identity: &str) -> Stri
 }
 
 #[tokio::test]
+async fn cloud_import_replaces_live_daemon_cached_bearer() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let label = save_account("cloud-account", "old-access", "old-refresh", "same-id");
+    let provider =
+        OpenAIProvider::new(jcode_base::auth::codex::load_credentials_for_account(&label).unwrap());
+    provider.set_oauth_account(Some(&label)).unwrap();
+    save_account(&label, "imported-access", "imported-refresh", "same-id");
+    let token = openai_access_token(provider.refresh_account_label(), &provider.credentials)
+        .await
+        .unwrap();
+    assert_eq!(token, "imported-access");
+    assert_eq!(
+        provider.credentials.read().await.refresh_token,
+        "imported-refresh"
+    );
+}
+
+#[tokio::test]
 async fn service_tier_catalog_is_scoped_across_account_mode_reload_and_fork() {
     let _lock = jcode_base::storage::lock_test_env();
     let _sandbox = AccountSandbox::new();

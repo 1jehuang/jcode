@@ -322,11 +322,20 @@ pub fn update_account_tokens(
     {
         account.access_token = access_token.to_string();
         account.refresh_token = refresh_token.to_string();
-        account.id_token = id_token.clone();
-        account.account_id =
-            account_id.or_else(|| id_token.as_deref().and_then(extract_account_id));
+        // Refresh grants may omit id_token. Keep identity hints from login so
+        // cloud return can still verify the same account after token rotation.
+        if let Some(email) = id_token.as_deref().and_then(extract_email) {
+            account.email = Some(email);
+        }
+        if let Some(identity) =
+            account_id.or_else(|| id_token.as_deref().and_then(extract_account_id))
+        {
+            account.account_id = Some(identity);
+        }
+        if id_token.is_some() {
+            account.id_token = id_token;
+        }
         account.expires_at = expires_at;
-        account.email = id_token.as_deref().and_then(extract_email);
         save_auth_file(&auth)?;
         Ok(())
     } else {

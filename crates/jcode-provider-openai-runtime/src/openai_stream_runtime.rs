@@ -89,6 +89,18 @@ pub(super) async fn openai_access_token(
     account_label: Option<String>,
     credentials: &Arc<RwLock<CodexCredentials>>,
 ) -> anyhow::Result<String> {
+    if let Some(label) = account_label.as_deref() {
+        let is_oauth = {
+            let tokens = credentials.read().await;
+            !tokens.refresh_token.is_empty() || tokens.id_token.is_some()
+        };
+        if is_oauth {
+            // Cloud handoff/login can replace the file while this daemon keeps
+            // its provider alive. Never send or refresh the old cached copy.
+            let mut tokens = credentials.write().await;
+            *tokens = jcode_base::auth::codex::load_credentials_for_account(label)?;
+        }
+    }
     let (access_token, refresh_token, needs_refresh, is_oauth) = {
         let tokens = credentials.read().await;
         if tokens.access_token.is_empty() {

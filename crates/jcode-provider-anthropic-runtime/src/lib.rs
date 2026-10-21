@@ -1057,7 +1057,17 @@ impl AnthropicProvider {
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
         // A removed explicit account must fail closed, even with a fresh cache.
         if let Some(label) = self.oauth_account_label() {
-            auth::claude::load_credentials_for_account(&label)?;
+            let mut cached = self.credentials.write().await;
+            let stored = auth::claude::load_credentials_for_account(&label)?;
+            if cached.as_ref().is_some_and(|old| {
+                old.access_token != stored.access_token
+                    || old.refresh_token != stored.refresh_token
+                    || old.expires_at != stored.expires_at
+            }) {
+                // /cloud imports happen in another process. Discard the old
+                // daemon snapshot and validate the newly stored account below.
+                *cached = None;
+            }
         }
         // Check cached credentials
         {

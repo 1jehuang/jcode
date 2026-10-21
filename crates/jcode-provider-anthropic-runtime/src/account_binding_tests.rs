@@ -55,6 +55,25 @@ fn save_account(label: &str, token: &str, refresh: &str) -> String {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn cloud_import_replaces_live_daemon_cached_bearer() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let label = save_account("cloud-account", "old-access", "old-refresh");
+    let provider = AnthropicProvider::new();
+    provider.set_oauth_account(Some(&label)).unwrap();
+    provider
+        .set_credential_mode(AnthropicCredentialMode::OAuth)
+        .unwrap();
+    assert_eq!(provider.get_access_token().await.unwrap().0, "old-access");
+    save_account(&label, "imported-access", "imported-refresh");
+    assert_eq!(
+        provider.get_access_token().await.unwrap().0,
+        "imported-access"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn active_oauth_email_follows_cached_unbound_credentials_not_global_account() {
     let _lock = jcode_base::storage::lock_test_env();
     let _sandbox = AccountSandbox::new();

@@ -804,6 +804,42 @@ pub fn export_cloud_local(
     export_cloud_account_at(&home, provider, selected.or(runtime.as_deref()))
 }
 
+/// Enumerate all explicitly stored cloud-transferable accounts. Missing stores
+/// are normal, but malformed stores must not silently produce partial transfers.
+/// This never discovers credentials from other tools or refreshes tokens.
+pub fn cloud_accounts_at(home: &Path) -> Result<Vec<(TransferProvider, String)>, TransferError> {
+    #[cfg(not(unix))]
+    {
+        let _ = home;
+        Err(TransferError::UnsupportedPlatform)
+    }
+    #[cfg(unix)]
+    {
+        let directory = match secure_directory(home, false) {
+            Ok(directory) => directory,
+            Err(TransferError::Unavailable) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut accounts = Vec::new();
+        for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
+            let bytes = match read_in(&directory, provider.store_name(), false) {
+                Ok(bytes) => bytes,
+                Err(TransferError::Unavailable) => continue,
+                Err(error) => return Err(error),
+            };
+            let store = cloud_store(&bytes, provider)?;
+            let (key, _, _, _) = cloud_keys(provider);
+            if let Some(entries) = store.get(key).and_then(serde_json::Value::as_array) {
+                for entry in entries {
+                    let label = entry["label"].as_str().ok_or(TransferError::InvalidStore)?;
+                    accounts.push((provider, label.to_owned()));
+                }
+            }
+        }
+        Ok(accounts)
+    }
+}
+
 /// Isolated-store export, without runtime overrides. Legacy unlabeled Claude
 /// credentials are refused rather than inventing a label or modifying the store.
 pub fn export_cloud_account_at(
@@ -878,7 +914,20 @@ pub fn import_cloud_at(
     expected_label: &str,
     bytes: &[u8],
 ) -> Result<(), TransferError> {
-    import_cloud_inner(home, provider, expected_label, bytes, None)
+    import_cloud_inner(home, provider, expected_label, bytes, None, false)
+}
+
+/// Explicit handoff replaces a stale destination copy of the same identity.
+/// Unlike a return/merge, the authenticated source is authoritative, including
+/// for accounts without identity hints or with equal access-token expiries.
+/// Call only after the user has requested transferring their accounts.
+pub fn import_cloud_handoff_at(
+    home: &Path,
+    provider: TransferProvider,
+    expected_label: &str,
+    bytes: &[u8],
+) -> Result<(), TransferError> {
+    import_cloud_inner(home, provider, expected_label, bytes, None, true)
 }
 
 /// Return updated tokens only if the destination credential still exactly
@@ -902,6 +951,7 @@ pub fn import_cloud_return_at(
         expected_label,
         bytes,
         Some(baseline.credential),
+        false,
     )
 }
 
@@ -943,11 +993,12 @@ fn import_cloud_inner(
     label: &str,
     bytes: &[u8],
     baseline: Option<serde_json::Value>,
+    authoritative: bool,
 ) -> Result<(), TransferError> {
     let envelope = parse_cloud(provider, label, bytes)?;
     #[cfg(not(unix))]
     {
-        let _ = (home, envelope, baseline);
+        let _ = (home, envelope, baseline, authoritative);
         Err(TransferError::UnsupportedPlatform)
     }
     #[cfg(unix)]
@@ -999,7 +1050,7 @@ fn import_cloud_inner(
                 if &old != baseline {
                     return Err(TransferError::ConcurrentUpdate);
                 }
-            } else if old != envelope.credential {
+            } else if !authoritative && old != envelope.credential {
                 let identity = match provider {
                     TransferProvider::OpenAi => "account_id",
                     TransferProvider::Claude => "email",
@@ -1149,6 +1200,76 @@ mod tests {
         let mut envelope: Value = serde_json::from_slice(bytes).unwrap();
         envelope["credential"][key] = value;
         serde_json::to_vec(&envelope).unwrap()
+    }
+
+    #[test]
+    fn cloud_enumerates_all_accounts_without_selecting_or_exporting_extra_fields() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(cloud_accounts_at(home.path()).unwrap().is_empty());
+        for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
+            for label in ["first", "second"] {
+                import_cloud_at(
+                    home.path(),
+                    provider,
+                    label,
+                    &cloud_fixture(provider, label),
+                )
+                .unwrap();
+            }
+        }
+        let accounts = cloud_accounts_at(home.path()).unwrap();
+        assert_eq!(
+            accounts,
+            vec![
+                (TransferProvider::OpenAi, "first".into()),
+                (TransferProvider::OpenAi, "second".into()),
+                (TransferProvider::Claude, "first".into()),
+                (TransferProvider::Claude, "second".into()),
+            ]
+        );
+        for (provider, label) in accounts {
+            let exported = export_cloud_account_at(home.path(), provider, Some(&label)).unwrap();
+            assert_eq!(exported.label(), label);
+        }
+        fs::write(home.path().join("auth.json"), b"not-json").unwrap();
+        assert_eq!(
+            cloud_accounts_at(home.path()),
+            Err(TransferError::InvalidStore)
+        );
+    }
+
+    #[test]
+    fn cloud_handoff_replaces_stale_rotated_copy_but_not_other_identity() {
+        for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
+            let home = tempfile::tempdir().unwrap();
+            let original = cloud_fixture(provider, "chosen");
+            import_cloud_at(home.path(), provider, "chosen", &original).unwrap();
+            let (_, _, access, refresh) = cloud_keys(provider);
+            let rotated = revised(
+                &revised(&original, access, json!("rotated-access")),
+                refresh,
+                json!("rotated-refresh"),
+            );
+            // Expiry did not change, so an ordinary unproven merge is refused.
+            assert_eq!(
+                import_cloud_at(home.path(), provider, "chosen", &rotated),
+                Err(TransferError::ConcurrentUpdate)
+            );
+            import_cloud_handoff_at(home.path(), provider, "chosen", &rotated).unwrap();
+            let exported = export_cloud_account_at(home.path(), provider, Some("chosen")).unwrap();
+            let value: Value = serde_json::from_slice(exported.as_bytes()).unwrap();
+            assert_eq!(value["credential"][refresh], "rotated-refresh");
+            let identity = if provider == TransferProvider::OpenAi {
+                "account_id"
+            } else {
+                "email"
+            };
+            let conflicting = revised(&rotated, identity, json!("different-identity"));
+            assert_eq!(
+                import_cloud_handoff_at(home.path(), provider, "chosen", &conflicting),
+                Err(TransferError::AccountConflict)
+            );
+        }
     }
 
     #[test]
