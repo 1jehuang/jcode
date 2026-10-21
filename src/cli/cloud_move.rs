@@ -440,7 +440,9 @@ impl Target {
     fn preflight_uncached(&self, host: &str) -> Result<()> {
         timed_move_stage("host preflight", || {
             if super::cloud_managed::is_managed(host) && self.transport.is_none() {
-                step("prepare", "waking your Jcode Cloud machine");
+                // Usually the machine is already running and this is one
+                // authorization request. `connect` reports real wake progress.
+                step("prepare", "connecting to your Jcode Cloud machine");
                 super::cloud_managed::connect(&mut |m| step("prepare", m))?;
                 let home = dirs::home_dir()
                     .map(|h| h.to_string_lossy().into_owned())
@@ -742,7 +744,9 @@ pub(crate) struct MoveReport {
 const PREFLIGHT_FRESH_SECS: u64 = 120;
 
 fn preflight_marker() -> Option<PathBuf> {
-    storage::jcode_dir().ok().map(|dir| dir.join("cloud-preflight-ok"))
+    storage::jcode_dir()
+        .ok()
+        .map(|dir| dir.join("cloud-preflight-ok"))
 }
 
 fn now_secs() -> u64 {
@@ -994,11 +998,7 @@ pub(crate) fn run_move(
                     )?;
                     timed_move_stage("credential transfer", || {
                         retry_ssh(host, "credential transfer", || {
-                            target.exchange_credentials(
-                                host,
-                                account,
-                                Some(credentials.as_bytes()),
-                            )
+                            target.exchange_credentials(host, account, Some(credentials.as_bytes()))
                         })
                     })?;
                     Ok(CloudAuthBaseline {
