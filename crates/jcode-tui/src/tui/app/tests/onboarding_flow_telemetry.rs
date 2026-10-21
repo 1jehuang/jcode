@@ -64,6 +64,11 @@ fn telemetry_pill_opens_settings_page_and_commits_choice() {
             }) => {
                 assert!(review.telemetry.is_none());
                 assert!(!review.choosing);
+                assert_eq!(
+                    review.summary_pill,
+                    crate::tui::app::onboarding_flow::SummaryPill::Continue,
+                    "saving telemetry settings refocuses Continue"
+                );
             }
             other => panic!("expected import summary, got {other:?}"),
         }

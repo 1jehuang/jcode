@@ -578,6 +578,10 @@ impl App {
                         if !settings.toggle() {
                             telemetry_choice = Some(*settings);
                             review.close_telemetry();
+                            // Saving returns focus to Continue so the next
+                            // Enter moves onboarding forward.
+                            review.summary_pill = SummaryPill::Continue;
+                            review.continue_focused = true;
                         }
                     }
                     _ => return false,
