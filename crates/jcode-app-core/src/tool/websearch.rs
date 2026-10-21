@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// Web search using DuckDuckGo or Bing (HTML scraping, with optional Bing API)
+#[path = "websearch_kagi.rs"]
+mod kagi;
+
+/// Web search using configured local HTTP backends.
 pub struct WebSearchTool {
     client: reqwest::Client,
 }
@@ -149,6 +152,10 @@ impl WebSearchTool {
                     .await
             }
             WebSearchEngine::Searxng => self.search_searxng(query, num_results).await,
+            WebSearchEngine::Kagi => {
+                let config = crate::config::config();
+                kagi::search(query, num_results, &config.websearch.kagi_api_key_env).await
+            }
             WebSearchEngine::Custom => {
                 let config = crate::config::config();
                 let custom = config.websearch.custom.as_ref().ok_or_else(|| {

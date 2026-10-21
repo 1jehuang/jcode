@@ -327,10 +327,10 @@ update_channel = "stable"
 # key. Providers without native search use the local engines below.
 # Anthropic API keys are billed about $10 per 1,000 searches.
 prefer_native = true
-# Local websearch engine: "duckduckgo", "bing", "searxng", "custom", or "native"
+# Local websearch engine: "duckduckgo", "bing", "kagi", "searxng", "custom", or "native"
 # ("native" forces prefer_native on and otherwise runs fallback_engines).
 engine = "duckduckgo"
-# Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
+# Local engines to try on errors or empty results. Default falls back to keyless Bing HTML.
 fallback_engines = ["bing"]
 # Bring your own Bing Search API key for primary Bing searches. Prefer using an env var.
 # Fallback Bing searches intentionally use keyless HTML search.
@@ -338,6 +338,11 @@ fallback_engines = ["bing"]
 # bing_api_key = ""
 # Bing market/region, for example "en-US" or "zh-CN".
 bing_market = "en-US"
+# Kagi Search API v1: set engine = "kagi" and prefer_native = false above.
+# Export the API key in this variable. Kagi searches incur API charges.
+# kagi_api_key_env = "KAGI_API_KEY"
+# Set fallback_engines = [] above to keep queries from reaching other backends.
+# Setup and API behavior: docs/kagi-web-search.md
 # SearXNG instance for the "searxng" engine. On some hosts (commonly Linux),
 # DuckDuckGo and Bing block scraped requests via TLS fingerprinting / IP
 # reputation and return an anti-bot page with no results. Pointing at a SearXNG
