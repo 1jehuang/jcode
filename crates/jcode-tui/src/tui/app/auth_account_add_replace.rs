@@ -2,109 +2,39 @@ use super::*;
 
 impl App {
     pub(crate) fn open_account_add_replace_flow(&mut self, provider_filter: Option<&str>) {
-        use crate::tui::account_picker::{
-            AccountPicker, AccountPickerCommand, AccountPickerItem, AccountProviderKind,
-        };
+        use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
 
         let mut items = vec![AccountPickerItem::action(
             "account-flow",
             "Accounts",
-            "Back to account center",
-            "Return to the full provider/auth account center",
+            "Back to accounts",
+            "Return to your saved accounts",
             AccountPickerCommand::OpenAccountCenter {
-                provider_filter: provider_filter.map(|value| value.to_string()),
+                provider_filter: provider_filter.map(str::to_owned),
             },
         )];
-
-        let include_claude = provider_filter.is_none()
-            || matches!(provider_filter, Some("claude") | Some("anthropic"));
-        let include_openai = provider_filter.is_none() || matches!(provider_filter, Some("openai"));
-
-        if include_claude {
-            items.push(AccountPickerItem::action(
-                "claude",
-                "Claude",
-                "Add new account",
-                "Sign in to another Claude account. Existing saved accounts are kept.",
-                AccountPickerCommand::SubmitInput("/accounts claude add".to_string()),
-            ));
-            let accounts = match crate::auth::claude::list_accounts() {
-                Ok(accounts) => accounts,
-                Err(error) => {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Could not load saved Claude accounts: {error}"
-                    )));
-                    return;
-                }
-            };
-            for account in accounts {
-                let label = account.label.clone();
-                items.push(AccountPickerItem::action(
-                    "claude",
-                    "Claude",
-                    format!("Refresh account {label}"),
-                    format!(
-                        "Sign in again as {}. Replaces the saved login for {label}.",
-                        account
-                            .email
-                            .as_deref()
-                            .map(mask_email)
-                            .unwrap_or_else(|| label.clone())
-                    ),
-                    AccountPickerCommand::Login {
-                        provider: AccountProviderKind::Anthropic,
-                        label,
-                    },
-                ));
+        for (id, name) in [("claude", "Claude"), ("openai", "OpenAI")] {
+            if provider_filter
+                .is_some_and(|filter| filter != id && !(id == "claude" && filter == "anthropic"))
+            {
+                continue;
             }
-        }
-
-        if include_openai {
             items.push(AccountPickerItem::action(
-                "openai",
-                "OpenAI",
+                id,
+                name,
                 "Add new account",
-                "Sign in to another OpenAI account. Existing saved accounts are kept.",
-                AccountPickerCommand::SubmitInput("/accounts openai add".to_string()),
+                format!("Sign in to another {name} account. Existing saved accounts are kept."),
+                AccountPickerCommand::SubmitInput(format!("/accounts {id} add")),
             ));
-            let accounts = match crate::auth::codex::list_accounts() {
-                Ok(accounts) => accounts,
-                Err(error) => {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Could not load saved OpenAI accounts: {error}"
-                    )));
-                    return;
-                }
-            };
-            for account in accounts {
-                let label = account.label.clone();
-                items.push(AccountPickerItem::action(
-                    "openai",
-                    "OpenAI",
-                    format!("Refresh account {label}"),
-                    format!(
-                        "Sign in again as {}. Replaces the saved login for {label}.",
-                        account
-                            .email
-                            .as_deref()
-                            .map(mask_email)
-                            .unwrap_or_else(|| label.clone())
-                    ),
-                    AccountPickerCommand::Login {
-                        provider: AccountProviderKind::OpenAi,
-                        label,
-                    },
-                ));
-            }
         }
 
         self.account_picker_overlay = Some(std::cell::RefCell::new(AccountPicker::new(
-            " Add / Reauthenticate Account ",
+            " Add account ",
             items,
         )));
         self.inline_interactive_state = None;
         self.input.clear();
         self.cursor_pos = 0;
-        self.set_status_notice("Accounts: choose a provider or a saved login to reauthenticate");
+        self.set_status_notice("Accounts: choose a provider for the new account");
     }
 }

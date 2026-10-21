@@ -8,10 +8,10 @@ The initial UX commit was rechecked against this interpretation. Its production 
 
 ## Account management
 
-- `/accounts` is the sole account slash command. It opens the full account center, focused on this window's saved login, with add, rename, reauthentication, removal, switching, and per-account usage. Explicit account searches retain the inline quick-switch picker. Claude Code instances are included in quick switching when configured or when the current window uses Claude Code.
-- Enter uses a saved account in this window. Ctrl+D makes a saved Claude/OpenAI login the default for new and unpinned windows, from either the command preview or the focused picker. A pinned window keeps its account. Ctrl+D on another action or an empty result preserves the query and explains that a saved login must be selected.
+- `/accounts` is the sole account slash command. Its main view has one row per saved login, showing that account's usage, plus one Add account entry and separate Provider settings. Enter on a saved Claude/OpenAI account opens only that account's actions: use in this window, make default, reauthenticate, rename, and remove. Escape returns to the account list with its search and selection preserved. Explicit account searches retain the inline quick-switch picker. Claude Code instances remain direct quick-switch entries.
+- Enter in an account's actions uses that saved account in this window. Enter in the inline quick-switch picker switches directly. Ctrl+D makes a saved Claude/OpenAI login the default for new and unpinned windows, from either the command preview or the focused picker. A pinned window keeps its account. Ctrl+D on another action or an empty result preserves the query and explains that a saved login must be selected.
 - Plain letters, including `d`, `j`, `k`, `g`, and `q`, search instead of triggering account actions or closing the account center. Arrow keys navigate. In the account center, Left/Right jump provider groups and Home/End and PageUp/PageDown navigate the list.
-- Add-login and refresh-login descriptions distinguish creating another saved login from refreshing a particular saved login. Provider settings are not duplicated in the account center.
+- Add account opens a provider chooser that only creates another saved login. Reauthentication belongs to the selected saved account's actions, never to a provider-wide clump of refresh rows. Provider authentication, diagnostics, and defaults live in Provider settings.
 - Removing an account from the account center opens a confirmation showing the exact target. Only lowercase `y` with no modifiers confirms. Enter does not delete. Escape, navigation, search, or a mouse event cancels confirmation.
 - Removal deletes saved Jcode credentials, not the external provider account. Direct `/accounts <provider> remove <label>` commands retain their existing behavior.
 - Compact terminals use a full-width account center. Provider headers, scrolling, and mouse hit testing share the same physical-row calculation so the selected action remains visible.
@@ -30,6 +30,22 @@ The initial UX commit was rechecked against this interpretation. Its production 
 - An active named provider profile determines availability only for the generic OpenAI-compatible endpoint. Dedicated provider credentials and local-provider enablement remain independent.
 
 ## Validation
+
+### Account-first follow-up, October 21, 2026
+
+The rebuilt TUI was exercised with actual keyboard input against the shared daemon and the real saved-account store. All 24 checks passed at 160×45 and 68×22. Screens and per-check results are in `$JCODE_SCRATCH_DIR/accounts-separate-rows-acceptance/result.json`.
+
+| Requirement | Observed result |
+| --- | --- |
+| Separate saved logins, without action clumps | Four Anthropic logins rendered as four account rows, with no top-level rename, reauthentication, or removal rows. |
+| Actions belong to one account | Each of the four account menus contained exactly five actions for its own provider and label. Escape restored that root account's selection. |
+| Usage stays attached to its account | Each submenu retained its parent account's usage report. A successful live quota response displayed remaining percentages and resets; provider failures remained explicitly unavailable, not zero remaining. |
+| Safe and discoverable management | Rename opened the local name prompt; removal required explicit confirmation and was canceled; Add offered only providers; provider-wide controls remained accessible separately. |
+| Preserve saved accounts | Saved labels and defaults matched before and after the run. No real account was switched, renamed, removed, or reauthenticated. |
+
+Live browser OAuth completion was not exercised in this layout follow-up. Regression tests inspect the emitted exact-target login command without starting OAuth.
+
+### Initial account/model validation
 
 Initial account/model validation was run locally on macOS on October 13, 2026. Those isolated runs did not change the running Jcode daemon or installed launcher. The later test-failure fix and requested installation are separate follow-up steps.
 

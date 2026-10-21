@@ -610,6 +610,7 @@ pub(crate) fn account_command_from_picker(
             label: label.clone(),
         }),
         AccountPickerCommand::SubmitInput(_)
+        | AccountPickerCommand::OpenProviderSettings
         | AccountPickerCommand::OpenAccountCenter { .. }
         | AccountPickerCommand::OpenAddReplaceFlow { .. }
         | AccountPickerCommand::PromptValue { .. }

@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use crate::{AccountPickerCommand, AccountPickerItem, AccountPickerSummary, AccountProviderKind};
 
+#[path = "overlay_navigation.rs"]
+mod navigation;
 #[path = "overlay_render.rs"]
 mod render_support;
 use render_support::{
@@ -26,6 +28,14 @@ const MUTED_DARK: Color = Color::Rgb(100, 106, 122);
 const OVERLAY_PERCENT_X: u16 = 88;
 const OVERLAY_PERCENT_Y: u16 = 74;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccountPickerView {
+    Flat,
+    Accounts,
+    Account(usize),
+    ProviderSettings,
+}
+
 #[derive(Debug, Clone)]
 pub struct AccountPicker {
     title: String,
@@ -36,6 +46,8 @@ pub struct AccountPicker {
     summary: Option<AccountPickerSummary>,
     last_action_list_area: Option<Rect>,
     removal_confirmation: Option<usize>,
+    view: AccountPickerView,
+    account_list_position: Option<(String, usize)>,
 }
 
 pub enum OverlayAction {
@@ -69,6 +81,15 @@ impl AccountPicker {
             "items_count": self.items.len(),
             "filtered_count": self.filtered.len(),
             "selected": self.selected,
+            "view": self.view_name(),
+            "visible_items": self.filtered.iter().map(|index| {
+                let item = &self.items[*index];
+                serde_json::json!({
+                    "provider_id": item.provider_id,
+                    "title": item.title,
+                    "command": format!("{:?}", item.command),
+                })
+            }).collect::<Vec<_>>(),
             "title_bytes": title_bytes,
             "filter_bytes": filter_bytes,
             "summary_estimate_bytes": summary_estimate_bytes,
@@ -92,6 +113,8 @@ impl AccountPicker {
             summary: Some(summary),
             last_action_list_area: None,
             removal_confirmation: None,
+            view: AccountPickerView::Flat,
+            account_list_position: None,
         };
         picker.apply_filter();
         picker
@@ -182,7 +205,10 @@ impl AccountPicker {
             .items
             .iter()
             .enumerate()
-            .filter_map(|(idx, item)| crate::item_matches_filter(item, &self.filter).then_some(idx))
+            .filter_map(|(idx, item)| {
+                (self.item_in_view(idx) && crate::item_matches_filter(item, &self.filter))
+                    .then_some(idx)
+            })
             .collect();
         let provider_order = self.provider_order();
         self.filtered.sort_by(|left, right| {
@@ -286,7 +312,10 @@ impl AccountPicker {
         let mut seen = Vec::new();
         let mut stats: HashMap<String, (String, usize, usize)> = HashMap::new();
 
-        for item in &self.items {
+        for (index, item) in self.items.iter().enumerate() {
+            if !self.item_in_view(index) {
+                continue;
+            }
             if matches!(item.provider_id.as_str(), "defaults" | "account-flow") {
                 continue;
             }
@@ -365,6 +394,9 @@ impl AccountPicker {
                     self.apply_filter();
                     return Ok(OverlayAction::Continue);
                 }
+                if self.return_to_account_list() {
+                    return Ok(OverlayAction::Continue);
+                }
                 return Ok(OverlayAction::Close);
             }
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -402,6 +434,9 @@ impl AccountPicker {
                 }
             }
             KeyCode::Enter => {
+                if self.open_selected_menu() {
+                    return Ok(OverlayAction::Continue);
+                }
                 if let Some(item) = self.selected_item() {
                     if action_section(item) == ActionSection::Remove {
                         self.removal_confirmation = self.filtered.get(self.selected).copied();
@@ -475,10 +510,17 @@ impl AccountPicker {
         };
 
         let block = Block::default()
-            .title(format!(" {} ", self.title))
+            .title(format!(" {} ", self.navigation_title()))
             .title_bottom(Line::from(vec![
                 hotkey(" Enter "),
-                Span::styled(" run  ", Style::default().fg(MUTED_DARK)),
+                Span::styled(
+                    if self.view == AccountPickerView::Accounts {
+                        " open  "
+                    } else {
+                        " run  "
+                    },
+                    Style::default().fg(MUTED_DARK),
+                ),
                 hotkey(" Up/Down "),
                 Span::styled(" navigate  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" Click "),
@@ -486,7 +528,7 @@ impl AccountPicker {
                 hotkey(" type "),
                 Span::styled(" filter  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" Esc "),
-                Span::styled(" clear / close ", Style::default().fg(MUTED_DARK)),
+                Span::styled(" clear / back / close ", Style::default().fg(MUTED_DARK)),
             ]))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(PANEL_BORDER));
@@ -604,15 +646,21 @@ impl AccountPicker {
     }
 
     fn render_action_list(&mut self, frame: &mut Frame, area: Rect) {
-        let title = if self.filtered.is_empty() {
-            " Providers & Quick Actions ".to_string()
-        } else {
-            format!(
-                " Providers & Quick Actions ({}/{}) ",
-                self.selected + 1,
-                self.filtered.len()
-            )
+        let list_title = match self.view {
+            AccountPickerView::Accounts => "Saved accounts",
+            AccountPickerView::Account(_) => "Account actions",
+            AccountPickerView::ProviderSettings => "Provider settings",
+            AccountPickerView::Flat => "Providers & Quick Actions",
         };
+        let title = format!(
+            " {list_title} ({}/{}) ",
+            if self.filtered.is_empty() {
+                0
+            } else {
+                self.selected + 1
+            },
+            self.filtered.len()
+        );
         let block = Block::default()
             .title(Span::styled(
                 title,
@@ -734,12 +782,21 @@ impl AccountPicker {
             return;
         };
 
+        if let AccountPickerView::Account(index) = self.view {
+            self.render_account_action_details(frame, inner, index, item);
+            return;
+        }
+
         // Usage belongs ahead of the provider's quick-switch/control inventory,
         // which can otherwise push the selected account's totals off-screen.
         if !item.details.is_empty() {
             let mut lines = vec![
                 Line::styled(item.title.clone(), Style::default().fg(Color::White).bold()),
-                Line::from("Enter: run action."),
+                Line::from(if self.view == AccountPickerView::Accounts {
+                    "Enter: manage this account."
+                } else {
+                    "Enter: run action."
+                }),
                 Line::from(""),
             ];
             for (label, value) in &item.details {
@@ -993,7 +1050,8 @@ fn estimate_command_bytes(command: &AccountPickerCommand) -> usize {
         | AccountPickerCommand::Remove { label, .. } => label.capacity(),
         AccountPickerCommand::PromptNew { .. }
         | AccountPickerCommand::Unpin { .. }
-        | AccountPickerCommand::ToggleFailover => 0,
+        | AccountPickerCommand::ToggleFailover
+        | AccountPickerCommand::OpenProviderSettings => 0,
     }
 }
 
