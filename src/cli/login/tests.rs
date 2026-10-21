@@ -444,7 +444,7 @@ async fn complete_saved_muse_subscription_login_uses_code_only_path() {
     let captured_device_code_clone = captured_device_code.clone();
     let _poll_guard = device_login::set_test_poll_override(move |code, _interval| {
         *captured_device_code_clone.lock().unwrap() = Some(code.to_string());
-        Ok(auth::muse::PollOutcome::Approved(
+        Ok(auth::muse::PollOutcome::Approved(Box::new(
             auth::muse::MuseCredentials {
                 api_key: "muse_test_api_key".to_string(),
                 access_token: "muse_test_access_token".to_string(),
@@ -455,7 +455,7 @@ async fn complete_saved_muse_subscription_login_uses_code_only_path() {
                 minted_at_ms: 1000,
                 subs_usage: None,
             },
-        ))
+        )))
     });
 
     let options = LoginOptions {
@@ -512,7 +512,7 @@ async fn cancelling_muse_subscription_login_during_polling_prevents_credential_p
     let _poll_guard = device_login::set_test_poll_override(move |_code, _interval| {
         // Simulate a concurrent cancellation during polling.
         cancel_scoped_pending_login(&path_clone).expect("cancel scoped pending login must succeed");
-        Ok(auth::muse::PollOutcome::Approved(
+        Ok(auth::muse::PollOutcome::Approved(Box::new(
             auth::muse::MuseCredentials {
                 api_key: "muse_test_api_key".to_string(),
                 access_token: "muse_test_access_token".to_string(),
@@ -523,7 +523,7 @@ async fn cancelling_muse_subscription_login_during_polling_prevents_credential_p
                 minted_at_ms: 1000,
                 subs_usage: None,
             },
-        ))
+        )))
     });
 
     let options = LoginOptions {
@@ -587,7 +587,7 @@ async fn replacing_muse_subscription_login_during_polling_prevents_credential_pe
             },
         };
         persist_pending_login(&path_clone, &new_record, true).expect("persist replacement login");
-        Ok(auth::muse::PollOutcome::Approved(
+        Ok(auth::muse::PollOutcome::Approved(Box::new(
             auth::muse::MuseCredentials {
                 api_key: "muse_test_api_key".to_string(),
                 access_token: "muse_test_access_token".to_string(),
@@ -598,7 +598,7 @@ async fn replacing_muse_subscription_login_during_polling_prevents_credential_pe
                 minted_at_ms: 1000,
                 subs_usage: None,
             },
-        ))
+        )))
     });
 
     let options = LoginOptions {
@@ -679,7 +679,7 @@ async fn muse_device_login_slow_down_accumulates_delay_code_only() {
             1 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 6 }),
             6 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 11 }),
             11 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 16 }),
-            16 => Ok(auth::muse::PollOutcome::Approved(
+            16 => Ok(auth::muse::PollOutcome::Approved(Box::new(
                 auth::muse::MuseCredentials {
                     api_key: "api-key".to_string(),
                     access_token: "token".to_string(),
@@ -690,7 +690,7 @@ async fn muse_device_login_slow_down_accumulates_delay_code_only() {
                     minted_at_ms: 1000,
                     subs_usage: None,
                 },
-            )),
+            ))),
             other => panic!("unexpected interval: {other}"),
         }
     });
@@ -737,7 +737,7 @@ async fn muse_device_login_slow_down_accumulates_delay_challenge_loop() {
             1 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 6 }),
             6 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 11 }),
             11 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 16 }),
-            16 => Ok(auth::muse::PollOutcome::Approved(
+            16 => Ok(auth::muse::PollOutcome::Approved(Box::new(
                 auth::muse::MuseCredentials {
                     api_key: "api-key".to_string(),
                     access_token: "token".to_string(),
@@ -748,7 +748,7 @@ async fn muse_device_login_slow_down_accumulates_delay_challenge_loop() {
                     minted_at_ms: 1000,
                     subs_usage: None,
                 },
-            )),
+            ))),
             other => panic!("unexpected challenge interval: {other}"),
         }
     });

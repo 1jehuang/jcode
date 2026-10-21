@@ -621,6 +621,10 @@ fn request_body(
     request_body_for(JevPurpose::Memory, provider, state, questions)
 }
 
+/// Builds a Jev request body for the provider's own default model. Only the
+/// in-crate tests call this: browser decisions moved to their own model label
+/// in jcode-app-core, and production memory calls go through
+/// [`request_body_with_model`] directly.
 #[cfg(test)]
 fn request_body_for(
     purpose: JevPurpose,
