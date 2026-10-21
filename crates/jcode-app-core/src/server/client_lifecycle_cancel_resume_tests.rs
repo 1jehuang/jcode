@@ -5,6 +5,19 @@ async fn cancel_idle_session(
     control_session_id: &str,
     processing_session_id: Option<&str>,
 ) -> (InterruptSignal, Vec<ServerEvent>) {
+    cancel_with_members(
+        control_session_id,
+        processing_session_id,
+        Arc::new(RwLock::new(HashMap::new())),
+    )
+    .await
+}
+
+async fn cancel_with_members(
+    control_session_id: &str,
+    processing_session_id: Option<&str>,
+    members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> (InterruptSignal, Vec<ServerEvent>) {
     let stop_signal = InterruptSignal::new();
     let control = SessionControlHandle::cancel_only(
         control_session_id,
@@ -12,7 +25,6 @@ async fn cancel_idle_session(
         stop_signal.clone(),
     );
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
-    let members = Arc::new(RwLock::new(HashMap::new()));
     let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
     let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -50,12 +62,17 @@ async fn cancel_idle_session(
 #[tokio::test]
 async fn idle_cancel_prevents_the_waiting_turn_from_resuming_after_its_reset() {
     let session_id = "cancel_waiting_turn_after_reset";
+    let publication = crate::server::swarm::begin_turn_publication(session_id).await;
     let ticket = register_pending_resume(session_id);
     assert!(!crate::turn_cancel_registry::has_active_turn(session_id));
 
     let (_, events) = cancel_idle_session(session_id, None).await;
 
     assert!(matches!(events.as_slice(), [ServerEvent::Interrupted]));
+    assert!(
+        publication.cancelled.is_cancelled(),
+        "idle Cancel must revoke the waiting turn, not merely its timer"
+    );
     assert!(
         !ticket.wait(Duration::ZERO).await,
         "a turn acknowledged as interrupted must not resume when its reset arrives"
@@ -99,4 +116,81 @@ async fn cancelling_a_pending_resume_does_not_poison_the_next_turn() {
         !stop_signal.is_set(),
         "the cancelled wait must not leave a stop signal for the next turn"
     );
+}
+
+struct RuntimeEnv(Option<std::ffi::OsString>);
+
+impl Drop for RuntimeEnv {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            crate::env::set_var("JCODE_RUNTIME_DIR", value);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "serializes the test storage environment"
+)]
+async fn direct_cancel_persists_an_active_headless_turn_without_stopping_a_finished_one() {
+    let _lock = crate::storage::lock_test_env();
+    let directory = tempfile::tempdir().unwrap();
+    let _env = RuntimeEnv(std::env::var_os("JCODE_RUNTIME_DIR"));
+    crate::env::set_var("JCODE_RUNTIME_DIR", directory.path());
+    for finished in [false, true] {
+        let session_id = if finished {
+            "finished-direct-cancel"
+        } else {
+            "active-direct-cancel"
+        };
+        let swarm_id = format!("swarm-{session_id}");
+        let publication = crate::server::swarm::begin_turn_publication(session_id).await;
+        if finished {
+            publication.complete(async {}).await;
+        }
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let member = SwarmMember {
+            session_id: session_id.into(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: Some(swarm_id.clone()),
+            swarm_enabled: true,
+            status: if finished { "ready" } else { "running" }.into(),
+            detail: None,
+            friendly_name: None,
+            report_back_to_session_id: Some("owner".into()),
+            latest_completion_report: finished.then(|| "finished report".into()),
+            role: "agent".into(),
+            joined_at: Instant::now(),
+            last_status_change: Instant::now(),
+            is_headless: true,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+            task_label: None,
+        };
+        crate::server::swarm_persistence::persist_swarm_state(
+            &swarm_id,
+            None,
+            Some("owner"),
+            &[member.clone()],
+        );
+        let members = Arc::new(RwLock::new(HashMap::from([(session_id.into(), member)])));
+        assert!(!has_pending_resume(session_id));
+        cancel_with_members(session_id, None, Arc::clone(&members)).await;
+        if finished {
+            assert_eq!(members.read().await[session_id].status, "ready");
+            assert!(!publication.cancelled.is_cancelled());
+        } else {
+            assert_eq!(members.read().await[session_id].status, "stopped");
+            assert!(publication.cancelled.is_cancelled());
+            let restarted = crate::server::swarm_persistence::load_runtime_state();
+            assert_eq!(restarted.members[session_id].status, "stopped");
+        }
+    }
 }

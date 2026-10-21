@@ -1897,6 +1897,12 @@ pub(super) async fn handle_client(
                     &event_counter,
                     &swarm_event_tx,
                     &client_event_tx,
+                    Some(&super::SwarmState {
+                        members: Arc::clone(&swarm_members),
+                        swarms_by_id: Arc::clone(&swarms_by_id),
+                        plans: Arc::clone(&swarm_plans),
+                        coordinators: Arc::clone(&swarm_coordinators),
+                    }),
                 )
                 .await;
             }
@@ -2277,7 +2283,9 @@ pub(super) async fn handle_client(
                         if !args.is_empty() { anyhow::bail!("This command accepts no arguments"); }
                         let (tx, mut rx) = mpsc::unbounded_channel();
                         super::client_actions::handle_resume_all_sessions(id, &sessions, &swarm_members, &swarms_by_id,
-                            &event_history, &event_counter, &swarm_event_tx, &tx).await;
+                            &event_history, &event_counter, &swarm_event_tx, &tx,
+                            Some(&super::SwarmState { members: Arc::clone(&swarm_members), swarms_by_id: Arc::clone(&swarms_by_id),
+                                plans: Arc::clone(&swarm_plans), coordinators: Arc::clone(&swarm_coordinators) })).await;
                         while let Ok(event) = rx.try_recv() {
                             if let ServerEvent::ResumeAllResult { resumed, skipped, message, resumed_sessions, .. } = event {
                                 return Ok((serde_json::json!({"resumed": resumed, "skipped": skipped, "resumed_sessions": resumed_sessions}), message));
@@ -3674,7 +3682,14 @@ async fn cancel_processing_message(
         .to_string();
     // A server-owned turn waiting for its quota reset has no active turn or
     // local task. Cancel its resume before the idle path acknowledges the stop.
-    super::usage_limit_resume::cancel_pending_resume(&session_label);
+    let stopped_session = session_label.as_str();
+    super::swarm::cancel_session_turn_with(stopped_session, |had_turn| async move {
+        if had_turn {
+            update_member_status(stopped_session, "stopped", Some("cancelled".into()), swarm.members,
+                swarm.swarms_by_id, Some(swarm.event_history), Some(swarm.event_counter), Some(swarm.event_tx)).await;
+            super::swarm_persistence::persist_member_lifecycle(stopped_session, swarm.members).await;
+        }
+    }).await;
     // Stopping a session also stops the workers it spawned. This runs on
     // every path, including the idle one: a coordinator waiting on
     // `await_members` has no running turn of its own while its workers do.

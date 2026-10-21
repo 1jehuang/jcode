@@ -1121,44 +1121,7 @@ pub(super) async fn handle_transfer(
 #[path = "client_actions_tests.rs"]
 mod tests;
 
-/// Decide whether an idle live session still owes the model a continuation.
-///
-/// This is the live-session analog of `restored_session_was_interrupted`: a
-/// session "would continue if resumed" when it has a pending reload-recovery
-/// directive, when it carries reload-interruption markers, or when its last
-/// model-visible message is a user/tool turn the assistant never answered
-/// (e.g. the turn errored or the process was interrupted mid-generation).
-fn live_session_owes_continuation(agent: &Agent) -> bool {
-    // Never continue an empty/fresh session.
-    if agent.visible_conversation_message_count() == 0 {
-        return false;
-    }
-
-    if super::reload_recovery::peek_for_session(agent.session_id())
-        .ok()
-        .flatten()
-        .map(|record| record.status == super::reload_recovery::ReloadRecoveryStatus::Pending)
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    if super::client_session::session_was_interrupted_by_reload(agent) {
-        return true;
-    }
-
-    matches!(
-        agent.last_visible_conversation_role(),
-        Some(crate::message::Role::User)
-    )
-}
-
 /// Continue every live, idle session that would auto-resume on a reload.
-///
-/// This is the on-demand equivalent of the post-reload recovery sweep: it walks
-/// the currently-live sessions, and for each idle one that still owes the model
-/// a continuation, injects the standard "continue where you left off" reminder
-/// so the session picks back up without the user having to open each one.
 #[expect(
     clippy::too_many_arguments,
     reason = "resuming live sessions needs session, swarm membership, and status event state"
@@ -1172,13 +1135,14 @@ pub(super) async fn handle_resume_all_sessions(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm_state: Option<&SwarmState>,
 ) {
-    // Snapshot live sessions (those with at least one live client attachment).
+    // Headless workers own a server Agent, not a live client attachment.
     let live_session_ids: Vec<String> = {
         let members = swarm_members.read().await;
         members
             .iter()
-            .filter(|(_, member)| !member.event_txs.is_empty() || !member.event_tx.is_closed())
+            .filter(|(_, member)| super::live_turn::member_accepts_automatic_turn(member))
             .map(|(session_id, _)| session_id.clone())
             .collect()
     };
@@ -1187,27 +1151,22 @@ pub(super) async fn handle_resume_all_sessions(
     let mut skipped = 0usize;
 
     for session_id in live_session_ids {
-        let agent = {
-            let guard = sessions.read().await;
-            guard.get(&session_id).cloned()
-        };
-        let Some(agent) = agent else {
-            continue;
-        };
-
         // Only act on idle sessions; a busy session is already making progress.
-        // The owned guard doubles as the turn reservation (#1152).
-        let Ok(agent_guard) = Arc::clone(&agent).try_lock_owned() else {
+        // The shared reservation rechecks status and pending provider waits.
+        let Some(agent_guard) =
+            super::live_turn::idle_live_agent(&session_id, sessions, swarm_members).await
+        else {
             skipped += 1;
             continue;
         };
 
-        if !live_session_owes_continuation(&agent_guard) {
+        if !super::live_turn::live_session_owes_continuation(&agent_guard) {
             drop(agent_guard);
             skipped += 1;
             continue;
         }
 
+        let publication = super::swarm::begin_turn_publication(&session_id).await;
         let reminder = match super::reload_recovery::pending_directive_for_session(&session_id) {
             Ok(Some(directive)) => directive.continuation_message,
             _ => crate::tool::selfdev::ReloadContext::interrupted_session_continuation_message(),
@@ -1229,20 +1188,36 @@ pub(super) async fn handle_resume_all_sessions(
             ));
         }
 
-        super::live_turn::spawn_tracked_live_turn(
+        let mut swarm = super::live_turn::LiveTurnSwarmContext::new(
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        );
+        if let Some(state) = swarm_state {
+            swarm.recovery_swarm = Some(state.clone());
+            swarm.recovered_assignment =
+                super::recovered_assignment::RecoveredAssignment::capture(&session_id, state).await;
+        }
+        if !swarm_members
+            .read()
+            .await
+            .get(&session_id)
+            .is_some_and(super::live_turn::member_accepts_automatic_turn)
+        {
+            skipped += 1;
+            continue;
+        }
+        super::live_turn::spawn_tracked_live_turn_with_publication(
             &session_id,
             agent_guard,
             String::new(),
             Some(reminder),
             None,
             Some("resuming interrupted session".to_string()),
-            super::live_turn::LiveTurnSwarmContext::new(
-                swarm_members,
-                swarms_by_id,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            ),
+            swarm,
+            publication,
         )
         .await;
 

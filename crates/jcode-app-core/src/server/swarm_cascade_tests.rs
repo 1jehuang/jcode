@@ -1,5 +1,53 @@
 //! Interrupting a coordinator stops the workers it spawned.
 
+#[tokio::test]
+async fn cancelling_a_coordinator_cancels_waiting_descendant_without_active_turn() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntime::new();
+    let id = format!("cascade-quota-{}", crate::id::new_id("wait"));
+    let parent = format!("{id}-parent");
+    let (mut worker, _events) = member(&id, Some(&parent));
+    worker.status = "rate_limited".to_string();
+    let members = Arc::new(RwLock::new(HashMap::from([(id.clone(), worker)])));
+    let swarms = Arc::new(RwLock::new(HashMap::new()));
+    let mut plan = crate::server::VersionedPlan::new();
+    plan.items.push(crate::plan::PlanItem {
+        id: "original-task".into(),
+        content: "preserve original assignment".into(),
+        status: "running".into(),
+        priority: "normal".into(),
+        assigned_to: Some(id.clone()),
+        subsystem: None,
+        file_scope: vec![],
+        blocked_by: vec![],
+    });
+    crate::server::swarm_persistence::persist_swarm_state(
+        "swarm-1",
+        Some(&plan),
+        Some(&parent),
+        &[members.read().await[&id].clone()],
+    );
+    let ticket = crate::server::usage_limit_resume::register_pending_resume(&id);
+    let stopped =
+        cancel_spawned_descendant_turns(&parent, &members, &swarms, None, None, None).await;
+    assert_eq!(stopped, vec![id.clone()], "a quota wait is unfinished work");
+    assert!(!crate::server::usage_limit_resume::has_pending_resume(&id));
+    assert_eq!(members.read().await[&id].status, "stopped");
+    let recovered = crate::server::swarm_persistence::load_runtime_state();
+    assert_eq!(
+        recovered.members[&id].status, "stopped",
+        "a second process must not resurrect the canceled worker"
+    );
+    assert_eq!(
+        recovered.plans["swarm-1"].items[0].content,
+        "preserve original assignment"
+    );
+    assert!(
+        !ticket.wait(std::time::Duration::ZERO).await,
+        "stopped worker cannot retry"
+    );
+}
+
 use super::{cancel_spawned_descendant_turns, swarm_descendants};
 use crate::protocol::ServerEvent;
 use crate::server::SwarmMember;
@@ -8,6 +56,32 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, mpsc};
+
+struct IsolatedRuntime {
+    previous: Option<std::ffi::OsString>,
+    _temp: tempfile::TempDir,
+}
+
+impl IsolatedRuntime {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("JCODE_RUNTIME_DIR");
+        crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+        Self {
+            previous,
+            _temp: temp,
+        }
+    }
+}
+
+impl Drop for IsolatedRuntime {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var("JCODE_RUNTIME_DIR", value),
+            None => crate::env::remove_var("JCODE_RUNTIME_DIR"),
+        }
+    }
+}
 
 pub(super) fn member(
     session_id: &str,

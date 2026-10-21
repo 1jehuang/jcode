@@ -269,7 +269,7 @@ async fn persist_reload_recovery_intents(
         );
         members
             .iter()
-            .filter(|(_, member)| member.status == "running")
+            .filter(|(_, member)| matches!(member.status.as_str(), "running" | "rate_limited"))
             .map(|(session_id, member)| (session_id.clone(), member.is_headless))
             .collect()
     };

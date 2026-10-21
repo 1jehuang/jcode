@@ -10,6 +10,9 @@ use tokio::sync::mpsc;
 
 /// Directory name under the durable state dir (`~/.jcode/state`).
 const SWARM_STATE_DIR: &str = "swarm";
+#[path = "swarm_persistence_member.rs"]
+mod member_lifecycle;
+pub(super) use member_lifecycle::persist_member_lifecycle;
 /// Pre-0.36 location under the runtime dir (tmpfs on Linux, wiped on reboot).
 const LEGACY_SWARM_STATE_DIR: &str = "jcode-swarm-state";
 /// Dormant plans are durable for recovery, but not immortal. A plan with no
@@ -351,6 +354,10 @@ fn recover_member_status(
     detail: Option<String>,
     is_headless: bool,
 ) -> (SwarmLifecycleStatus, Option<String>) {
+    if matches!(&status, SwarmLifecycleStatus::Other(value) if matches!(value.as_str(), "suspended" | "paused"))
+    {
+        return (status, detail);
+    }
     if status == SwarmLifecycleStatus::Running {
         return (
             SwarmLifecycleStatus::Crashed,
@@ -692,6 +699,10 @@ pub(super) fn remove_swarm_state_if_version(
     }
     remove_snapshot_files(swarm_id)
 }
+
+#[cfg(test)]
+#[path = "swarm_persistence_status_tests.rs"]
+mod status_tests;
 
 #[cfg(test)]
 #[path = "swarm_persistence_tests.rs"]
