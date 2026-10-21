@@ -60,7 +60,7 @@ impl TelemetryCategory {
 
     pub fn label(self) -> &'static str {
         match self {
-            TelemetryCategory::Content => "Prompts and transcripts (30-day retention)",
+            TelemetryCategory::Content => "Prompts and transcripts",
             TelemetryCategory::Usage => "Basic usage stats",
             TelemetryCategory::Crashes => "Crash reports",
             TelemetryCategory::Features => "Feature usage",

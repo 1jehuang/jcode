@@ -526,7 +526,7 @@ fn onboarding_golden_telemetry_settings_page() {
     assert!(text.contains("Telemetry settings"), "title: {text}");
     let continue_at = text.find("Continue").expect("Continue button");
     let content_at = text
-        .find("Prompts and transcripts (30-day retention)")
+        .find("Prompts and transcripts")
         .expect("content row");
     assert!(continue_at < content_at, "Continue sits above the checkboxes: {text}");
     for label in [
