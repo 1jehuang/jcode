@@ -1,22 +1,44 @@
 #!/usr/bin/env bash
-# test-portal-bridge.sh — verify mcp-remote fetches a local stub CIMD document.
+# test-portal-bridge.sh — verify mcp-remote accepts a local stub client
+# metadata document and configures the matching OAuth callback.
 #
 # What this tests:
-#   1. The stub CIMD server starts and serves /cimd.json
-#   2. mcp-remote (pinned v0.15.1) connects via stdio, fetches the CIMD,
-#      and begins the OAuth flow (which fails because we have no real AS)
-#   3. The stub logs show the /cimd.json fetch happened
+#   1. The stub CIMD server starts and serves /cimd.json over HTTPS
+#   2. mcp-remote (pinned v0.15.1) ACCEPTS the client metadata URL
+#      (i.e. it does not silently discard it) and begins OAuth discovery
+#   3. mcp-remote uses the 127.0.0.1 callback host that the CIMD
+#      registered, and derives a callback port
+#
+# Why HTTPS (fixed 2026-10-19):
+#   mcp-remote's isClientMetadataUrl() requires an https: URL with a
+#   non-root pathname. An http:// client metadata URL is SILENTLY IGNORED
+#   ("Warning: Ignoring invalid client metadata URL"), so a plain-HTTP stub
+#   meant mcp-remote never even considered the document the test claimed
+#   to verify. The stub therefore serves a self-signed 127.0.0.1
+#   certificate and the test points NODE_EXTRA_CA_CERTS at it (undici
+#   honours that variable).
+#
+# Why the assertions are NOT "the stub logged a /cimd.json fetch" (fixed
+# 2026-10-19):
+#   mcp-remote does not download the client metadata document itself. Per
+#   SEP-991 it uses the CIMD URL AS THE client_id and asks the
+#   AUTHORIZATION SERVER to fetch it; mcp-remote only reads the AS
+#   metadata to check client_id_metadata_document_supported === true. The
+#   stub therefore never sees a /cimd.json request from mcp-remote. The
+#   old assertion passed only because the harness's own curl populated the
+#   same log line -- a false positive that hid the HTTP/HTTPS defect
+#   entirely.
 #
 # What this does NOT test:
 #   - Completing the OAuth flow (requires the real Spotify Portal)
 #   - The real Cloudflare Worker serving the production CIMD
+#   - That the AS accepts the client metadata document (needs the real AS)
 #   - The allow-list gate (a Spotify/vendor action)
 #
 # Exit codes:
-#   0 = bridge correctly fetched CIMD and started OAuth
-#   1 = test infrastructure failure (stub didn't start, etc.)
-#   2 = mcp-remote did not attempt CIMD fetch (config or version issue)
-#   3 = mcp-remote crashed before reaching CIMD fetch
+#   0 = bridge accepted the CIMD URL and configured the 127.0.0.1 callback
+#   1 = test infrastructure failure (stub didn't start, no TLS material, etc.)
+#   2 = the bridge did not prove the client-metadata / callback configuration
 #
 set -euo pipefail
 
@@ -24,6 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 STUB_SCRIPT="$SCRIPT_DIR/stub-cimd-server.py"
 WORK_DIR=$(mktemp -d)
+TLS_DIR="$WORK_DIR/tls"
 STUB_LOG="$WORK_DIR/stub.log"
 BRIDGE_LOG="$WORK_DIR/bridge.log"
 INIT_LOG="$WORK_DIR/init.log"
@@ -50,17 +73,29 @@ trap cleanup EXIT
 
 TEST_FAILED=1
 
+# Generate a short-lived self-signed cert for 127.0.0.1 so the stub can serve
+# HTTPS. Scoped to the temp work dir; never written into the repo.
+mkdir -p "$TLS_DIR"
+if ! openssl req -x509 -newkey rsa:2048 -keyout "$TLS_DIR/key.pem" -out "$TLS_DIR/cert.pem" \
+    -days 1 -nodes -subj "/CN=127.0.0.1" \
+    -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" >/dev/null 2>&1; then
+    echo "FAIL: could not generate a self-signed certificate for the stub."
+    echo "      openssl is required for this test (HTTPS is mandatory because"
+    echo "      mcp-remote ignores http:// client metadata URLs)."
+    exit 1
+fi
+
 echo "=== XJ-03 Portal Bridge Local Test ==="
 echo ""
 
 # Step 1: Start stub CIMD server
 echo "[1/5] Starting stub CIMD server..."
-python3 "$STUB_SCRIPT" > "$WORK_DIR/stub-port.txt" 2>"$STUB_LOG" &
+python3 "$STUB_SCRIPT" --tls-dir "$TLS_DIR" > "$WORK_DIR/stub-port.txt" 2>"$STUB_LOG" &
 STUB_PID=$!
 
 # Wait for the stub to print its port (first line to stdout)
 for i in $(seq 1 10); do
-    if [[ -s "$WORK_DIR/stub-port.txt" ]]; then
+    if [[ -s "$WORK_DIR/stub-port.txt" ]] && [[ "$(wc -l < "$WORK_DIR/stub-port.txt")" -ge 2 ]]; then
         break
     fi
     sleep 0.5
@@ -79,27 +114,52 @@ if [[ -z "$STUB_PORT" ]]; then
     exit 1
 fi
 
-CIMD_URL="http://127.0.0.1:${STUB_PORT}/cimd.json"
-MCP_URL="http://127.0.0.1:${STUB_PORT}"
+STUB_SCHEME=$(sed -n '2p' "$WORK_DIR/stub-port.txt" | sed 's/^scheme=//')
+if [[ "$STUB_SCHEME" != "https" ]]; then
+    echo "FAIL: Stub is serving PLAIN HTTP. mcp-remote's isClientMetadataUrl()"
+    echo "      requires https: and silently ignores an http:// client metadata"
+    echo "      URL, so the CIMD fetch assertion below would be meaningless."
+    cat "$STUB_LOG" 2>/dev/null || true
+    exit 1
+fi
+
+CIMD_URL="https://127.0.0.1:${STUB_PORT}/cimd.json"
+MCP_URL="https://127.0.0.1:${STUB_PORT}"
 
 echo "  Stub PID  : $STUB_PID"
 echo "  Stub port : $STUB_PORT"
+echo "  Stub TLS  : $STUB_SCHEME (self-signed, trusted via NODE_EXTRA_CA_CERTS)"
 echo "  CIMD URL  : $CIMD_URL"
 echo "  MCP URL   : $MCP_URL"
 
 # Step 2: Verify stub serves CIMD
 echo ""
 echo "[2/5] Verifying stub serves /cimd.json..."
-CIMD_RESPONSE=$(curl -sS "http://127.0.0.1:${STUB_PORT}/cimd.json" 2>&1)
-CIMD_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${STUB_PORT}/cimd.json" 2>&1)
-CIMD_CT=$(curl -sS -I "http://127.0.0.1:${STUB_PORT}/cimd.json" 2>&1 | grep -i content-type | tr -d '\r')
+CIMD_RESPONSE=$(curl -sS --cacert "$TLS_DIR/cert.pem" "$CIMD_URL" 2>&1)
+CIMD_STATUS=$(curl -sS --cacert "$TLS_DIR/cert.pem" -o /dev/null -w "%{http_code}" "$CIMD_URL" 2>&1)
+CIMD_CT=$(curl -sS --cacert "$TLS_DIR/cert.pem" -I "$CIMD_URL" 2>&1 | grep -i content-type | tr -d '\r')
 
 if [[ "$CIMD_STATUS" != "200" ]]; then
     echo "FAIL: Stub returned HTTP $CIMD_STATUS for /cimd.json"
     exit 1
 fi
 echo "  HTTP $CIMD_STATUS — $CIMD_CT"
-echo "  Body: $(echo "$CIMD_RESPONSE" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(f"client_id={d[\"client_id\"]}, client_name={d[\"client_name\"]}")' 2>/dev/null || echo '(parse error)')"
+echo "  Body: $(echo "$CIMD_RESPONSE" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("client_id=" + str(d["client_id"]) + ", client_name=" + str(d["client_name"]))' 2>/dev/null || echo '(parse error)')"
+
+# The harness's own probe above produced /cimd.json requests in the stub
+# log. The count is reported in step 5 for transparency, but it is NOT an
+# assertion: mcp-remote does not download the client metadata document
+# itself (the authorization server does, per SEP-991), so the only local
+# requests are the harness's own.
+#
+# (Corrected 2026-10-19. The previous version of this test asserted that
+# the stub logged a /cimd.json fetch caused by mcp-remote. That was a false
+# positive: the only /cimd.json request in the stub log came from the
+# harness's OWN curl. Combined with a plain-HTTP stub -- which mcp-remote
+# silently ignores, since isClientMetadataUrl() requires https: -- the
+# assertion was vacuous.)
+BASELINE_CIMD_FETCHES=$(grep -c "200 /cimd.json" "$STUB_LOG" 2>/dev/null || echo 0)
+echo "  Baseline CIMD fetches (harness probe only): $BASELINE_CIMD_FETCHES"
 
 # Step 3: Start mcp-remote bridge
 echo ""
@@ -107,26 +167,64 @@ echo "[3/5] Starting mcp-remote bridge (v0.15.1)..."
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test-harness","version":"0.1.0"}}}' > "$WORK_DIR/init-request.json"
 
 # Run mcp-remote: pipe the init request, capture output, with a timeout.
-# mcp-remote will:
-#   1. Connect to MCP_URL (the stub)
-#   2. Fetch CIMD from $CIMD_URL
-#   3. Try to contact the AS (fails — no real Spotify Portal)
-# We expect it to either:
-#   a. Get an error from the MCP endpoint (not a real MCP server)
-#   b. Successfully fetch CIMD and then fail on OAuth AS discovery
-# Either case proves the CIMD fetch happened (verified in step 5).
+#
+# What mcp-remote actually does with --client-metadata-url (SEP-991):
+#   It does NOT download the document itself. It uses the CIMD URL AS THE
+#   client_id and asks the AUTHORIZATION SERVER to fetch it. mcp-remote
+#   only reads the AS metadata to check
+#   client_id_metadata_document_supported === true. So the local stub is
+#   never hit by mcp-remote for /cimd.json -- the AS would do that.
+#
+#   (Corrected 2026-10-19. The previous version of this test asserted that
+#   the stub logged a /cimd.json fetch caused by mcp-remote. That was a
+#   false positive: the only /cimd.json request in the stub log came from
+#   the harness's OWN curl in step 2. Combined with a plain-HTTP stub --
+#   which mcp-remote silently ignores, since isClientMetadataUrl() requires
+#   https: -- the assertion was vacuous.)
+#
+# What this test CAN prove locally:
+#   a. mcp-remote ACCEPTS the CIMD URL (did not log "Ignoring invalid
+#      client metadata URL") -- this is the real regression guard, because
+#      an http:// URL is silently dropped and the bridge would fall back to
+#      dynamic registration with a localhost redirect_uri.
+#   b. mcp-remote uses --host 127.0.0.1 as the callback hostname.
+#   c. mcp-remote derives a callback port and starts the callback server.
+#
+# Arg order: the server URL must be the FIRST positional arg. Putting
+# --transport before it makes mcp-remote parse '--transport' as the URL
+# (TypeError: Invalid URL). Fixed 2026-10-19.
+# --host 127.0.0.1 must match the redirect_uri registered in the CIMD
+# (the stub publishes 127.0.0.1; mcp-remote defaults to localhost on
+# non-Windows). Fixed 2026-10-19.
 timeout 30 bash -c "
     cat '$WORK_DIR/init-request.json' | \
+    NODE_EXTRA_CA_CERTS='$TLS_DIR/cert.pem' \
     npx -y mcp-remote@0.15.1 \
-        --transport http-only \
         '$MCP_URL' \
+        --transport http-only \
         --client-metadata-url '$CIMD_URL' \
         --resource '$MCP_URL' \
+        --host 127.0.0.1 \
         --debug \
         2>'$BRIDGE_LOG' > '$INIT_LOG'
 " || true
 
 echo "  Bridge exited (expected — no real MCP server or OAuth AS)"
+
+# mcp-remote must ACCEPT the client metadata document. If it ignored it
+# (e.g. an http:// URL), the whole test would be vacuous.
+CIMD_ACCEPTED=0
+if grep -qi "Ignoring invalid client metadata" "$BRIDGE_LOG" 2>/dev/null; then
+    echo "FAIL: mcp-remote IGNORED the client metadata document:"
+    grep -i "Ignoring invalid client metadata" "$BRIDGE_LOG" | head -3 | sed 's/^/    /'
+    exit 2
+fi
+if ! grep -qi "Using client metadata document" "$BRIDGE_LOG" 2>/dev/null; then
+    echo "FAIL: mcp-remote never logged that it accepted the client metadata document."
+    exit 2
+fi
+CIMD_ACCEPTED=1
+echo "  CONFIRMED: mcp-remote accepted the client metadata document"
 
 # Step 4: Check bridge output for OAuth/CIMD activity
 echo ""
@@ -148,43 +246,81 @@ if grep -qiE "(404|not found|unsupported|content.type|unexpected|fetch.*fail)" "
     grep -iE "(404|not found|unsupported|content.type|unexpected|fetch.*fail)" "$BRIDGE_LOG" | head -3 | sed 's/^/    /'
 fi
 
-# Step 5: Verify CIMD fetch from stub logs
+# Step 5: Verify the bridge's client-metadata and callback configuration
 echo ""
-echo "[5/5] Verifying CIMD fetch from stub logs..."
+echo "[5/5] Verifying client metadata and callback configuration..."
 
-CIMD_FETCHED=0
-if grep -q "/cimd.json" "$STUB_LOG" 2>/dev/null; then
-    CIMD_FETCHED=1
-    echo "  CONFIRMED: Stub served /cimd.json to mcp-remote"
-    grep "/cimd.json" "$STUB_LOG" | sed 's/^/    /'
+# The CIMD URL is used as the client_id (SEP-991). mcp-remote does not
+# download it; the AS does. So the local assertion is that mcp-remote
+# (1) adopted the CIMD URL as the client identifier and
+# (2) is using the 127.0.0.1 callback host the CIMD registered.
+#
+# The stub's own /cimd.json request count is reported for transparency only.
+# It is NOT an assertion: mcp-remote never fetches the document locally, and
+# the harness's own probe would otherwise make the count look meaningful.
+CIMD_FETCHES=$(grep -c "200 /cimd.json" "$STUB_LOG" 2>/dev/null || echo 0)
+echo "  stub /cimd.json 200s: $CIMD_FETCHES (harness probe only; mcp-remote does not fetch it)"
+
+# (1) the client_id must be the CIMD URL, not a dynamically registered client
+if grep -qi "Identifying this client by its metadata document" "$BRIDGE_LOG" 2>/dev/null; then
+    echo "  CONFIRMED: client_id is the client metadata document (SEP-991)"
+    grep -i "Identifying this client by its metadata document" "$BRIDGE_LOG" | head -2 | sed 's/^/    /'
+elif grep -qi "registering instead" "$BRIDGE_LOG" 2>/dev/null; then
+    echo "  WARNING: the AS does not accept a client metadata document, so"
+    echo "           mcp-remote fell back to DYNAMIC REGISTRATION -- which"
+    echo "           uses the default callback host (localhost) and breaks"
+    echo "           the registered redirect_uri. The real Spotify Portal is"
+    echo "           required to observe this branch."
+    grep -i "registering instead" "$BRIDGE_LOG" | head -2 | sed 's/^/    /'
+else
+    echo "  NOTE: the local stub has no real AS, so the client-id branch was not"
+    echo "        reached in this run. This is expected: the SEP-991 client-id"
+    echo "        decision requires the AS's client_id_metadata_document_supported"
+    echo "        flag, which only the production AS can provide."
+fi
+
+# (2) the callback host must be 127.0.0.1, matching the registered redirect_uri
+CALLBACK_HOST_OK=0
+if grep -qi "Using callback hostname: 127.0.0.1" "$BRIDGE_LOG" 2>/dev/null; then
+    CALLBACK_HOST_OK=1
+    echo "  CONFIRMED: callback hostname is 127.0.0.1 (matches the registered redirect_uri)"
+    grep -i "Using callback hostname" "$BRIDGE_LOG" | head -2 | sed 's/^/    /'
+else
+    echo "  FAIL: callback hostname was not 127.0.0.1"
+    grep -i "Using callback hostname" "$BRIDGE_LOG" | head -2 | sed 's/^/    /' || true
+fi
+
+# (3) mcp-remote must have derived a callback port and started the callback
+CALLBACK_PORT_OK=0
+if grep -qi "Using callback port derived from the server URL" "$BRIDGE_LOG" 2>/dev/null; then
+    CALLBACK_PORT_OK=1
+    echo "  CONFIRMED: callback port derived and callback server started"
+    grep -i "Using callback port derived" "$BRIDGE_LOG" | head -1 | sed 's/^/    /'
 fi
 
 echo ""
 echo "=== Results ==="
-echo "  CIMD stub served    : YES"
-echo "  Bridge started      : YES"
-echo "  OAuth flow attempt  : $(if [[ $OAUTH_ATTEMPTED -eq 1 ]]; then echo 'YES'; else echo 'NO'; fi)"
-echo "  CIMD fetch verified : $(if [[ $CIMD_FETCHED -eq 1 ]]; then echo 'YES'; else echo 'NO'; fi)"
+echo "  CIMD stub served over HTTPS : YES"
+echo "  Bridge started              : YES"
+echo "  OAuth flow attempt          : $(if [[ $OAUTH_ATTEMPTED -eq 1 ]]; then echo 'YES'; else echo 'NO'; fi)"
+echo "  CIMD URL accepted           : $(if [[ $CIMD_ACCEPTED -eq 1 ]]; then echo 'YES'; else echo 'NO'; fi)"
+echo "  Callback host = 127.0.0.1   : $(if [[ $CALLBACK_HOST_OK -eq 1 ]]; then echo 'YES'; else echo 'NO'; fi)"
+echo "  Callback port derived       : $(if [[ $CALLBACK_PORT_OK -eq 1 ]]; then echo 'YES'; else echo 'NO'; fi)"
 
-if [[ $CIMD_FETCHED -eq 1 ]]; then
+if [[ $CIMD_ACCEPTED -eq 1 && $CALLBACK_HOST_OK -eq 1 && $CALLBACK_PORT_OK -eq 1 ]]; then
     echo ""
-    echo "PASS: mcp-remote fetched the stub CIMD document and started OAuth flow."
-    echo "      (OAuth completion requires the real Spotify Portal — out of scope.)"
+    echo "PASS: mcp-remote accepted the client metadata document over HTTPS and"
+    echo "      is using the 127.0.0.1 callback host that the CIMD registers."
+    echo "      (Completing the OAuth flow requires the real Spotify Portal —"
+    echo "      out of scope for this local test.)"
     TEST_FAILED=0
     exit 0
-elif [[ $OAUTH_ATTEMPTED -eq 1 ]]; then
-    echo ""
-    echo "PASS (partial): Bridge attempted OAuth but CIMD fetch not confirmed in stub logs."
-    echo "      This may indicate mcp-remote cached or skipped the fetch."
-    TEST_FAILED=0
-    exit 0
-else
-    echo ""
-    echo "FAIL: No evidence that mcp-remote attempted to fetch the CIMD document."
-    echo "      Possible causes: mcp-remote version mismatch, --client-metadata-url not recognized,"
-    echo "      or bridge crashed before reaching the CIMD fetch step."
-    echo ""
-    echo "Debug: bridge log tail:"
-    tail -20 "$BRIDGE_LOG" 2>/dev/null | sed 's/^/  /'
-    exit 2
 fi
+
+echo ""
+echo "FAIL: the bridge did not prove the client-metadata and callback"
+echo "      configuration. Treat this as a regression, not a partial pass."
+echo ""
+echo "Debug: bridge log tail:"
+tail -20 "$BRIDGE_LOG" 2>/dev/null | sed 's/^/  /'
+exit 2

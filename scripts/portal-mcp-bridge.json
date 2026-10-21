@@ -5,11 +5,16 @@
       "-y",
       "mcp-remote@0.15.1",
       "https://phenotype.spotifyportal.com/api/mcp-actions/v1",
-      "--transport", "http-only",
-      "--client-metadata-url", "https://auth.kooshapari.com/oauth/client-metadata.json",
-      "--resource", "https://phenotype.spotifyportal.com/api/mcp-actions/v1"
+      "--transport",
+      "http-only",
+      "--client-metadata-url",
+      "https://auth.kooshapari.com/oauth/client-metadata.json",
+      "--resource",
+      "https://phenotype.spotifyportal.com/api/mcp-actions/v1",
+      "--host",
+      "127.0.0.1"
     ],
-    "description": "Spotify Portal MCP via mcp-remote bridge with CIMD (SEP-991). Verified LIVE 2026-10-18T06:32Z: bridge reaches OAuth authorize step (see STATE.md §24.5). Arg order fixed 2026-10-17: server URL is first positional arg (mcp-remote 0.15.1 contract). See docs/sessions/2026-10-15-portal-xirp-resume/XJ-03-DEPLOY.md.",
+    "description": "Spotify Portal MCP via mcp-remote bridge with CIMD (SEP-991). LIVE VERIFIED 2026-10-19T20:51Z: OAuth consent completed, token minted, MCP initialize + tools/list succeed against the live Portal endpoint. Arg order fixed 2026-10-17: server URL is first positional arg (mcp-remote 0.15.1 contract). --host 127.0.0.1 is REQUIRED (2026-10-19): the CIMD registers redirect_uris=['http://127.0.0.1:47290/oauth/callback'] but mcp-remote defaults to 'localhost' on non-Windows, and the AS rejects the mismatch with HTTP 400 'Invalid redirect_uri ... not registered in client metadata'. See docs/sessions/2026-10-15-portal-xirp-resume/STATE.md \u00a727.",
     "timeout_secs": 120,
     "env": {
       "PORTAL_CIMD_URL": "https://auth.kooshapari.com/oauth/client-metadata.json"
@@ -17,18 +22,21 @@
     "_deploy_notes": {
       "ready_to_merge_into_mcp_json": true,
       "ready_to_merge_set_at": "2026-10-18T06:32Z",
-      "ready_to_merge_set_by": "XJ-03 LIVE verification — see STATE.md §24.5",
+      "ready_to_merge_set_by": "XJ-03 LIVE verification \u2014 see STATE.md \u00a724.5",
       "blocked_on": [],
       "fully_unblocked_at": "2026-10-18T06:32Z",
       "_historical_blockers_for_audit_trail": [
         "Cloudflare Worker deployed at auth.kooshapari.com serving application/json at /oauth/client-metadata.json",
         "Portal App Settings -> Allowed client ID patterns includes https://auth.kooshapari.com/*"
       ],
-      "arg_order_fixed": "2026-10-17 — server URL is first positional arg, mcp-remote 0.15.1 contract. Prior order (--transport before URL) caused 'TypeError: Invalid URL ... input: --transport'.",
+      "arg_order_fixed": "2026-10-17 \u2014 server URL is first positional arg, mcp-remote 0.15.1 contract. Prior order (--transport before URL) caused 'TypeError: Invalid URL ... input: --transport'.",
       "derived_callback_port": 47290,
       "redirect_uri": "http://127.0.0.1:47290/oauth/callback",
       "cimd_document": "docs/sessions/2026-10-15-portal-xirp-resume/jcode-cimd.worker.js",
-      "port_derivation_script": "scripts/derive_callback_port.py"
+      "port_derivation_script": "scripts/derive_callback_port.py",
+      "redirect_uri_host_fix": "2026-10-19 \u2014 added '--host 127.0.0.1'. mcp-remote's default callback host is 'localhost' on non-Windows (chunk-KJCT2FXL.js: let host = process.platform === 'win32' ? '127.0.0.1' : 'localhost'). The CIMD registers 127.0.0.1, so the authorize request failed with HTTP 400 InputError. This was the true blocker behind the 'bridge reached authorize but never completed consent' symptom; the BROWSER=/usr/bin/true in test-portal-bridge-live.sh masked it.",
+      "live_verified_at": "2026-10-19T20:51Z",
+      "live_verified_result": "OAuth consent completed in Safari; tokens.json written with access_token, id_token, refresh_token. MCP initialize returned serverInfo {name: backstage, version: 0.2.2}; tools/list returned 34 tools; tools/call auth.who-am-i returned the operator's Backstage User entity."
     }
   }
 }

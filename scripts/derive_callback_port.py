@@ -72,10 +72,17 @@ def main(argv: list[str]) -> int:
     print("Publish this exact redirect_uri in the CIMD document:")
     print(f"    http://127.0.0.1:{port}/oauth/callback")
     print()
-    print("NOTE: mcp-remote builds the callback as .../oauth/callback on 127.0.0.1,")
-    print("while the allow-listed Xirp document declares http://127.0.0.1/callback")
-    print("(default port, different path). Confirm with the vendor whether the")
-    print("server compares redirect_uri strictly before publishing.")
+    print("IMPORTANT (corrected 2026-10-19): mcp-remote's callback host is")
+    print("'localhost' on non-Windows and '127.0.0.1' on Windows, NOT always")
+    print("127.0.0.1. The mcp-remote 0.15.1 source is:")
+    print("    let host = process.platform === 'win32' ? '127.0.0.1' : 'localhost';")
+    print("So on macOS/Linux you MUST pass '--host 127.0.0.1' when the CIMD")
+    print("registers the 127.0.0.1 form above, or the AS rejects the authorize")
+    print("request with HTTP 400:")
+    print("    Invalid redirect_uri 'http://localhost:<port>/oauth/callback',")
+    print("    not registered in client metadata")
+    print("Alternatively publish 'http://localhost:<port>/oauth/callback' in")
+    print("the CIMD and omit --host. Either is valid; they must agree.")
     return 0
 
 
