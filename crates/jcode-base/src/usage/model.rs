@@ -384,8 +384,8 @@ impl MultiAccountProviderKind {
 
     pub fn switch_command(self, label: &str) -> String {
         match self {
-            Self::Anthropic => format!("/account switch {}", label),
-            Self::OpenAI => format!("/account openai switch {}", label),
+            Self::Anthropic => format!("/accounts switch {}", label),
+            Self::OpenAI => format!("/accounts openai switch {}", label),
         }
     }
 }

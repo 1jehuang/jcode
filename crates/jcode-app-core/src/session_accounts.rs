@@ -204,7 +204,7 @@ pub fn set_default_label(kind: AccountProviderKind, label: &str) -> Result<()> {
         }
         AccountProviderKind::ClaudeCode => {
             anyhow::bail!(
-                "The default Claude Code instance is set by [provider.claude_code].default_instance in config.toml (currently '{}'); use /account claude-code switch {label} to pin this session",
+                "The default Claude Code instance is set by [provider.claude_code].default_instance in config.toml (currently '{}'); use /accounts claude-code switch {label} to pin this session",
                 crate::auth::claude_code::default_instance_id()
             );
         }
@@ -538,6 +538,16 @@ mod metadata_tests {
                 .then(|| self.resolved.clone())
                 .flatten()
         }
+    }
+
+    #[test]
+    fn claude_code_default_guidance_uses_plural_accounts_command() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let error = set_default_label(AccountProviderKind::ClaudeCode, "research team")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/accounts claude-code switch research team"));
+        assert!(!error.contains("/account "));
     }
 
     fn store_openai_accounts() {

@@ -198,7 +198,7 @@ fn key_for_route(route: &str, active: impl Fn(&str) -> Option<String>) -> Option
 }
 
 /// Keep the auto-switch order in step after the default provider changed
-/// through any path (model picker, `/account`, login, Desktop).
+/// through any path (model picker, `/accounts`, login, Desktop).
 pub fn sync_order_with_default_route(route: &str) -> Result<()> {
     let mut pool = AccountPool::load();
     if pool.promote_route(route, active_label) {

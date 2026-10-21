@@ -82,7 +82,7 @@ impl Agent {
 
     /// Mirror an explicit saved-account binding into the persisted route so
     /// resume and swarm children restore the same login. The binding is the
-    /// window's account pin, which `/account switch`, failover and return home
+    /// window's account pin, which `/accounts switch`, failover and return home
     /// may move, so the route follows it instead of refusing the change.
     pub(super) fn sync_bound_account_route(&mut self) {
         let Some((method, label)) = self.observed_oauth_account_route() else {
@@ -112,7 +112,7 @@ impl Agent {
 
     /// A model or route change can select a saved account (`claude-oauth@label`
     /// routes) or drop one (generic routes). That is a user choice: record it
-    /// like `/account switch`, so the next stream does not report it as a
+    /// like `/accounts switch`, so the next stream does not report it as a
     /// failover move.
     fn adopt_provider_account_pins(&mut self) {
         for kind in crate::provider::AccountProviderKind::ALL {
