@@ -422,6 +422,22 @@ impl Target {
     /// Fail fast, with an actionable message, when the cloud host's jcode is
     /// too old to speak the move protocol.
     fn preflight(&self, host: &str) -> Result<()> {
+        if self.transport.is_none() && preflight_is_fresh(&self.preflight_key(host)) {
+            crate::logging::info("cloud move: host preflight skipped, prepared moments ago");
+            return Ok(());
+        }
+        let result = self.preflight_uncached(host);
+        if result.is_ok() && self.transport.is_none() {
+            record_preflight(&self.preflight_key(host));
+        }
+        result
+    }
+
+    fn preflight_key(&self, host: &str) -> String {
+        format!("{host}\n{}", self.remote_binary())
+    }
+
+    fn preflight_uncached(&self, host: &str) -> Result<()> {
         timed_move_stage("host preflight", || {
             if super::cloud_managed::is_managed(host) && self.transport.is_none() {
                 step("prepare", "waking your Jcode Cloud machine");
@@ -721,6 +737,40 @@ pub(crate) struct MoveReport {
     pub return_command: String,
 }
 
+/// `/cloud` prepares the host, then runs the move in a second process moments
+/// later. Re-checking the same host and binary doubled the wait for no benefit.
+const PREFLIGHT_FRESH_SECS: u64 = 120;
+
+fn preflight_marker() -> Option<PathBuf> {
+    storage::jcode_dir().ok().map(|dir| dir.join("cloud-preflight-ok"))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn preflight_is_fresh(key: &str) -> bool {
+    let Some(text) = preflight_marker().and_then(|p| std::fs::read_to_string(p).ok()) else {
+        return false;
+    };
+    let Some((stamp, stored)) = text.split_once('\n') else {
+        return false;
+    };
+    stored == key
+        && stamp
+            .parse::<u64>()
+            .is_ok_and(|t| now_secs().saturating_sub(t) <= PREFLIGHT_FRESH_SECS)
+}
+
+fn record_preflight(key: &str) {
+    if let Some(path) = preflight_marker() {
+        let _ = std::fs::write(path, format!("{}\n{key}", now_secs()));
+    }
+}
+
 fn timed_move_stage<T>(stage: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let started = std::time::Instant::now();
     let result = operation();
@@ -923,26 +973,50 @@ pub(crate) fn run_move(
         return Ok(report);
     }
 
-    let mut baselines = Vec::new();
-    for account in &auth_accounts {
+    if !auth_accounts.is_empty() {
         step("credentials", "securely transferring OAuth accounts");
-        // Snapshotting a large repository may take long enough for another
-        // local session to refresh the account. Do not ship the earlier token.
-        let credentials = transfer::export_cloud_account_at(
-            &storage::jcode_dir()?,
-            account.provider,
-            Some(&account.label),
-        )?;
-        timed_move_stage("credential transfer", || {
-            retry_ssh(&host, "credential transfer", || {
-                target.exchange_credentials(&host, account, Some(credentials.as_bytes()))
-            })
-        })?;
-        baselines.push(CloudAuthBaseline {
-            account: account.clone(),
-            fingerprint: credential_fingerprint(&credentials),
-        });
     }
+    // Each account is an independent SSH round trip over the shared control
+    // connection, so send them concurrently instead of one after another.
+    let baselines = std::thread::scope(|scope| -> Result<Vec<CloudAuthBaseline>> {
+        let handles: Vec<_> = auth_accounts
+            .iter()
+            .map(|account| {
+                let host = &host;
+                scope.spawn(move || -> Result<CloudAuthBaseline> {
+                    // Snapshotting a large repository may take long enough for
+                    // another local session to refresh the account. Do not
+                    // ship the earlier token.
+                    let credentials = transfer::export_cloud_account_at(
+                        &storage::jcode_dir()?,
+                        account.provider,
+                        Some(&account.label),
+                    )?;
+                    timed_move_stage("credential transfer", || {
+                        retry_ssh(host, "credential transfer", || {
+                            target.exchange_credentials(
+                                host,
+                                account,
+                                Some(credentials.as_bytes()),
+                            )
+                        })
+                    })?;
+                    Ok(CloudAuthBaseline {
+                        account: account.clone(),
+                        fingerprint: credential_fingerprint(&credentials),
+                    })
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("credential transfer thread panicked"))?
+            })
+            .collect()
+    })?;
     // API keys, other providers' token stores and the auto-switch order are
     // one-way: the cloud copy is never imported back.
     let router = export_router_credentials()?;

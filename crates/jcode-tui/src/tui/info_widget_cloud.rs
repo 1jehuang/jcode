@@ -27,13 +27,19 @@ fn fit(line: Line<'static>, width: u16) -> Line<'static> {
             text.push(ch);
             left -= cells;
         }
-        spans.push(Span::styled(text, span.style));
+        // Never let unstyled text fall back to the terminal's pure white.
+        let style = if span.style.fg.is_none() {
+            span.style.patch(value_style())
+        } else {
+            span.style
+        };
+        spans.push(Span::styled(text, style));
         if left == 0 {
             break;
         }
     }
     if truncated {
-        spans.push(Span::raw("…"));
+        spans.push(Span::styled("…", value_style()));
     }
     Line::from(spans)
 }
@@ -46,7 +52,7 @@ fn row(text: impl Into<String>, width: u16) -> Line<'static> {
     fit(Line::from(clean(&text.into())), width)
 }
 fn value_style() -> Style {
-    Style::default().fg(crate::tui::color_support::rgb(210, 210, 220))
+    Style::default().fg(crate::tui::color_support::rgb(170, 170, 185))
 }
 /// Dim label, bright value. `label` should include its trailing separator.
 fn kv(label: &str, value: impl Into<String>, width: u16) -> Line<'static> {
