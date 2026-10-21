@@ -197,12 +197,7 @@ fn telemetry_settings_lines(
         .max()
         .unwrap_or(0);
     let row_width = left_width + COL_W * 2 + GAP.len();
-    let block_width = TelemetryCategory::ALL
-        .iter()
-        .map(|c| 2 + c.caption().width())
-        .max()
-        .unwrap_or(0)
-        .max(row_width);
+    let block_width = row_width;
     let pad = |used: usize| " ".repeat(block_width.saturating_sub(used));
 
     let filled = Style::default()
@@ -248,15 +243,17 @@ fn telemetry_settings_lines(
             ])
             .alignment(align),
         );
-        lines.push(
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled(category.caption(), dim),
-                Span::raw(pad(2 + category.caption().width())),
-            ])
-            .alignment(align),
-        );
     }
+    // Describe only the focused category, in one dim line under the list, so
+    // the rows stay compact. Always reserve the line so nothing jumps.
+    lines.push(Line::from(""));
+    let description = page
+        .cursor
+        .checked_sub(1)
+        .and_then(|i| TelemetryCategory::ALL.get(i))
+        .map(|c| c.caption())
+        .unwrap_or("");
+    lines.push(Line::from(Span::styled(description, dim)).alignment(align));
     lines.push(Line::from(""));
 
     if env_forced_off {
@@ -270,7 +267,7 @@ fn telemetry_settings_lines(
     }
     lines.push(
         Line::from(Span::styled(
-            "Left/Right pick Yes/No, Esc goes back. Change later with /telemetry.",
+            "Left/Right pick Yes/No. Esc goes back. Change later with /telemetry.",
             dim,
         ))
         .alignment(align),
