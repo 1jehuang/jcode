@@ -17,6 +17,8 @@ OAuth providers can rotate or revoke refresh tokens. Copying a login does not ma
 
 The TUI accepts `/cloud`, `/cloud <host>`, and `/local` while the agent is working. For `/cloud`, it prepares the destination host while the current turn continues, without snapshotting the live repository or copying the session or credentials. The actual handoff starts automatically once preparation succeeds and the current turn finishes, rather than requiring you to interrupt the agent and retry the command. `/local` waits for the same safe turn boundary. The queued request is local to that TUI instance. Closing the client before dispatch does not persist the request.
 
+Use `/cloud status` to inspect the pending request, `/cloud cancel` (or `/local cancel`) to cancel it, or submit another handoff command to replace its destination. Cancellation prevents the handoff but does not stop host preparation that is already running. Once the actual transfer starts, it is allowed to finish rather than being killed halfway through.
+
 This is a deferred handoff, not live process migration. An in-flight model stream or tool process is not moved between machines. Waiting for the turn boundary keeps tool results and the session snapshot consistent. Background processes are still local-only and are described in the migration notice.
 
 ## Managed-host release compatibility
