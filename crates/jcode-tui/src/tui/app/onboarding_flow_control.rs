@@ -573,7 +573,20 @@ impl App {
                     KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => settings.step(true),
                     KeyCode::Char('a') | KeyCode::Char('A') => settings.set_all(true),
                     KeyCode::Char('n') | KeyCode::Char('N') => settings.set_all(false),
-                    KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => review.close_telemetry(),
+                    // Left = Yes, Right = No on a category row, like the
+                    // "Import less" page.
+                    KeyCode::Left
+                    | KeyCode::Char('h')
+                    | KeyCode::Char('y')
+                    | KeyCode::Char('Y')
+                        if settings.cursor > 0 =>
+                    {
+                        settings.checked[settings.cursor - 1] = true
+                    }
+                    KeyCode::Right | KeyCode::Char('l') if settings.cursor > 0 => {
+                        settings.checked[settings.cursor - 1] = false
+                    }
+                    KeyCode::Esc => review.close_telemetry(),
                     KeyCode::Enter | KeyCode::Char(' ') => {
                         if !settings.toggle() {
                             telemetry_choice = Some(*settings);

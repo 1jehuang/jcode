@@ -179,47 +179,80 @@ fn telemetry_settings_lines(
     lines.push(Line::from(lozenge_pill_spans("Continue", page.cursor == 0)).alignment(align));
     lines.push(Line::from(""));
 
-    let check_style = Style::default()
-        .fg(rgb(126, 211, 159))
-        .add_modifier(Modifier::BOLD);
-    // Left-align the rows inside a centered block: pad every row to the
-    // widest one so centering shifts them all by the same amount.
+    // Same Yes/No two-column layout as the "Import less" page: a header row,
+    // then one row per category with a filled dot under the chosen column and
+    // a dim caption beneath. Every row is padded to one block width so the
+    // centered block stays left-aligned internally.
     use unicode_width::UnicodeWidthStr;
-    let block_width = TelemetryCategory::ALL
+    const COL_W: usize = 5;
+    const GAP: &str = "  ";
+    let center_cell = |s: &str| {
+        let total = COL_W.saturating_sub(s.width());
+        let left = total / 2;
+        format!("{}{}{}", " ".repeat(left), s, " ".repeat(total - left))
+    };
+    let left_width = TelemetryCategory::ALL
         .iter()
-        .flat_map(|c| [4 + c.label().width(), 4 + c.caption().width()])
+        .map(|c| 2 + c.label().width() + 2)
         .max()
         .unwrap_or(0);
+    let row_width = left_width + COL_W * 2 + GAP.len();
+    let block_width = TelemetryCategory::ALL
+        .iter()
+        .map(|c| 2 + c.caption().width())
+        .max()
+        .unwrap_or(0)
+        .max(row_width);
     let pad = |used: usize| " ".repeat(block_width.saturating_sub(used));
+
+    let filled = Style::default()
+        .fg(rgb(126, 211, 159))
+        .add_modifier(Modifier::BOLD);
+    let empty = dim;
+    let header_style = dim.add_modifier(Modifier::BOLD);
+    lines.push(
+        Line::from(vec![
+            Span::raw(" ".repeat(left_width)),
+            Span::styled(center_cell("Yes"), header_style),
+            Span::raw(GAP),
+            Span::styled(center_cell("No"), header_style),
+            Span::raw(pad(row_width)),
+        ])
+        .alignment(align),
+    );
     for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
         let focused = page.cursor == i + 1;
         let checked = page.checked[i];
-        let pointer = if focused { "› " } else { "  " };
-        let label_style = if focused {
-            Style::default()
-                .fg(welcome_accent())
-                .add_modifier(Modifier::BOLD)
+        let label_style = if checked {
+            Style::default().fg(rgb(210, 210, 210))
         } else {
-            Style::default()
+            dim
+        };
+        let (yes_glyph, yes_style, no_glyph, no_style) = if checked {
+            ("●", filled, "○", empty)
+        } else {
+            ("○", empty, "●", filled)
         };
         lines.push(
             Line::from(vec![
-                Span::styled(pointer, label_style),
-                if checked {
-                    Span::styled("● ", check_style)
-                } else {
-                    Span::styled("○ ", dim)
-                },
+                Span::styled(
+                    if focused { "> " } else { "  " },
+                    Style::default().fg(welcome_accent()),
+                ),
                 Span::styled(category.label(), label_style),
-                Span::raw(pad(4 + category.label().width())),
+                Span::raw(" ".repeat(left_width - 2 - category.label().width())),
+                Span::styled(center_cell(yes_glyph), yes_style),
+                Span::raw(GAP),
+                Span::styled(center_cell(no_glyph), no_style),
+                Span::raw(pad(row_width)),
             ])
             .alignment(align),
         );
         lines.push(
             Line::from(vec![
-                Span::raw("    "),
+                Span::raw("  "),
                 Span::styled(category.caption(), dim),
-                Span::raw(pad(4 + category.caption().width())),
+                Span::raw(pad(2 + category.caption().width())),
             ])
             .alignment(align),
         );
@@ -237,7 +270,7 @@ fn telemetry_settings_lines(
     }
     lines.push(
         Line::from(Span::styled(
-            "Space toggles, a/n all on/off, Esc goes back. Change later with /telemetry.",
+            "Left/Right pick Yes/No, Esc goes back. Change later with /telemetry.",
             dim,
         ))
         .alignment(align),
@@ -252,6 +285,12 @@ fn import_summary_lines(prompt: &crate::tui::LoginImportPrompt) -> Vec<Line<'sta
     let check_style = Style::default()
         .fg(rgb(126, 211, 159))
         .add_modifier(Modifier::BOLD);
+    // Pad every row to the widest so the centered block is left-aligned.
+    use unicode_width::UnicodeWidthStr;
+    let row_width = |row: &crate::tui::LoginImportRow| {
+        2 + row.provider_summary.width() + 3 + row.source_name.width()
+    };
+    let block_width = prompt.rows.iter().map(row_width).max().unwrap_or(0);
     prompt
         .rows
         .iter()
@@ -266,6 +305,7 @@ fn import_summary_lines(prompt: &crate::tui::LoginImportPrompt) -> Vec<Line<'sta
                     format!(" ({})", row.source_name),
                     Style::default().fg(dim_color()),
                 ),
+                Span::raw(" ".repeat(block_width - row_width(row))),
             ])
             .alignment(Alignment::Center)
         })
