@@ -16,7 +16,8 @@ first word of each user prompt:
   session     -> reply with the argv session flags it was started with
   system      -> reply with the appendSystemPrompt from `initialize`
 
-Every invocation's argv is appended to $FAKE_CLAUDE_LOG.
+Every invocation's argv is appended to $FAKE_CLAUDE_LOG, and every stdin
+message is recorded alongside its PID in $FAKE_CLAUDE_LOG.stdin.
 """
 
 import json
@@ -101,7 +102,11 @@ def read_line():
     line = sys.stdin.readline()
     if not line:
         sys.exit(0)
-    return json.loads(line)
+    message = json.loads(line)
+    if log_path:
+        with open(log_path + ".stdin", "a") as f:
+            f.write(json.dumps({"pid": os.getpid(), "message": message}) + "\n")
+    return message
 
 
 interrupted = [False]
