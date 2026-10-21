@@ -100,6 +100,34 @@ fn truncating_redirect_target_is_marked_but_append_is_not() {
 }
 
 #[test]
+fn fd_duplication_is_not_a_truncating_redirect() {
+    for cmd in [
+        "printf evidence 2>&1",
+        "cmd >&2",
+        "cmd 2>&-",
+        "cmd 1>&2 && ls",
+    ] {
+        assert!(
+            !tokenize(cmd)
+                .iter()
+                .any(|t| t.is_truncating_redirect_target),
+            "{cmd} duplicates an fd and must not flag a target"
+        );
+    }
+    let both = tokenize("cmd >& out.log");
+    assert!(
+        both.iter()
+            .any(|t| t.is_truncating_redirect_target && t.text == "out.log")
+    );
+    let mixed = tokenize("cmd 2>&1 > out.txt");
+    assert!(
+        mixed
+            .iter()
+            .any(|t| t.is_truncating_redirect_target && t.text == "out.txt")
+    );
+}
+
+#[test]
 fn recursive_flag_detected_in_bundles_and_long_form() {
     let cases = [
         ("-rf", true),
