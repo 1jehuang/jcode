@@ -227,35 +227,100 @@ impl Agent {
         true
     }
 
-    /// A provider rejected an inline image with a deterministic 400 (bad
-    /// media type, undecodable data, a limit jcode does not model). Every
-    /// retry would replay the same image, so replace stored images with text
-    /// notes and retry once (#1712). The outbound clamp normally prevents
-    /// this; this catches provider rules it does not know about.
+    /// Repair only a uniquely identifiable malformed/unsupported image. Provider
+    /// error indices refer to the encoded request, not necessarily stored history
+    /// (compaction, memory injection and provider encoding can change positions).
+    /// Never guess from those indices or remove otherwise valid images.
     fn try_recover_after_image_rejection(&mut self, error: &str) -> bool {
+        use base64::Engine as _;
+
         if !crate::compaction::is_image_rejection_error(error) {
             return false;
         }
-        let stripped = self.session.strip_all_images();
-        if stripped == 0 {
-            return false;
+        let mut candidate = None;
+        for (message_index, message) in self.session.messages.iter().enumerate() {
+            for (block_index, block) in message.content.iter().enumerate() {
+                let ContentBlock::Image { media_type, data } = block else {
+                    continue;
+                };
+                let normalized = base64::engine::general_purpose::STANDARD
+                    .decode(data.trim())
+                    .map_err(|_| "invalid base64 image data".to_string())
+                    .and_then(crate::image_normalize::normalize_image_bytes);
+                let replacement = match normalized {
+                    Ok(image)
+                        if image.converted_from.is_none()
+                            && image.media_type.eq_ignore_ascii_case(media_type) =>
+                    {
+                        continue;
+                    }
+                    Ok(image) => ContentBlock::Image {
+                        media_type: image.media_type.into(),
+                        data: base64::engine::general_purpose::STANDARD.encode(image.data),
+                    },
+                    Err(reason) => ContentBlock::Text {
+                        text: format!("[Image omitted: {media_type}: {reason}]"),
+                        cache_control: None,
+                    },
+                };
+                if candidate.is_some() {
+                    logging::warn("Image-rejection recovery skipped: ambiguous offending image");
+                    return false;
+                }
+                candidate = Some((message_index, block_index, replacement));
+            }
         }
+        let Some((message_index, block_index, replacement)) = candidate else {
+            logging::warn("Image-rejection recovery skipped: no identifiable invalid image");
+            return false;
+        };
+        // Use the session mutation API to invalidate its provider-message cache.
+        let mut messages = self.session.messages.clone();
+        let content = &mut messages[message_index].content;
+        // Keep parallel tool results contiguous when an unrepairable attachment
+        // must become a note, matching outbound image-clamp behavior.
+        if let ContentBlock::Text { text, .. } = &replacement
+            && block_index > 0
+            && let ContentBlock::ToolResult {
+                content: result, ..
+            } = &mut content[block_index - 1]
+        {
+            result.push('\n');
+            result.push_str(text);
+            content.remove(block_index);
+            if let Some(ContentBlock::Text { text, .. }) = content.get(block_index)
+                && text.starts_with("[Attached image associated with the preceding tool result: ")
+            {
+                let label = text.clone();
+                content.remove(block_index);
+                if let ContentBlock::ToolResult {
+                    content: result, ..
+                } = &mut content[block_index - 1]
+                {
+                    result.push('\n');
+                    result.push_str(&label);
+                }
+            }
+        } else {
+            content[block_index] = replacement;
+        }
+        self.session.replace_messages(messages);
         self.reset_after_transcript_image_rewrite();
         if let Err(err) = self.session.save() {
             logging::warn(&format!(
-                "Image-rejection recovery: failed to persist stripped transcript: {err}"
+                "Image-rejection recovery: failed to persist selective repair: {err}"
             ));
         }
-        logging::warn(&format!(
-            "Provider rejected an inline image; replaced {stripped} image(s) with text notes and retrying"
-        ));
+        logging::warn(
+            "Provider rejected an inline image; repaired one identified image and retrying",
+        );
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "image_rejection_recovered",
                 "provider_image_rejected",
             )
             .with_session_id(self.session.id.clone())
-            .with_detail(format!("images_stripped={stripped}"))
+            .with_detail("images_repaired=1".to_string())
             .force_attribution(),
         );
         true
@@ -384,5 +449,199 @@ impl Agent {
         if let Ok(mut manager) = compaction.try_write() {
             manager.push_embedding_snapshot(text);
         };
+    }
+}
+
+#[cfg(test)]
+mod image_recovery_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use base64::Engine as _;
+
+    const REJECTION: &str = "400 invalid_request_error: unsupported image media type";
+
+    fn bmp_bytes() -> Vec<u8> {
+        // A complete 1x1, 24-bit BMP with one padded pixel row.
+        let mut bmp = b"BM".to_vec();
+        bmp.extend_from_slice(&58u32.to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&1i32.to_le_bytes());
+        bmp.extend_from_slice(&1i32.to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&[0; 24]);
+        bmp.extend_from_slice(&[0, 0, 255, 0]);
+        bmp
+    }
+
+    fn png_data() -> String {
+        // Generate a truly decodable PNG rather than a signature-only fixture.
+        let png = crate::image_normalize::normalize_image_bytes(bmp_bytes()).unwrap();
+        assert_eq!(png.media_type, "image/png");
+        assert_eq!(png.converted_from, Some("BMP"));
+        base64::engine::general_purpose::STANDARD.encode(png.data)
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingProvider {
+        requests: Arc<StdMutex<Vec<Vec<Message>>>>,
+    }
+
+    #[async_trait]
+    impl Provider for RecordingProvider {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(messages.to_vec());
+            if requests.len() == 1 {
+                anyhow::bail!(REJECTION);
+            }
+            assert_eq!(requests.len(), 2, "recovery must not loop");
+            Ok(Box::pin(futures::stream::iter([
+                Ok(StreamEvent::TextDelta("recovered".into())),
+                Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".into()),
+                }),
+            ])))
+        }
+
+        fn name(&self) -> &str {
+            "image-recovery-test"
+        }
+
+        fn supports_compaction(&self) -> bool {
+            false
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    fn image(media_type: &str, data: &str) -> ContentBlock {
+        ContentBlock::Image {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+
+    fn images(messages: &[Message]) -> Vec<(String, String)> {
+        messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Image { media_type, data } => {
+                    Some((media_type.clone(), data.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn exercise_recovery(
+        rejected: Vec<ContentBlock>,
+        expected: Option<usize>,
+        streaming: bool,
+    ) {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let provider = Arc::new(RecordingProvider::default());
+        let mut agent = Agent::new(provider.clone(), Registry::empty());
+        agent.memory_enabled = false;
+        agent.session.system_prompt = Some("Image recovery regression".into());
+        // Separate older, valid history from the offending attachment. Seed the
+        // provider cache and disk before entering the real public turn API.
+        let png = png_data();
+        agent.add_message(Role::User, vec![image("image/png", &png)]);
+        agent.add_message(Role::User, rejected);
+        let before = images(&agent.session.messages_for_provider());
+        agent.session.save().unwrap();
+        let id = agent.session.id.clone();
+        agent.session = Session::load(&id).unwrap();
+        let result = if streaming {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            agent
+                .run_once_streaming_mpsc("Continue", vec![], None, tx)
+                .await
+        } else {
+            agent.run_once_capture("Continue").await.map(|_| ())
+        };
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(images(&requests[0]), before);
+        let mut reopened = Session::load(&id).unwrap();
+        let persisted = images(&reopened.messages_for_provider());
+        assert_eq!(persisted.first(), Some(&("image/png".into(), png)));
+        if let Some(count) = expected {
+            result.unwrap();
+            assert_eq!(requests.len(), 2);
+            let retried = images(&requests[1]);
+            assert_eq!(retried.len(), count);
+            assert_eq!(retried, persisted);
+            assert!(
+                retried
+                    .iter()
+                    .all(|(media_type, _)| media_type == "image/png")
+            );
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unsupported image")
+            );
+            assert_eq!(
+                requests.len(),
+                1,
+                "ambiguous rejection must fail without retry"
+            );
+            assert_eq!(
+                persisted, before,
+                "ambiguous recovery must not rewrite history"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_recovery_preserves_earlier_png_in_retry_and_reopened_history() {
+        for streaming in [false, true] {
+            exercise_recovery(
+                vec![image("image/bmp", "Qk0=")], // BMP signature, truncated data
+                Some(1),
+                streaming,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn public_recovery_repairs_decodable_bmp_without_discarding_it() {
+        let data = base64::engine::general_purpose::STANDARD.encode(bmp_bytes());
+        for streaming in [false, true] {
+            exercise_recovery(vec![image("image/bmp", &data)], Some(2), streaming).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn public_recovery_fails_safely_when_image_is_ambiguous() {
+        for streaming in [false, true] {
+            // No locally identifiable defect, despite a deterministic rejection.
+            exercise_recovery(vec![image("image/png", &png_data())], None, streaming).await;
+            // Multiple malformed attachments cannot identify one offender either.
+            exercise_recovery(
+                vec![
+                    image("image/bmp", "Qk0="),
+                    image("image/png", "not base64!"),
+                ],
+                None,
+                streaming,
+            )
+            .await;
+        }
     }
 }
