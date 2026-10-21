@@ -13,6 +13,10 @@
 //!   (OpenAI-compatible catalog and Muse profiles, the fixed first-party files,
 //!   and safe `env_file` names of configured named providers).
 //!
+//! - Jcode home `config.toml`: only the `[provider]` routing keys in
+//!   [`ROUTING_CONFIG_KEYS`], merged into the destination file with the rest
+//!   of its keys, tables and comments preserved.
+//!
 //! External-tool logins (Codex CLI, Claude Code, Copilot, Gemini CLI, Grok,
 //! OpenCode and similar) are deliberately excluded. The router only reads them
 //! after a per-path trust decision bound to that machine's file, they are owned
@@ -35,6 +39,104 @@ const MAX_FILE_BYTES: usize = 1024 * 1024;
 const BUNDLE_VERSION: u32 = 1;
 
 pub const ACCOUNT_POOL_FILE: &str = "account-pool.json";
+pub const ROUTING_CONFIG_FILE: &str = "config.toml";
+
+/// `[provider]` keys that decide which account/model the router picks and how
+/// it fails over. Everything else in config.toml (MCP servers, paths,
+/// keybinds, named providers, host-specific tuning) stays on its machine.
+pub const ROUTING_CONFIG_KEYS: &[&str] = &[
+    "default_model",
+    "default_provider",
+    "cross_provider_failover",
+    "same_provider_account_failover",
+    "model_picker_providers",
+    "gemini_force_oauth",
+    "gemini_project",
+];
+
+/// Extract only the allowlisted `[provider]` routing keys as a TOML snippet.
+/// `None` when the config has none of them.
+pub fn routing_config_snippet(config: &str) -> Result<Option<String>, RouterTransferError> {
+    let document: toml_edit::Document =
+        config.parse().map_err(|_| RouterTransferError::Malformed)?;
+    let mut out = toml_edit::Document::new();
+    let mut table = toml_edit::Table::new();
+    if let Some(provider) = document
+        .get("provider")
+        .and_then(|item| item.as_table_like())
+    {
+        for key in ROUTING_CONFIG_KEYS {
+            if let Some(value) = provider.get(key).and_then(|item| item.as_value()) {
+                let mut value = value.clone();
+                value.decor_mut().clear();
+                table.insert(key, toml_edit::Item::Value(value));
+            }
+        }
+    }
+    if table.is_empty() {
+        return Ok(None);
+    }
+    out.insert("provider", toml_edit::Item::Table(table));
+    Ok(Some(out.to_string()))
+}
+
+/// Source wins for every allowlisted key: set when present in the snippet,
+/// removed when absent, so routing is identical. Every other key, table and
+/// comment in the destination is preserved.
+pub fn merge_routing_config(
+    snippet: &str,
+    destination: Option<&str>,
+) -> Result<String, RouterTransferError> {
+    let snippet: toml_edit::Document = snippet
+        .parse()
+        .map_err(|_| RouterTransferError::Malformed)?;
+    if snippet.as_table().iter().any(|(key, _)| key != "provider") {
+        return Err(RouterTransferError::NotAllowed);
+    }
+    let source = snippet
+        .get("provider")
+        .and_then(|item| item.as_table())
+        .ok_or(RouterTransferError::Malformed)?;
+    if source
+        .iter()
+        .any(|(key, item)| !ROUTING_CONFIG_KEYS.contains(&key) || item.as_value().is_none())
+    {
+        return Err(RouterTransferError::NotAllowed);
+    }
+    let mut document: toml_edit::Document = destination
+        .unwrap_or("")
+        .parse()
+        .map_err(|_| RouterTransferError::Malformed)?;
+    if document.get("provider").is_none() {
+        document.insert("provider", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let provider = document
+        .get_mut("provider")
+        .and_then(|item| item.as_table_like_mut())
+        .ok_or(RouterTransferError::Malformed)?;
+    for key in ROUTING_CONFIG_KEYS {
+        match source.get(key).and_then(|item| item.as_value()) {
+            Some(value) => {
+                let mut value = value.clone();
+                if let Some(existing) = provider.get(key).and_then(|item| item.as_value()) {
+                    *value.decor_mut() = existing.decor().clone();
+                }
+                // Overwrite only the value. Re-inserting would drop the key's
+                // own decor, which holds comments written above the key.
+                match provider.get_mut(key) {
+                    Some(item) if item.is_value() => *item = toml_edit::Item::Value(value),
+                    _ => {
+                        provider.insert(key, toml_edit::Item::Value(value));
+                    }
+                }
+            }
+            None => {
+                provider.remove(key);
+            }
+        }
+    }
+    Ok(document.to_string())
+}
 
 /// Credential stores under the Jcode home directory.
 pub fn jcode_home_files() -> &'static [&'static str] {
@@ -207,6 +309,16 @@ pub fn export_at(
                 .iter()
                 .map(|name| (Root::Config, config_dir.join(name), name.clone())),
         );
+    if let Some(config) = read_regular(&jcode_home.join(ROUTING_CONFIG_FILE), ROUTING_CONFIG_FILE)?
+        && let Some(snippet) = routing_config_snippet(&config)?
+    {
+        files.push(Entry {
+            root: Root::Jcode,
+            name: ROUTING_CONFIG_FILE.into(),
+            data: hex::encode(snippet.as_bytes()),
+        });
+        names.push(ROUTING_CONFIG_FILE.into());
+    }
     for (root, path, name) in sources {
         if let Some(text) = read_regular(&path, &name)? {
             if root == Root::Jcode && name != ACCOUNT_POOL_FILE && text.trim().is_empty() {
@@ -272,7 +384,10 @@ pub fn import_at(
     let mut planned = Vec::new();
     for entry in bundle.files {
         let allowed = match entry.root {
-            Root::Jcode => jcode_home_files().contains(&entry.name.as_str()),
+            Root::Jcode => {
+                jcode_home_files().contains(&entry.name.as_str())
+                    || entry.name == ROUTING_CONFIG_FILE
+            }
             Root::Config => is_transferable_env_name(&entry.name),
         };
         if !allowed || !seen.insert((entry.root, entry.name.clone())) {
@@ -292,6 +407,9 @@ pub fn import_at(
         let text = if entry.root == Root::Jcode && entry.name == ACCOUNT_POOL_FILE {
             let existing = read_regular(&path, &entry.name)?;
             merge_pool(&text, existing.as_deref())?
+        } else if entry.root == Root::Jcode && entry.name == ROUTING_CONFIG_FILE {
+            let existing = read_regular(&path, &entry.name)?;
+            merge_routing_config(&text, existing.as_deref())?
         } else {
             if entry.root == Root::Jcode {
                 serde_json::from_str::<serde_json::Value>(&text)
@@ -415,6 +533,91 @@ mod tests {
         .unwrap();
         assert_eq!(pool.members, ["openai:a", "gemini", "cloud-only"]);
         assert_eq!(pool.excluded, ["openrouter", "xai"]);
+    }
+
+    #[test]
+    fn routing_config_extracts_allowlist_and_merges_preserving_destination() {
+        let local = r#"
+mcp_secret_path = "/local/only"
+[provider]
+default_model = "openai-oauth:gpt-test"
+default_provider = "openai-oauth"
+cross_provider_failover = "countdown"
+openai_service_tier = "priority"
+[keybindings]
+quit = "ctrl-q"
+"#;
+        let snippet = routing_config_snippet(local).unwrap().unwrap();
+        assert!(snippet.contains("cross_provider_failover = \"countdown\""));
+        assert!(!snippet.contains("priority") && !snippet.contains("keybindings"));
+        assert!(!snippet.contains("/local/only"));
+        let cloud = r#"# cloud comment
+[provider]
+# pick claude
+default_model = "claude-oauth:claude-test"
+same_provider_account_failover = false
+openai_transport = "https"
+
+[mcp.servers]
+x = 1
+"#;
+        let merged = merge_routing_config(&snippet, Some(cloud)).unwrap();
+        let parsed: toml::Value = toml::from_str(&merged).unwrap();
+        let provider = &parsed["provider"];
+        assert_eq!(
+            provider["default_model"].as_str(),
+            Some("openai-oauth:gpt-test")
+        );
+        assert_eq!(provider["default_provider"].as_str(), Some("openai-oauth"));
+        assert_eq!(
+            provider["cross_provider_failover"].as_str(),
+            Some("countdown")
+        );
+        assert!(provider.get("same_provider_account_failover").is_none());
+        assert_eq!(provider["openai_transport"].as_str(), Some("https"));
+        assert!(provider.get("openai_service_tier").is_none());
+        assert_eq!(parsed["mcp"]["servers"]["x"].as_integer(), Some(1));
+        assert!(merged.contains("# cloud comment") && merged.contains("# pick claude"));
+        assert!(
+            merge_routing_config(&snippet, None)
+                .unwrap()
+                .contains("countdown")
+        );
+        assert!(routing_config_snippet("[ui]\nx=1").unwrap().is_none());
+        for evil in [
+            "[mcp]\nx=1\n[provider]\ndefault_model=\"a\"",
+            "[provider]\nopenai_service_tier=\"x\"",
+        ] {
+            assert!(merge_routing_config(evil, Some(cloud)).is_err());
+        }
+    }
+
+    #[test]
+    fn routing_config_travels_in_bundle() {
+        let (_s, src_home, src_config) = dirs();
+        let (_d, dst_home, dst_config) = dirs();
+        std::fs::write(
+            src_home.join(ROUTING_CONFIG_FILE),
+            "[provider]\ndefault_provider = \"openai-oauth\"\n[mcp]\nleak = \"no\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dst_home.join(ROUTING_CONFIG_FILE),
+            "[display]\ntheme = \"dark\"\n",
+        )
+        .unwrap();
+        let bundle = export_at(&src_home, &src_config, &env_file_names([])).unwrap();
+        assert!(!String::from_utf8_lossy(bundle.as_bytes()).contains(&hex::encode("leak")));
+        import_at(&dst_home, &dst_config, bundle.as_bytes()).unwrap();
+        let path = dst_home.join(ROUTING_CONFIG_FILE);
+        let merged = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            merged.contains("openai-oauth") && merged.contains("theme") && !merged.contains("leak")
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
