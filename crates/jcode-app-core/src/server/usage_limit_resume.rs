@@ -180,6 +180,33 @@ pub(super) fn has_pending_resume(session_id: &str) -> bool {
 }
 
 impl ResumeTicket {
+    fn is_current(&self) -> bool {
+        !self.token.is_cancelled()
+            && PENDING
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&self.session_id)
+                .is_some_and(|(id, _)| *id == self.id)
+    }
+
+    /// Keep the registration alive while reacquiring and resuming the agent.
+    /// Cancellation wins over a ready continuation, and a replaced generation
+    /// cannot publish its result even before its token cancellation propagates.
+    async fn run_if_current<T>(
+        &self,
+        operation: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        if !self.is_current() {
+            return None;
+        }
+        let result = tokio::select! {
+            biased;
+            _ = self.token.cancelled() => return None,
+            result = operation => result,
+        };
+        self.is_current().then_some(result)
+    }
+
     /// Sleep `delay`. Returns false when the resume was cancelled or replaced.
     pub(super) async fn wait(&self, delay: Duration) -> bool {
         tokio::select! {
@@ -200,6 +227,46 @@ impl Drop for ResumeTicket {
         {
             pending.remove(&self.session_id);
         }
+    }
+}
+
+#[cfg(test)]
+struct ResumeWaitTestGate {
+    reached: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static RESUME_WAIT_TEST_GATES: LazyLock<Mutex<HashMap<String, ResumeWaitTestGate>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Pause exactly after the timer wakes and before the agent is reacquired.
+#[cfg(test)]
+pub(super) fn gate_next_resume_wait_for_test(
+    session_id: &str,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let previous = RESUME_WAIT_TEST_GATES.lock().unwrap().insert(
+        session_id.to_string(),
+        ResumeWaitTestGate {
+            reached: reached_tx,
+            release: release_rx,
+        },
+    );
+    assert!(previous.is_none(), "only one test gate per session");
+    (reached_rx, release_tx)
+}
+
+#[cfg(test)]
+async fn pause_after_resume_wait_for_test(session_id: &str) {
+    let gate = RESUME_WAIT_TEST_GATES.lock().unwrap().remove(session_id);
+    if let Some(gate) = gate {
+        let _ = gate.reached.send(());
+        let _ = gate.release.await;
     }
 }
 
@@ -266,6 +333,9 @@ pub(super) async fn resume_turn_after_usage_limit(
     let mut error = error;
     let mut held = held;
     let mut resumes_used = 0u32;
+    // One registration owns the whole continuation, including repeated limits.
+    // Re-registering between attempts would lose a cancellation in that gap.
+    let mut ticket = None;
     loop {
         let plan = match decide(&error, resumes_used) {
             UsageLimitDecision::NotUsageLimit if resumes_used == 0 => {
@@ -299,7 +369,7 @@ pub(super) async fn resume_turn_after_usage_limit(
             plan.attempt,
             MAX_USAGE_LIMIT_RESUMES
         ));
-        let ticket = register_pending_resume(session_id);
+        let ticket = ticket.get_or_insert_with(|| register_pending_resume(session_id));
         update_member_status(
             session_id,
             "rate_limited",
@@ -330,36 +400,54 @@ pub(super) async fn resume_turn_after_usage_limit(
             ));
             return ResumeOutcome::Superseded;
         }
-        let Ok(mut guard) = Arc::clone(&agent).try_lock_owned() else {
-            crate::logging::info(&format!(
-                "Usage-limit resume for {session_id} skipped: another turn is running"
-            ));
+        #[cfg(test)]
+        pause_after_resume_wait_for_test(session_id).await;
+
+        let resumed = ticket
+            .run_if_current(async {
+                let Ok(mut guard) = Arc::clone(&agent).try_lock_owned() else {
+                    crate::logging::info(&format!(
+                        "Usage-limit resume for {session_id} skipped: another turn is running"
+                    ));
+                    return None;
+                };
+                if !ticket.is_current() {
+                    return None;
+                }
+                update_member_status(
+                    session_id,
+                    "running",
+                    Some(format!(
+                        "resuming after usage limit ({}/{})",
+                        plan.attempt, MAX_USAGE_LIMIT_RESUMES
+                    )),
+                    &swarm.members,
+                    &swarm.swarms_by_id,
+                    Some(&swarm.event_history),
+                    Some(&swarm.event_counter),
+                    Some(&swarm.event_tx),
+                )
+                .await;
+                if !ticket.is_current() {
+                    return None;
+                }
+                let start_message_index = guard.message_count();
+                let result = std::panic::AssertUnwindSafe(
+                    guard.resume_turn_streaming_mpsc(system_reminder.clone(), event_tx.clone()),
+                )
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!("Processing task panicked while resuming"))
+                });
+                Some((guard, start_message_index, result))
+            })
+            .await
+            .flatten();
+        let Some((guard, start_message_index, result)) = resumed else {
             return ResumeOutcome::Superseded;
         };
-        drop(ticket);
         resumes_used += 1;
-
-        update_member_status(
-            session_id,
-            "running",
-            Some(format!(
-                "resuming after usage limit ({}/{})",
-                plan.attempt, MAX_USAGE_LIMIT_RESUMES
-            )),
-            &swarm.members,
-            &swarm.swarms_by_id,
-            Some(&swarm.event_history),
-            Some(&swarm.event_counter),
-            Some(&swarm.event_tx),
-        )
-        .await;
-        let start_message_index = guard.message_count();
-        let result = std::panic::AssertUnwindSafe(
-            guard.resume_turn_streaming_mpsc(system_reminder.clone(), event_tx.clone()),
-        )
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("Processing task panicked while resuming")));
         match result {
             Ok(()) => {
                 let completion_report = guard.latest_assistant_text_after(start_message_index);
@@ -474,5 +562,39 @@ mod tests {
         assert!(cancel_pending_resume(session));
         assert!(!ticket.wait(Duration::from_secs(60)).await);
         assert!(!cancel_pending_resume(session));
+    }
+
+    #[tokio::test]
+    async fn removed_generation_cannot_poll_continuation_before_token_cancellation() {
+        let session = "usage-limit-resume-unit-removed-generation";
+        let ticket = register_pending_resume(session);
+        // Removal happens before token.cancel() in cancel_pending_resume.
+        // A different thread may try to continue in that narrow interval.
+        let (_, token) = PENDING.lock().unwrap().remove(session).unwrap();
+        assert!(!token.is_cancelled());
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let result = ticket
+            .run_if_current(async {
+                polled.store(true, Ordering::SeqCst);
+            })
+            .await;
+        assert!(result.is_none());
+        assert!(!polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn ready_continuation_result_is_discarded_when_cancelled() {
+        let session = "usage-limit-resume-unit-ready-cancel";
+        let ticket = register_pending_resume(session);
+        let result = ticket
+            .run_if_current(async {
+                assert!(cancel_pending_resume(session));
+                42
+            })
+            .await;
+        assert_eq!(
+            result, None,
+            "cancelled continuation cannot publish completion"
+        );
     }
 }
