@@ -2625,6 +2625,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // Suggestions are read many times while composing one frame. Bump the
     // epoch here so the memo is scoped to exactly this frame.
     app.advance_command_suggestions_epoch();
+    crate::tui::mermaid::begin_terminal_image_frame();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
@@ -2637,10 +2638,10 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // can make distinct muted source grays converge to the same rendered ink.
     jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
     adapt_buffer_for_emoji_preference(frame.buffer_mut());
-    // Cache eviction/clearing can outlive the last visible image. Carry Kitty
-    // deletion commands on any completed frame so terminal-side pixel storage
-    // is reclaimed even when no image widget renders again.
-    crate::tui::mermaid::render_pending_terminal_image_cleanup(frame.buffer_mut());
+    // Classic Kitty placements must follow all text writes. Unlike Unicode
+    // placeholders they survive scrolling, so finalize even an image-free frame.
+    // This also drains deferred cache-eviction deletions when no image remains.
+    crate::tui::mermaid::finish_terminal_image_frame(frame.buffer_mut());
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     panel_image_preview::clear_regions();
