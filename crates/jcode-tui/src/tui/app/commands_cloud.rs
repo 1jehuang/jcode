@@ -97,6 +97,19 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         )));
         return true;
     }
+    if matches!(command, CloudCommand::Move { .. })
+        && !app
+            .display_messages
+            .iter()
+            .any(|m| m.role == "user" || m.role == "assistant")
+    {
+        // Sessions are persisted only after the first message, so the move
+        // subprocess would fail with "No session found matching ...".
+        app.push_display_message(DisplayMessage::error(
+            "Nothing to move yet: this session has no messages, so it has not been saved. Send a message first, then retry /cloud.".to_string(),
+        ));
+        return true;
+    }
     if !matches!(command, CloudCommand::Where) {
         if !check_cloud_handoff_input(app, trimmed) {
             return true;
@@ -899,6 +912,7 @@ mod tests {
         for cancel in [false, true] {
             let mut app = crate::tui::app::tests::create_test_app();
             app.is_processing = true;
+            app.push_display_message(DisplayMessage::user("hi".to_string()));
             app.pending_cloud_handoff = Some(pending(
                 CloudCommand::Move {
                     host: Some("old".into()),
