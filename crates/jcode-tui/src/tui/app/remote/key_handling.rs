@@ -1070,6 +1070,12 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
         return Ok(());
     }
     if !app.input.is_empty() {
+        let command = input::expand_paste_placeholders(app, &app.input)
+            .trim()
+            .to_string();
+        if !app_mod::commands_cloud::check_cloud_handoff_input(app, &command) {
+            return Ok(());
+        }
         if app.cloud_handoff_blocks_work()
             && app_mod::commands_cloud::parse_cloud_command(app.input.trim()).is_none()
         {

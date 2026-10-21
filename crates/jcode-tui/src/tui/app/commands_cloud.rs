@@ -10,6 +10,9 @@
 //! Move/return waits for idle and no staged turn. Status preserves the pending
 //! request. Cancellation drops it but does not kill an already-running child.
 //! Preparation results belong to the exact request, never its replacement.
+//! Unsent composer/queue state refuses acceptance and cancels a pending request
+//! at dispatch. A changed active session also cancels it. Canceled host-only
+//! preparation does not prevent continued work in the original session.
 
 use super::{App, CloudHandoff, DisplayMessage};
 
@@ -41,6 +44,23 @@ pub(super) fn parse_cloud_command(trimmed: &str) -> Option<CloudCommand> {
         }),
         _ => None,
     }
+}
+
+/// Validate before a submit path consumes the composer or its attachments.
+pub(super) fn check_cloud_handoff_input(app: &mut App, trimmed: &str) -> bool {
+    if !matches!(
+        parse_cloud_command(trimmed),
+        Some(CloudCommand::Move { .. } | CloudCommand::Return)
+    ) {
+        return true;
+    }
+    if app.has_unsent_handoff_work(Some(trimmed)) {
+        app.push_display_message(DisplayMessage::error(
+            "Cloud handoff not queued: unsent messages, commands, draft text, or attachments would be lost. Send or save them, then retry /cloud or /local. Nothing was removed.".to_string(),
+        ));
+        return false;
+    }
+    true
 }
 
 /// Run a `/cloud` family command. Returns true when handled.
@@ -78,6 +98,9 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         return true;
     }
     if !matches!(command, CloudCommand::Where) {
+        if !check_cloud_handoff_input(app, trimmed) {
+            return true;
+        }
         app.pending_cloud_handoff = Some(PendingCloudHandoff {
             command,
             trimmed: trimmed.to_string(),
@@ -88,7 +111,8 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         app.push_display_message(DisplayMessage::system(
             "Cloud handoff queued for the next idle turn boundary. The current turn continues here. Use /cloud cancel to cancel.",
         ));
-        app.poll_cloud_job();
+        // A queued-command dispatcher may still be restoring the composer draft.
+        // Only the next tick may prepare or transfer, after that state is visible.
         return true;
     }
     start_cloud_command(app, command, trimmed, session_id)
@@ -242,8 +266,53 @@ impl App {
     /// Drain the running job or dispatch a pending handoff when idle.
     pub(super) fn cloud_handoff_blocks_work(&self) -> bool {
         self.pending_cloud_handoff.is_some()
-            || self.cloud_job.is_some()
+            || self
+                .cloud_job
+                .as_ref()
+                .is_some_and(|job| !matches!(job.command, CloudCommand::Prepare { .. }))
             || self.cloud_handoff_requested.is_some()
+    }
+
+    fn has_unsent_handoff_work(&self, accepted_command: Option<&str>) -> bool {
+        let draft = self.input.trim();
+        (!draft.is_empty() && accepted_command != Some(draft))
+            || !self.queued_messages.is_empty()
+            || !self.queued_commands.is_empty()
+            || !self.hidden_queued_system_messages.is_empty()
+            || !self.pending_images.is_empty()
+            || !self.pasted_contents.is_empty()
+            || self
+                .interleave_message
+                .as_ref()
+                .is_some_and(|text| !text.is_empty())
+            || !self.interleave_images.is_empty()
+            || !self.pending_soft_interrupts.is_empty()
+            || !self.pending_soft_interrupt_requests.is_empty()
+    }
+
+    /// Shared by polling and deterministic dispatch tests. No process starts here.
+    fn take_ready_cloud_handoff(&mut self) -> Option<PendingCloudHandoff> {
+        if !self.cloud_handoff_can_dispatch() {
+            return None;
+        }
+        let pending = self.pending_cloud_handoff.as_ref()?;
+        if matches!(pending.command, CloudCommand::Move { .. }) && !pending.prepared {
+            return None;
+        }
+        let changed_session = pending.session_id != super::commands::active_session_id(self);
+        if changed_session || self.has_unsent_handoff_work(None) {
+            self.pending_cloud_handoff = None;
+            let reason = if changed_session {
+                "the active session changed. Retry /cloud or /local from the session you want to move"
+            } else {
+                "unsent messages, commands, draft text, or attachments would be lost. Send or save them, then retry /cloud or /local"
+            };
+            self.push_display_message(DisplayMessage::error(format!(
+                "Pending cloud handoff canceled: {reason}. Nothing was removed."
+            )));
+            return None;
+        }
+        self.pending_cloud_handoff.take()
     }
 
     fn cloud_handoff_can_dispatch(&self) -> bool {
@@ -268,9 +337,8 @@ impl App {
                 "",
             );
         }
-        if self.cloud_handoff_can_dispatch()
-            && let Some(pending) = self.pending_cloud_handoff.take()
-        {
+        let had_pending = self.pending_cloud_handoff.is_some();
+        if let Some(pending) = self.take_ready_cloud_handoff() {
             return start_cloud_command(
                 self,
                 pending.command,
@@ -279,7 +347,7 @@ impl App {
             );
         }
         let Some(job) = self.cloud_job.as_mut() else {
-            return false;
+            return had_pending && self.pending_cloud_handoff.is_none();
         };
         let mut redraw = false;
         let mut done = None;
@@ -535,6 +603,197 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: Vec::new(),
         }
+    }
+
+    fn unsent_snapshot(app: &App) -> String {
+        format!(
+            "{:?}",
+            (
+                &app.input,
+                &app.queued_messages,
+                &app.queued_commands,
+                &app.hidden_queued_system_messages,
+                &app.pending_images,
+                &app.pasted_contents,
+                &app.interleave_message,
+                &app.interleave_images,
+                &app.pending_soft_interrupts,
+                &app.pending_soft_interrupt_requests,
+            )
+        )
+    }
+
+    fn unsent_cases() -> Vec<(&'static str, fn(&mut App))> {
+        vec![
+            ("draft", |app| app.input = "save this draft".into()),
+            ("message", |app| {
+                app.queued_messages.push("queued prompt".into())
+            }),
+            ("command", |app| app.queued_commands.push("/compact".into())),
+            ("hidden", |app| {
+                app.hidden_queued_system_messages.push("reminder".into())
+            }),
+            ("attachment", |app| {
+                app.pending_images.push(("image/png".into(), "data".into()))
+            }),
+            ("paste", |app| {
+                app.pasted_contents.push("pasted draft".into())
+            }),
+            ("interleave", |app| {
+                app.interleave_message = Some("interleave".into())
+            }),
+            ("interleave image", |app| {
+                app.interleave_images
+                    .push(("image/png".into(), "data".into()))
+            }),
+            ("soft interrupt", |app| {
+                app.pending_soft_interrupts.push("interrupt".into())
+            }),
+            ("unacknowledged interrupt", |app| {
+                app.pending_soft_interrupt_requests
+                    .push((1, "interrupt".into()))
+            }),
+        ]
+    }
+
+    #[test]
+    fn acceptance_refuses_unsent_state_without_consuming_it() {
+        for (label, populate) in unsent_cases() {
+            let mut app = crate::tui::app::tests::create_test_app();
+            app.is_processing = true;
+            populate(&mut app);
+            let before = unsent_snapshot(&app);
+            let session = super::super::commands::active_session_id(&app);
+            handle_cloud_command(&mut app, "/local", &session);
+            assert!(app.pending_cloud_handoff.is_none(), "{label}");
+            assert!(app.cloud_job.is_none(), "{label}");
+            assert_eq!(unsent_snapshot(&app), before, "{label}");
+        }
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.input = "/local".into();
+        app.pending_images
+            .push(("image/png".into(), "attachment".into()));
+        let before = unsent_snapshot(&app);
+        app.submit_input();
+        assert_eq!(unsent_snapshot(&app), before);
+        assert!(app.pending_cloud_handoff.is_none());
+        assert!(app.cloud_job.is_none());
+    }
+
+    #[test]
+    fn safe_dispatch_rechecks_new_unsent_work_without_spawning() {
+        for (label, populate) in unsent_cases() {
+            let mut app = crate::tui::app::tests::create_test_app();
+            let session = super::super::commands::active_session_id(&app);
+            app.is_processing = true;
+            handle_cloud_command(&mut app, "/local", &session);
+            assert!(app.pending_cloud_handoff.is_some());
+            populate(&mut app);
+            let before = unsent_snapshot(&app);
+            app.is_processing = false;
+            assert!(app.poll_cloud_job(), "{label}");
+            assert!(app.pending_cloud_handoff.is_none(), "{label}");
+            assert!(app.cloud_job.is_none(), "{label}");
+            assert!(!app.cloud_handoff_blocks_work(), "{label}");
+            assert_eq!(unsent_snapshot(&app), before, "{label}");
+            assert!(
+                app.display_messages
+                    .last()
+                    .unwrap()
+                    .content
+                    .contains("Nothing was removed")
+            );
+        }
+    }
+
+    #[test]
+    fn safe_dispatch_uses_original_session_and_cancels_after_session_change() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let session = super::super::commands::active_session_id(&app);
+        app.pending_cloud_handoff = Some(pending(CloudCommand::Return, &session));
+        app.is_processing = true;
+        assert!(app.take_ready_cloud_handoff().is_none());
+        app.is_processing = false;
+        app.pending_turn = true;
+        assert!(app.take_ready_cloud_handoff().is_none());
+        app.pending_turn = false;
+        let ready = app
+            .take_ready_cloud_handoff()
+            .expect("idle request dispatched");
+        assert_eq!(ready.session_id, session);
+        assert_eq!(ready.command, CloudCommand::Return);
+        assert!(
+            app.cloud_job.is_none(),
+            "deterministic dispatch helper never spawns"
+        );
+        app.pending_cloud_handoff = Some(ready);
+        app.is_remote = true;
+        app.remote_session_id = Some("different-session".into());
+        assert!(app.poll_cloud_job());
+        assert!(app.pending_cloud_handoff.is_none());
+        assert!(app.cloud_job.is_none());
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("active session changed")
+        );
+    }
+
+    #[test]
+    fn busy_enter_keeps_new_draft_out_of_interleave() {
+        for queue_mode in [false, true] {
+            let mut app = crate::tui::app::tests::create_test_app();
+            app.is_processing = true;
+            app.queue_mode = queue_mode;
+            let session = super::super::commands::active_session_id(&app);
+            handle_cloud_command(&mut app, "/local", &session);
+            app.input = "new draft".into();
+            super::super::input::handle_enter(&mut app);
+            assert_eq!(app.input, "new draft");
+            assert!(app.interleave_message.is_none());
+            assert!(app.queued_messages.is_empty());
+            app.is_processing = false;
+            assert!(app.poll_cloud_job());
+            assert!(app.pending_cloud_handoff.is_none());
+            assert_eq!(app.input, "new draft");
+        }
+    }
+
+    #[test]
+    fn queued_handoff_restores_draft_before_dispatch_recheck() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.input = "unsent original draft".into();
+        app.queued_commands.push("/local".into());
+        super::super::input::run_queued_commands_local(&mut app);
+        assert_eq!(app.input, "unsent original draft");
+        assert!(app.pending_cloud_handoff.is_some());
+        assert!(
+            app.cloud_job.is_none(),
+            "acceptance cannot race draft restoration"
+        );
+        assert!(app.poll_cloud_job());
+        assert!(app.pending_cloud_handoff.is_none());
+        assert!(app.cloud_job.is_none());
+        assert_eq!(app.input, "unsent original draft");
+    }
+
+    #[test]
+    fn canceled_preparation_does_not_block_work() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.pending_cloud_handoff = Some(pending(CloudCommand::Move { host: None }, "source"));
+        let _tx = fake_job(&mut app, CloudCommand::Prepare { host: None });
+        handle_cloud_command(&mut app, "/cloud cancel", "source");
+        assert!(!app.cloud_handoff_blocks_work());
+        assert!(
+            app.cloud_job.is_some(),
+            "preflight may finish independently"
+        );
+        app.input = "continue working here".into();
+        app.submit_input();
+        assert!(app.pending_turn);
+        assert!(app.input.is_empty());
     }
 
     #[test]

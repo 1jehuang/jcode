@@ -1279,7 +1279,7 @@ pub(super) fn clear_input_for_escape(app: &mut App) {
     }
 }
 
-pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
+pub(super) fn expand_paste_placeholders(app: &App, input: &str) -> String {
     expand_paste_placeholders_with(&app.pasted_contents, input)
 }
 
@@ -1436,6 +1436,11 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
 }
 
 pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
+    // Route through the submission guard rather than consuming this draft
+    // into an interleave slot that turn completion would clear.
+    if app.cloud_handoff_blocks_work() {
+        return SendAction::Submit;
+    }
     if app.pending_login.is_some() {
         return SendAction::Submit;
     }
@@ -3891,6 +3896,12 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
+        let command = expand_paste_placeholders(self, &self.input)
+            .trim()
+            .to_string();
+        if !super::commands_cloud::check_cloud_handoff_input(self, &command) {
+            return;
+        }
         if self.cloud_handoff_blocks_work()
             && super::commands_cloud::parse_cloud_command(self.input.trim()).is_none()
         {
