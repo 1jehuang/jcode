@@ -2,9 +2,11 @@
 
 #[path = "input/shell_commands.rs"]
 mod shell_commands;
+pub(super) mod terminal_replies;
 use super::input_images::attach_image;
 pub(super) use super::input_images::take_prepared_input;
 use shell_commands::*;
+pub(super) use terminal_replies::strip_osc_color_replies;
 
 use super::{
     App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
@@ -733,6 +735,9 @@ impl App {
 /// listed. Anything else is left alone: a missed remnant is cosmetic, whereas
 /// eating a user's real characters is not.
 pub(super) fn strip_terminal_control_sequences(text: &str) -> std::borrow::Cow<'_, str> {
+    if let Some((cleaned, _)) = strip_osc_color_replies(text, text.len()) {
+        return std::borrow::Cow::Owned(strip_terminal_control_sequences(&cleaned).into_owned());
+    }
     let looks_suspicious = text
         .chars()
         .any(|ch| ch == '\x1b' || ch == '\u{9b}' || (ch.is_control() && ch != '\t' && ch != '\n'));
@@ -761,8 +766,8 @@ pub(super) fn strip_terminal_control_sequences(text: &str) -> std::borrow::Cow<'
                     None => index = bytes.len(),
                 }
             } else if index < bytes.len() {
-                // Two-character escape such as ESC O or ESC ].
-                index += 1;
+                // ESC followed by one whole character (including Alt+Unicode).
+                index += text[index..].chars().next().unwrap().len_utf8();
             }
             continue;
         }
@@ -775,6 +780,11 @@ pub(super) fn strip_terminal_control_sequences(text: &str) -> std::borrow::Cow<'
                     None => index = bytes.len(),
                 }
             }
+            continue;
+        }
+        // C1 OSC/ST are controls, not printable composer content.
+        if byte == 0xc2 && matches!(bytes.get(index + 1), Some(0x9c | 0x9d)) {
+            index += 2;
             continue;
         }
         // A bare report-shaped run left behind by a torn read.
@@ -849,113 +859,6 @@ fn bare_terminal_report_length(bytes: &[u8]) -> Option<usize> {
     REPORT_FINALS.contains(&bytes[len - 1]).then_some(len)
 }
 
-/// Remove late OSC 10/11 color replies that the terminal delivered as keys.
-///
-/// Some terminals (Orca's Electron terminal, #970) answer the startup
-/// background query after the query has timed out. crossterm then decodes the
-/// reply one character at a time: the `ESC ]` introducer and `ESC \`
-/// terminator become Alt chords that never reach the composer, but the body
-/// `11;rgb:3030/3434/4646` lands in the draft character by character. No single
-/// insertion contains the whole sequence, so it has to be recognized in the
-/// accumulated buffer instead.
-fn scrub_osc_color_replies(app: &mut App) {
-    if !app.input.contains("rgb") {
-        return;
-    }
-    let Some((cleaned, cursor)) = strip_osc_color_replies(&app.input, app.cursor_pos) else {
-        return;
-    };
-    app.input = cleaned;
-    app.cursor_pos = cursor;
-}
-
-/// Strip complete OSC color reply bodies from `input`, returning the cleaned
-/// text and the cursor remapped onto it, or `None` when nothing matched.
-///
-/// A body only matches once it is complete: `1N;rgb:` (or `rgba:`) followed by
-/// three (or four for `rgba`) `/`-separated hex components that all share the
-/// first component's width. Requiring equal widths keeps a half-arrived reply
-/// from matching early and leaving its tail behind. An adjacent `]` or `\` (surviving pieces of the OSC
-/// introducer and string terminator) is removed with it.
-pub(super) fn strip_osc_color_replies(input: &str, cursor: usize) -> Option<(String, usize)> {
-    let bytes = input.as_bytes();
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let mut search = 0usize;
-    while let Some(found) = input[search..].find(";rgb") {
-        let semi = search + found;
-        search = semi + 1;
-        // `1` then one digit before the `;`: OSC 10..=19 color reports.
-        if semi < 2 || bytes[semi - 2] != b'1' || !bytes[semi - 1].is_ascii_digit() {
-            continue;
-        }
-        let mut start = semi - 2;
-        // A third leading digit means this is some other number, not `1N`,
-        // unless it is the tail of a reply we just matched.
-        let follows_reply = ranges.last().is_some_and(|&(_, end)| end == start);
-        if start > 0 && bytes[start - 1].is_ascii_digit() && !follows_reply {
-            continue;
-        }
-        let mut pos = semi + 4;
-        let mut wanted = 3;
-        if bytes.get(pos) == Some(&b'a') {
-            pos += 1;
-            wanted = 4;
-        }
-        if bytes.get(pos) != Some(&b':') {
-            continue;
-        }
-        pos += 1;
-        let hex_run = |from: usize| {
-            bytes[from..]
-                .iter()
-                .take_while(|byte| byte.is_ascii_hexdigit())
-                .count()
-        };
-        let width = hex_run(pos);
-        if !(1..=4).contains(&width) {
-            continue;
-        }
-        pos += width;
-        // Later components take exactly `width` digits, so a second reply
-        // glued onto the last one (`f4f411;rgb:...`) still splits cleanly,
-        // while a component that is still arriving is too short to match.
-        let mut components = 1;
-        while components < wanted && bytes.get(pos) == Some(&b'/') && hex_run(pos + 1) >= width {
-            pos += 1 + width;
-            components += 1;
-        }
-        if components < wanted {
-            continue;
-        }
-        if start > 0 && bytes[start - 1] == b']' {
-            start -= 1;
-        }
-        if bytes.get(pos) == Some(&b'\\') {
-            pos += 1;
-        }
-        ranges.push((start, pos));
-        search = pos;
-    }
-    if ranges.is_empty() {
-        return None;
-    }
-
-    let mut cleaned = String::with_capacity(input.len());
-    let mut new_cursor = cursor;
-    let mut last = 0usize;
-    for (start, end) in ranges {
-        cleaned.push_str(&input[last..start]);
-        if cursor >= end {
-            new_cursor -= end - start;
-        } else if cursor > start {
-            new_cursor -= cursor - start;
-        }
-        last = end;
-    }
-    cleaned.push_str(&input[last..]);
-    Some((cleaned, new_cursor))
-}
-
 pub(super) fn insert_input_text(app: &mut App, text: &str) {
     insert_input_text_with_undo(app, text, false);
 }
@@ -965,8 +868,10 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
         return;
     }
 
-    // Drop terminal escape remnants before they can land in the draft (#540).
-    let sanitized = strip_terminal_control_sequences(text);
+    // Filter framed replies before any composer, marker, undo or render state
+    // can observe them. Incomplete frames live only in the bounded parser.
+    let filtered = app.terminal_reply_filter.filter(text);
+    let sanitized = strip_terminal_control_sequences(&filtered);
     let text: &str = &sanitized;
     if text.is_empty() {
         return;
@@ -1023,7 +928,6 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     app.input.insert_str(at, text);
     app.cursor_pos += text.len();
     app.input_images_inserted(at, text.len(), None);
-    scrub_osc_color_replies(app);
 
     // Typing the final command character immediately arms picker filtering.
     // Without this, users can keep typing the command token or press Enter
@@ -1049,6 +953,11 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         return false;
     }
 
+    if app.terminal_reply_filter.is_pending() || text.contains(['\x1b', '\u{9d}']) {
+        // Terminal digits must not activate empty-composer suggestion hotkeys.
+        insert_input_text_with_undo(app, text, true);
+        return true;
+    }
     let onboarding_suggestions = matches!(
         app.onboarding_phase(),
         Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)
@@ -3200,6 +3109,41 @@ impl App {
         modifiers: KeyModifiers,
         text_input: Option<String>,
     ) -> Result<()> {
+        if modifiers == KeyModifiers::ALT && code == KeyCode::Char(']') {
+            self.terminal_reply_filter.reset();
+            insert_input_text(self, "\x1b]");
+            return Ok(());
+        }
+        if self.terminal_reply_filter.is_pending() {
+            let terminator = match (code, modifiers) {
+                (KeyCode::Char('\\'), KeyModifiers::ALT) => Some("\x1b\\"),
+                (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some("\x07"),
+                (KeyCode::Char('\x07'), KeyModifiers::NONE) => Some("\x07"),
+                _ => None,
+            };
+            if let Some(terminator) = terminator {
+                insert_input_text(self, terminator);
+                return Ok(());
+            }
+            if !modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                && let Some(text) = text_input
+                    .clone()
+                    .or_else(|| text_input_for_key(code, modifiers))
+            {
+                // Consume response characters before modal/suggestion routing.
+                insert_input_text_with_undo(self, &text, true);
+                return Ok(());
+            }
+        }
+        // Editing/navigation/submit shortcuts end a response burst. Printable
+        // keys may still complete a frame, but controls cannot preserve stale
+        // parser state across a user action such as undo or history movement.
+        if !matches!(code, KeyCode::Char(_))
+            || modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            self.terminal_reply_filter.reset();
+        }
         let mut code = code;
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
@@ -3965,6 +3909,7 @@ impl App {
     }
 
     pub(super) fn submit_input_with_routing(&mut self, mut routing_input: String) {
+        self.terminal_reply_filter.reset();
         // Connected SSH input is dispatched through the wire client, never the
         // local submit fallback (which reads skills and persists prompts).
         if crate::tui::is_ssh_remote() {

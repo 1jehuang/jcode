@@ -483,7 +483,6 @@ impl App {
             crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
             crate::session::SessionImproveMode::RefactorPlan => ImproveMode::RefactorPlan,
         });
-
         crate::logging::info("App::new_minimal_with_session: skipping skill/prompt bootstrap");
         crate::telemetry::begin_session_with_parent(
             provider.name(),
@@ -491,7 +490,6 @@ impl App {
             session.parent_id.clone(),
             false,
         );
-
         let mut app = Self {
             provider,
             registry,
@@ -804,6 +802,7 @@ impl App {
             input_selection_anchor: None,
             input_selection_clicks: Default::default(),
             input_typing_undo: None,
+            terminal_reply_filter: Default::default(),
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -1290,6 +1289,7 @@ impl App {
             input_selection_anchor: None,
             input_selection_clicks: Default::default(),
             input_typing_undo: None,
+            terminal_reply_filter: Default::default(),
             history_draft: None,
             status_notice: None,
             learn_hint: None,
