@@ -57,7 +57,7 @@ impl Default for ClaudeCodeConfig {
 pub struct ClaudeCodeInstanceConfig {
     /// Slug, `^[a-zA-Z][a-zA-Z0-9_-]*$`.
     pub id: String,
-    /// Label shown in the model picker and `/account`.
+    /// Label shown in the model picker and `/accounts`.
     pub display_name: Option<String>,
     /// `CLAUDE_CONFIG_DIR` for this instance. Empty or unset = CLI default (`~/.claude`).
     pub home: Option<String>,

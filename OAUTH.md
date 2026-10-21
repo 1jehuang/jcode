@@ -126,7 +126,7 @@ a session picks one per turn.
 | Transport | jcode calls the Anthropic API directly | jcode drives a long-lived `claude` process (stream-json) |
 | Credentials | `~/.jcode/auth.json` (jcode OAuth or imported) | Owned by Claude Code (`~/.claude` or the instance's `CLAUDE_CONFIG_DIR`); jcode never reads or imports them |
 | Tools | jcode executes its own tools | Claude Code runs its built-in tools; jcode-only tools are offered over an in-process MCP server |
-| Accounts | `claude-<n>` labels in `/account claude` | Instances from `[provider.claude_code]` in `/account claude-code` |
+| Accounts | `claude-<n>` labels in `/accounts claude` | Instances from `[provider.claude_code]` in `/accounts claude-code` |
 | Model ids | `claude-opus-4-8`, `claude-oauth:...` | `claude-code:claude-opus-4-8` |
 
 Why use it: Claude Code keeps the login, makes every request and runs its own
@@ -173,7 +173,7 @@ jcode login --provider claude-code --account personal  # CLAUDE_CONFIG_DIR=~/.cl
 ```
 
 Use it with `jcode --provider claude-code`, a `Claude Code` route in `/model`, or
-`/model claude-code:claude-opus-4-8`. `/account claude-code` lists the instances
+`/model claude-code:claude-opus-4-8`. `/accounts claude-code` lists the instances
 with the email and plan Claude Code cached for each login; picking one pins it
 for the current window. Each non-default instance also appears in `/model` as
 its own route (`claude-code:<instance>`), so picking a route picks the account.

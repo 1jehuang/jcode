@@ -25,7 +25,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
         command,
         "/logout"
             | "/auth"
-            | "/account"
             | "/accounts"
             | "/config"
             | "/permissions"
@@ -296,7 +295,7 @@ mod tests {
                     .contains("SSH mode")
             );
         }
-        for command in ["/login", "/account", "/subagent-model"] {
+        for command in ["/login", "/accounts", "/subagent-model"] {
             app.input = command.to_string();
             app.sync_model_picker_preview_from_input();
             assert!(app.inline_interactive_state.is_none(), "{command}");
@@ -339,7 +338,7 @@ mod tests {
     fn ssh_blocks_local_side_effects_but_preserves_wire_commands() {
         for command in [
             "/logout all",
-            "/account add",
+            "/accounts add",
             "/config edit",
             "/permissions",
             "/open /etc/passwd",

@@ -287,7 +287,7 @@ impl App {
     /// * Local sessions prefer the provider's *explicitly pinned* credential
     ///   ([`Provider::active_explicit_credential`]) so the widget reflects the
     ///   credential the next request will actually use the instant the user
-    ///   switches OAuth<->API (model picker, `/account`, header toggle). That
+    ///   switches OAuth<->API (model picker, `/accounts`, header toggle). That
     ///   read is in-memory and cache-free, so it never lingers on a stale
     ///   [`AuthStatus`] snapshot (cached up to 60s) or a `JCODE_RUNTIME_PROVIDER`
     ///   pin that drifted out of sync with the provider. When the provider is in

@@ -58,7 +58,7 @@ struct LegacyTokens {
 const ACCOUNT_LABEL_PREFIX: &str = "openai";
 
 /// Set the runtime override for the active account label.
-/// This allows `/account switch <label>` to take effect without rewriting the file.
+/// This allows `/accounts switch <label>` to take effect without rewriting the file.
 pub fn set_active_account_override(label: Option<String>) {
     crate::auth::account_store::set_runtime_active_override(ACCOUNT_LABEL_PREFIX, label);
 }
@@ -255,6 +255,53 @@ pub fn remove_account(label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rename an account's label (the human-facing name shown in the picker).
+/// References to the old label (active account and runtime override) are
+/// migrated; identity-based session pins continue resolving to the renamed login.
+pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
+    let new_label = new_label.trim();
+    if new_label.is_empty() {
+        anyhow::bail!("New account name cannot be empty");
+    }
+    if matches!(new_label, "default" | "main")
+        || new_label.strip_prefix("openai-").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+        })
+    {
+        anyhow::bail!("That name is reserved for legacy account migration; choose a custom name");
+    }
+    let mut auth = load_auth_file()?;
+    if new_label == old_label {
+        if auth.openai_accounts.iter().any(|account| account.label == old_label) {
+            return Ok(());
+        }
+        anyhow::bail!("No OpenAI account with label '{}' found", old_label);
+    }
+    if auth.openai_accounts.iter().any(|a| a.label == new_label) {
+        anyhow::bail!("An account named '{}' already exists", new_label);
+    }
+    let Some(account) = auth
+        .openai_accounts
+        .iter_mut()
+        .find(|a| a.label == old_label)
+    else {
+        anyhow::bail!("No OpenAI account with label '{}' found", old_label);
+    };
+    account.label = new_label.to_string();
+
+    if auth.active_openai_account.as_deref() == Some(old_label) {
+        auth.active_openai_account = Some(new_label.to_string());
+    }
+
+    save_auth_file(&auth)?;
+
+    if get_active_account_override().as_deref() == Some(old_label) {
+        set_active_account_override(Some(new_label.to_string()));
+    }
+
+    Ok(())
+}
+
 pub fn clear_accounts() -> Result<usize> {
     let mut auth = load_auth_file()?;
     let removed = auth.openai_accounts.len();
@@ -281,11 +328,16 @@ pub fn update_account_tokens(
     {
         account.access_token = access_token.to_string();
         account.refresh_token = refresh_token.to_string();
-        account.id_token = id_token.clone();
-        account.account_id =
-            account_id.or_else(|| id_token.as_deref().and_then(extract_account_id));
+        if let Some(id_token) = id_token {
+            account.email = extract_email(&id_token).or_else(|| account.email.clone());
+            account.account_id = account_id
+                .or_else(|| extract_account_id(&id_token))
+                .or_else(|| account.account_id.clone());
+            account.id_token = Some(id_token);
+        } else if let Some(account_id) = account_id {
+            account.account_id = Some(account_id);
+        }
         account.expires_at = expires_at;
-        account.email = id_token.as_deref().and_then(extract_email);
         save_auth_file(&auth)?;
         Ok(())
     } else {

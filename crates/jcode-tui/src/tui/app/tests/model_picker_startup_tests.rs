@@ -55,7 +55,7 @@ fn test_open_model_picker_without_routes_shows_actionable_guidance() {
         let last = app.display_messages.last().expect("display message");
         assert_eq!(last.role, "system");
         assert!(last.content.contains("/login"));
-        assert!(last.content.contains("/account"));
+        assert!(last.content.contains("/accounts"));
         assert!(last.content.contains("/model"));
     });
 }

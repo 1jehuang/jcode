@@ -39,6 +39,48 @@ pub use openai_reset::{
 };
 use provider_fetch::*;
 
+/// Fetch a saved login's subscription limits without selecting it as active.
+/// Identity is explicit rather than inferred from a provider display name.
+pub async fn fetch_saved_account_usage(provider: &str, label: &str) -> ProviderUsage {
+    let result = match provider {
+        "claude" | "anthropic" => match auth::claude::list_accounts() {
+            Ok(accounts) => match accounts.into_iter().find(|account| account.label == label) {
+                Some(account) => {
+                    return fetch_anthropic_usage_for_token(
+                        format!("Claude {label}"),
+                        account.access,
+                        account.refresh,
+                        account.label,
+                        account.expires,
+                    )
+                    .await;
+                }
+                None => "Saved Claude account no longer exists".to_string(),
+            },
+            Err(error) => error.to_string(),
+        },
+        "openai" => match auth::codex::load_credentials_for_account(label) {
+            Ok(credentials) => {
+                let mut report = fetch_openai_usage_for_account(
+                    format!("OpenAI {label}"),
+                    credentials,
+                    Some(label),
+                )
+                .await;
+                attach_activity(&mut report, &format!("openai:oauth:{label}"));
+                return report;
+            }
+            Err(error) => error.to_string(),
+        },
+        _ => "Subscription usage is unsupported for this provider".to_string(),
+    };
+    ProviderUsage {
+        provider_name: format!("{provider} {label}"),
+        error: Some(result),
+        ..Default::default()
+    }
+}
+
 use anyhow::{Context, Result};
 pub use display::{format_reset_time, format_usage_bar};
 use display::{format_token_count, humanize_key, provider_usage_cache_is_fresh};

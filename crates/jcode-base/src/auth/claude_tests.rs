@@ -1,6 +1,47 @@
 use super::*;
 use std::ffi::OsString;
 
+#[test]
+fn rename_saved_account_preserves_identity_default_and_other_accounts() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    set_active_account_override(None);
+    for label in ["work", "personal"] {
+        let saved_label = upsert_account(AnthropicAccount {
+            label: label.into(), access: format!("access-{label}"),
+            refresh: format!("refresh-{label}"), expires: 1234,
+            email: Some(format!("{label}@example.com")), scopes: vec!["user:profile".into()],
+            subscription_type: Some("max".into()),
+        }).unwrap();
+        rename_account(&saved_label, label).unwrap();
+    }
+    set_active_account("work").unwrap();
+    let pin = pin_for_label("work").unwrap();
+    rename_account("work", "  Research team  ").unwrap();
+    assert_eq!(default_account_label().as_deref(), Some("Research team"));
+    assert_eq!(get_active_account_override().as_deref(), Some("Research team"));
+    assert_eq!(resolve_pin(&pin).as_deref(), Some("Research team"));
+    let accounts = list_accounts().unwrap();
+    assert_eq!(accounts.len(), 2);
+    assert_eq!(accounts[0].label, "Research team");
+    assert_eq!(accounts[0].access, "access-work");
+    assert_eq!(accounts[1].label, "personal");
+    update_account_tokens("Research team", "renewed-access", "renewed-refresh", 5678).unwrap();
+    assert_eq!(default_account_label().as_deref(), Some("Research team"));
+    assert_eq!(resolve_pin(&pin).as_deref(), Some("Research team"));
+    assert_eq!(list_accounts().unwrap()[1].access, "access-personal");
+    for invalid in ["", "main", "default", "claude-2", "personal"] {
+        assert!(rename_account("Research team", invalid).is_err());
+    }
+    assert!(rename_account("missing", "missing").is_err());
+    assert_eq!(list_accounts().unwrap()[0].label, "Research team");
+    remove_account("Research team").unwrap();
+    assert!(update_account_tokens("Research team", "late-access", "late-refresh", 9999).is_err());
+    assert_eq!(list_accounts().unwrap().len(), 1);
+    set_active_account_override(None);
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,

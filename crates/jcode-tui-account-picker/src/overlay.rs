@@ -103,6 +103,39 @@ impl AccountPicker {
             .and_then(|idx| self.items.get(*idx))
     }
 
+    /// Refresh row metadata without changing the active filter or selection.
+    /// The callback must leave commands and row identity unchanged.
+    pub fn update_account_details(&mut self, update: impl FnOnce(&mut [AccountPickerItem])) {
+        update(&mut self.items);
+    }
+
+    pub fn select_account(&mut self, provider_id: &str, label: Option<&str>) {
+        let target = self
+            .filtered
+            .iter()
+            .position(|index| {
+                let item = &self.items[*index];
+                item.provider_id == provider_id
+                    && match &item.command {
+                        AccountPickerCommand::Switch { label: target, .. } => {
+                            label == Some(target.as_str())
+                        }
+                        AccountPickerCommand::SubmitInput(input) => label.is_some_and(|label| {
+                            input == &format!("/accounts {provider_id} switch {label}")
+                        }),
+                        _ => false,
+                    }
+            })
+            .or_else(|| {
+                self.filtered
+                    .iter()
+                    .position(|index| action_section(&self.items[*index]) == ActionSection::Switch)
+            });
+        if let Some(target) = target {
+            self.selected = target;
+        }
+    }
+
     fn visible_rows(&self, height: u16) -> Vec<(usize, bool)> {
         let capacity = height as usize;
         if capacity == 0 || self.filtered.is_empty() {
@@ -624,11 +657,33 @@ impl AccountPicker {
                     Style::default()
                 };
                 let (icon, icon_color) = action_icon(item);
-                let title = compact_item_title(item);
                 let badges = render_support::account_badges(item);
-                let badge_text: String = badges.iter().map(|badge| format!(" [{badge}]")).collect();
+                let badge_text: String = badges
+                    .iter()
+                    .filter_map(|badge| {
+                        let badge = match (*badge, list_inner.width) {
+                            ("this window", 0..50) | ("pinned", 0..50) => return None,
+                            ("this window", 50..72) => "here",
+                            ("pinned", 50..72) => "pin",
+                            ("default", 0..72) => "def",
+                            _ => badge,
+                        };
+                        Some(format!(" [{badge}]"))
+                    })
+                    .collect();
+                // Keep a remaining-capacity value visible even on a long or
+                // active/default account row. Full names and scopes are in Details.
+                let quota_width = if matches!(item.command, AccountPickerCommand::Switch { .. }) {
+                    17
+                } else {
+                    0
+                };
+                let title_width = 22.min(
+                    (list_inner.width as usize).saturating_sub(7 + badge_text.len() + quota_width),
+                );
+                let title = truncate_with_ellipsis(&compact_item_title(item), title_width);
                 let meta_width = (list_inner.width as usize)
-                    .saturating_sub(16)
+                    .saturating_sub(7 + Line::from(title.clone()).width())
                     .saturating_sub(badge_text.chars().count());
                 let meta = truncate_with_ellipsis(&item.subtitle, meta_width);
                 let mut spans = vec![
@@ -637,10 +692,7 @@ impl AccountPicker {
                         row_style.fg(Color::White),
                     ),
                     Span::styled(format!("{} ", icon), row_style.fg(icon_color).bold()),
-                    Span::styled(
-                        truncate_with_ellipsis(&title, 22),
-                        row_style.fg(Color::White),
-                    ),
+                    Span::styled(title, row_style.fg(Color::White)),
                 ];
                 if !badge_text.is_empty() {
                     spans.push(Span::styled(
@@ -937,6 +989,7 @@ fn estimate_command_bytes(command: &AccountPickerCommand) -> usize {
         AccountPickerCommand::Switch { label, .. }
         | AccountPickerCommand::SetDefault { label, .. }
         | AccountPickerCommand::Login { label, .. }
+        | AccountPickerCommand::Rename { label, .. }
         | AccountPickerCommand::Remove { label, .. } => label.capacity(),
         AccountPickerCommand::PromptNew { .. }
         | AccountPickerCommand::Unpin { .. }
@@ -976,10 +1029,115 @@ mod tests {
                     format!("Provider {index}"),
                     format!("Action {index}"),
                     "long subtitle that must never wrap into a mouse row",
-                    AccountPickerCommand::SubmitInput(format!("/account p{index} settings")),
+                    AccountPickerCommand::SubmitInput(format!("/accounts p{index} settings")),
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn account_focus_and_usage_updates_preserve_search_and_target() {
+        let items = ["personal", "work account"]
+            .into_iter()
+            .map(|label| {
+                AccountPickerItem::action(
+                    "openai",
+                    "OpenAI",
+                    format!("Use {label} in this window"),
+                    "Usage loading",
+                    AccountPickerCommand::Switch {
+                        provider: AccountProviderKind::OpenAi,
+                        label: label.into(),
+                    },
+                )
+            })
+            .collect();
+        let mut picker = AccountPicker::new("Accounts", items);
+        picker.select_account("openai", Some("work account"));
+        assert!(matches!(&picker.selected_item().unwrap().command,
+            AccountPickerCommand::Switch { label, .. } if label == "work account"));
+        for letter in "work".chars() {
+            picker
+                .handle_overlay_key(KeyCode::Char(letter), KeyModifiers::empty())
+                .unwrap();
+        }
+        let before = (
+            picker.selected,
+            picker.filtered.clone(),
+            picker.filter.clone(),
+        );
+        picker.update_account_details(|items| {
+            for item in items {
+                item.subtitle = "5h 75% left | saved".into();
+                item.details = vec![("5h".into(), "75% left; resets tomorrow".into())];
+            }
+        });
+        assert_eq!(
+            (
+                picker.selected,
+                picker.filtered.clone(),
+                picker.filter.clone()
+            ),
+            before
+        );
+        assert!(
+            matches!(picker.handle_overlay_key(KeyCode::Enter, KeyModifiers::empty()).unwrap(),
+            OverlayAction::Execute(AccountPickerCommand::Switch { label, .. }) if label == "work account")
+        );
+    }
+
+    #[test]
+    fn usage_updates_preserve_exact_pending_removal_confirmation() {
+        let mut picker = AccountPicker::new(
+            "Accounts",
+            vec![AccountPickerItem::action(
+                "openai",
+                "OpenAI",
+                "Remove work",
+                "saved",
+                AccountPickerCommand::Remove {
+                    provider: AccountProviderKind::OpenAi,
+                    label: "work".into(),
+                },
+            )],
+        );
+        picker
+            .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        picker.update_account_details(|items| items[0].subtitle = "updated metadata".into());
+        assert!(
+            matches!(picker.handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty()).unwrap(),
+            OverlayAction::Execute(AccountPickerCommand::Remove { label, .. }) if label == "work")
+        );
+    }
+
+    #[test]
+    fn remaining_quota_survives_long_account_names_and_scope_badges() {
+        let item = AccountPickerItem::action(
+            "openai",
+            "OpenAI",
+            "Use a very long custom account name in this window",
+            "5h 75% left · 7d 25% left | test@example.com - this window - pinned - default",
+            AccountPickerCommand::Switch {
+                provider: AccountProviderKind::OpenAi,
+                label: "a very long custom account name".into(),
+            },
+        );
+        for width in [38, 50, 64, 90] {
+            let mut picker = AccountPicker::new("Accounts", vec![item.clone()]);
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            terminal
+                .draw(|frame| picker.render_action_list(frame, frame.area()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = (0..8)
+                .flat_map(|y| (0..width).map(move |x| buffer[(x, y)].symbol()))
+                .collect::<String>();
+            assert!(
+                text.contains("5h 75% left"),
+                "quota hidden at width {width}: {text}"
+            );
+        }
     }
 
     #[test]
@@ -1080,7 +1238,7 @@ mod tests {
                 provider: AccountProviderKind::OpenAi,
                 label: "exact-work".into(),
             },
-            AccountPickerCommand::SubmitInput("/account openai remove exact-work".into()),
+            AccountPickerCommand::SubmitInput("/accounts openai remove exact-work".into()),
         ] {
             let item = AccountPickerItem::action(
                 "openai",
@@ -1163,7 +1321,7 @@ mod tests {
                 "OpenAI",
                 title,
                 "OAuth",
-                AccountPickerCommand::SubmitInput("/account openai login".into()),
+                AccountPickerCommand::SubmitInput("/accounts openai login".into()),
             );
             assert_eq!(compact_item_title(&item), title);
         }
@@ -1268,12 +1426,12 @@ mod tests {
                     "OpenAI",
                     "Switch OpenAI Otter",
                     "saved",
-                    AccountPickerCommand::SubmitInput("/account openai switch openai-otter".into()),
+                    AccountPickerCommand::SubmitInput("/accounts openai switch openai-otter".into()),
                 )
                 .with_details(vec![
                     (
                         "Full usage details".into(),
-                        "/account openai settings".into(),
+                        "/accounts openai settings".into(),
                     ),
                     (
                         "Today (local midnight)".into(),
@@ -1315,7 +1473,7 @@ mod tests {
             "1234567890 input",
             "600000 cached input",
             "Not your subscription bill.",
-            "/account openai settings",
+            "/accounts openai settings",
         ] {
             assert!(
                 rendered.contains(expected),
@@ -1332,12 +1490,12 @@ mod tests {
             .flat_map(|y| (0..42).map(move |x| compact_buffer[(x, y)].symbol()))
             .collect::<String>();
         assert!(
-            compact_text.contains("/account openai settings"),
+            compact_text.contains("/accounts openai settings"),
             "short panes retain the full-detail route"
         );
         assert!(
             matches!(picker.handle_overlay_key(KeyCode::Enter, KeyModifiers::empty()).unwrap(),
-            OverlayAction::Execute(AccountPickerCommand::SubmitInput(command)) if command == "/account openai switch openai-otter")
+            OverlayAction::Execute(AccountPickerCommand::SubmitInput(command)) if command == "/accounts openai switch openai-otter")
         );
     }
 
@@ -1350,7 +1508,7 @@ mod tests {
                 "OpenAI",
                 "Add account",
                 "Start login flow",
-                AccountPickerCommand::SubmitInput("/account openai add default".to_string()),
+                AccountPickerCommand::SubmitInput("/accounts openai add default".to_string()),
             )],
         );
 
@@ -1385,14 +1543,14 @@ mod tests {
                     "OpenAI",
                     "Provider settings",
                     "configured",
-                    AccountPickerCommand::SubmitInput("/account openai settings".to_string()),
+                    AccountPickerCommand::SubmitInput("/accounts openai settings".to_string()),
                 ),
                 AccountPickerItem::action(
                     "openai",
                     "OpenAI",
                     "Login / refresh",
                     "OAuth",
-                    AccountPickerCommand::SubmitInput("/account openai login".to_string()),
+                    AccountPickerCommand::SubmitInput("/accounts openai login".to_string()),
                 ),
             ],
         );
@@ -1438,12 +1596,12 @@ mod tests {
     fn test_prompt_value_command_preview_shows_placeholder() {
         let preview = command_preview(&AccountPickerCommand::PromptValue {
             prompt: "Enter default model".to_string(),
-            command_prefix: "/account default-model".to_string(),
+            command_prefix: "/accounts default-model".to_string(),
             empty_value: Some("clear".to_string()),
             status_notice: "editing".to_string(),
         });
 
-        assert!(preview.contains("/account default-model <value>"));
+        assert!(preview.contains("/accounts default-model <value>"));
         assert!(preview.contains("clear"));
     }
 
@@ -1457,14 +1615,14 @@ mod tests {
                     "OpenAI",
                     "Provider settings",
                     "configured",
-                    AccountPickerCommand::SubmitInput("/account openai settings".to_string()),
+                    AccountPickerCommand::SubmitInput("/accounts openai settings".to_string()),
                 ),
                 AccountPickerItem::action(
                     "openai",
                     "OpenAI",
                     "Switch account `work`",
                     "user@example.com - valid - active",
-                    AccountPickerCommand::SubmitInput("/account openai switch work".to_string()),
+                    AccountPickerCommand::SubmitInput("/accounts openai switch work".to_string()),
                 ),
                 AccountPickerItem::action(
                     "defaults",
@@ -1473,7 +1631,7 @@ mod tests {
                     "Current: auto",
                     AccountPickerCommand::PromptValue {
                         prompt: "provider".to_string(),
-                        command_prefix: "/account default-provider".to_string(),
+                        command_prefix: "/accounts default-provider".to_string(),
                         empty_value: Some("auto".to_string()),
                         status_notice: "editing".to_string(),
                     },
@@ -1502,21 +1660,23 @@ mod tests {
                     "Claude",
                     "Switch account `work`",
                     "a@example.com - valid - active",
-                    AccountPickerCommand::SubmitInput("/account claude switch work".to_string()),
+                    AccountPickerCommand::SubmitInput("/accounts claude switch work".to_string()),
                 ),
                 AccountPickerItem::action(
                     "claude",
                     "Claude",
                     "Provider settings",
                     "configured",
-                    AccountPickerCommand::SubmitInput("/account claude settings".to_string()),
+                    AccountPickerCommand::SubmitInput("/accounts claude settings".to_string()),
                 ),
                 AccountPickerItem::action(
                     "openai",
                     "OpenAI",
                     "Switch account `default`",
                     "b@example.com - valid - active",
-                    AccountPickerCommand::SubmitInput("/account openai switch default".to_string()),
+                    AccountPickerCommand::SubmitInput(
+                        "/accounts openai switch default".to_string(),
+                    ),
                 ),
             ],
         );

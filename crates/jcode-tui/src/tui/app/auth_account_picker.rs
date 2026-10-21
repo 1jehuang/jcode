@@ -12,6 +12,8 @@ impl App {
 
         crate::telemetry::record_setup_step_once("account_center_opened");
 
+        super::auth_account_picker_saved_accounts::start_account_usage_refresh();
+
         let status = crate::auth::AuthStatus::check_fast();
         let validation = crate::auth::validation::load_all();
         let cfg = crate::config::Config::load();
@@ -68,8 +70,8 @@ impl App {
             };
             items.push(AccountPickerItem::action(
                 "account-flow",
-                "Add / Replace",
-                "Add or replace account",
+                "Accounts",
+                "Add or reauthenticate account",
                 detail,
                 AccountPickerCommand::OpenAddReplaceFlow {
                     provider_filter: provider_scope.clone(),
@@ -90,7 +92,7 @@ impl App {
                 "review all configured providers and recovery steps".to_string()
             },
             AccountPickerCommand::SubmitInput(match provider_scope.as_deref() {
-                Some(provider_id) => format!("/account {} doctor", provider_id),
+                Some(provider_id) => format!("/accounts {} doctor", provider_id),
                 None => "/auth doctor".to_string(),
             }),
         ));
@@ -136,7 +138,7 @@ impl App {
                     "{} - {} - {}",
                     state_label, method_detail, validation_detail
                 ),
-                AccountPickerCommand::SubmitInput(format!("/account {} settings", provider.id)),
+                AccountPickerCommand::SubmitInput(format!("/accounts {} settings", provider.id)),
             ));
             items.push(AccountPickerItem::action(
                 provider.id,
@@ -147,7 +149,7 @@ impl App {
                     "Refresh login"
                 },
                 provider.menu_detail,
-                AccountPickerCommand::SubmitInput(format!("/account {} login", provider.id)),
+                AccountPickerCommand::SubmitInput(format!("/accounts {} login", provider.id)),
             ));
             if provider_scope.is_none() {
                 items.push(AccountPickerItem::action(
@@ -155,14 +157,50 @@ impl App {
                     provider.display_name,
                     "Diagnose login",
                     format!("{} - {}", state_label, validation_detail),
-                    AccountPickerCommand::SubmitInput(format!("/account {} doctor", provider.id)),
+                    AccountPickerCommand::SubmitInput(format!("/accounts {} doctor", provider.id)),
                 ));
             }
 
             match provider.id {
-                "claude" => self.append_anthropic_account_picker_items(&mut items, provider),
+                "claude-code" => {
+                    for instance in crate::auth::claude_code::instances() {
+                        let identity = crate::auth::claude_code::instance_identity(&instance);
+                        let email = identity
+                            .as_ref()
+                            .and_then(|value| value.email.as_deref())
+                            .unwrap_or("not signed in");
+                        let plan = identity
+                            .as_ref()
+                            .and_then(|value| value.plan.as_deref())
+                            .unwrap_or("unknown plan");
+                        items.push(AccountPickerItem::action(
+                            provider.id, provider.display_name,
+                            format!("Use {} in this window", instance.display_label()),
+                            format!("{email} - {plan}{}", self.account_row_scope_suffix(provider.id, &instance.id)),
+                            AccountPickerCommand::SubmitInput(format!("/accounts claude-code switch {}", instance.id)),
+                        ).with_details(vec![("Usage".to_string(),
+                            "Managed by the Claude Code instance. Remaining quota is not reported here.".to_string())]));
+                    }
+                }
+                "claude" => {
+                    self.append_anthropic_account_picker_items(&mut items, provider);
+                    items.push(AccountPickerItem::action(
+                        provider.id,
+                        provider.display_name,
+                        "Add new account",
+                        "Sign in to another Claude account. Existing saved accounts are kept.",
+                        AccountPickerCommand::SubmitInput("/accounts claude add".to_string()),
+                    ));
+                }
                 "openai" => {
                     self.append_openai_account_picker_items(&mut items, provider);
+                    items.push(AccountPickerItem::action(
+                        provider.id,
+                        provider.display_name,
+                        "Add new account",
+                        "Sign in to another OpenAI account. Existing saved accounts are kept.",
+                        AccountPickerCommand::SubmitInput("/accounts openai add".to_string()),
+                    ));
                     items.push(AccountPickerItem::action(
                         provider.id,
                         provider.display_name,
@@ -171,7 +209,7 @@ impl App {
                         AccountPickerCommand::PromptValue {
                             prompt: "Enter OpenAI transport: auto, https, or websocket."
                                 .to_string(),
-                            command_prefix: "/account openai transport".to_string(),
+                            command_prefix: "/accounts openai transport".to_string(),
                             empty_value: Some("auto".to_string()),
                             status_notice: "Account: editing OpenAI transport...".to_string(),
                         },
@@ -186,7 +224,7 @@ impl App {
                             .unwrap_or("(provider default)"),
                         AccountPickerCommand::PromptValue {
                             prompt: "Enter OpenAI reasoning effort: none, minimal, low, medium, high, xhigh, max, or clear.".to_string(),
-                            command_prefix: "/account openai effort".to_string(),
+                            command_prefix: "/accounts openai effort".to_string(),
                             empty_value: Some("clear".to_string()),
                             status_notice: "Account: editing OpenAI effort...".to_string(),
                         },
@@ -201,7 +239,7 @@ impl App {
                             "off"
                         },
                         AccountPickerCommand::SubmitInput(format!(
-                            "/account openai fast {}",
+                            "/accounts openai fast {}",
                             if cfg.provider.openai_service_tier.as_deref() == Some("priority") {
                                 "off"
                             } else {
@@ -221,7 +259,7 @@ impl App {
                         compat.api_base,
                         AccountPickerCommand::PromptValue {
                             prompt: "Step 1/2: enter the OpenAI-compatible API base URL, for example https://llm.example.com/v1.".to_string(),
-                            command_prefix: "/account openai-compatible api-base".to_string(),
+                            command_prefix: "/accounts openai-compatible api-base".to_string(),
                             empty_value: Some("clear".to_string()),
                             status_notice: "Account: editing OpenAI-compatible API base URL (step 1/2)...".to_string(),
                         },
@@ -233,7 +271,7 @@ impl App {
                         compat.api_key_env,
                         AccountPickerCommand::PromptValue {
                             prompt: "Step 2/2: enter the env var name that stores the API key, for example OPENAI_API_KEY.".to_string(),
-                            command_prefix: "/account openai-compatible api-key-name".to_string(),
+                            command_prefix: "/accounts openai-compatible api-key-name".to_string(),
                             empty_value: Some("clear".to_string()),
                             status_notice: "Account: editing OpenAI-compatible API key variable (step 2/2)...".to_string(),
                         },
@@ -245,7 +283,7 @@ impl App {
                         compat.env_file,
                         AccountPickerCommand::PromptValue {
                             prompt: "Enter the env file name for this profile.".to_string(),
-                            command_prefix: "/account openai-compatible env-file".to_string(),
+                            command_prefix: "/accounts openai-compatible env-file".to_string(),
                             empty_value: Some("clear".to_string()),
                             status_notice: "Account: editing env file...".to_string(),
                         },
@@ -259,7 +297,7 @@ impl App {
                             .unwrap_or_else(|| "(unset)".to_string()),
                         AccountPickerCommand::PromptValue {
                             prompt: "Enter the default model hint for this profile.".to_string(),
-                            command_prefix: "/account openai-compatible default-model".to_string(),
+                            command_prefix: "/accounts openai-compatible default-model".to_string(),
                             empty_value: Some("clear".to_string()),
                             status_notice: "Account: editing default model hint...".to_string(),
                         },
@@ -273,7 +311,7 @@ impl App {
                         cfg.provider.copilot_premium.as_deref().unwrap_or("normal"),
                         AccountPickerCommand::PromptValue {
                             prompt: "Enter Copilot premium mode: normal, one, or zero.".to_string(),
-                            command_prefix: "/account copilot premium".to_string(),
+                            command_prefix: "/accounts copilot premium".to_string(),
                             empty_value: Some("normal".to_string()),
                             status_notice: "Account: editing Copilot premium mode...".to_string(),
                         },
@@ -290,7 +328,7 @@ impl App {
             cfg.provider.default_provider.as_deref().unwrap_or("auto"),
             AccountPickerCommand::PromptValue {
                 prompt: "Enter the default provider: claude, openai, copilot, gemini, openrouter, or auto.".to_string(),
-                command_prefix: "/account default-provider".to_string(),
+                command_prefix: "/accounts default-provider".to_string(),
                 empty_value: Some("auto".to_string()),
                 status_notice: "Account: editing default provider...".to_string(),
             },
@@ -305,7 +343,7 @@ impl App {
                 .unwrap_or("(provider default)"),
             AccountPickerCommand::PromptValue {
                 prompt: "Enter the default model, or clear to unset it.".to_string(),
-                command_prefix: "/account default-model".to_string(),
+                command_prefix: "/accounts default-model".to_string(),
                 empty_value: Some("clear".to_string()),
                 status_notice: "Account: editing default model...".to_string(),
             },
@@ -315,25 +353,48 @@ impl App {
             Some(provider_id) => format!(" {} account center ", provider_id),
             None => " Accounts ".to_string(),
         };
-        self.account_picker_overlay = Some(std::cell::RefCell::new(AccountPicker::with_summary(
-            title, items, summary,
-        )));
+        let mut picker = AccountPicker::with_summary(title, items, summary);
+        let current_provider = if self.is_remote {
+            self.remote_provider_name.as_deref().unwrap_or_default()
+        } else {
+            self.provider.name()
+        };
+        let provider_id =
+            super::window_account::account_family(current_provider).unwrap_or(current_provider);
+        picker.select_account(
+            provider_id,
+            self.window_account_label(provider_id).as_deref(),
+        );
+        self.account_picker_overlay = Some(std::cell::RefCell::new(picker));
         self.inline_interactive_state = None;
         self.input.clear();
         self.cursor_pos = 0;
         self.set_status_notice("Account center: choose an action");
     }
 
+    pub(crate) fn poll_account_picker_usage(&mut self) -> bool {
+        let Some(picker) = self.account_picker_overlay.as_ref() else {
+            return false;
+        };
+        if !super::auth_account_picker_saved_accounts::poll_account_usage_refresh() {
+            return false;
+        }
+        picker.borrow_mut().update_account_details(
+            super::auth_account_picker_saved_accounts::decorate_account_usage_items,
+        );
+        true
+    }
+
     pub(crate) fn open_account_picker(&mut self, provider_filter: Option<&str>) {
         let Some(scope_key) = self.inline_account_picker_scope_key(provider_filter) else {
             if let Some(provider_id) = provider_filter {
                 self.push_display_message(DisplayMessage::system(format!(
-                    "Inline /account picker is only available for Claude and OpenAI accounts. Use /account {} settings for provider details.",
+                    "Inline /accounts picker is only available for Claude and OpenAI accounts. Use /accounts {} settings for provider details.",
                     provider_id
                 )));
             } else {
                 self.push_display_message(DisplayMessage::system(
-                    "Inline /account picker is available for Claude and OpenAI accounts. Use /account claude or /account openai to choose explicitly.".to_string(),
+                    "Inline /accounts picker is available for Claude and OpenAI accounts. Use /accounts claude or /accounts openai to choose explicitly.".to_string(),
                 ));
             }
             self.set_status_notice("Account picker unavailable");
@@ -400,13 +461,6 @@ impl App {
             "Account → {} (Enter: use in this window · Ctrl+D: make default)",
             provider_label
         ));
-    }
-
-    pub(crate) fn should_open_inline_account_picker(&self, provider_filter: Option<&str>) -> bool {
-        provider_filter.is_none()
-            || self
-                .inline_account_picker_scope_key(provider_filter)
-                .is_some()
     }
 
     pub(crate) fn inline_account_picker_scope_key(
@@ -1173,12 +1227,12 @@ impl App {
             crate::tui::account_picker::AccountPickerCommand::PromptNew { provider } => {
                 match provider {
                     crate::tui::account_picker::AccountProviderKind::Anthropic => {
-                        self.input = "/account claude add".to_string();
+                        self.input = "/accounts claude add".to_string();
                         self.cursor_pos = self.input.len();
                         self.submit_input();
                     }
                     crate::tui::account_picker::AccountProviderKind::OpenAi => {
-                        self.input = "/account openai add".to_string();
+                        self.input = "/accounts openai add".to_string();
                         self.cursor_pos = self.input.len();
                         self.submit_input();
                     }
@@ -1248,6 +1302,17 @@ impl App {
         }
 
         match pending {
+            PendingAccountInput::Rename { provider_id, label } => {
+                if trimmed.is_empty() {
+                    self.push_display_message(DisplayMessage::error(
+                        "Account name cannot be empty.".to_string(),
+                    ));
+                    self.pending_account_input =
+                        Some(PendingAccountInput::Rename { provider_id, label });
+                    return;
+                }
+                self.rename_saved_account(&provider_id, &label, trimmed);
+            }
             PendingAccountInput::NewAccountLabel {
                 provider_id,
                 display_name,
@@ -1262,7 +1327,7 @@ impl App {
                     });
                     return;
                 }
-                self.input = format!("/account {} add {}", provider_id, trimmed);
+                self.input = format!("/accounts {} add {}", provider_id, trimmed);
                 self.cursor_pos = self.input.len();
                 self.submit_input();
             }

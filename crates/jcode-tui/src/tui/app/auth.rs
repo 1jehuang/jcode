@@ -1,6 +1,9 @@
 #[path = "auth_subscription_status.rs"]
 mod subscription_status;
 
+#[path = "auth_account_management.rs"]
+mod auth_account_management;
+
 #[path = "auth_account_commands.rs"]
 mod auth_account_commands;
 #[path = "auth_account_picker.rs"]
@@ -10,7 +13,8 @@ mod auth_types;
 pub(crate) use self::auth_account_commands::{
     account_command_from_inline_action, account_command_from_picker, execute_account_command_local,
     execute_account_command_remote, handle_account_command_remote, handle_auth_command,
-    resolve_account_provider_descriptor, same_account_command, save_openai_fast_setting_local,
+    requests_account_center, resolve_account_provider_descriptor, same_account_command,
+    save_openai_fast_setting_local,
 };
 pub(super) use self::auth_types::{
     AccountCommand, AccountFailoverMode, PendingAccountInput, PendingLogin,
@@ -177,7 +181,7 @@ impl App {
             message.push('\n');
         }
         message.push_str(
-            "\nUse /login <provider> to authenticate. /login jcode is for curated jcode subscription access; /account opens the provider/account management center, /account <provider> settings shows provider-specific controls, and /auth doctor or /account <provider> doctor shows recovery steps.",
+            "\nUse /login <provider> to authenticate. /login jcode is for curated jcode subscription access; /accounts opens the provider/accounts management center, /accounts <provider> settings shows provider-specific controls, and /auth doctor or /accounts <provider> doctor shows recovery steps.",
         );
         self.push_display_message(DisplayMessage::system(message));
     }
@@ -264,7 +268,7 @@ impl App {
                 Ok("Logged out of Gemini.".to_string())
             }
             _ => Ok(format!(
-                "Logout for {} is not automated yet. Remove its saved API key or external CLI session from /account {} settings.",
+                "Logout for {} is not automated yet. Remove its saved API key or external CLI session from /accounts {} settings.",
                 provider.display_name, provider.id
             )),
         })();
@@ -649,7 +653,7 @@ impl App {
                 Err(error) => {
                     publish(
                         format!(
-                            "Jcode Account Login\n\nCould not start browser approval: {}\n\nRetry /account jcode login. No credential was saved.",
+                            "Jcode Account Login\n\nCould not start browser approval: {}\n\nRetry /accounts jcode login. No credential was saved.",
                             error
                         ),
                         "Jcode account login failed",
@@ -711,7 +715,7 @@ impl App {
                 Ok(approved) => approved,
                 Err(error) => {
                     publish(
-                        format!("Jcode Account Login\n\n{error}\n\nRetry /account jcode login."),
+                        format!("Jcode Account Login\n\n{error}\n\nRetry /accounts jcode login."),
                         "Jcode account login stopped",
                     );
                     return;
@@ -750,7 +754,7 @@ impl App {
             {
                 ActivationOutcome::Active(me) => {
                     let message = format!(
-                        "Jcode Account Ready\n\nHosted models are enabled for {} with a ${:.2} monthly spending limit. Models are being refreshed automatically.\n\nUsage: /usage\nManage limit: /account jcode manage\nLogout: /account jcode logout",
+                        "Jcode Account Ready\n\nHosted models are enabled for {} with a ${:.2} monthly spending limit. Models are being refreshed automatically.\n\nUsage: /usage\nManage limit: /accounts jcode manage\nLogout: /accounts jcode logout",
                         me.email,
                         me.usage.budget_usd
                     );
@@ -772,12 +776,12 @@ impl App {
                     );
                 }
                 ActivationOutcome::Canceled(_) => publish(
-                    "Jcode Account Login\n\nBilling setup was canceled. The valid account key remains saved, but hosted usage is not enabled.\n\nStatus: /usage\nManage limit: /account jcode manage\nLogout: /account jcode logout".to_string(),
+                    "Jcode Account Login\n\nBilling setup was canceled. The valid account key remains saved, but hosted usage is not enabled.\n\nStatus: /usage\nManage limit: /accounts jcode manage\nLogout: /accounts jcode logout".to_string(),
                     "Jcode hosted billing not active",
                 ),
                 ActivationOutcome::TimedOut { last_error_was_offline } => publish(
                     format!(
-                        "Jcode Account Login\n\nA spending limit was not confirmed before timeout{}. The valid account key remains saved.\n\nStatus: /usage\nManage limit: /account jcode manage\nLogout: /account jcode logout",
+                        "Jcode Account Login\n\nA spending limit was not confirmed before timeout{}. The valid account key remains saved.\n\nStatus: /usage\nManage limit: /accounts jcode manage\nLogout: /accounts jcode logout",
                         if last_error_was_offline { " because the API remained unreachable" } else { "" }
                     ),
                     "Jcode hosted billing setup pending",
@@ -785,7 +789,7 @@ impl App {
                 ActivationOutcome::Revoked | ActivationOutcome::Denied => {
                     let _ = crate::subscription_catalog::clear_account_credentials();
                     publish(
-                        "Jcode Account Login\n\nThe issued key was revoked or denied during activation checks. Local credentials were cleared. Retry /account jcode login.".to_string(),
+                        "Jcode Account Login\n\nThe issued key was revoked or denied during activation checks. Local credentials were cleared. Retry /accounts jcode login.".to_string(),
                         "Jcode account key rejected",
                     );
                 }
@@ -861,6 +865,13 @@ impl App {
     }
 
     pub(super) fn start_claude_login_for_account(&mut self, label: &str) {
+        let target_snapshot = match Self::saved_login_snapshot("claude", label) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.push_display_message(DisplayMessage::error(error));
+                return;
+            }
+        };
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         use sha2::{Digest, Sha256};
 
@@ -930,12 +941,14 @@ impl App {
             let verifier_clone = verifier.clone();
             let label_clone = label.to_string();
             let redirect_clone = redirect_uri.clone();
+            let callback_snapshot = target_snapshot.clone();
             tokio::spawn(async move {
                 match Self::claude_login_callback(
                     verifier_clone,
                     label_clone,
                     redirect_clone,
                     listener,
+                    callback_snapshot,
                 )
                 .await
                 {
@@ -952,6 +965,13 @@ impl App {
                             "Claude automatic callback did not complete: {}",
                             e
                         ));
+                        if e.contains("No credentials were replaced") {
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "claude".to_string(),
+                                success: false,
+                                message: format!("Claude login failed: {e}"),
+                            }));
+                        }
                     }
                 }
             });
@@ -992,6 +1012,8 @@ impl App {
         }
         self.begin_pending_login(PendingLogin::ClaudeAccount {
             verifier,
+            expected_existing: target_snapshot.0,
+            expected_identity: target_snapshot.1,
             label: label.to_string(),
             redirect_uri: if callback_available {
                 Some(redirect_uri)
@@ -1006,6 +1028,7 @@ impl App {
         label: String,
         redirect_uri: String,
         listener: tokio::net::TcpListener,
+        target_snapshot: (bool, Option<String>),
     ) -> Result<String, String> {
         // Claude uses the PKCE verifier as the OAuth `state` value.
         let code = tokio::time::timeout(
@@ -1016,7 +1039,7 @@ impl App {
         .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())?
         .map_err(|e| format!("Callback failed: {}", e))?;
 
-        Self::claude_token_exchange(verifier, code, &label, Some(redirect_uri)).await
+        Self::claude_token_exchange(verifier, code, &label, Some(redirect_uri), target_snapshot).await
     }
 
     pub(super) fn remove_account(&mut self, label: &str) {
@@ -1060,6 +1083,13 @@ impl App {
     }
 
     pub(super) fn start_openai_login_for_account(&mut self, label: &str) {
+        let target_snapshot = match Self::saved_login_snapshot("openai", label) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.push_display_message(DisplayMessage::error(error));
+                return;
+            }
+        };
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         use sha2::{Digest, Sha256};
 
@@ -1110,12 +1140,14 @@ impl App {
             let verifier_clone = verifier.clone();
             let state_clone = state.clone();
             let label_clone = label_owned.clone();
+            let callback_snapshot = target_snapshot.clone();
             tokio::spawn(async move {
                 match Self::openai_login_callback(
                     verifier_clone,
                     state_clone,
                     Some(label_clone),
                     listener,
+                    callback_snapshot,
                 )
                 .await
                 {
@@ -1132,6 +1164,13 @@ impl App {
                             "OpenAI automatic callback did not complete: {}",
                             e
                         ));
+                        if e.contains("No credentials were replaced") {
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "openai".to_string(),
+                                success: false,
+                                message: format!("OpenAI login failed: {e}"),
+                            }));
+                        }
                     }
                 }
             });
@@ -1181,6 +1220,8 @@ impl App {
         self.set_status_notice(format!("Login [{}]: waiting...", label));
         self.begin_pending_login(PendingLogin::OpenAiAccount {
             verifier,
+            expected_existing: target_snapshot.0,
+            expected_identity: target_snapshot.1,
             label: label.to_string(),
             expected_state: state,
             redirect_uri,
@@ -1192,6 +1233,7 @@ impl App {
         expected_state: String,
         label: Option<String>,
         listener: tokio::net::TcpListener,
+        target_snapshot: (bool, Option<String>),
     ) -> Result<String, String> {
         let port = crate::auth::oauth::openai::DEFAULT_PORT;
         let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
@@ -1203,7 +1245,7 @@ impl App {
         .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())?
         .map_err(|e| format!("Callback failed: {}", e))?;
 
-        Self::openai_token_exchange(verifier, code, label, None, &redirect_uri).await
+        Self::openai_token_exchange(verifier, code, label, None, &redirect_uri, target_snapshot).await
     }
 
     async fn openai_token_exchange(
@@ -1212,6 +1254,7 @@ impl App {
         label: Option<String>,
         expected_state: Option<String>,
         redirect_uri: &str,
+        target_snapshot: (bool, Option<String>),
     ) -> Result<String, String> {
         let oauth_tokens = if let Some(expected_state) = expected_state {
             crate::auth::oauth::exchange_openai_callback_input(
@@ -1229,8 +1272,21 @@ impl App {
         };
 
         let label = label.unwrap_or_else(crate::auth::codex::primary_account_label);
-        crate::auth::oauth::save_openai_tokens_for_account(&oauth_tokens, &label)
-            .map_err(|e| format!("Failed to save tokens: {}", e))?;
+        Self::verify_saved_openai_login(&label, oauth_tokens.id_token.as_deref(), &target_snapshot)?;
+        if target_snapshot.0 {
+            crate::auth::codex::update_account_tokens(
+                &label,
+                &oauth_tokens.access_token,
+                &oauth_tokens.refresh_token,
+                oauth_tokens.id_token.clone(),
+                oauth_tokens.id_token.as_deref().and_then(crate::auth::codex::extract_account_id),
+                Some(oauth_tokens.expires_at),
+            )
+            .map_err(|e| format!("Failed to update the saved login: {e}"))?;
+        } else {
+            crate::auth::oauth::save_openai_tokens_for_account(&oauth_tokens, &label)
+                .map_err(|e| format!("Failed to save tokens: {}", e))?;
+        }
 
         Ok(format!(
             "Successfully logged in to OpenAI! (account: {})",
@@ -2001,6 +2057,8 @@ impl App {
             PendingLogin::ClaudeAccount {
                 verifier,
                 label,
+                expected_existing,
+                expected_identity,
                 redirect_uri,
             } => {
                 self.set_status_notice(format!("Login [{}]: exchanging...", label));
@@ -2012,6 +2070,7 @@ impl App {
                         input_owned,
                         &label_clone,
                         redirect_uri,
+                        (expected_existing, expected_identity),
                     )
                     .await
                     {
@@ -2039,6 +2098,8 @@ impl App {
             PendingLogin::OpenAiAccount {
                 verifier,
                 label,
+                expected_existing,
+                expected_identity,
                 expected_state,
                 redirect_uri,
             } => {
@@ -2052,6 +2113,7 @@ impl App {
                         Some(label_clone.clone()),
                         Some(expected_state),
                         &redirect_uri,
+                        (expected_existing, expected_identity),
                     )
                     .await
                     {
@@ -3283,6 +3345,7 @@ impl App {
         input: String,
         label: &str,
         redirect_uri: Option<String>,
+        target_snapshot: (bool, Option<String>),
     ) -> Result<String, String> {
         let fallback_redirect_uri =
             redirect_uri.unwrap_or_else(|| crate::auth::oauth::claude::REDIRECT_URI.to_string());
@@ -3293,23 +3356,40 @@ impl App {
                 .await
                 .map_err(|e| e.to_string())?;
 
-        crate::auth::oauth::save_claude_tokens_for_account(&oauth_tokens, label)
-            .map_err(|e| format!("Failed to save tokens: {}", e))?;
+        Self::verify_saved_claude_login(label, &oauth_tokens.access_token, &target_snapshot).await?;
+        if target_snapshot.0 {
+            crate::auth::claude::update_account_tokens(
+                label,
+                &oauth_tokens.access_token,
+                &oauth_tokens.refresh_token,
+                oauth_tokens.expires_at,
+            )
+            .map_err(|e| format!("Failed to update the saved login: {e}"))?;
+        } else {
+            crate::auth::oauth::save_claude_tokens_for_account(&oauth_tokens, label)
+                .map_err(|e| format!("Failed to save tokens: {}", e))?;
+        }
 
-        let profile_suffix = match crate::auth::oauth::update_claude_account_profile(
-            label,
-            &oauth_tokens.access_token,
-        )
-        .await
-        {
-            Ok(Some(email)) => format!(" (email: {})", mask_email(&email)),
-            Ok(None) => String::new(),
-            Err(e) => {
-                crate::logging::warn(&format!(
-                    "Claude login [{}] profile fetch failed: {}",
-                    label, e
-                ));
-                String::new()
+        let profile_suffix = if target_snapshot.0 {
+            // Identity was verified before persistence. Do not perform another
+            // profile fetch that could erase its email if metadata is omitted.
+            String::new()
+        } else {
+            match crate::auth::oauth::update_claude_account_profile(
+                label,
+                &oauth_tokens.access_token,
+            )
+            .await
+            {
+                Ok(Some(email)) => format!(" (email: {})", mask_email(&email)),
+                Ok(None) => String::new(),
+                Err(e) => {
+                    crate::logging::warn(&format!(
+                        "Claude login [{}] profile fetch failed: {}",
+                        label, e
+                    ));
+                    String::new()
+                }
             }
         };
 

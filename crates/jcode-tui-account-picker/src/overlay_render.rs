@@ -51,6 +51,7 @@ pub(super) fn action_section(item: &AccountPickerItem) -> ActionSection {
             ActionSection::Setting
         }
         AccountPickerCommand::Login { .. } => ActionSection::Login,
+        AccountPickerCommand::Rename { .. } => ActionSection::Setting,
         AccountPickerCommand::Remove { .. } => ActionSection::Remove,
         AccountPickerCommand::PromptNew { .. } => ActionSection::Add,
         AccountPickerCommand::PromptValue { .. } => ActionSection::Setting,
@@ -109,6 +110,9 @@ fn extract_account_label(title: &str) -> Option<String> {
 }
 
 pub(super) fn compact_item_title(item: &AccountPickerItem) -> String {
+    if let AccountPickerCommand::Rename { label, .. } = &item.command {
+        return format!("Rename {label}");
+    }
     match action_section(item) {
         ActionSection::Switch => extract_account_label(&item.title)
             .or_else(|| {
@@ -216,6 +220,9 @@ pub(super) fn action_kind_help(command: &AccountPickerCommand) -> &'static str {
         AccountPickerCommand::Login { .. } => {
             "Refreshes the selected account by starting the provider login flow again."
         }
+        AccountPickerCommand::Rename { .. } => {
+            "Changes this saved account's name without changing its login or subscription."
+        }
         AccountPickerCommand::Remove { .. } => {
             "Removes saved credentials from Jcode, not the provider account. Enter reviews the target, then y confirms removal."
         }
@@ -232,8 +239,8 @@ pub(super) fn command_preview(command: &AccountPickerCommand) -> String {
     match command {
         AccountPickerCommand::SubmitInput(input) => input.clone(),
         AccountPickerCommand::OpenAccountCenter { provider_filter } => match provider_filter {
-            Some(provider_id) => format!("Open /account {}", provider_id),
-            None => "Open /account".to_string(),
+            Some(provider_id) => format!("Open /accounts {}", provider_id),
+            None => "Open /accounts".to_string(),
         },
         AccountPickerCommand::OpenAddReplaceFlow { provider_filter } => match provider_filter {
             Some(provider_id) => format!("Open add/replace flow for {}", provider_id),
@@ -248,26 +255,32 @@ pub(super) fn command_preview(command: &AccountPickerCommand) -> String {
             None => format!("{} <value>", command_prefix),
         },
         AccountPickerCommand::Switch { provider, label } => match provider {
-            AccountProviderKind::Anthropic => format!("/account switch {}", label),
-            AccountProviderKind::OpenAi => format!("/account openai switch {}", label),
+            AccountProviderKind::Anthropic => format!("/accounts switch {}", label),
+            AccountProviderKind::OpenAi => format!("/accounts openai switch {}", label),
         },
-        AccountPickerCommand::SetDefault { label, .. } => format!("/account default {}", label),
+        AccountPickerCommand::SetDefault { label, .. } => format!("/accounts default {}", label),
         AccountPickerCommand::Unpin { provider } => match provider {
-            AccountProviderKind::Anthropic => "/account unpin claude".to_string(),
-            AccountProviderKind::OpenAi => "/account unpin openai".to_string(),
+            AccountProviderKind::Anthropic => "/accounts unpin claude".to_string(),
+            AccountProviderKind::OpenAi => "/accounts unpin openai".to_string(),
         },
-        AccountPickerCommand::ToggleFailover => "/account failover on|off".to_string(),
+        AccountPickerCommand::ToggleFailover => "/accounts failover on|off".to_string(),
         AccountPickerCommand::Login { provider, label } => match provider {
-            AccountProviderKind::Anthropic => format!("/account claude add {}", label),
-            AccountProviderKind::OpenAi => format!("/account openai add {}", label),
+            AccountProviderKind::Anthropic => format!("/accounts claude reauth {}", label),
+            AccountProviderKind::OpenAi => format!("/accounts openai reauth {}", label),
+        },
+        AccountPickerCommand::Rename { provider, label } => match provider {
+            AccountProviderKind::Anthropic => {
+                format!("/accounts claude rename {} <new name>", label)
+            }
+            AccountProviderKind::OpenAi => format!("/accounts openai rename {} <new name>", label),
         },
         AccountPickerCommand::Remove { provider, label } => match provider {
-            AccountProviderKind::Anthropic => format!("/account claude remove {}", label),
-            AccountProviderKind::OpenAi => format!("/account openai remove {}", label),
+            AccountProviderKind::Anthropic => format!("/accounts claude remove {}", label),
+            AccountProviderKind::OpenAi => format!("/accounts openai remove {}", label),
         },
         AccountPickerCommand::PromptNew { provider } => match provider {
-            AccountProviderKind::Anthropic => "/account claude add".to_string(),
-            AccountProviderKind::OpenAi => "/account openai add".to_string(),
+            AccountProviderKind::Anthropic => "/accounts claude add".to_string(),
+            AccountProviderKind::OpenAi => "/accounts openai add".to_string(),
         },
     }
 }

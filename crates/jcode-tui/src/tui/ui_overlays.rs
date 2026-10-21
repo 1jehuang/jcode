@@ -476,8 +476,8 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Interactive or direct login",
     ));
     lines.push(help_entry(
-        "/account",
-        "Open combined Claude/OpenAI account picker",
+        "/accounts",
+        "Manage accounts, reauthenticate, and check usage",
     ));
     lines.push(help_entry(
         "/subscription",

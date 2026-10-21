@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, RwLock};
 
 /// Runtime (process-local) active-account overrides, keyed by provider
-/// prefix ("claude", "openai", ...). Lets `/account switch <label>` take
+/// prefix ("claude", "openai", ...). Lets `/accounts switch <label>` take
 /// effect immediately without rewriting the provider auth file.
 ///
 /// Centralized here so every provider shares one mechanism instead of

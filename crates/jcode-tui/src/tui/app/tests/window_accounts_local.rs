@@ -27,7 +27,7 @@ fn inline_account_search_accepts_navigation_and_default_letters() {
 #[test]
 fn account_help_matches_window_default_and_removal_safety() {
     let app = create_test_app();
-    for topic in ["account", "accounts", "/account"] {
+    for topic in ["account", "accounts", "/accounts"] {
         let help = app.command_help(topic).expect("public account command help");
         assert!(help.contains("THIS window only"));
         assert!(help.contains("In the picker press Ctrl+D"));
@@ -141,7 +141,7 @@ fn account_recording_app() -> (App, AccountRecordingProvider) {
     (app, provider)
 }
 
-/// Greptile "Local toggle misses provider": `/account failover on|off` in a
+/// Greptile "Local toggle misses provider": `/accounts failover on|off` in a
 /// local session must reach the provider, not only the display.
 #[test]
 fn local_account_failover_toggle_reaches_provider() {
@@ -149,11 +149,11 @@ fn local_account_failover_toggle_reaches_provider() {
         let (mut app, provider) = account_recording_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            app.input = "/account failover off".to_string();
+            app.input = "/accounts failover off".to_string();
             app.submit_input();
-            app.input = "/account failover on".to_string();
+            app.input = "/accounts failover on".to_string();
             app.submit_input();
-            app.input = "/account failover default".to_string();
+            app.input = "/accounts failover default".to_string();
             app.submit_input();
         });
         assert_eq!(
@@ -242,7 +242,7 @@ fn store_two_claude_accounts() -> (String, String) {
     (first, second)
 }
 
-/// Greptile "Remote rejection looks successful": remote /account switch,
+/// Greptile "Remote rejection looks successful": remote /accounts switch,
 /// default and failover change nothing until the server answers that request
 /// id. An Error keeps the old display and is shown.
 #[test]
@@ -740,7 +740,7 @@ fn empty_account_preview_enter_preserves_search() {
     with_temp_jcode_home(|| {
         for direct_activation in [false, true] {
             let mut app = create_test_app();
-            let input = "/account openai zzz-not-found";
+            let input = "/accounts openai zzz-not-found";
             type_into(&mut app, input);
             assert!(app.inline_interactive_state.as_ref().unwrap().filtered.is_empty());
             if direct_activation {
@@ -768,7 +768,7 @@ fn account_preview_ctrl_d_sets_default_without_changing_window_pin() {
                 "claude".to_string(),
                 crate::provider::AccountPin::new(&first, None),
             );
-            type_into(&mut app, &format!("/account claude {}", second.trim_start_matches("claude-")));
+            type_into(&mut app, &format!("/accounts claude {}", second.trim_start_matches("claude-")));
             assert!(app.inline_interactive_state.as_ref().unwrap().preview);
             assert!(matches!(
                 &app.inline_interactive_state.as_ref().unwrap().selected_entry().unwrap().action,
@@ -822,7 +822,7 @@ fn account_preview_ctrl_d_without_saved_account_preserves_query() {
             for preview in [false, true] {
                 for action in &actions {
                     let mut app = create_test_app();
-                    let input = "/account claude new account";
+                    let input = "/accounts claude new account";
                     let mut picker = model_browser_state(preview);
                     picker.kind = crate::tui::PickerKind::Account;
                     picker.filter = "new account".to_string();

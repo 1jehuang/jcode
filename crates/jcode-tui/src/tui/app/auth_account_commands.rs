@@ -113,9 +113,7 @@ pub(crate) async fn handle_account_command_remote(
 }
 
 fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>> {
-    let rest = trimmed
-        .strip_prefix("/accounts")
-        .or_else(|| trimmed.strip_prefix("/account"))?;
+    let rest = trimmed.strip_prefix("/accounts")?;
     if !rest.is_empty() && !rest.chars().next().is_some_and(char::is_whitespace) {
         return None;
     }
@@ -126,10 +124,9 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
         }));
     }
 
-    let mut parts = rest.split_whitespace();
-    let first = parts.next()?;
-    let remainder = parts.collect::<Vec<_>>().join(" ");
-    let remainder = remainder.trim();
+    let (first, remainder) = rest
+        .split_once(char::is_whitespace)
+        .map_or((rest, ""), |(first, remainder)| (first, remainder.trim()));
 
     match first {
         "doctor" => {
@@ -142,7 +139,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
         }
         "switch" | "use" => {
             if remainder.is_empty() {
-                return Some(Err("Usage: /account switch <label>".to_string()));
+                return Some(Err("Usage: /accounts switch <label>".to_string()));
             }
             return Some(use_in_window_for_label(remainder));
         }
@@ -150,7 +147,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
         "default" => {
             if remainder.is_empty() {
                 return Some(Err(
-                    "Usage: /account default <label>  (sets the default account for new windows)"
+                    "Usage: /accounts default <label>  (sets the default account for new windows)"
                         .to_string(),
                 ));
             }
@@ -163,24 +160,58 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             return Some(parse_failover(remainder));
         }
         "add" | "login" => {
+            if remainder.is_empty() {
+                return Some(Ok(AccountCommand::ChooseAddProvider));
+            }
+            let (provider, label) = remainder
+                .split_once(char::is_whitespace)
+                .map_or((remainder, None), |(provider, label)| {
+                    (provider, Some(label.trim().to_string()))
+                });
+            let Some(provider) = resolve_account_provider_descriptor(provider) else {
+                return Some(Err("Usage: /accounts add <provider> [label]".to_string()));
+            };
             return Some(Ok(AccountCommand::Add {
-                provider_id: "claude".to_string(),
-                label: (!remainder.is_empty()).then(|| remainder.to_string()),
+                provider_id: provider.id.to_string(),
+                label,
             }));
         }
         "remove" | "rm" | "delete" => {
             if remainder.is_empty() {
-                return Some(Err("Usage: /account remove <label>".to_string()));
+                return Some(Err("Usage: /accounts remove <label>".to_string()));
             }
-            return Some(Ok(AccountCommand::Remove {
-                provider_id: "claude".to_string(),
-                label: remainder.to_string(),
+            return Some(
+                infer_account_provider(remainder)
+                    .map(|(provider_id, label)| AccountCommand::Remove { provider_id, label }),
+            );
+        }
+        "rename" => {
+            let (label, new_label) = split_account_rename_target(remainder, None);
+            if label.is_empty() {
+                return Some(Err("Usage: /accounts rename <label> [new name]".to_string()));
+            }
+            return Some(infer_account_provider(&label).map(|(provider_id, label)| {
+                AccountCommand::Rename {
+                    provider_id,
+                    label,
+                    new_label,
+                }
             }));
+        }
+        "reauth" | "reauthenticate" | "refresh" => {
+            if remainder.is_empty() {
+                return Some(Err("Usage: /accounts reauth <label>".to_string()));
+            }
+            return Some(
+                infer_account_provider(remainder).map(|(provider_id, label)| {
+                    AccountCommand::Reauthenticate { provider_id, label }
+                }),
+            );
         }
         "default-provider" => {
             if remainder.is_empty() {
                 return Some(Err(
-                    "Usage: /account default-provider <claude|openai|copilot|gemini|openrouter|auto>"
+                    "Usage: /accounts default-provider <claude|openai|copilot|gemini|openrouter|auto>"
                         .to_string(),
                 ));
             }
@@ -191,7 +222,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
         "default-model" => {
             if remainder.is_empty() {
                 return Some(Err(
-                    "Usage: /account default-model <model|clear>".to_string()
+                    "Usage: /accounts default-model <model|clear>".to_string()
                 ));
             }
             return Some(Ok(AccountCommand::SetDefaultModel(
@@ -209,10 +240,9 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             }));
         }
 
-        let mut provider_parts = remainder.split_whitespace();
-        let subcommand = provider_parts.next().unwrap_or_default();
-        let value = provider_parts.collect::<Vec<_>>().join(" ");
-        let value = value.trim();
+        let (subcommand, value) = remainder
+            .split_once(char::is_whitespace)
+            .map_or((remainder, ""), |(command, value)| (command, value.trim()));
 
         let parsed = match subcommand {
             "doctor" => AccountCommand::Doctor {
@@ -234,10 +264,36 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
                 provider_id: provider.id.to_string(),
                 label: (!value.is_empty()).then(|| value.to_string()),
             },
+            "reauth" | "reauthenticate" | "refresh" => {
+                if value.is_empty() {
+                    return Some(Err(format!(
+                        "Usage: /accounts {} reauth <label>",
+                        provider.id
+                    )));
+                }
+                AccountCommand::Reauthenticate {
+                    provider_id: provider.id.to_string(),
+                    label: value.to_string(),
+                }
+            }
+            "rename" => {
+                let (label, new_label) = split_account_rename_target(value, Some(provider.id));
+                if label.is_empty() {
+                    return Some(Err(format!(
+                        "Usage: /accounts {} rename <label> [new name]",
+                        provider.id
+                    )));
+                }
+                AccountCommand::Rename {
+                    provider_id: provider.id.to_string(),
+                    label,
+                    new_label,
+                }
+            }
             "switch" | "use" => {
                 if value.is_empty() {
                     return Some(Err(format!(
-                        "Usage: /account {} switch <label>",
+                        "Usage: /accounts {} switch <label>",
                         provider.id
                     )));
                 }
@@ -248,14 +304,14 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             }
             "default" if provider.id == "claude-code" => {
                 return Some(Err(format!(
-                    "The default Claude Code instance is [provider.claude_code].default_instance in config.toml (currently {}). Use /account claude-code switch <instance> for this window.",
+                    "The default Claude Code instance is [provider.claude_code].default_instance in config.toml (currently {}). Use /accounts claude-code switch <instance> for this window.",
                     crate::auth::claude_code::default_instance_id()
                 )));
             }
             "default" if matches!(provider.id, "claude" | "openai") => {
                 if value.is_empty() {
                     return Some(Err(format!(
-                        "Usage: /account {} default <label>",
+                        "Usage: /accounts {} default <label>",
                         provider.id
                     )));
                 }
@@ -272,7 +328,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "remove" | "rm" | "delete" => {
                 if value.is_empty() {
                     return Some(Err(format!(
-                        "Usage: /account {} remove <label>",
+                        "Usage: /accounts {} remove <label>",
                         provider.id
                     )));
                 }
@@ -284,7 +340,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "transport" if provider.id == "openai" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: /account openai transport <auto|https|websocket>".to_string(),
+                        "Usage: /accounts openai transport <auto|https|websocket>".to_string(),
                     ));
                 }
                 AccountCommand::SetOpenAiTransport(normalize_clearish_value(value))
@@ -292,7 +348,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "effort" if provider.id == "openai" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: /account openai effort <none|minimal|low|medium|high|xhigh|max|clear>"
+                        "Usage: /accounts openai effort <none|minimal|low|medium|high|xhigh|max|clear>"
                             .to_string(),
                     ));
                 }
@@ -302,13 +358,13 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
                 "on" => AccountCommand::SetOpenAiFast(true),
                 "off" => AccountCommand::SetOpenAiFast(false),
                 _ => {
-                    return Some(Err("Usage: /account openai fast <on|off>".to_string()));
+                    return Some(Err("Usage: /accounts openai fast <on|off>".to_string()));
                 }
             },
             "premium" if provider.id == "copilot" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: /account copilot premium <normal|one|zero>".to_string()
+                        "Usage: /accounts copilot premium <normal|one|zero>".to_string()
                     ));
                 }
                 AccountCommand::SetCopilotPremium(normalize_normal_mode_value(value))
@@ -316,7 +372,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "api-base" if provider.id == "openai-compatible" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: /account openai-compatible api-base <url|clear>".to_string(),
+                        "Usage: /accounts openai-compatible api-base <url|clear>".to_string(),
                     ));
                 }
                 AccountCommand::SetOpenAiCompatApiBase(normalize_clearish_value(value))
@@ -324,7 +380,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "api-key-name" if provider.id == "openai-compatible" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: /account openai-compatible api-key-name <ENV_VAR|clear>"
+                        "Usage: /accounts openai-compatible api-key-name <ENV_VAR|clear>"
                             .to_string(),
                     ));
                 }
@@ -333,7 +389,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "env-file" if provider.id == "openai-compatible" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: /account openai-compatible env-file <file.env|clear>".to_string(),
+                        "Usage: /accounts openai-compatible env-file <file.env|clear>".to_string(),
                     ));
                 }
                 AccountCommand::SetOpenAiCompatEnvFile(normalize_clearish_value(value))
@@ -341,7 +397,8 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "default-model" if provider.id == "openai-compatible" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: /account openai-compatible default-model <model|clear>".to_string(),
+                        "Usage: /accounts openai-compatible default-model <model|clear>"
+                            .to_string(),
                     ));
                 }
                 AccountCommand::SetOpenAiCompatDefaultModel(normalize_clearish_value(value))
@@ -350,11 +407,11 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
                 if matches!(provider.id, "claude" | "openai" | "claude-code") {
                     return Some(Ok(AccountCommand::UseInWindow {
                         provider_id: provider.id.to_string(),
-                        label: other.to_string(),
+                        label: remainder.to_string(),
                     }));
                 }
                 return Some(Err(format!(
-                    "Unknown /account {} subcommand '{}'. Try /account {} settings or /account {} login.",
+                    "Unknown /accounts {} subcommand '{}'. Try /accounts {} settings or /accounts {} login.",
                     provider.id, other, provider.id, provider.id
                 )));
             }
@@ -363,11 +420,55 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
         return Some(Ok(parsed));
     }
 
-    Some(use_in_window_for_label(first))
+    Some(use_in_window_for_label(rest))
+}
+
+pub(crate) fn requests_account_center(input: &str) -> bool {
+    matches!(
+        parse_account_command(input.trim()),
+        Some(Ok(AccountCommand::OpenOverlay { .. }))
+    )
+}
+
+fn split_account_rename_target(value: &str, provider_id: Option<&str>) -> (String, Option<String>) {
+    let mut labels = Vec::new();
+    if provider_id.is_none_or(|provider| matches!(provider, "claude" | "anthropic")) {
+        labels.extend(
+            crate::auth::claude::list_accounts()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.label),
+        );
+    }
+    if provider_id.is_none_or(|provider| provider == "openai") {
+        labels.extend(
+            crate::auth::codex::list_accounts()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.label),
+        );
+    }
+    // Prefer the longest saved name, so a login named "work account" is not
+    // mistaken for a login named "work" followed by a new name.
+    labels.sort_by_key(|label| std::cmp::Reverse(label.len()));
+    for label in labels {
+        if value == label {
+            return (label, None);
+        }
+        if let Some(rest) = value.strip_prefix(&label)
+            && rest.chars().next().is_some_and(char::is_whitespace)
+        {
+            return (label, Some(rest.trim().to_string()));
+        }
+    }
+    value.split_once(char::is_whitespace).map_or_else(
+        || (value.to_string(), None),
+        |(label, name)| (label.to_string(), Some(name.trim().to_string())),
+    )
 }
 
 /// Provider family for a stored label: the label prefix first, then the
-/// stored account lists (labels and emails), so `/account fox@example.com`
+/// stored account lists (labels and emails), so `/accounts fox@example.com`
 /// and custom labels still work.
 pub(crate) fn infer_account_provider(label: &str) -> Result<(String, String), String> {
     if let Some(kind) = jcode_provider_core::AccountProviderKind::from_label(label) {
@@ -387,10 +488,10 @@ pub(crate) fn infer_account_provider(label: &str) -> Result<(String, String), St
         (Some(found), None) => Ok(("claude".to_string(), found)),
         (None, Some(found)) => Ok(("openai".to_string(), found)),
         (Some(_), Some(_)) => Err(format!(
-            "{label} matches both a Claude and an OpenAI account. Use /account claude switch {label} or /account openai switch {label}."
+            "{label} matches both a Claude and an OpenAI account. Use /accounts claude switch {label} or /accounts openai switch {label}."
         )),
         (None, None) => Err(format!(
-            "No Claude or OpenAI account named {label}. Use /account to list saved accounts."
+            "No Claude or OpenAI account named {label}. Use /accounts to list saved accounts."
         )),
     }
 }
@@ -412,7 +513,7 @@ fn parse_unpin(value: &str) -> Result<AccountCommand, String> {
             Some(kind) => Ok(AccountCommand::Unpin {
                 provider_id: Some(kind.key().to_string()),
             }),
-            None => Err("Usage: /account unpin [claude|openai|claude-code]".to_string()),
+            None => Err("Usage: /accounts unpin [claude|openai|claude-code]".to_string()),
         },
     }
 }
@@ -425,12 +526,12 @@ fn parse_failover(value: &str) -> Result<AccountCommand, String> {
             "on" | "enable" | "true" => AccountFailoverMode::On,
             "off" | "disable" | "false" => AccountFailoverMode::Off,
             "default" | "auto" | "clear" => AccountFailoverMode::Default,
-            _ => return Err("Usage: /account failover [on|off|default|status]".to_string()),
+            _ => return Err("Usage: /accounts failover [on|off|default|status]".to_string()),
         },
     ))
 }
 
-/// True when both inputs are valid `/account` commands with the same action,
+/// True when both inputs are valid `/accounts` commands with the same action,
 /// so a differently spelled suggestion need not replace what was typed.
 pub(crate) fn same_account_command(input: &str, suggestion: &str) -> bool {
     match (
@@ -442,7 +543,7 @@ pub(crate) fn same_account_command(input: &str, suggestion: &str) -> bool {
     }
 }
 
-/// Inline `/account` picker rows that change which account a window uses.
+/// Inline `/accounts` picker rows that change which account a window uses.
 pub(crate) fn account_command_from_inline_action(
     action: &crate::tui::AccountPickerAction,
 ) -> Option<AccountCommand> {
@@ -466,7 +567,7 @@ pub(crate) fn account_command_from_inline_action(
 /// Translate typed account-picker commands directly into [`AccountCommand`]s.
 ///
 /// This is the typed bridge for picker actions: it avoids rendering the
-/// action into a `/account ...` string and re-parsing it through the slash
+/// action into a `/accounts ...` string and re-parsing it through the slash
 /// command grammar (which broke for labels containing spaces and coupled
 /// picker behavior to the CLI grammar). `SubmitInput` items still carry
 /// free-form command strings and are not handled here.
@@ -495,9 +596,14 @@ pub(crate) fn account_command_from_picker(
             provider_id: Some(provider_id(provider)),
         }),
         AccountPickerCommand::ToggleFailover => None,
-        AccountPickerCommand::Login { provider, label } => Some(AccountCommand::Add {
+        AccountPickerCommand::Login { provider, label } => Some(AccountCommand::Reauthenticate {
             provider_id: provider_id(provider),
-            label: Some(label.clone()),
+            label: label.clone(),
+        }),
+        AccountPickerCommand::Rename { provider, label } => Some(AccountCommand::Rename {
+            provider_id: provider_id(provider),
+            label: label.clone(),
+            new_label: None,
         }),
         AccountPickerCommand::Remove { provider, label } => Some(AccountCommand::Remove {
             provider_id: provider_id(provider),
@@ -513,12 +619,9 @@ pub(crate) fn account_command_from_picker(
 
 pub(crate) fn execute_account_command_local(app: &mut App, command: AccountCommand) {
     match command {
+        AccountCommand::ChooseAddProvider => app.open_account_add_replace_flow(None),
         AccountCommand::OpenOverlay { provider_filter } => {
-            if app.should_open_inline_account_picker(provider_filter.as_deref()) {
-                app.open_account_picker(provider_filter.as_deref())
-            } else {
-                app.open_account_center(provider_filter.as_deref())
-            }
+            app.open_account_center(provider_filter.as_deref())
         }
         AccountCommand::Doctor { provider_id } => app.push_display_message(DisplayMessage::system(
             render_auth_doctor_markdown(provider_id.as_deref()),
@@ -540,6 +643,25 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
         AccountCommand::JcodeLogout => app.start_jcode_account_logout(),
         AccountCommand::Add { provider_id, label } => {
             execute_account_add_local(app, &provider_id, label.as_deref())
+        }
+        AccountCommand::Reauthenticate { provider_id, label } => {
+            app.reauthenticate_saved_account(&provider_id, &label);
+        }
+        AccountCommand::Rename {
+            provider_id,
+            label,
+            new_label,
+        } => {
+            if let Some(new_label) = new_label {
+                app.rename_saved_account(&provider_id, &label, &new_label);
+            } else {
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Enter a new name for {provider_id} account `{label}`, then press Enter. Use /cancel to abort."
+                )));
+                app.pending_account_input =
+                    Some(PendingAccountInput::Rename { provider_id, label });
+                app.set_status_notice("Accounts: enter a new account name");
+            }
         }
         command @ (AccountCommand::UseInWindow { .. }
         | AccountCommand::SetDefault { .. }
@@ -589,11 +711,7 @@ pub(crate) async fn execute_account_command_remote(
 ) -> anyhow::Result<()> {
     match command {
         AccountCommand::OpenOverlay { provider_filter } => {
-            if app.should_open_inline_account_picker(provider_filter.as_deref()) {
-                app.open_account_picker(provider_filter.as_deref());
-            } else {
-                app.open_account_center(provider_filter.as_deref());
-            }
+            app.open_account_center(provider_filter.as_deref());
         }
         AccountCommand::Doctor { provider_id } => {
             execute_account_command_local(app, AccountCommand::Doctor { provider_id })
@@ -707,7 +825,7 @@ fn save_default_provider_setting(app: &mut App, provider: Option<&str>) {
         // values the model picker's "set default" path writes, and startup now
         // honors them as a routing + OAuth-vs-API decision. Rejecting them here
         // was itself an inconsistency: the picker could save a default the
-        // `/account` command refused to set.
+        // `/accounts` command refused to set.
         Some(other) if jcode_provider_core::AuthRoute::parse(other).is_some() => normalized,
         Some(other) => {
             app.push_display_message(DisplayMessage::error(format!(
@@ -1002,9 +1120,12 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
             .map(crate::auth::validation::format_record_label)
             .unwrap_or_else(|| "not validated".to_string())
     ));
-    lines.push(format!("  - Login command: /account {} login", provider.id));
     lines.push(format!(
-        "  - Doctor command: /account {} doctor",
+        "  - Login command: /accounts {} login",
+        provider.id
+    ));
+    lines.push(format!(
+        "  - Doctor command: /accounts {} doctor",
         provider.id
     ));
     lines.push(String::new());
@@ -1023,9 +1144,9 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
             lines.push(app.render_anthropic_accounts_markdown());
             lines.push(String::new());
             lines.push("Commands:".to_string());
-            lines.push("  - /account claude add".to_string());
-            lines.push("  - /account claude switch <label>".to_string());
-            lines.push("  - /account claude remove <label>".to_string());
+            lines.push("  - /accounts claude add".to_string());
+            lines.push("  - /accounts claude switch <label>".to_string());
+            lines.push("  - /accounts claude remove <label>".to_string());
         }
         "openai" => {
             lines.push(app.render_openai_accounts_markdown());
@@ -1050,12 +1171,12 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
                     "off"
                 }
             ));
-            lines.push("  - /account openai transport <auto|https|websocket>".to_string());
+            lines.push("  - /accounts openai transport <auto|https|websocket>".to_string());
             lines.push(
-                "  - /account openai effort <none|minimal|low|medium|high|xhigh|max|clear>"
+                "  - /accounts openai effort <none|minimal|low|medium|high|xhigh|max|clear>"
                     .to_string(),
             );
-            lines.push("  - /account openai fast <on|off>".to_string());
+            lines.push("  - /accounts openai fast <on|off>".to_string());
         }
         "copilot" => {
             lines.push("Settings".to_string());
@@ -1063,7 +1184,7 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
                 "  - Premium mode: {}",
                 cfg.provider.copilot_premium.as_deref().unwrap_or("normal")
             ));
-            lines.push("  - /account copilot premium <normal|one|zero>".to_string());
+            lines.push("  - /accounts copilot premium <normal|one|zero>".to_string());
         }
         "openai-compatible" => {
             let compat = crate::provider_catalog::resolve_openai_compatible_profile(
@@ -1081,10 +1202,10 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
                 "  - Default model hint: {}",
                 compat.default_model.as_deref().unwrap_or("(unset)")
             ));
-            lines.push("  - /account openai-compatible api-base <url|clear>".to_string());
-            lines.push("  - /account openai-compatible api-key-name <ENV_VAR|clear>".to_string());
-            lines.push("  - /account openai-compatible env-file <file.env|clear>".to_string());
-            lines.push("  - /account openai-compatible default-model <model|clear>".to_string());
+            lines.push("  - /accounts openai-compatible api-base <url|clear>".to_string());
+            lines.push("  - /accounts openai-compatible api-key-name <ENV_VAR|clear>".to_string());
+            lines.push("  - /accounts openai-compatible env-file <file.env|clear>".to_string());
+            lines.push("  - /accounts openai-compatible default-model <model|clear>".to_string());
         }
         _ => {
             lines.push("No provider-specific settings are exposed here yet. Use /login to configure credentials.".to_string());
@@ -1106,10 +1227,10 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
                 .unwrap_or("(provider default)")
         ));
         lines.push(
-            "  - /account default-provider <claude|openai|copilot|gemini|openrouter|auto>"
+            "  - /accounts default-provider <claude|openai|copilot|gemini|openrouter|auto>"
                 .to_string(),
         );
-        lines.push("  - /account default-model <model|clear>".to_string());
+        lines.push("  - /accounts default-model <model|clear>".to_string());
     }
 
     lines.join("\n")
@@ -1123,7 +1244,7 @@ fn render_auth_doctor_markdown(provider_filter: Option<&str>) -> String {
             Some(provider) => vec![provider],
             None => {
                 return format!(
-                    "Unknown provider {}. Use /account <provider> doctor with a valid provider id.",
+                    "Unknown provider {}. Use /accounts <provider> doctor with a valid provider id.",
                     provider_id
                 );
             }
@@ -1220,11 +1341,11 @@ mod tests {
     #[test]
     fn parse_account_doctor_subcommands() {
         assert!(matches!(
-            parse_account_command("/account doctor"),
+            parse_account_command("/accounts doctor"),
             Some(Ok(AccountCommand::Doctor { provider_id: None }))
         ));
         assert!(matches!(
-            parse_account_command("/account openai doctor"),
+            parse_account_command("/accounts openai doctor"),
             Some(Ok(AccountCommand::Doctor { provider_id: Some(provider_id) })) if provider_id == "openai"
         ));
     }
@@ -1232,32 +1353,32 @@ mod tests {
     #[test]
     fn parse_claude_code_instance_commands() {
         assert!(matches!(
-            parse_account_command("/account claude-code switch personal"),
+            parse_account_command("/accounts claude-code switch personal"),
             Some(Ok(AccountCommand::UseInWindow { provider_id, label }))
                 if provider_id == "claude-code" && label == "personal"
         ));
         assert!(matches!(
-            parse_account_command("/account claude-code personal"),
+            parse_account_command("/accounts claude-code personal"),
             Some(Ok(AccountCommand::UseInWindow { provider_id, label }))
                 if provider_id == "claude-code" && label == "personal"
         ));
         assert!(matches!(
-            parse_account_command("/account claude-code"),
+            parse_account_command("/accounts claude-code"),
             Some(Ok(AccountCommand::OpenOverlay { provider_filter: Some(filter) }))
                 if filter == "claude-code"
         ));
         assert!(matches!(
-            parse_account_command("/account claude-code unpin"),
+            parse_account_command("/accounts claude-code unpin"),
             Some(Ok(AccountCommand::Unpin { provider_id: Some(provider_id) }))
                 if provider_id == "claude-code"
         ));
         assert!(matches!(
-            parse_account_command("/account unpin claude-code"),
+            parse_account_command("/accounts unpin claude-code"),
             Some(Ok(AccountCommand::Unpin { provider_id: Some(provider_id) }))
                 if provider_id == "claude-code"
         ));
         assert!(matches!(
-            parse_account_command("/account claude-code default personal"),
+            parse_account_command("/accounts claude-code default personal"),
             Some(Err(_))
         ));
     }
@@ -1265,19 +1386,19 @@ mod tests {
     #[test]
     fn parse_native_jcode_account_actions() {
         assert!(matches!(
-            parse_account_command("/account jcode login"),
+            parse_account_command("/accounts jcode login"),
             Some(Ok(AccountCommand::Login { provider_id })) if provider_id == "jcode"
         ));
         assert!(matches!(
-            parse_account_command("/account jcode status"),
+            parse_account_command("/accounts jcode status"),
             Some(Ok(AccountCommand::JcodeStatus))
         ));
         assert!(matches!(
-            parse_account_command("/account jcode manage"),
+            parse_account_command("/accounts jcode manage"),
             Some(Ok(AccountCommand::JcodeManage))
         ));
         assert!(matches!(
-            parse_account_command("/account jcode logout"),
+            parse_account_command("/accounts jcode logout"),
             Some(Ok(AccountCommand::JcodeLogout))
         ));
     }
@@ -1289,17 +1410,17 @@ mod tests {
     #[test]
     fn parse_account_switch_pins_this_window() {
         for input in [
-            "/account switch claude-fox",
-            "/account use claude-fox",
-            "/account claude switch claude-fox",
-            "/account claude claude-fox",
-            "/account claude-fox",
+            "/accounts switch claude-fox",
+            "/accounts use claude-fox",
+            "/accounts claude switch claude-fox",
+            "/accounts claude claude-fox",
+            "/accounts claude-fox",
         ] {
             let out = parsed(input);
             assert!(out.contains("UseInWindow"), "{input} -> {out}");
             assert!(out.contains("claude-fox"), "{input} -> {out}");
         }
-        let out = parsed("/account openai switch openai-otter");
+        let out = parsed("/accounts openai switch openai-otter");
         assert!(
             out.contains("UseInWindow") && out.contains("\"openai\""),
             "{out}"
@@ -1308,31 +1429,31 @@ mod tests {
 
     #[test]
     fn parse_account_default_label_sets_default_not_provider_fallthrough() {
-        let out = parsed("/account default claude-fox");
+        let out = parsed("/accounts default claude-fox");
         assert!(out.contains("SetDefault {"), "{out}");
         assert!(out.contains("claude-fox"), "{out}");
         assert!(!out.contains("UseInWindow"), "{out}");
-        let out = parsed("/account openai default openai-fox");
+        let out = parsed("/accounts openai default openai-fox");
         assert!(
             out.contains("SetDefault {") && out.contains("openai-fox"),
             "{out}"
         );
         // Existing global-default commands keep their meaning.
-        assert!(parsed("/account default-provider claude").contains("SetDefaultProvider"));
-        assert!(parsed("/account default-model gpt-5").contains("SetDefaultModel"));
-        assert!(parsed("/account default").contains("Err"));
+        assert!(parsed("/accounts default-provider claude").contains("SetDefaultProvider"));
+        assert!(parsed("/accounts default-model gpt-5").contains("SetDefaultModel"));
+        assert!(parsed("/accounts default").contains("Err"));
     }
 
     #[test]
     fn parse_account_unpin() {
-        let out = parsed("/account unpin");
+        let out = parsed("/accounts unpin");
         assert!(out.contains("Unpin { provider_id: None }"), "{out}");
-        let out = parsed("/account unpin openai");
+        let out = parsed("/accounts unpin openai");
         assert!(
             out.contains("Unpin { provider_id: Some(\"openai\") }"),
             "{out}"
         );
-        let out = parsed("/account claude unpin");
+        let out = parsed("/accounts claude unpin");
         assert!(
             out.contains("Unpin { provider_id: Some(\"claude\") }"),
             "{out}"
@@ -1341,25 +1462,85 @@ mod tests {
 
     #[test]
     fn parse_account_failover_modes() {
-        assert!(parsed("/account failover on").contains("Failover(On)"));
-        assert!(parsed("/account failover off").contains("Failover(Off)"));
-        assert!(parsed("/account failover default").contains("Failover(Default)"));
-        assert!(parsed("/account failover status").contains("Failover(Status)"));
-        assert!(parsed("/account failover").contains("Failover(Status)"));
-        assert!(parsed("/account failover sideways").contains("Err"));
+        assert!(parsed("/accounts failover on").contains("Failover(On)"));
+        assert!(parsed("/accounts failover off").contains("Failover(Off)"));
+        assert!(parsed("/accounts failover default").contains("Failover(Default)"));
+        assert!(parsed("/accounts failover status").contains("Failover(Status)"));
+        assert!(parsed("/accounts failover").contains("Failover(Status)"));
+        assert!(parsed("/accounts failover sideways").contains("Err"));
     }
 
     #[test]
     fn parse_account_command_requires_a_token_boundary() {
+        for removed in [
+            "/account",
+            "/account list",
+            "/account openai add",
+            "/accounts-extra",
+        ] {
+            assert!(parse_account_command(removed).is_none(), "{removed}");
+        }
         assert!(
             parse_account_command("/accounting").is_none(),
-            "/accounting must not be parsed as /account with label `ing`"
+            "/accounting must not be parsed as /accounts with label `ing`"
         );
         assert!(matches!(
             parse_account_command("/accounts"),
             Some(Ok(AccountCommand::OpenOverlay {
                 provider_filter: None
             }))
+        ));
+    }
+
+    #[test]
+    fn parse_accounts_rename_and_reauthenticate_keep_the_selected_target() {
+        for provider in ["claude", "openai"] {
+            assert!(matches!(
+                parse_account_command(&format!("/accounts {provider} rename work New account name")),
+                Some(Ok(AccountCommand::Rename { provider_id, label, new_label: Some(name) }))
+                    if provider_id == provider && label == "work" && name == "New account name"
+            ));
+            assert!(matches!(
+                parse_account_command(&format!("/accounts {provider} rename work")),
+                Some(Ok(AccountCommand::Rename { provider_id, label, new_label: None }))
+                    if provider_id == provider && label == "work"
+            ));
+            for action in ["reauth", "reauthenticate", "refresh"] {
+                assert!(matches!(
+                    parse_account_command(&format!("/accounts {provider} {action} Work account")),
+                    Some(Ok(AccountCommand::Reauthenticate { provider_id, label }))
+                        if provider_id == provider && label == "Work account"
+                ));
+                assert!(matches!(
+                    parse_account_command(&format!("/accounts {provider} {action}")),
+                    Some(Err(_))
+                ));
+            }
+            assert!(matches!(
+                parse_account_command(&format!("/accounts {provider} rename")),
+                Some(Err(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn account_picker_management_actions_preserve_labels_with_spaces() {
+        use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind};
+        assert!(matches!(
+            account_command_from_picker(&AccountPickerCommand::Rename {
+                provider: AccountProviderKind::OpenAi,
+                label: "Work account".to_string(),
+            }),
+            Some(AccountCommand::Rename { provider_id, label, new_label: None })
+                if provider_id == "openai" && label == "Work account"
+        ));
+        assert!(matches!(
+            account_command_from_picker(&AccountPickerCommand::Login {
+                provider: AccountProviderKind::Anthropic,
+                label: "Work account".to_string(),
+            }),
+            Some(AccountCommand::Reauthenticate { provider_id, label })
+                if provider_id == "claude" && label == "Work account"
         ));
     }
 

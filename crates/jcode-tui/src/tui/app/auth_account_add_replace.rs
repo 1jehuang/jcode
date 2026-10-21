@@ -2,11 +2,13 @@ use super::*;
 
 impl App {
     pub(crate) fn open_account_add_replace_flow(&mut self, provider_filter: Option<&str>) {
-        use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
+        use crate::tui::account_picker::{
+            AccountPicker, AccountPickerCommand, AccountPickerItem, AccountProviderKind,
+        };
 
         let mut items = vec![AccountPickerItem::action(
             "account-flow",
-            "Add / Replace",
+            "Accounts",
             "Back to account center",
             "Return to the full provider/auth account center",
             AccountPickerCommand::OpenAccountCenter {
@@ -24,7 +26,7 @@ impl App {
                 "Claude",
                 "Add new account",
                 "Sign in to another Claude account. Existing saved accounts are kept.",
-                AccountPickerCommand::SubmitInput("/account claude add".to_string()),
+                AccountPickerCommand::SubmitInput("/accounts claude add".to_string()),
             ));
             let accounts = match crate::auth::claude::list_accounts() {
                 Ok(accounts) => accounts,
@@ -49,7 +51,10 @@ impl App {
                             .map(mask_email)
                             .unwrap_or_else(|| label.clone())
                     ),
-                    AccountPickerCommand::SubmitInput(format!("/account claude add {}", label)),
+                    AccountPickerCommand::Login {
+                        provider: AccountProviderKind::Anthropic,
+                        label,
+                    },
                 ));
             }
         }
@@ -60,7 +65,7 @@ impl App {
                 "OpenAI",
                 "Add new account",
                 "Sign in to another OpenAI account. Existing saved accounts are kept.",
-                AccountPickerCommand::SubmitInput("/account openai add".to_string()),
+                AccountPickerCommand::SubmitInput("/accounts openai add".to_string()),
             ));
             let accounts = match crate::auth::codex::list_accounts() {
                 Ok(accounts) => accounts,
@@ -85,18 +90,21 @@ impl App {
                             .map(mask_email)
                             .unwrap_or_else(|| label.clone())
                     ),
-                    AccountPickerCommand::SubmitInput(format!("/account openai add {}", label)),
+                    AccountPickerCommand::Login {
+                        provider: AccountProviderKind::OpenAi,
+                        label,
+                    },
                 ));
             }
         }
 
         self.account_picker_overlay = Some(std::cell::RefCell::new(AccountPicker::new(
-            " Add / Replace Account ",
+            " Add / Reauthenticate Account ",
             items,
         )));
         self.inline_interactive_state = None;
         self.input.clear();
         self.cursor_pos = 0;
-        self.set_status_notice("Account center: choose add/replace target");
+        self.set_status_notice("Accounts: choose a provider or a saved login to reauthenticate");
     }
 }

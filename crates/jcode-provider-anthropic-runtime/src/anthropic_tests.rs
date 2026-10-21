@@ -2269,7 +2269,7 @@ async fn same_label_relogin_replaces_cached_token_in_every_live_session() {
     );
 }
 
-/// `/account switch` only reaches the requesting session's provider. Every
+/// `/accounts switch` only reaches the requesting session's provider. Every
 /// other live session must still pick up the newly active account on its next
 /// request instead of reusing its cached token for hours.
 #[tokio::test]

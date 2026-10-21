@@ -8,12 +8,16 @@ pub(crate) enum PendingLogin {
     ClaudeAccount {
         verifier: String,
         label: String,
+        expected_existing: bool,
+        expected_identity: Option<String>,
         redirect_uri: Option<String>,
     },
     /// Waiting for user to paste an OpenAI OAuth callback URL/query for a specific stored account.
     OpenAiAccount {
         verifier: String,
         label: String,
+        expected_existing: bool,
+        expected_identity: Option<String>,
         expected_state: String,
         redirect_uri: String,
     },
@@ -105,6 +109,10 @@ impl PendingLogin {
 
 #[derive(Debug, Clone)]
 pub(crate) enum PendingAccountInput {
+    Rename {
+        provider_id: String,
+        label: String,
+    },
     NewAccountLabel {
         provider_id: String,
         display_name: String,
@@ -119,6 +127,7 @@ pub(crate) enum PendingAccountInput {
 
 #[derive(Debug, Clone)]
 pub(crate) enum AccountCommand {
+    ChooseAddProvider,
     OpenOverlay {
         provider_filter: Option<String>,
     },
@@ -138,7 +147,16 @@ pub(crate) enum AccountCommand {
         provider_id: String,
         label: Option<String>,
     },
-    /// Pin THIS window to a stored account (`/account switch <label>`).
+    Reauthenticate {
+        provider_id: String,
+        label: String,
+    },
+    Rename {
+        provider_id: String,
+        label: String,
+        new_label: Option<String>,
+    },
+    /// Pin THIS window to a stored account (`/accounts switch <label>`).
     UseInWindow {
         provider_id: String,
         label: String,

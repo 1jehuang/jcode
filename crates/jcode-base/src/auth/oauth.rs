@@ -1030,6 +1030,11 @@ async fn fetch_claude_profile_email_at_url(
     Ok(profile.account.email)
 }
 
+/// Fetch the browser login identity without changing any saved credentials.
+pub async fn fetch_claude_profile_email(access_token: &str) -> Result<Option<String>> {
+    fetch_claude_profile_email_at_url(access_token, claude::PROFILE_URL).await
+}
+
 /// Fetch profile metadata for a Claude account and persist any discovered fields.
 pub async fn update_claude_account_profile(
     label: &str,

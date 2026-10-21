@@ -228,8 +228,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/auth", "Show authentication status"),
     RegisteredCommand::public("/login", "Login to a provider"),
     RegisteredCommand::public("/logout", "Log out of a provider"),
-    RegisteredCommand::public("/account", "Open the combined account picker"),
-    RegisteredCommand::public("/accounts", "Alias for /account"),
+    RegisteredCommand::public("/accounts", "Manage accounts, logins, and usage"),
     RegisteredCommand::public("/cache", "Show cache stats; extend/5m saves Anthropic TTL"),
     RegisteredCommand::public("/debug-visual", "Toggle visual debug overlay"),
     RegisteredCommand::public("/screenshot-mode", "Toggle screenshot capture mode"),
@@ -948,79 +947,110 @@ impl App {
             return self.rank_suggestions(input, suggestions);
         }
 
-        if prefix.starts_with("/account ") || prefix.starts_with("/accounts ") {
+        if prefix.starts_with("/accounts ") {
             let mut suggestions = vec![
-                ("/account list".into(), "Open all provider/account actions"),
                 (
-                    "/account switch".into(),
+                    "/accounts add".into(),
+                    "Choose a provider and add an account",
+                ),
+                (
+                    "/accounts list".into(),
+                    "Open all provider/accounts actions",
+                ),
+                (
+                    "/accounts switch".into(),
                     "Use a saved account in this window",
                 ),
                 (
-                    "/account default".into(),
+                    "/accounts default".into(),
                     "Set the default account for new windows",
                 ),
                 (
-                    "/account unpin".into(),
+                    "/accounts unpin".into(),
                     "This window follows the default account",
                 ),
                 (
-                    "/account failover".into(),
+                    "/accounts failover".into(),
                     "Per-window account failover on|off|status",
                 ),
                 (
-                    "/account default-provider".into(),
+                    "/accounts default-provider".into(),
                     "Set preferred default provider",
                 ),
                 (
-                    "/account default-model".into(),
+                    "/accounts default-model".into(),
                     "Set preferred default model",
                 ),
                 (
-                    "/account openai-compatible settings".into(),
+                    "/accounts openai-compatible settings".into(),
                     "Inspect custom OpenAI-compatible settings",
                 ),
                 (
-                    "/account openai-compatible api-base".into(),
+                    "/accounts openai-compatible api-base".into(),
                     "Set custom OpenAI-compatible API base",
                 ),
             ];
             for provider in crate::provider_catalog::login_providers() {
                 suggestions.push((
-                    format!("/account {}", provider.id),
+                    format!("/accounts {}", provider.id),
                     "Open this provider's account/settings actions",
                 ));
                 suggestions.push((
-                    format!("/account {} settings", provider.id),
+                    format!("/accounts {} settings", provider.id),
                     "Show provider-specific settings",
                 ));
                 suggestions.push((
-                    format!("/account {} login", provider.id),
+                    format!("/accounts {} login", provider.id),
                     "Start or refresh login for this provider",
                 ));
             }
-            suggestions.push(("/account claude add".into(), "Add a new Claude account"));
-            suggestions.push(("/account openai add".into(), "Add a new OpenAI account"));
+            suggestions.push(("/accounts claude add".into(), "Add a new Claude account"));
+            suggestions.push(("/accounts openai add".into(), "Add a new OpenAI account"));
             suggestions.push((
-                "/account openai transport".into(),
+                "/accounts openai transport".into(),
                 "Set OpenAI transport preference",
             ));
             suggestions.push((
-                "/account openai effort".into(),
+                "/accounts openai effort".into(),
                 "Set OpenAI reasoning effort preference",
             ));
             if let Ok(accounts) = crate::auth::claude::list_accounts() {
                 for account in accounts {
                     suggestions.push((
-                        format!("/account claude switch {}", account.label),
+                        format!("/accounts claude switch {}", account.label),
                         "Switch to this Claude account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts claude rename {}", account.label),
+                        "Rename this Claude account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts claude reauth {}", account.label),
+                        "Sign in again to this Claude account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts claude remove {}", account.label),
+                        "Remove this saved Claude login",
                     ));
                 }
             }
             if let Ok(accounts) = crate::auth::codex::list_accounts() {
                 for account in accounts {
                     suggestions.push((
-                        format!("/account openai switch {}", account.label),
+                        format!("/accounts openai switch {}", account.label),
                         "Switch to this OpenAI account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts openai rename {}", account.label),
+                        "Rename this OpenAI account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts openai reauth {}", account.label),
+                        "Sign in again to this OpenAI account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts openai remove {}", account.label),
+                        "Remove this saved OpenAI login",
                     ));
                 }
             }
@@ -1434,6 +1464,11 @@ impl App {
     }
 
     pub(super) fn accept_selected_command_suggestion(&mut self) -> bool {
+        // Complete account-center commands open the manager, even with trailing
+        // whitespace. A suggested login must never consume their Enter key.
+        if super::auth::requests_account_center(&self.input) {
+            return false;
+        }
         let suggestions = self.clamp_command_suggestion_selection();
         let Some((cmd, _)) = suggestions.get(self.command_suggestion_selected).cloned() else {
             return false;
@@ -1442,8 +1477,8 @@ impl App {
             return false;
         }
         // The input is already a complete command that means the same thing
-        // as the highlighted suggestion (e.g. `/account switch claude-fox`
-        // vs `/account claude switch claude-fox`): let Enter submit it.
+        // as the highlighted suggestion (e.g. `/accounts switch claude-fox`
+        // vs `/accounts claude switch claude-fox`): let Enter submit it.
         if super::auth::same_account_command(self.input.trim(), &cmd) {
             return false;
         }
@@ -1810,17 +1845,17 @@ impl App {
                 | "/transport"
                 | "/login"
                 | "/auth"
-                | "/account"
-                | "/account claude"
-                | "/account switch"
-                | "/account openai"
-                | "/account openai-compatible"
-                | "/account default-provider"
-                | "/account default-model"
-                | "/account claude switch"
-                | "/account claude remove"
-                | "/account openai switch"
-                | "/account openai remove"
+                | "/accounts"
+                | "/accounts claude"
+                | "/accounts switch"
+                | "/accounts openai"
+                | "/accounts openai-compatible"
+                | "/accounts default-provider"
+                | "/accounts default-model"
+                | "/accounts claude switch"
+                | "/accounts claude remove"
+                | "/accounts openai switch"
+                | "/accounts openai remove"
                 | "/usage"
                 | "/reset"
                 | "/subscription"

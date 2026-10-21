@@ -460,7 +460,7 @@ pub(in crate::tui::app) fn handle_server_event(
         return true;
     }
 
-    // Replies to this window's account requests (/account switch, default,
+    // Replies to this window's account requests (/accounts switch, default,
     // unpin, failover). Only these settle the change the user asked for.
     match &event {
         ServerEvent::Done { id } if app.settle_account_request(*id, Ok(())) => return true,

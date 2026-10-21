@@ -99,7 +99,7 @@ struct LegacyAnthropicAuth {
 const ACCOUNT_LABEL_PREFIX: &str = "claude";
 
 /// Set the runtime override for the active account label.
-/// This allows `/account switch <label>` to take effect without rewriting the file.
+/// This allows `/accounts switch <label>` to take effect without rewriting the file.
 pub fn set_active_account_override(label: Option<String>) {
     crate::auth::account_store::set_runtime_active_override(ACCOUNT_LABEL_PREFIX, label);
 }
@@ -425,6 +425,54 @@ pub fn remove_account(label: &str) -> Result<()> {
 
     if get_active_account_override().as_deref() == Some(label) {
         set_active_account_override(auth.active_anthropic_account.clone());
+    }
+
+    Ok(())
+}
+
+/// Rename an account's label. The label is the human-facing name shown in the
+/// picker, so this is the account "rename". References to the old label (the
+/// active account and the runtime override) are migrated. Identity-based session
+/// pins continue resolving to the renamed login.
+pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
+    let new_label = new_label.trim();
+    if new_label.is_empty() {
+        anyhow::bail!("New account name cannot be empty");
+    }
+    if matches!(new_label, "default" | "main")
+        || new_label.strip_prefix("claude-").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+        })
+    {
+        anyhow::bail!("That name is reserved for legacy account migration; choose a custom name");
+    }
+    let mut auth = load_auth_file()?;
+    if new_label == old_label {
+        if auth.anthropic_accounts.iter().any(|account| account.label == old_label) {
+            return Ok(());
+        }
+        anyhow::bail!("No account with label '{}' found", old_label);
+    }
+    if auth.anthropic_accounts.iter().any(|a| a.label == new_label) {
+        anyhow::bail!("An account named '{}' already exists", new_label);
+    }
+    let Some(account) = auth
+        .anthropic_accounts
+        .iter_mut()
+        .find(|a| a.label == old_label)
+    else {
+        anyhow::bail!("No account with label '{}' found", old_label);
+    };
+    account.label = new_label.to_string();
+
+    if auth.active_anthropic_account.as_deref() == Some(old_label) {
+        auth.active_anthropic_account = Some(new_label.to_string());
+    }
+
+    save_auth_file(&auth)?;
+
+    if get_active_account_override().as_deref() == Some(old_label) {
+        set_active_account_override(Some(new_label.to_string()));
     }
 
     Ok(())

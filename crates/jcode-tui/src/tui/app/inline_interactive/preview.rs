@@ -19,15 +19,10 @@ impl App {
 
     fn account_picker_preview_request(&self, input: &str) -> Option<InlinePickerPreviewRequest> {
         let trimmed = input.trim_start();
-        let rest = trimmed
-            .strip_prefix("/account")
-            .or_else(|| trimmed.strip_prefix("/accounts"))?;
+        let rest = trimmed.strip_prefix("/accounts")?;
 
         if rest.is_empty() {
-            return Some(InlinePickerPreviewRequest::Account {
-                provider_filter: None,
-                filter: String::new(),
-            });
+            return None;
         }
 
         if !rest
@@ -41,10 +36,7 @@ impl App {
 
         let rest = rest.trim_start();
         if rest.is_empty() {
-            return Some(InlinePickerPreviewRequest::Account {
-                provider_filter: None,
-                filter: String::new(),
-            });
+            return None;
         }
 
         let mut parts = rest.split_whitespace();
@@ -53,14 +45,9 @@ impl App {
         let remainder = remainder.trim();
 
         match first {
-            "switch" | "use" | "add" | "login" | "remove" | "rm" | "delete"
-            | "default-provider" | "default-model" => return None,
-            "list" | "ls" => {
-                return Some(InlinePickerPreviewRequest::Account {
-                    provider_filter: None,
-                    filter: String::new(),
-                });
-            }
+            "switch" | "use" | "add" | "login" | "remove" | "rm" | "delete" | "rename"
+            | "reauth" | "reauthenticate" | "refresh" | "default" | "unpin" | "failover"
+            | "doctor" | "default-provider" | "default-model" | "list" | "ls" => return None,
             _ => {}
         }
 
@@ -74,21 +61,15 @@ impl App {
 
         if let Some(provider_filter) = provider_filter {
             if remainder.is_empty() {
-                return Some(InlinePickerPreviewRequest::Account {
-                    provider_filter: Some(provider_filter),
-                    filter: String::new(),
-                });
+                return None;
             }
 
             let subcommand = remainder.split_whitespace().next().unwrap_or_default();
             match subcommand {
-                "list" | "ls" => Some(InlinePickerPreviewRequest::Account {
-                    provider_filter: Some(provider_filter),
-                    filter: String::new(),
-                }),
                 "settings" | "login" | "add" | "switch" | "use" | "remove" | "rm" | "delete"
-                | "transport" | "effort" | "fast" | "premium" | "api-base" | "api-key-name"
-                | "env-file" | "default-model" => None,
+                | "rename" | "reauth" | "reauthenticate" | "refresh" | "default" | "unpin"
+                | "doctor" | "list" | "ls" | "transport" | "effort" | "fast" | "premium"
+                | "api-base" | "api-key-name" | "env-file" | "default-model" => None,
                 _ => Some(InlinePickerPreviewRequest::Account {
                     provider_filter: Some(provider_filter),
                     filter: remainder.to_string(),

@@ -498,7 +498,7 @@ impl MultiProvider {
             };
             if !exists {
                 anyhow::bail!(
-                    "Saved account '{}' no longer exists. Select an account with /model or /account.",
+                    "Saved account '{}' no longer exists. Select an account with /model or /accounts.",
                     bound_label
                 );
             }

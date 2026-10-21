@@ -430,7 +430,7 @@ async fn openai_same_label_relogin_replaces_token_in_every_live_session() {
     );
 }
 
-/// `/account switch` only invalidates the requesting session. Every other
+/// `/accounts switch` only invalidates the requesting session. Every other
 /// live session must use the newly active account on its next request.
 #[tokio::test]
 async fn openai_account_switch_replaces_token_in_other_live_sessions() {

@@ -457,7 +457,7 @@ preserve_reasoning_context = true
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
 # Try another account on the same provider before switching providers (default: true).
-# Only the window that ran out moves. `/account failover off` turns it off per window.
+# Only the window that ran out moves. `/accounts failover off` turns it off per window.
 # same_provider_account_failover = false
 # After failover, go back to the preferred account at the start of a turn once
 # its usage limit has reset (default: true)

@@ -41,6 +41,10 @@ pub enum AccountPickerCommand {
         provider: AccountProviderKind,
         label: String,
     },
+    Rename {
+        provider: AccountProviderKind,
+        label: String,
+    },
     Remove {
         provider: AccountProviderKind,
         label: String,
@@ -114,6 +118,7 @@ pub fn action_kind_label(command: &AccountPickerCommand) -> &'static str {
         AccountPickerCommand::Unpin { .. } => "account",
         AccountPickerCommand::ToggleFailover => "setting",
         AccountPickerCommand::Login { .. } => "login",
+        AccountPickerCommand::Rename { .. } => "setting",
         AccountPickerCommand::Remove { .. } => "danger",
         AccountPickerCommand::PromptNew { .. } => "account",
         AccountPickerCommand::SubmitInput(_) => "action",

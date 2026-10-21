@@ -308,7 +308,7 @@ static STARTUP_ACCOUNT_PINS: std::sync::Mutex<Vec<(String, String)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Record `jcode --account` pins. They are sent once, with the first
-/// Subscribe, so a reconnect does not undo a later `/account switch`.
+/// Subscribe, so a reconnect does not undo a later `/accounts switch`.
 pub fn set_startup_account_pins(pins: Vec<(String, String)>) {
     *STARTUP_ACCOUNT_PINS
         .lock()
