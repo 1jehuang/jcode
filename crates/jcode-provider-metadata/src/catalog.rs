@@ -471,6 +471,18 @@ pub const CELERIS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const VENICE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "venice",
+    display_name: "Venice AI",
+    api_base: "https://api.venice.ai/api/v1",
+    api_key_env: "VENICE_API_KEY",
+    env_file: "venice.env",
+    setup_url: "https://venice.ai/settings/api",
+    // Venice's catalog changes often; pick from the live /models list.
+    default_model: None,
+    requires_api_key: true,
+};
+
 // Yolo-Auto is an OpenAI-compatible gateway. Its `/v1/models` listing is
 // authenticated, so the full catalog is discovered with the account key after
 // login; `default_model` keeps the documented `yolo` alias selected until that
@@ -497,7 +509,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -538,6 +550,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
     META_MUSE_PROFILE,
     MUSE_SUBSCRIPTION_PROFILE,
     CELERIS_PROFILE,
+    VENICE_PROFILE,
     YOLO_AUTO_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -1238,6 +1251,19 @@ pub const CELERIS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
     order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
 };
 
+pub const VENICE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "venice",
+    display_name: "Venice AI",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["venice-ai", "veniceai", "venice.ai"],
+    menu_detail: "OpenAI-compatible private, uncensored inference",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(VENICE_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
+};
+
 pub const YOLO_AUTO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "yolo-auto",
     display_name: "Yolo-Auto",
@@ -1264,7 +1290,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1311,6 +1337,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
     META_MUSE_LOGIN_PROVIDER,
     MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
     CELERIS_LOGIN_PROVIDER,
+    VENICE_LOGIN_PROVIDER,
     YOLO_AUTO_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
