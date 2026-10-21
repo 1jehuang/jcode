@@ -708,6 +708,25 @@ pub struct InputShellResult {
     pub failed_to_start: bool,
 }
 
+/// Safe, categorical cause of a retry. Never contains provider error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryReason {
+    RateLimit,
+    Overloaded,
+    Transport,
+    Unknown,
+}
+
+/// Structured retry status shared by providers and client protocols.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetryMetadata {
+    pub attempt: u32,
+    pub max: u32,
+    pub delay_ms: u64,
+    pub reason: RetryReason,
+}
+
 /// Connection phase for status bar transparency.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionPhase {
@@ -723,6 +742,8 @@ pub enum ConnectionPhase {
     Streaming,
     /// Retrying after a transient error
     Retrying { attempt: u32, max: u32 },
+    /// Retrying with structured backoff and cause information.
+    RetryingWithMetadata { retry: RetryMetadata },
 }
 
 impl std::fmt::Display for ConnectionPhase {
@@ -736,7 +757,47 @@ impl std::fmt::Display for ConnectionPhase {
             ConnectionPhase::Retrying { attempt, max } => {
                 write!(f, "retrying ({}/{})", attempt, max)
             }
+            ConnectionPhase::RetryingWithMetadata { retry } => {
+                write!(f, "retrying ({}/{})", retry.attempt, retry.max)
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod retry_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn retry_metadata_roundtrip_and_fixed_display() {
+        for (reason, wire_reason) in [
+            (RetryReason::RateLimit, "rate_limit"),
+            (RetryReason::Overloaded, "overloaded"),
+            (RetryReason::Transport, "transport"),
+            (RetryReason::Unknown, "unknown"),
+        ] {
+            let retry = RetryMetadata {
+                attempt: 2,
+                max: 3,
+                delay_ms: 1500,
+                reason,
+            };
+            let wire =
+                serde_json::json!({"attempt":2,"max":3,"delay_ms":1500,"reason":wire_reason});
+            assert_eq!(serde_json::to_value(&retry).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<RetryMetadata>(wire).unwrap(),
+                retry
+            );
+            assert_eq!(
+                ConnectionPhase::RetryingWithMetadata { retry }.to_string(),
+                "retrying (2/3)"
+            );
+        }
+        assert_eq!(
+            ConnectionPhase::Retrying { attempt: 2, max: 3 }.to_string(),
+            "retrying (2/3)"
+        );
     }
 }
 

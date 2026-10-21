@@ -147,6 +147,7 @@ pub(super) fn apply_failover_target(
     });
     let _ = event_tx.send(ServerEvent::ConnectionPhase {
         phase: format!("retrying on {}", target.label),
+        retry: None,
     });
     Ok(())
 }
@@ -429,7 +430,7 @@ mod tests {
         )));
         assert!(events.iter().any(|event| matches!(
             event,
-            ServerEvent::ConnectionPhase { phase } if phase.starts_with("retrying on")
+            ServerEvent::ConnectionPhase { phase, .. } if phase.starts_with("retrying on")
         )));
     }
 

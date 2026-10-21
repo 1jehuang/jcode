@@ -3,6 +3,31 @@
 use crate::*;
 
 #[test]
+fn connection_phase_retry_metadata_is_optional_and_roundtrips() {
+    for phase in ["connecting", "retrying (2/3)"] {
+        let legacy = serde_json::json!({"ev":"connection_phase","session_id":"s1","phase":phase});
+        let event: ApiEvent = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(matches!(
+            event,
+            ApiEvent::ConnectionPhase { retry: None, .. }
+        ));
+        assert_eq!(serde_json::to_value(event).unwrap(), legacy);
+    }
+    for delay_ms in [0, 1500] {
+        let wire = serde_json::json!({
+            "ev":"connection_phase","session_id":"s1","phase":"retrying (2/3)",
+            "retry":{"attempt":2,"max":3,"delay_ms":delay_ms,"reason":"rate_limit"}
+        });
+        let event: ApiEvent = serde_json::from_value(wire.clone()).unwrap();
+        assert!(
+            matches!(&event, ApiEvent::ConnectionPhase { retry: Some(retry), .. }
+            if retry.reason == RetryReason::RateLimit && retry.delay_ms == delay_ms)
+        );
+        assert_eq!(serde_json::to_value(event).unwrap(), wire);
+    }
+}
+
+#[test]
 fn create_session_system_prompt_roundtrip_and_legacy_default() {
     let legacy = serde_json::json!({"req": "create_session"});
     let decoded: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();

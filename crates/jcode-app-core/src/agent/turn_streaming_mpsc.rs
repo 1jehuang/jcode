@@ -515,6 +515,7 @@ impl Agent {
                         // their TPS timer without forcing hidden reasoning into the transcript.
                         let _ = event_tx.send(ServerEvent::ConnectionPhase {
                             phase: crate::message::ConnectionPhase::Streaming.to_string(),
+                            retry: None,
                         });
                     }
                     StreamEvent::ThinkingEnd => {}
@@ -878,6 +879,12 @@ impl Agent {
                     StreamEvent::ConnectionPhase { phase } => {
                         let _ = event_tx.send(ServerEvent::ConnectionPhase {
                             phase: phase.to_string(),
+                            retry: match phase {
+                                crate::message::ConnectionPhase::RetryingWithMetadata { retry } => {
+                                    Some(retry)
+                                }
+                                _ => None,
+                            },
                         });
                     }
                     StreamEvent::StatusDetail { detail } => {
@@ -939,6 +946,7 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::ConnectionPhase {
                             phase: crate::message::ConnectionPhase::Retrying { attempt, max }
                                 .to_string(),
+                            retry: None,
                         });
                     }
                     StreamEvent::MessageEnd {

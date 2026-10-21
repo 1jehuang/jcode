@@ -758,6 +758,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
             ApiEvent::ConnectionPhase {
                 session_id: session_id.clone(),
                 phase: "connecting".into(),
+                retry: None,
             },
             writer,
         );
