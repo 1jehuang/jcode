@@ -16,6 +16,10 @@ use crate::session::Session;
 use anyhow::Result;
 use std::collections::BTreeMap;
 
+#[path = "session_account_routes.rs"]
+mod routes;
+pub(crate) use routes::{ensure_bound_account_route, refresh_bound_account_route};
+
 /// Account state a child session (swarm worker, split, transfer, overnight
 /// coordinator) inherits from its parent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

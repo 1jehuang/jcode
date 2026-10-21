@@ -5,19 +5,7 @@ impl Agent {
     /// Refuse to run a model turn when this session moved to another machine
     /// or this in-memory copy is older than the transcript on disk.
     pub(crate) fn ensure_session_lease(&self) -> Result<()> {
-        let account_route = self
-            .session
-            .route_api_method
-            .as_deref()
-            .or(self.session.provider_key.as_deref());
-        if let Some(expected) = account_route.and_then(jcode_provider_core::oauth_account_label)
-            && self.provider.oauth_account_label().as_deref() != Some(expected)
-        {
-            anyhow::bail!(
-                "Saved account '{}' could not be restored for this session. Select an available account using /model or /login before sending a request.",
-                expected
-            );
-        }
+        crate::session_accounts::ensure_bound_account_route(self.provider.as_ref(), &self.session)?;
         match self.session.migration_lease_block() {
             Some(block) => Err(anyhow::anyhow!("Session is not runnable here: {block}")),
             None => Ok(()),

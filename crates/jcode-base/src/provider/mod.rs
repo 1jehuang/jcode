@@ -487,15 +487,7 @@ impl MultiProvider {
         if self.provider_uses_oauth_accounts(active)
             && let Some(bound_label) = self.selected_account_for_provider(active)
         {
-            let exists = match active {
-                ActiveProvider::OpenAI => crate::auth::codex::list_accounts()?
-                    .iter()
-                    .any(|account| account.label == bound_label),
-                ActiveProvider::Claude => crate::auth::claude::list_accounts()?
-                    .iter()
-                    .any(|account| account.label == bound_label),
-                _ => true,
-            };
+            let exists = self.saved_account_binding_exists(active, &bound_label)?;
             if !exists {
                 anyhow::bail!(
                     "Saved account '{}' no longer exists. Select an account with /model or /accounts.",
