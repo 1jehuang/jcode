@@ -414,16 +414,19 @@ test('a dropped stream before the page navigates still finds its conversation',a
   assert.equal(t.available,true); assert.deepEqual(t.texts,['Recovered.']); assert.equal(t.complete,true);
   assert.equal(api.calls.at(-1).url,`/backend-api/conversation/${id}`);
 });
-test('a turn request that fails before any response is reported as never sent',async()=>{
+test('a failed turn response reports ambiguous delivery and cannot be re-clicked',async()=>{
   // Observed live: the page showed "Failed to fetch" and jcode waited 120s.
   const f=fixture(); const placeholder='jcode turn jcode-ff';
-  const globals={ fetch: async () => { throw new TypeError('Failed to fetch'); } };
+  let accepted=0;
+  const globals={ fetch: async () => { accepted++; throw new TypeError('Failed to fetch'); } };
   await run({op:'arm_send',key:'jcode-ff',text:'P',placeholder},f,{globals});
   await assert.rejects(globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody(placeholder)}),/Failed to fetch/);
   const state=await run({op:'stream',key:'jcode-ff'},f,{globals});
   assert.equal(state.started,false); assert.equal(state.fetchError,'Failed to fetch');
   assert.equal(state.pending,false,'the hook consumed the prompt, so click_send cannot resend in this tab');
   assert.equal((await run({op:'stream',key:'jcode-other'},f,{globals})).fetchError,null);
+  assert.equal((await run({op:'click_send',armedKey:'jcode-ff'},f,{globals})).clicked,false);
+  assert.equal(accepted,1,'polling and re-clicking never repeat an ambiguously accepted POST');
 });
 test('click_send re-clicks only while this turn is armed and unsent',async()=>{
   const f=fixture(); const placeholder='jcode turn jcode-c1'; f.editor.text=placeholder;

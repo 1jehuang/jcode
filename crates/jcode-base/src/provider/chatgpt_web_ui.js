@@ -388,8 +388,8 @@ return (async () => {
         try {
           response = await net.original.call(this ?? globalThis, input, init);
         } catch (error) {
-          // The turn POST failed before any response ("Failed to fetch"):
-          // ChatGPT never got it, so jcode can retry instead of waiting.
+          // A failed response does not prove the server missed this POST.
+          // Report the transport failure; the caller must not blindly resend.
           if (substituted) net.fetchError = { key: substituted.key, message: String(error?.message || error) };
           throw error;
         }

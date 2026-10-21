@@ -155,20 +155,34 @@ fn sentence_claims_no_access(sentence: &str) -> bool {
     let Some((start, end, no_access)) = negation else {
         return false;
     };
-    // The subject must sit right before the negation: at most three words
-    // ("the jcode tools here aren't", "unfortunately i can't").
-    let lead: Vec<&str> = sentence[..start].split_whitespace().rev().take(4).collect();
-    let lead = format!(" {} ", lead.into_iter().rev().collect::<Vec<_>>().join(" "));
-    if contains_any(TOOL_SUBJECTS, &lead) {
+    // Bind the predicate to its subject, not an earlier tool mention in a
+    // contrast clause ("Jcode tools work, GitHub isn't connected").
+    let lead = sentence[..start].trim_end();
+    let subject = [" here", " currently", " still", " now"]
+        .iter()
+        .find_map(|suffix| lead.strip_suffix(*suffix))
+        .unwrap_or(lead);
+    if TOOL_SUBJECTS.iter().any(|tool| {
+        subject
+            .strip_suffix(*tool)
+            .is_some_and(|before| before.is_empty() || before.ends_with(char::is_whitespace))
+    }) {
         return true;
     }
-    let first_person = [" i ", " i'm ", " i've ", " we "]
+    let first_person = [" i", " i'm", " i've", " we", " i am", " we are"]
         .iter()
-        .any(|subject| lead.contains(subject));
+        .any(|person| subject.ends_with(*person));
     let after = &sentence[end..];
     // Scoped claim: "I couldn't reach the tool transport in this session", or
     // a list of tools that "aren't connected in this session".
-    let tool_subject = sentence[..start].contains(" tools") || sentence[..start].contains("jcode");
+    let clause = lead
+        .rsplit(',')
+        .next()
+        .unwrap_or(lead)
+        .rsplit(" but ")
+        .next()
+        .unwrap_or(lead);
+    let tool_subject = clause.trim_end().ends_with(" tools");
     if contains_any(SCOPES, sentence)
         && (first_person || tool_subject)
         && (contains_any(CAPABILITIES, after) || contains_any(SCOPED_CAPABILITIES, after))
@@ -280,6 +294,11 @@ mod tests {
             "Done. All 166 tests pass and the branch is pushed.",
             "The CI job can't access the cache, so the toolchain reinstalls each run.",
             "I can't edit the PR description without your approval.",
+            "The Jcode tools work, but GitHub's services are unavailable",
+            "The Jcode tools work, GitHub isn't connected.",
+            "The Jcode tools work, GitHub isn't connected in this session.",
+            "The Jcode tools work but GitHub isn't connected in this session.",
+            "The Jcode tools work but GitHub isn't connected.",
             "The tools menu is unavailable until the dialog closes.",
             "GitHub's API is not available right now, so the push failed.",
             "The Jcode tools returned an error: permission denied on /etc/hosts.",

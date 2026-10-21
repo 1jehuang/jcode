@@ -75,6 +75,11 @@ impl SandboxCall {
 pub(super) fn sandbox_command(code: &str) -> Option<String> {
     let trimmed = code.trim();
     if let Ok(Value::Object(call)) = serde_json::from_str::<Value>(trimmed) {
+        // Remote execution options cannot be mapped onto the user's machine.
+        // Even a relative write changes meaning when workdir/env is dropped.
+        if call.keys().any(|key| key != "cmd") {
+            return None;
+        }
         let argv: Vec<&str> = call
             .get("cmd")?
             .as_array()?
@@ -96,10 +101,7 @@ pub(super) fn sandbox_command(code: &str) -> Option<String> {
 }
 
 fn is_shell(program: &str) -> bool {
-    matches!(
-        program.rsplit('/').next(),
-        Some("bash" | "sh" | "zsh" | "dash")
-    )
+    matches!(program, "bash" | "/bin/bash" | "/usr/bin/bash")
 }
 
 /// The answer jcode acts on instead of the sandboxed one: the text the model
@@ -149,7 +151,7 @@ mod tests {
             Some("pwd; ls -la /tmp | head -80")
         );
         assert_eq!(
-            sandbox_command("sh -c for i in 1 2; do\n  echo \"$i\"\ndone").as_deref(),
+            sandbox_command("bash -c for i in 1 2; do\n  echo \"$i\"\ndone").as_deref(),
             Some("for i in 1 2; do\n  echo \"$i\"\ndone")
         );
         assert_eq!(
@@ -181,6 +183,26 @@ mod tests {
                 .unwrap()
                 .contains("this computer")
         );
+    }
+
+    #[test]
+    fn contextual_or_non_bash_sandbox_calls_are_not_redirected() {
+        for code in [
+            r#"{"cmd":["bash","-lc","printf new > result.txt"],"workdir":"/tmp/scratch"}"#,
+            r#"{"cmd":["bash","-lc","echo $TARGET"],"env":{"TARGET":"remote"}}"#,
+            r#"{"cmd":["bash","-lc","sleep 10"],"timeout":1}"#,
+            "sh -c echo hi",
+            "zsh -lc echo hi",
+            "dash -c echo hi",
+            "/untrusted/bash -lc echo hi",
+        ] {
+            let call = SandboxCall {
+                code: code.to_string(),
+                before: Vec::new(),
+            };
+            assert_eq!(redirected_response(&call), None, "redirected: {code}");
+        }
+        assert_eq!(sandbox_command("bash -lc pwd").as_deref(), Some("pwd"));
     }
 
     #[test]

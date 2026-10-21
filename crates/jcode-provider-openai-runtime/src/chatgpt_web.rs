@@ -11,6 +11,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use jcode_base::provider::chatgpt_web::{self as web_catalog, ChatGptWebModel};
 use jcode_base::provider::chatgpt_web_instance as web_instance;
 
+#[path = "chatgpt_web/markup.rs"]
+mod markup;
+use markup::strip_web_markup;
+
 #[path = "chatgpt_web/refusal.rs"]
 mod refusal;
 use refusal::{claims_no_tool_access, only_announces_action};
@@ -20,8 +24,6 @@ use sandbox::{SandboxCall, sandbox_tools, sandbox_warning, with_sandbox_correcti
 
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
-/// Error text for a turn request that failed before ChatGPT received it.
-const NOT_SENT: &str = "ChatGPT web could not send the request (ChatGPT never received it)";
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(1000);
@@ -105,7 +107,6 @@ impl ChatGptWebState {
             let mut prompt = prompt;
             let mut corrected = false;
             let mut refusal_corrected = false;
-            let mut resent = false;
             // With `bash` on offer, a ChatGPT sandbox shell call is run on
             // this computer instead, so the turn can stop at that call.
             let redirect = advertised_tools.iter().any(|tool| tool == "bash");
@@ -115,11 +116,6 @@ impl ChatGptWebState {
                     .await
                 {
                     Ok(answer) => answer,
-                    Err(err) if !resent && format!("{err:#}").contains(NOT_SENT) => {
-                        resent = true;
-                        jcode_base::logging::warn(&format!("{err:#}; resending the turn"));
-                        continue;
-                    }
                     Err(err) => {
                         let _ = tx.send(Err(err)).await;
                         return;
@@ -777,10 +773,12 @@ async fn poll_network_stream(
         if let Some(error) = state.get("sendError").and_then(Value::as_str) {
             anyhow::bail!("ChatGPT web send was refused before reaching the network: {error}");
         }
-        // The browser's request failed before any response, so ChatGPT never
-        // received this turn. Fail now; the caller resends it once.
+        // A rejected fetch may follow server acceptance. Without proof of
+        // non-delivery, resending could duplicate an at-most-once request.
         if let Some(error) = state.get("fetchError").and_then(Value::as_str) {
-            anyhow::bail!("{NOT_SENT}: {error}");
+            anyhow::bail!(
+                "ChatGPT web request transport failed; delivery is unknown and the turn was not resent: {error}"
+            );
         }
         if state.get("started").and_then(Value::as_bool) == Some(true) {
             if !verified {
@@ -1178,22 +1176,6 @@ struct ParsedToolCall {
 struct ParsedResponse {
     text: String,
     calls: Vec<ParsedToolCall>,
-}
-
-/// Wrapper tags ChatGPT's own renderer adds around raw markup, plus its
-/// internal citation tokens. None of them are part of the model's answer.
-fn strip_web_markup(response: &str) -> String {
-    let mut text = response.replace("<escape>", "").replace("</escape>", "");
-    // `<Cite ref="turn0view0"/>` style source markers.
-    while let Some(start) = text.find("<Cite ") {
-        let Some(len) = text[start..].find("/>") else {
-            break;
-        };
-        let end = start + len + 2;
-        let before = text[..start].trim_end_matches(' ').len();
-        text.replace_range(before..end, "");
-    }
-    text
 }
 
 /// Parses every `<jcode_tool_call>` envelope. Text outside envelopes is
