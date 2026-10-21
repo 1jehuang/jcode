@@ -1,5 +1,6 @@
 use super::*;
 use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::{Terminal, backend::TestBackend};
 
 fn isolated(test: impl FnOnce()) {
     let _guard = IMAGE_TEST_LOCK
@@ -28,6 +29,132 @@ fn seed(hash: u64) {
 
 fn output(buf: &Buffer) -> String {
     buf.content.iter().map(|cell| cell.symbol()).collect()
+}
+
+#[test]
+fn public_image_frames_compose_two_origin_local_panes_with_one_tail() {
+    isolated(|| {
+        force_test_kitty_picker();
+        let path = std::env::temp_dir().join(format!(
+            "jcode-classic-composition-{}.png",
+            std::process::id()
+        ));
+        DynamicImage::new_rgba8(80, 80).save(&path).unwrap();
+        let hash = register_external_image(&path, 80, 80);
+        let mut previous = Buffer::empty(Rect::new(0, 0, 24, 6));
+        for frame_index in 0..2 {
+            crate::begin_terminal_image_frame();
+            let mut composed = Buffer::empty(*previous.area());
+            for offset in [0, 12] {
+                let pane = crate::with_image_frame_offset(offset, 0, || {
+                    let mut terminal = Terminal::new(TestBackend::new(12, 6)).unwrap();
+                    let completed = terminal
+                        .draw(|frame| {
+                            crate::begin_terminal_image_frame();
+                            assert!(crate::render_image_widget_fit_stable(
+                                hash,
+                                Rect::new(1, 1, 4, 3),
+                                frame.buffer_mut(),
+                                4,
+                                3,
+                                0,
+                                false,
+                                false,
+                            ));
+                            assert!(!crate::finish_terminal_image_frame(frame.buffer_mut()));
+                        })
+                        .unwrap();
+                    completed.buffer.clone()
+                });
+                assert!(output(&pane).contains("jcode-image="));
+                assert!(!output(&pane).contains("a=p,"));
+                for y in 0..6 {
+                    for x in 0..12 {
+                        *composed.cell_mut((x + offset, y)).unwrap() =
+                            pane.cell((x, y)).unwrap().clone();
+                    }
+                }
+            }
+            assert!(crate::finish_terminal_image_frame(&mut composed));
+            let mut bytes = Vec::new();
+            CrosstermBackend::new(&mut bytes)
+                .draw(previous.diff(&composed).into_iter())
+                .unwrap();
+            let stream = String::from_utf8(bytes).unwrap();
+            assert_eq!(stream.matches("a=p,").count(), 2);
+            assert!(stream.contains("\x1b[2;2H\x1b_Ga=p,"));
+            assert!(stream.contains("\x1b[2;14H\x1b_Ga=p,"));
+            assert_eq!(
+                stream.matches("a=t,").count(),
+                usize::from(frame_index == 0)
+            );
+            assert_eq!(
+                stream.matches("a=d,d=i,").count(),
+                if frame_index == 0 { 0 } else { 2 }
+            );
+            if frame_index != 0 {
+                assert!(stream.rfind("a=d,d=i,").unwrap() < stream.find("a=p,").unwrap());
+            }
+            assert!(!stream.contains("jcode-image="));
+            assert!(!stream.contains("U=1"));
+            previous = composed;
+        }
+        fs::remove_file(path).unwrap();
+    });
+}
+
+#[test]
+fn image_frame_offsets_compose_and_restore_after_panics() {
+    isolated(|| {
+        seed(11);
+        begin_terminal_image_frame();
+        let mut local = Buffer::empty(Rect::new(0, 0, 8, 4));
+        crate::with_image_frame_offset(3, 2, || {
+            crate::with_image_frame_offset(5, 2, || {
+                begin_terminal_image_frame();
+                render_cell_viewport(11, Rect::new(1, 1, 3, 2), &mut local, 0, 0, 3, 2);
+                assert!(!finish_terminal_image_frame(&mut local));
+            });
+        });
+        let mut composed = Buffer::empty(Rect::new(0, 0, 20, 12));
+        for y in 0..4 {
+            for x in 0..8 {
+                *composed.cell_mut((x + 8, y + 4)).unwrap() = local.cell((x, y)).unwrap().clone();
+            }
+        }
+        assert!(finish_terminal_image_frame(&mut composed));
+        assert!(output(&composed).contains("\x1b[6;10H\x1b_Ga=p,"));
+
+        assert!(
+            std::panic::catch_unwind(|| {
+                crate::with_image_frame_offset(50, 50, || {
+                    panic!("synthetic nested render failure")
+                });
+            })
+            .is_err()
+        );
+        begin_terminal_image_frame();
+        let mut normal = Buffer::empty(Rect::new(0, 0, 8, 4));
+        render_cell_viewport(11, Rect::new(1, 1, 3, 2), &mut normal, 0, 0, 3, 2);
+        assert!(finish_terminal_image_frame(&mut normal));
+        assert!(output(&normal).contains("\x1b[2;2H\x1b_Ga=p,"));
+    });
+}
+
+#[test]
+fn translated_image_outside_composed_bounds_is_not_placed() {
+    isolated(|| {
+        seed(12);
+        begin_terminal_image_frame();
+        let mut local = Buffer::empty(Rect::new(0, 0, 4, 4));
+        crate::with_image_frame_offset(u16::MAX, 0, || {
+            render_cell_viewport(12, Rect::new(1, 1, 3, 2), &mut local, 0, 0, 3, 2);
+        });
+        let mut composed = Buffer::empty(Rect::new(0, 0, 12, 6));
+        assert!(finish_terminal_image_frame(&mut composed));
+        assert!(!output(&composed).contains("a=p,"));
+        assert!(!output(&composed).contains("jcode-image="));
+    });
 }
 
 #[test]

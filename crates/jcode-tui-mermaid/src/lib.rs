@@ -253,7 +253,9 @@ pub use inline_image::{
     inline_image_dims, inline_image_id, inline_image_is_materialized, materialize_inline_image,
     materialize_inline_image_by_id, rediscover_inline_image,
 };
-pub use kitty_classic::{begin_terminal_image_frame, finish_terminal_image_frame};
+pub use kitty_classic::{
+    begin_terminal_image_frame, finish_terminal_image_frame, with_image_frame_offset,
+};
 pub use runtime::force_test_kitty_picker;
 pub use runtime::{
     error_lines_for, get_cached_png, get_font_size, image_protocol_available, init_picker,

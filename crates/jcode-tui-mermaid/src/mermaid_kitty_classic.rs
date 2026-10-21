@@ -26,6 +26,46 @@ struct ImageFrame {
 
 static FRAME: LazyLock<Mutex<ImageFrame>> = LazyLock::new(|| Mutex::new(ImageFrame::default()));
 
+#[derive(Clone, Copy, Default)]
+struct FrameComposition {
+    offset: (u16, u16),
+    depth: usize,
+}
+
+thread_local! {
+    static COMPOSITION: std::cell::Cell<FrameComposition> = const {
+        std::cell::Cell::new(FrameComposition { offset: (0, 0), depth: 0 })
+    };
+}
+
+/// Compose an origin-local image buffer into an already-started outer frame.
+/// Nested begin/finish calls are deferred to the outer frame, and image
+/// destinations are translated by `(x, y)`. Keep the full local frame buffer
+/// when blitting, not an intermediate backend's post-diff buffer, because its
+/// internal image markers must survive until the outer finish call.
+/// Offsets compose additively and the scope is restored even after a panic.
+pub fn with_image_frame_offset<T>(x: u16, y: u16, render: impl FnOnce() -> T) -> T {
+    struct Restore(FrameComposition);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            COMPOSITION.with(|context| context.set(self.0));
+        }
+    }
+    let previous = COMPOSITION.with(|context| {
+        let previous = context.get();
+        context.set(FrameComposition {
+            offset: (
+                previous.offset.0.saturating_add(x),
+                previous.offset.1.saturating_add(y),
+            ),
+            depth: previous.depth.saturating_add(1),
+        });
+        previous
+    });
+    let _restore = Restore(previous);
+    render()
+}
+
 pub(super) fn state_hash(hash: u64, fit: Option<(u16, u16)>, font: (u16, u16)) -> u64 {
     if !runtime::use_classic_kitty() {
         return hash;
@@ -46,6 +86,9 @@ fn delete_placement(payload: &mut String, image: u32, placement: u32) {
 /// [`finish_terminal_image_frame`] after overlays and other text are complete.
 /// Native Kitty placeholders and non-Kitty protocols need no frame bookkeeping.
 pub fn begin_terminal_image_frame() {
+    if COMPOSITION.with(|context| context.get().depth != 0) {
+        return;
+    }
     let Ok(mut frame) = FRAME.lock() else { return };
     let abandoned = !frame.pending.is_empty();
     frame.pending.clear();
@@ -127,7 +170,14 @@ pub(super) fn render_crop(hash: u64, area: Rect, buf: &mut Buffer, crop: PixelCr
     frame.pending.push(Placement {
         image_id,
         placement_id,
-        area: clipped,
+        area: COMPOSITION.with(|context| {
+            let (x, y) = context.get().offset;
+            Rect {
+                x: clipped.x.saturating_add(x),
+                y: clipped.y.saturating_add(y),
+                ..clipped
+            }
+        }),
         crop: (x, y, w, h),
         marker,
         transmit,
@@ -174,6 +224,9 @@ pub(super) fn render_cell_viewport(
 /// A later overlay covering any part of an image hides that placement for this
 /// frame, rather than allowing terminal graphics to cover the overlay.
 pub fn finish_terminal_image_frame(buf: &mut Buffer) -> bool {
+    if COMPOSITION.with(|context| context.get().depth != 0) {
+        return false;
+    }
     if buf.area().is_empty() || buf.content.iter().all(|cell| cell.skip) {
         return false;
     }
@@ -209,7 +262,15 @@ pub fn finish_terminal_image_frame(buf: &mut Buffer) -> bool {
         }
     }
     for placement in pending {
-        let mut visible = live_ids.contains(&placement.image_id);
+        let area = placement.area;
+        let bounds = *buf.area();
+        // Translation may put a local image outside the composed destination.
+        // Check widened endpoints instead of Rect's saturating u16 edges.
+        let mut visible = live_ids.contains(&placement.image_id)
+            && area.x >= bounds.x
+            && area.y >= bounds.y
+            && area.x as u32 + area.width as u32 <= bounds.x as u32 + bounds.width as u32
+            && area.y as u32 + area.height as u32 <= bounds.y as u32 + bounds.height as u32;
         for y in placement.area.top()..placement.area.bottom() {
             for x in placement.area.left()..placement.area.right() {
                 match buf.cell_mut((x, y)) {
@@ -224,7 +285,6 @@ pub fn finish_terminal_image_frame(buf: &mut Buffer) -> bool {
             continue;
         }
         let (x, y, w, h) = placement.crop;
-        let area = placement.area;
         let _ = write!(
             payload,
             "\x1b[{};{}H\x1b_Ga=p,i={},p={},x={x},y={y},w={w},h={h},c={},r={},C=1,q=2\x1b\\",
