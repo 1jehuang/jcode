@@ -951,7 +951,7 @@ impl App {
         });
         self.onboarding_prefetch_recent_project();
         self.onboarding_mark_start_choice_shown();
-        self.set_status_notice("Press any key to switch, Enter to choose");
+        self.set_status_notice("Press any key to switch, Enter or Space to choose");
     }
 
     /// Persist that the first-run start choice was shown so it never appears

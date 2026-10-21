@@ -1261,6 +1261,20 @@ fn onboarding_banner_is_action_only() {
 }
 
 #[test]
+fn onboarding_banner_space_submits_like_enter() {
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.activate_onboarding_banner(vec![Line::from("welcome")]);
+    let action = picker
+        .handle_overlay_key(KeyCode::Char(' '), KeyModifiers::empty())
+        .expect("space");
+    assert!(matches!(
+        action,
+        OverlayAction::Selected(PickerResult::ReviewRecentProject)
+    ));
+    assert!(picker.onboarding_review_recent_project_highlighted());
+}
+
+#[test]
 fn onboarding_banner_offers_review_then_new_session() {
     let mut picker = SessionPicker::new(Vec::new());
     picker.activate_onboarding_banner(vec![Line::from("welcome")]);

@@ -1268,9 +1268,14 @@ impl SessionPicker {
         }
 
         // The first-run choice is deliberately simpler than the full session
-        // picker: Enter submits, and every other key rotates between its two
-        // actions. This makes the page work without requiring users to discover
-        // a particular navigation key.
+        // picker: Enter or Space submits, and every other key rotates between
+        // its two actions. This makes the page work without requiring users to
+        // discover a particular navigation key.
+        let code = if self.onboarding_banner_active() && code == KeyCode::Char(' ') {
+            KeyCode::Enter
+        } else {
+            code
+        };
         if self.onboarding_banner_active() && code != KeyCode::Enter {
             if self.onboarding_review_recent_project_highlighted() {
                 self.onboarding_action = Some(OnboardingAction::StartNewSession);
