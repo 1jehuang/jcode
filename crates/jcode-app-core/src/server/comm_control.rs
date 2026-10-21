@@ -250,7 +250,7 @@ fn active_assignment_error(task_id: &str, conflict: &ActiveAssignmentConflict) -
 /// What to do with a node whose worker turn ended while the node is still
 /// marked running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TurnEndDisposition {
+pub(super) enum TurnEndDisposition {
     /// Light mode: the worker just ran an atomic node; mark it done.
     AutoComplete,
     /// Deep mode, first offense: the worker never called `complete_node`, so
@@ -275,7 +275,7 @@ enum TurnEndDisposition {
 /// if there is no path to "done" that skips it. A running node at turn end
 /// (atomic without `complete_node`, or a re-woken composite synthesis that
 /// never synthesized) gets one fresh attempt, then fails.
-fn turn_end_disposition(
+pub(super) fn turn_end_disposition(
     is_deep: bool,
     status: &str,
     expanded: bool,
@@ -753,496 +753,9 @@ async fn resolve_assignment_target_for_task(
     select_and_claim_auto_target(swarm_id, &candidates, &affinities.loads)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "task execution restart needs session state, plan state, and event sinks together"
-)]
-fn spawn_assigned_task_run(
-    agent_arc: Arc<Mutex<Agent>>,
-    target_session: String,
-    swarm_id: String,
-    task_id: String,
-    assignment_text: String,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
-    swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
-    event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    event_counter: Arc<std::sync::atomic::AtomicU64>,
-    swarm_event_tx: broadcast::Sender<SwarmEvent>,
-) -> tokio::task::JoinHandle<()> {
-    let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
-    tokio::spawn(async move {
-        {
-            let now_ms = now_unix_ms();
-            let mut plans = swarm_plans.write().await;
-            if let Some(plan) = plans.get_mut(&swarm_id)
-                && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
-            {
-                item.status = "running".to_string();
-                let progress = plan.task_progress.entry(task_id.clone()).or_default();
-                progress.assigned_session_id = Some(target_session.clone());
-                progress.assignment_summary = Some(truncate_detail(&assignment_text, 120));
-                progress.started_at_unix_ms = Some(now_ms);
-                progress.last_heartbeat_unix_ms = Some(now_ms);
-                progress.last_detail = Some(truncate_detail(&assignment_text, 120));
-                progress.last_checkpoint_unix_ms = Some(now_ms);
-                progress.checkpoint_summary = Some("task started".to_string());
-                progress.completed_at_unix_ms = None;
-                progress.stale_since_unix_ms = None;
-                progress.heartbeat_count = Some(progress.heartbeat_count.unwrap_or(0) + 1);
-                progress.checkpoint_count = Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                plan.version += 1;
-            }
-        }
-        let swarm_state = SwarmState {
-            members: Arc::clone(&swarm_members),
-            swarms_by_id: Arc::clone(&swarms_by_id),
-            plans: Arc::clone(&swarm_plans),
-            coordinators: Arc::clone(&swarm_coordinators),
-        };
-        persist_swarm_state_for(&swarm_id, &swarm_state).await;
-        broadcast_swarm_plan(
-            &swarm_id,
-            Some("task_running".to_string()),
-            &swarm_plans,
-            &swarm_members,
-            &swarms_by_id,
-        )
-        .await;
-        set_member_task_label(&target_session, &assignment_text, &swarm_members).await;
-        update_member_status(
-            &target_session,
-            "running",
-            Some(truncate_detail(&assignment_text, 120)),
-            &swarm_members,
-            &swarms_by_id,
-            Some(&event_history),
-            Some(&event_counter),
-            Some(&swarm_event_tx),
-        )
-        .await;
-
-        let (heartbeat_stop_tx, mut heartbeat_stop_rx) = watch::channel(false);
-        let heartbeat_task = {
-            let target_session = target_session.clone();
-            let swarm_id = swarm_id.clone();
-            let task_id = task_id.clone();
-            let swarm_members = Arc::clone(&swarm_members);
-            let swarms_by_id = Arc::clone(&swarms_by_id);
-            let swarm_plans = Arc::clone(&swarm_plans);
-            let swarm_coordinators = Arc::clone(&swarm_coordinators);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(swarm_task_heartbeat_interval());
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                interval.tick().await;
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            let revived = touch_swarm_task_progress(
-                                &swarm_id,
-                                &task_id,
-                                Some(&target_session),
-                                None,
-                                None,
-                                &swarm_members,
-                                &swarms_by_id,
-                                &swarm_plans,
-                                &swarm_coordinators,
-                            )
-                            .await;
-                            if revived {
-                                broadcast_swarm_plan(
-                                    &swarm_id,
-                                    Some("task_heartbeat".to_string()),
-                                    &swarm_plans,
-                                    &swarm_members,
-                                    &swarms_by_id,
-                                )
-                                .await;
-                            }
-                        }
-                        changed = heartbeat_stop_rx.changed() => {
-                            if changed.is_err() || *heartbeat_stop_rx.borrow() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            })
-        };
-
-        let event_tx = task_progress_event_sender(
-            target_session.clone(),
-            swarm_id.clone(),
-            task_id.clone(),
-            Arc::clone(&swarm_members),
-            Arc::clone(&swarms_by_id),
-            Arc::clone(&swarm_plans),
-            Arc::clone(&swarm_coordinators),
-            Arc::clone(&event_history),
-            Arc::clone(&event_counter),
-            swarm_event_tx.clone(),
-        );
-        let start_message_index = {
-            let agent = agent_arc.lock().await;
-            agent.message_count()
-        };
-        let result = super::client_lifecycle::process_message_streaming_mpsc(
-            Arc::clone(&agent_arc),
-            &assignment_text,
-            vec![],
-            None,
-            event_tx.clone(),
-        )
-        .await;
-        // A usage limit that resets later keeps the task in progress: wait
-        // for the reset (the heartbeat keeps the task from going stale) and
-        // continue the same turn. Other errors fail the task as before.
-        // A resumed turn reserves the agent through terminal bookkeeping so
-        // a successor cannot start before this task publishes its outcome.
-        let (result, completion_report, _resume_guard) = match result {
-            Err(error) => {
-                let on_wait = {
-                    let swarm_id = swarm_id.clone();
-                    let task_id = task_id.clone();
-                    let target_session = target_session.clone();
-                    let swarm_members = Arc::clone(&swarm_members);
-                    let swarms_by_id = Arc::clone(&swarms_by_id);
-                    let swarm_plans = Arc::clone(&swarm_plans);
-                    let swarm_coordinators = Arc::clone(&swarm_coordinators);
-                    move |plan: &super::usage_limit_resume::UsageLimitResumePlan| {
-                        let detail = plan.status_detail();
-                        let swarm_id = swarm_id.clone();
-                        let task_id = task_id.clone();
-                        let target_session = target_session.clone();
-                        let swarm_members = Arc::clone(&swarm_members);
-                        let swarms_by_id = Arc::clone(&swarms_by_id);
-                        let swarm_plans = Arc::clone(&swarm_plans);
-                        let swarm_coordinators = Arc::clone(&swarm_coordinators);
-                        Box::pin(async move {
-                            touch_swarm_task_progress(
-                                &swarm_id,
-                                &task_id,
-                                Some(&target_session),
-                                Some(detail.clone()),
-                                Some(detail),
-                                &swarm_members,
-                                &swarms_by_id,
-                                &swarm_plans,
-                                &swarm_coordinators,
-                            )
-                            .await;
-                            broadcast_swarm_plan(
-                                &swarm_id,
-                                Some("task_rate_limited".to_string()),
-                                &swarm_plans,
-                                &swarm_members,
-                                &swarms_by_id,
-                            )
-                            .await;
-                        }) as futures::future::BoxFuture<'static, ()>
-                    }
-                };
-                let swarm_ctx = super::live_turn::LiveTurnSwarmContext::new(
-                    &swarm_members,
-                    &swarms_by_id,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                );
-                match super::usage_limit_resume::resume_turn_after_usage_limit(
-                    Arc::clone(&agent_arc),
-                    None,
-                    &target_session,
-                    error,
-                    None,
-                    &event_tx,
-                    &swarm_ctx,
-                    &on_wait,
-                )
-                .await
-                {
-                    super::usage_limit_resume::ResumeOutcome::NotUsageLimit { error, guard }
-                    | super::usage_limit_resume::ResumeOutcome::Failed { error, guard, .. } => {
-                        (Err(error), None, guard)
-                    }
-                    super::usage_limit_resume::ResumeOutcome::Completed {
-                        guard,
-                        completion_report,
-                    } => (Ok(()), completion_report, Some(guard)),
-                    super::usage_limit_resume::ResumeOutcome::Superseded => {
-                        // The user (or another turn) took the worker over.
-                        // Release the task back to the queue, like the
-                        // no-artifact requeue path, so the normal assignment
-                        // flow can hand it out again instead of leaving it
-                        // assigned to a worker that is no longer running it.
-                        let _ = heartbeat_stop_tx.send(true);
-                        let _ = heartbeat_task.await;
-                        let previous_items = {
-                            let plans = swarm_plans.read().await;
-                            plans
-                                .get(&swarm_id)
-                                .map(|plan| plan.items.clone())
-                                .unwrap_or_default()
-                        };
-                        {
-                            let now_ms = now_unix_ms();
-                            let mut plans = swarm_plans.write().await;
-                            if let Some(plan) = plans.get_mut(&swarm_id)
-                                && let Some(item) =
-                                    plan.items.iter_mut().find(|item| item.id == task_id)
-                                && item.status == "running"
-                            {
-                                item.status = "queued".to_string();
-                                item.assigned_to = None;
-                                let progress =
-                                    plan.task_progress.entry(task_id.clone()).or_default();
-                                progress.assigned_session_id = None;
-                                progress.last_heartbeat_unix_ms = Some(now_ms);
-                                progress.last_checkpoint_unix_ms = Some(now_ms);
-                                progress.checkpoint_summary =
-                                    Some("requeued: usage-limit resume was superseded".to_string());
-                                progress.stale_since_unix_ms = None;
-                                progress.checkpoint_count =
-                                    Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                plan.version += 1;
-                            }
-                        }
-                        let swarm_state = SwarmState {
-                            members: Arc::clone(&swarm_members),
-                            swarms_by_id: Arc::clone(&swarms_by_id),
-                            plans: Arc::clone(&swarm_plans),
-                            coordinators: Arc::clone(&swarm_coordinators),
-                        };
-                        persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                        broadcast_swarm_plan_with_previous(
-                            &swarm_id,
-                            Some("task_requeued_superseded".to_string()),
-                            Some(&previous_items),
-                            &swarm_plans,
-                            &swarm_members,
-                            &swarms_by_id,
-                        )
-                        .await;
-                        // Requeue alone leaves an idle worker ineligible for
-                        // assignment. Do not overwrite a successor turn that
-                        // has already claimed the member's lifecycle state.
-                        super::swarm::update_member_status_if(
-                            &target_session,
-                            "rate_limited",
-                            "ready",
-                            None,
-                            &swarm_members,
-                            &swarms_by_id,
-                            Some(&event_history),
-                            Some(&event_counter),
-                            Some(&swarm_event_tx),
-                        )
-                        .await;
-                        return;
-                    }
-                }
-            }
-            Ok(()) => {
-                let agent = agent_arc.lock().await;
-                (
-                    Ok(()),
-                    agent.latest_assistant_text_after(start_message_index),
-                    None,
-                )
-            }
-        };
-        drop(event_tx);
-        let _ = heartbeat_stop_tx.send(true);
-        let _ = heartbeat_task.await;
-
-        match result {
-            Ok(_) => {
-                let previous_items = {
-                    let plans = swarm_plans.read().await;
-                    plans
-                        .get(&swarm_id)
-                        .map(|plan| plan.items.clone())
-                        .unwrap_or_default()
-                };
-                let mut applied_disposition = TurnEndDisposition::LeaveAlone;
-                {
-                    let now_ms = now_unix_ms();
-                    let mut plans = swarm_plans.write().await;
-                    if let Some(plan) = plans.get_mut(&swarm_id)
-                        && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
-                    {
-                        // A worker turn ends in one of three ways for its node:
-                        //  1. it decomposed the node via `expand_node` -> the node is
-                        //     now a composite synthesis/join point that must stay
-                        //     in-progress until its children (and deep-mode gate)
-                        //     finish; it is re-woken later to synthesize.
-                        //  2. it already finished the node via `complete_node` -> the
-                        //     node is terminal and owned by no one.
-                        //  3. it just ran and the node is still `running`.
-                        // Case 3 is mode-dependent: light mode auto-completes
-                        // (cheap fan-out, artifacts optional), deep mode never
-                        // does — a deep node only closes through `complete_node`
-                        // with a validated artifact, so an artifact-less turn is
-                        // re-queued once to a fresh worker and then failed.
-                        let expanded = plan
-                            .node_meta
-                            .get(&task_id)
-                            .map(|m| m.expanded && !m.is_gate)
-                            .unwrap_or(false);
-                        let is_deep = plan.mode.eq_ignore_ascii_case("deep");
-                        let prior_requeues = plan
-                            .task_progress
-                            .get(&task_id)
-                            .and_then(|p| p.no_artifact_requeues)
-                            .unwrap_or(0);
-                        match turn_end_disposition(is_deep, &item.status, expanded, prior_requeues)
-                        {
-                            TurnEndDisposition::AutoComplete => {
-                                applied_disposition = TurnEndDisposition::AutoComplete;
-                                item.status = "done".to_string();
-                                let progress =
-                                    plan.task_progress.entry(task_id.clone()).or_default();
-                                progress.last_heartbeat_unix_ms = Some(now_ms);
-                                progress.last_checkpoint_unix_ms = Some(now_ms);
-                                progress.checkpoint_summary = Some("task completed".to_string());
-                                progress.completed_at_unix_ms = Some(now_ms);
-                                progress.stale_since_unix_ms = None;
-                                progress.checkpoint_count =
-                                    Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                plan.version += 1;
-                            }
-                            TurnEndDisposition::RequeueNoArtifact => {
-                                applied_disposition = TurnEndDisposition::RequeueNoArtifact;
-                                item.status = "queued".to_string();
-                                item.assigned_to = None;
-                                let progress =
-                                    plan.task_progress.entry(task_id.clone()).or_default();
-                                progress.assigned_session_id = None;
-                                progress.no_artifact_requeues = Some(prior_requeues + 1);
-                                progress.last_heartbeat_unix_ms = Some(now_ms);
-                                progress.last_checkpoint_unix_ms = Some(now_ms);
-                                progress.checkpoint_summary = Some(
-                                    "requeued: deep-mode turn ended without a complete_node \
-                                     artifact"
-                                        .to_string(),
-                                );
-                                progress.stale_since_unix_ms = None;
-                                progress.checkpoint_count =
-                                    Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                plan.version += 1;
-                            }
-                            TurnEndDisposition::FailNoArtifact => {
-                                applied_disposition = TurnEndDisposition::FailNoArtifact;
-                                item.status = "failed".to_string();
-                                let progress =
-                                    plan.task_progress.entry(task_id.clone()).or_default();
-                                progress.last_heartbeat_unix_ms = Some(now_ms);
-                                progress.last_checkpoint_unix_ms = Some(now_ms);
-                                progress.checkpoint_summary = Some(
-                                    "failed: repeated deep-mode turns ended without a \
-                                     complete_node artifact"
-                                        .to_string(),
-                                );
-                                progress.completed_at_unix_ms = Some(now_ms);
-                                progress.stale_since_unix_ms = None;
-                                progress.checkpoint_count =
-                                    Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                plan.version += 1;
-                            }
-                            TurnEndDisposition::LeaveAlone => {}
-                        }
-                    }
-                }
-                let swarm_state = SwarmState {
-                    members: Arc::clone(&swarm_members),
-                    swarms_by_id: Arc::clone(&swarms_by_id),
-                    plans: Arc::clone(&swarm_plans),
-                    coordinators: Arc::clone(&swarm_coordinators),
-                };
-                persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                let plan_reason = match applied_disposition {
-                    TurnEndDisposition::RequeueNoArtifact => "task_requeued_no_artifact",
-                    TurnEndDisposition::FailNoArtifact => "task_failed_no_artifact",
-                    _ => "task_completed",
-                };
-                broadcast_swarm_plan_with_previous(
-                    &swarm_id,
-                    Some(plan_reason.to_string()),
-                    Some(&previous_items),
-                    &swarm_plans,
-                    &swarm_members,
-                    &swarms_by_id,
-                )
-                .await;
-                // The worker's member status reflects its own turn (it ran to
-                // completion) even when its node was requeued/failed for missing
-                // an artifact: lifecycle and node state are separate axes, and a
-                // "completed" worker is reusable for the requeued node.
-                update_member_status_with_report(
-                    &target_session,
-                    "completed",
-                    None,
-                    completion_report,
-                    &swarm_members,
-                    &swarms_by_id,
-                    Some(&event_history),
-                    Some(&event_counter),
-                    Some(&swarm_event_tx),
-                )
-                .await;
-            }
-            Err(error) => {
-                {
-                    let now_ms = now_unix_ms();
-                    let mut plans = swarm_plans.write().await;
-                    if let Some(plan) = plans.get_mut(&swarm_id)
-                        && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
-                    {
-                        item.status = "failed".to_string();
-                        let progress = plan.task_progress.entry(task_id.clone()).or_default();
-                        progress.last_heartbeat_unix_ms = Some(now_ms);
-                        progress.last_checkpoint_unix_ms = Some(now_ms);
-                        progress.checkpoint_summary =
-                            Some(truncate_detail(&format!("task failed: {}", error), 120));
-                        progress.completed_at_unix_ms = Some(now_ms);
-                        progress.stale_since_unix_ms = None;
-                        progress.checkpoint_count =
-                            Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                        plan.version += 1;
-                    }
-                }
-                let swarm_state = SwarmState {
-                    members: Arc::clone(&swarm_members),
-                    swarms_by_id: Arc::clone(&swarms_by_id),
-                    plans: Arc::clone(&swarm_plans),
-                    coordinators: Arc::clone(&swarm_coordinators),
-                };
-                persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                broadcast_swarm_plan(
-                    &swarm_id,
-                    Some("task_failed".to_string()),
-                    &swarm_plans,
-                    &swarm_members,
-                    &swarms_by_id,
-                )
-                .await;
-                update_member_status(
-                    &target_session,
-                    "failed",
-                    Some(truncate_detail(&error.to_string(), 120)),
-                    &swarm_members,
-                    &swarms_by_id,
-                    Some(&event_history),
-                    Some(&event_counter),
-                    Some(&swarm_event_tx),
-                )
-                .await;
-            }
-        }
-    })
-}
+#[path = "comm_control_assigned.rs"]
+mod assigned;
+use assigned::spawn_assigned_task_run;
 
 fn format_salvage_message(
     source_session: &str,
@@ -1284,6 +797,7 @@ fn format_salvage_message(
     reason = "task progress fanout needs plan state, swarm membership, and event sinks together"
 )]
 fn task_progress_event_sender(
+    publication: Arc<super::swarm::TurnPublication>,
     session_id: String,
     swarm_id: String,
     task_id: String,
@@ -1298,62 +812,69 @@ fn task_progress_event_sender(
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            let (detail, checkpoint_summary) = match &event {
-                ServerEvent::StatusDetail { detail } => (Some(detail.clone()), None),
-                ServerEvent::ToolStart { name, .. } => {
-                    let summary = format!("tool start: {name}");
-                    (Some(summary.clone()), Some(summary))
-                }
-                ServerEvent::ToolDone { name, error, .. } => {
-                    let summary = if error.is_some() {
-                        format!("tool error: {name}")
-                    } else {
-                        format!("tool done: {name}")
+            if !publication
+                .publish_start(async {
+                    let (detail, checkpoint_summary) = match &event {
+                        ServerEvent::StatusDetail { detail } => (Some(detail.clone()), None),
+                        ServerEvent::ToolStart { name, .. } => {
+                            let summary = format!("tool start: {name}");
+                            (Some(summary.clone()), Some(summary))
+                        }
+                        ServerEvent::ToolDone { name, error, .. } => {
+                            let summary = if error.is_some() {
+                                format!("tool error: {name}")
+                            } else {
+                                format!("tool done: {name}")
+                            };
+                            (Some(summary.clone()), Some(summary))
+                        }
+                        _ => (None, None),
                     };
-                    (Some(summary.clone()), Some(summary))
-                }
-                _ => (None, None),
-            };
 
-            if detail.is_some() || checkpoint_summary.is_some() {
-                let revived = touch_swarm_task_progress(
-                    &swarm_id,
-                    &task_id,
-                    Some(&session_id),
-                    detail.clone(),
-                    checkpoint_summary,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                )
-                .await;
-                if let Some(detail) = detail {
-                    update_member_status(
-                        &session_id,
-                        "running",
-                        Some(truncate_detail(&detail, 120)),
-                        &swarm_members,
-                        &swarms_by_id,
-                        Some(&event_history),
-                        Some(&event_counter),
-                        Some(&swarm_event_tx),
-                    )
-                    .await;
-                }
-                if revived {
-                    broadcast_swarm_plan(
-                        &swarm_id,
-                        Some("task_heartbeat".to_string()),
-                        &swarm_plans,
-                        &swarm_members,
-                        &swarms_by_id,
-                    )
-                    .await;
-                }
+                    if detail.is_some() || checkpoint_summary.is_some() {
+                        let revived = touch_swarm_task_progress(
+                            &swarm_id,
+                            &task_id,
+                            Some(&session_id),
+                            detail.clone(),
+                            checkpoint_summary,
+                            &swarm_members,
+                            &swarms_by_id,
+                            &swarm_plans,
+                            &swarm_coordinators,
+                        )
+                        .await;
+                        if let Some(detail) = detail {
+                            update_member_status(
+                                &session_id,
+                                "running",
+                                Some(truncate_detail(&detail, 120)),
+                                &swarm_members,
+                                &swarms_by_id,
+                                Some(&event_history),
+                                Some(&event_counter),
+                                Some(&swarm_event_tx),
+                            )
+                            .await;
+                        }
+                        if revived {
+                            broadcast_swarm_plan(
+                                &swarm_id,
+                                Some("task_heartbeat".to_string()),
+                                &swarm_plans,
+                                &swarm_members,
+                                &swarms_by_id,
+                            )
+                            .await;
+                        }
+                    }
+
+                    let _ = fanout_session_event(&swarm_members, &session_id, event).await;
+                })
+                .await
+            {
+                break;
             }
-
-            let _ = fanout_session_event(&swarm_members, &session_id, event).await;
         }
     });
     tx

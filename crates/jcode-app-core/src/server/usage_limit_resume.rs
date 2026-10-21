@@ -36,13 +36,21 @@ use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 
+#[path = "usage_limit_resume_state.rs"]
+mod durable;
+pub(super) use durable::ResumeState;
+
+pub(super) fn pending_state(session_id: &str) -> anyhow::Result<Option<ResumeState>> {
+    durable::load(session_id)
+}
+
 /// Resumes for a turn whose provider stays overloaded (5xx, 529) after the
 /// runtime's own retries. Same budget and delays as the TUI's overload hold.
 pub(super) const MAX_OVERLOAD_RESUMES: u32 = 4;
 const OVERLOAD_RESUME_DELAYS_SECS: [u64; MAX_OVERLOAD_RESUMES as usize] = [15, 30, 60, 120];
 
 /// Why a server-initiated turn waits before resuming.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum ResumeKind {
     UsageLimit,
     ProviderOverload,
@@ -213,6 +221,7 @@ pub(super) struct ResumeTicket {
 
 /// Register the pending resume for `session_id`, cancelling any earlier one,
 /// so a session never has more than one.
+#[cfg(test)]
 pub(super) fn register_pending_resume(session_id: &str) -> ResumeTicket {
     let id = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
     let token = CancellationToken::new();
@@ -233,13 +242,66 @@ pub(super) fn register_pending_resume(session_id: &str) -> ResumeTicket {
     }
 }
 
+fn register_durable_resume(
+    state: &ResumeState,
+    expected: Option<&str>,
+) -> anyhow::Result<Option<ResumeTicket>> {
+    let mut pending = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+    // Validate the disk generation before replacing any live ticket. An old
+    // restore must not cancel a newer turn even when its own CAS fails.
+    if !durable::save(state, expected)? {
+        return Ok(None);
+    }
+    let id = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
+    let token = CancellationToken::new();
+    if let Some((_, previous)) = pending.insert(state.session_id.clone(), (id, token.clone())) {
+        previous.cancel();
+    }
+    Ok(Some(ResumeTicket {
+        session_id: state.session_id.clone(),
+        id,
+        token,
+    }))
+}
+
+async fn register_owned_durable_resume(
+    state: &ResumeState,
+    expected: Option<&str>,
+    publication: Option<&super::swarm::TurnPublication>,
+) -> anyhow::Result<Option<ResumeTicket>> {
+    let mut registered = None;
+    let register = async {
+        registered = Some(register_durable_resume(state, expected));
+    };
+    if let Some(publication) = publication {
+        // Stop holds this same ownership lock while clearing RAM and disk.
+        // If Stop wins, do not create a record; if we win, Stop sees and
+        // removes our record. Dropping a rejected turn alone cannot clean it.
+        if !publication.publish_start(register).await {
+            return Ok(None);
+        }
+    } else {
+        register.await;
+    }
+    registered.expect("accepted registration future was polled")
+}
+
 /// Cancel the pending resume for `session_id`, if any. A user message
 /// supersedes the resume, and an explicit cancellation stops it.
 pub(super) fn cancel_pending_resume(session_id: &str) -> bool {
-    let removed = PENDING
+    let mut pending = PENDING
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(session_id);
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let removed = pending.remove(session_id);
+    let durable_removed = match durable::clear(session_id, None) {
+        Ok(removed) => removed,
+        Err(error) => {
+            crate::logging::error(&format!(
+                "Could not cancel durable provider wait for {session_id}: {error:#}"
+            ));
+            false
+        }
+    };
     match removed {
         Some((_, token)) => {
             crate::logging::info(&format!(
@@ -248,16 +310,26 @@ pub(super) fn cancel_pending_resume(session_id: &str) -> bool {
             token.cancel();
             true
         }
-        None => false,
+        None => durable_removed,
     }
 }
 
-#[cfg(test)]
 pub(super) fn has_pending_resume(session_id: &str) -> bool {
     PENDING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .contains_key(session_id)
+        || match pending_state(session_id) {
+            Ok(state) => state.is_some(),
+            Err(error) => {
+                crate::logging::error(&format!(
+                    "Could not inspect durable provider wait for {session_id}: {error:#}"
+                ));
+                // Corrupt/unreadable state must not allow a second turn to
+                // silently replace an unaccounted-for provider wait.
+                true
+            }
+        }
 }
 
 impl ResumeTicket {
@@ -294,12 +366,13 @@ pub(super) type OnUsageLimitWait<'a> =
     &'a (dyn Fn(&UsageLimitResumePlan) -> BoxFuture<'static, ()> + Send + Sync);
 
 /// No-op [`OnUsageLimitWait`].
+#[cfg(test)]
 pub(super) fn no_wait_hook(_: &UsageLimitResumePlan) -> BoxFuture<'static, ()> {
     Box::pin(async {})
 }
 
 /// How a failed server-initiated turn ended after
-/// [`resume_turn_after_usage_limit`].
+/// [`resume_turn_after_usage_limit_with_publication`].
 pub(super) enum ResumeOutcome {
     /// The error was not a usage limit. The caller's failure path owns it.
     NotUsageLimit {
@@ -330,34 +403,6 @@ pub(super) enum ResumeOutcome {
 /// transcript, and repeat until it completes, fails otherwise, or spends
 /// [`MAX_USAGE_LIMIT_RESUMES`]. `held` is the caller's reservation of the
 /// agent; it is released while waiting so the user can use the session.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the resume needs the agent, its turn inputs, and the swarm status sinks"
-)]
-pub(super) async fn resume_turn_after_usage_limit(
-    agent: Arc<AsyncMutex<Agent>>,
-    held: Option<OwnedMutexGuard<Agent>>,
-    session_id: &str,
-    error: anyhow::Error,
-    system_reminder: Option<String>,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    swarm: &LiveTurnSwarmContext,
-    on_wait: OnUsageLimitWait<'_>,
-) -> ResumeOutcome {
-    resume_turn_after_usage_limit_with_publication(
-        agent,
-        held,
-        session_id,
-        error,
-        system_reminder,
-        event_tx,
-        swarm,
-        on_wait,
-        None,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn resume_turn_after_usage_limit_with_publication(
     agent: Arc<AsyncMutex<Agent>>,
@@ -370,6 +415,7 @@ pub(super) async fn resume_turn_after_usage_limit_with_publication(
     on_wait: OnUsageLimitWait<'_>,
     publication: Option<&super::swarm::TurnPublication>,
 ) -> ResumeOutcome {
+    let generation = uuid::Uuid::new_v4().to_string();
     let resume = resume_turn_after_usage_limit_inner(
         agent,
         held,
@@ -380,15 +426,111 @@ pub(super) async fn resume_turn_after_usage_limit_with_publication(
         swarm,
         on_wait,
         publication,
+        None,
+        generation.clone(),
     );
-    match publication {
+    let outcome = match publication {
         Some(publication) => tokio::select! {
             biased;
             _ = publication.cancelled.cancelled() => ResumeOutcome::Superseded,
             outcome = resume => outcome,
         },
         None => resume.await,
+    };
+    cleanup_superseded_wait(session_id, &generation, outcome)
+}
+
+/// Restore a persisted wait without appending a synthetic user message.
+/// The original absolute deadline and both retry budgets remain authoritative.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn restore_turn_after_provider_wait(
+    agent: Arc<AsyncMutex<Agent>>,
+    held: Option<OwnedMutexGuard<Agent>>,
+    state: ResumeState,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm: &LiveTurnSwarmContext,
+    on_wait: OnUsageLimitWait<'_>,
+    publication: Option<&super::swarm::TurnPublication>,
+) -> ResumeOutcome {
+    let session_id = state.session_id.clone();
+    let generation = state.generation.clone();
+    let reminder = state.system_reminder.clone();
+    let resume = resume_turn_after_usage_limit_inner(
+        agent,
+        held,
+        &session_id,
+        anyhow::anyhow!("Restoring pending provider wait"),
+        reminder,
+        event_tx,
+        swarm,
+        on_wait,
+        publication,
+        Some(state),
+        generation.clone(),
+    );
+    let outcome = match publication {
+        Some(publication) => tokio::select! {
+            biased;
+            _ = publication.cancelled.cancelled() => ResumeOutcome::Superseded,
+            outcome = resume => outcome,
+        },
+        None => resume.await,
+    };
+    cleanup_superseded_wait(&session_id, &generation, outcome)
+}
+
+fn cleanup_superseded_wait(
+    session_id: &str,
+    generation: &str,
+    outcome: ResumeOutcome,
+) -> ResumeOutcome {
+    // Ownership loss is an explicit terminal outcome, unlike dropping a
+    // daemon task during reload. A newer generation may already be waiting:
+    // CAS cleanup must never remove or cancel that successor's disk record.
+    if matches!(&outcome, ResumeOutcome::Superseded)
+        && let Err(error) = clear_current_wait(session_id, generation)
+    {
+        crate::logging::error(&format!(
+            "Could not clear superseded provider wait for {session_id}: {error:#}"
+        ));
     }
+    outcome
+}
+
+fn decide_with_budgets(error: &anyhow::Error, quota: u32, overload: u32) -> UsageLimitDecision {
+    if usage_limit_hint(error).is_some() {
+        decide(error, quota)
+    } else {
+        decide(error, overload)
+    }
+}
+
+fn restored_decision(state: &ResumeState, now: DateTime<Utc>) -> UsageLimitDecision {
+    // A retry is charged before its upstream request starts. A crash during
+    // that request consumes the attempt, even if it was the final one; replay
+    // must not silently grant an unbounded extra attempt on every restart.
+    let used = match state.kind {
+        ResumeKind::UsageLimit => state.quota_resumes_used,
+        ResumeKind::ProviderOverload => state.overload_resumes_used,
+    };
+    if used >= state.kind.max_resumes() {
+        UsageLimitDecision::GiveUp {
+            resumes_used: used,
+            kind: state.kind,
+        }
+    } else {
+        UsageLimitDecision::Resume(UsageLimitResumePlan {
+            delay: (state.resume_at - now).to_std().unwrap_or(Duration::ZERO),
+            attempt: used + 1,
+            resume_at: state.resume_at,
+            kind: state.kind,
+        })
+    }
+}
+
+fn clear_current_wait(session_id: &str, generation: &str) -> anyhow::Result<bool> {
+    durable::clear(session_id, Some(generation))
+        .map_err(|error| error.context("Could not clear durable provider wait"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -402,16 +544,37 @@ async fn resume_turn_after_usage_limit_inner(
     swarm: &LiveTurnSwarmContext,
     on_wait: OnUsageLimitWait<'_>,
     publication: Option<&super::swarm::TurnPublication>,
+    restored: Option<ResumeState>,
+    generation: String,
 ) -> ResumeOutcome {
     let mut error = error;
     let mut held = held;
-    let mut resumes_used = 0u32;
+    let mut quota_used = restored.as_ref().map_or(0, |s| s.quota_resumes_used);
+    let mut overload_used = restored.as_ref().map_or(0, |s| s.overload_resumes_used);
+    let mut restored = restored;
+    let mut persisted = restored.is_some();
     loop {
-        let plan = match decide(&error, resumes_used) {
-            UsageLimitDecision::NotUsageLimit if resumes_used == 0 => {
+        let decision = if let Some(state) = restored.take() {
+            restored_decision(&state, Utc::now())
+        } else {
+            decide_with_budgets(&error, quota_used, overload_used)
+        };
+        let plan = match decision {
+            UsageLimitDecision::NotUsageLimit if !persisted => {
                 return ResumeOutcome::NotUsageLimit { error, guard: held };
             }
             UsageLimitDecision::NotUsageLimit => {
+                match clear_current_wait(session_id, &generation) {
+                    Ok(true) => {}
+                    Ok(false) => return ResumeOutcome::Superseded,
+                    Err(storage_error) => {
+                        return ResumeOutcome::Failed {
+                            error: storage_error,
+                            retry_after_secs: None,
+                            guard: held,
+                        };
+                    }
+                }
                 let retry_after_secs = error_retry_after_secs(&error);
                 return ResumeOutcome::Failed {
                     error,
@@ -420,6 +583,17 @@ async fn resume_turn_after_usage_limit_inner(
                 };
             }
             UsageLimitDecision::GiveUp { resumes_used, kind } => {
+                match clear_current_wait(session_id, &generation) {
+                    Ok(true) => {}
+                    Ok(false) => return ResumeOutcome::Superseded,
+                    Err(storage_error) => {
+                        return ResumeOutcome::Failed {
+                            error: storage_error,
+                            retry_after_secs: None,
+                            guard: held,
+                        };
+                    }
+                }
                 crate::logging::warn(&format!(
                     "{} resume budget spent for {session_id} after {resumes_used} resumes: {error}",
                     kind.label()
@@ -441,7 +615,38 @@ async fn resume_turn_after_usage_limit_inner(
             plan.attempt,
             plan.max_resumes()
         ));
-        let ticket = register_pending_resume(session_id);
+        let mut state = ResumeState {
+            session_id: session_id.to_string(),
+            generation: generation.clone(),
+            resume_at: plan.resume_at,
+            quota_resumes_used: quota_used,
+            overload_resumes_used: overload_used,
+            kind: plan.kind,
+            system_reminder: system_reminder.clone(),
+            in_flight: false,
+            terminal: false,
+        };
+        let ticket = match register_owned_durable_resume(
+            &state,
+            persisted.then_some(generation.as_str()),
+            publication,
+        )
+        .await
+        {
+            Ok(Some(ticket)) => {
+                persisted = true;
+                ticket
+            }
+            Ok(None) => return ResumeOutcome::Superseded,
+            Err(storage_error) => {
+                return ResumeOutcome::Failed {
+                    error: storage_error
+                        .context("Could not persist provider wait; automatic resume not scheduled"),
+                    retry_after_secs: None,
+                    guard: held,
+                };
+            }
+        };
         let announce_wait = async {
             update_member_status(
                 session_id,
@@ -481,14 +686,34 @@ async fn resume_turn_after_usage_limit_inner(
             ));
             return ResumeOutcome::Superseded;
         }
-        let Ok(mut guard) = Arc::clone(&agent).try_lock_owned() else {
-            crate::logging::info(&format!(
-                "Usage-limit resume for {session_id} skipped: another turn is running"
-            ));
-            return ResumeOutcome::Superseded;
+        // A status inspection can briefly hold this mutex at the deadline;
+        // contention alone does not prove that a new turn superseded us.
+        // Real supersession cancels the ticket/publication instead.
+        let mut guard = tokio::select! {
+            biased;
+            _ = ticket.token.cancelled() => return ResumeOutcome::Superseded,
+            guard = Arc::clone(&agent).lock_owned() => guard,
         };
-        drop(ticket);
-        resumes_used += 1;
+        match plan.kind {
+            ResumeKind::UsageLimit => quota_used += 1,
+            ResumeKind::ProviderOverload => overload_used += 1,
+        }
+        state.quota_resumes_used = quota_used;
+        state.overload_resumes_used = overload_used;
+        state.in_flight = true;
+        // Charge the retry durably before opening a provider request. A
+        // restart during that request must not refill its budget.
+        match durable::save(&state, Some(&generation)) {
+            Ok(true) => {}
+            Ok(false) => return ResumeOutcome::Superseded,
+            Err(storage_error) => {
+                return ResumeOutcome::Failed {
+                    error: storage_error.context("Could not persist provider resume attempt"),
+                    retry_after_secs: None,
+                    guard: Some(guard),
+                };
+            }
+        }
 
         let status = update_member_status(
             session_id,
@@ -533,6 +758,17 @@ async fn resume_turn_after_usage_limit_inner(
         };
         match result {
             Ok(()) => {
+                match clear_current_wait(session_id, &generation) {
+                    Ok(true) => {}
+                    Ok(false) => return ResumeOutcome::Superseded,
+                    Err(storage_error) => {
+                        return ResumeOutcome::Failed {
+                            error: storage_error,
+                            retry_after_secs: None,
+                            guard: Some(guard),
+                        };
+                    }
+                }
                 let completion_report = guard.latest_assistant_text_after(start_message_index);
                 return ResumeOutcome::Completed {
                     guard,
@@ -550,6 +786,7 @@ async fn resume_turn_after_usage_limit_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("usage_limit_resume_restore_tests.rs");
     use jcode_provider_core::usage_limit_resume::{
         PAST_RESET_RESUME_DELAY, UNKNOWN_RESET_RESUME_DELAY, with_usage_limit_reset,
     };
@@ -608,6 +845,61 @@ mod tests {
                 Duration::ZERO
             ),
             UsageLimitDecision::NotUsageLimit
+        );
+    }
+
+    #[test]
+    fn quota_and_overload_resume_budgets_are_independent() {
+        let quota = limit(Some(Duration::from_secs(7200)));
+        let overload = anyhow::anyhow!("HTTP 503: Service temporarily unavailable");
+        let UsageLimitDecision::Resume(plan) = decide_with_budgets(&quota, 0, 3) else {
+            panic!("three overloads must not spend the quota budget");
+        };
+        assert_eq!(plan.attempt, 1);
+        assert_eq!(plan.kind, ResumeKind::UsageLimit);
+        let UsageLimitDecision::Resume(plan) = decide_with_budgets(&overload, 2, 0) else {
+            panic!("quota waits must not spend the overload budget");
+        };
+        assert_eq!(plan.attempt, 1);
+        assert_eq!(plan.delay, Duration::from_secs(15));
+        assert_eq!(plan.kind, ResumeKind::ProviderOverload);
+    }
+
+    #[test]
+    fn restored_wait_keeps_absolute_deadline_and_charged_retry_budget() {
+        let now = Utc::now();
+        let mut state = ResumeState {
+            session_id: "restore-policy-test".into(),
+            generation: "original-turn".into(),
+            resume_at: now + chrono::Duration::hours(2),
+            quota_resumes_used: 2,
+            overload_resumes_used: 4,
+            kind: ResumeKind::UsageLimit,
+            system_reminder: Some("original reminder".into()),
+            in_flight: false,
+            terminal: false,
+        };
+        let UsageLimitDecision::Resume(plan) = restored_decision(&state, now) else {
+            panic!("third quota retry should remain available");
+        };
+        assert_eq!(plan.delay, Duration::from_secs(7200));
+        assert_eq!(plan.resume_at, state.resume_at);
+        assert_eq!(plan.attempt, 3);
+        let UsageLimitDecision::Resume(plan) =
+            restored_decision(&state, state.resume_at + chrono::Duration::seconds(1))
+        else {
+            panic!("expired deadline should continue without inventing another reset");
+        };
+        assert_eq!(plan.delay, Duration::ZERO);
+        // A crash while the third request is in flight does not refill it.
+        state.in_flight = true;
+        state.quota_resumes_used = 3;
+        assert_eq!(
+            restored_decision(&state, now),
+            UsageLimitDecision::GiveUp {
+                resumes_used: 3,
+                kind: ResumeKind::UsageLimit,
+            }
         );
     }
 

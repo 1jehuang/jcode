@@ -888,6 +888,7 @@ async fn resume_all_continues_interrupted_idle_live_session() {
         &event_counter,
         &swarm_event_tx,
         &client_event_tx,
+        None,
     )
     .await;
 
@@ -990,6 +991,7 @@ async fn resume_all_skips_session_with_completed_turn() {
         &event_counter,
         &swarm_event_tx,
         &client_event_tx,
+        None,
     )
     .await;
 

@@ -1,5 +1,4 @@
 use super::ClientConnectionInfo;
-use super::client_lifecycle::process_message_streaming_mpsc;
 use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
@@ -10,8 +9,7 @@ use super::{
     create_headless_session, fanout_session_event, persist_swarm_state_for, record_swarm_event,
     record_swarm_event_for_session, remove_background_tool_signal,
     remove_session_channel_subscriptions, remove_session_from_swarm,
-    remove_session_interrupt_queue, set_member_task_label, truncate_detail, update_member_status,
-    update_member_status_with_report,
+    remove_session_interrupt_queue, set_member_task_label, truncate_detail,
 };
 use crate::agent::Agent;
 use crate::config::SwarmSpawnMode;
@@ -830,74 +828,35 @@ pub(super) async fn spawn_swarm_agent(
             agent_sessions.get(&new_session_id).cloned()
         };
         if let Some(agent_arc) = agent_arc {
-            let sid_clone = new_session_id.clone();
-            let swarm_members2 = Arc::clone(swarm_members);
-            let swarms_by_id2 = Arc::clone(swarms_by_id);
-            let event_history2 = Arc::clone(event_history);
-            let event_counter2 = Arc::clone(event_counter);
-            let swarm_event_tx2 = swarm_event_tx.clone();
+            let held = Arc::clone(&agent_arc).lock_owned().await;
             let publication = super::swarm::begin_turn_publication(&new_session_id).await;
-            tokio::spawn(async move {
-                publication
-                    .publish_start(update_member_status(
-                        &sid_clone,
-                        "running",
-                        Some(truncate_detail(&initial_msg, 120)),
-                        &swarm_members2,
-                        &swarms_by_id2,
-                        Some(&event_history2),
-                        Some(&event_counter2),
-                        Some(&swarm_event_tx2),
-                    ))
-                    .await;
-                let event_tx = super::session_event_fanout_sender(
-                    sid_clone.clone(),
-                    Arc::clone(&swarm_members2),
-                );
-                let (start_message_index, signal) = {
-                    let agent = agent_arc.lock().await;
-                    (agent.message_count(), agent.graceful_shutdown_signal())
-                };
-                let result = publication
-                    .run(
-                        signal,
-                        process_message_streaming_mpsc(
-                            Arc::clone(&agent_arc),
-                            &initial_msg,
-                            vec![],
-                            None,
-                            event_tx,
-                        ),
-                    )
-                    .await
-                    .unwrap_or(Ok(()));
-                let completion_report = if result.is_ok() {
-                    let agent = agent_arc.lock().await;
-                    agent.latest_assistant_text_after(start_message_index)
-                } else {
-                    None
-                };
-                complete_headless_turn(
-                    &sid_clone,
-                    &publication,
-                    result,
-                    completion_report,
-                    &super::live_turn::LiveTurnSwarmContext::new(
-                        &swarm_members2,
-                        &swarms_by_id2,
-                        &event_history2,
-                        &event_counter2,
-                        &swarm_event_tx2,
-                    ),
-                )
-                .await;
-            });
+            let detail = Some(truncate_detail(&initial_msg, 120));
+            let mut swarm = super::live_turn::LiveTurnSwarmContext::new(
+                swarm_members,
+                swarms_by_id,
+                event_history,
+                event_counter,
+                swarm_event_tx,
+            );
+            swarm.recovery_swarm = Some(swarm_state);
+            super::live_turn::spawn_tracked_live_turn_with_publication(
+                &new_session_id,
+                held,
+                initial_msg,
+                None,
+                None,
+                detail,
+                swarm,
+                publication,
+            )
+            .await;
         }
     }
 
     Ok(new_session_id)
 }
 
+#[cfg(test)]
 pub(super) async fn complete_headless_turn(
     session_id: &str,
     publication: &super::swarm::TurnPublication,
@@ -905,27 +864,18 @@ pub(super) async fn complete_headless_turn(
     completion_report: Option<String>,
     swarm: &super::live_turn::LiveTurnSwarmContext,
 ) {
-    publication
-        .complete(async {
-            let completion_report = result.is_ok().then_some(completion_report).flatten();
-            let (new_status, new_detail) = match result {
-                Ok(()) => ("ready", None),
-                Err(ref error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
-            };
-            update_member_status_with_report(
-                session_id,
-                new_status,
-                new_detail,
-                completion_report,
-                &swarm.members,
-                &swarm.swarms_by_id,
-                Some(&swarm.event_history),
-                Some(&swarm.event_counter),
-                Some(&swarm.event_tx),
-            )
-            .await;
-        })
-        .await;
+    let event_tx =
+        super::session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
+    super::live_turn::complete_live_turn(
+        session_id,
+        publication,
+        result.map_err(|error| (error, None)),
+        completion_report,
+        crate::protocol::TurnStopReason::Failure,
+        &event_tx,
+        swarm,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1546,3 +1496,7 @@ async fn ensure_spawn_coordinator_swarm(
 #[cfg(test)]
 #[path = "comm_session_tests.rs"]
 mod comm_session_tests;
+
+#[cfg(test)]
+#[path = "comm_spawn_recovery_tests.rs"]
+mod comm_spawn_recovery_tests;

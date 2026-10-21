@@ -1,6 +1,6 @@
 use super::state::{MAX_EVENT_HISTORY, fanout_session_event};
 use super::{SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
-use super::{persist_swarm_state_for, remove_persisted_swarm_state_for};
+use super::persist_swarm_state_for;
 use crate::agent::Agent;
 use crate::plan::{PlanItem, newly_ready_item_ids};
 use crate::protocol::{NotificationType, ServerEvent};
@@ -103,9 +103,7 @@ pub(super) fn swarm_descendants(
     descendants
 }
 
-/// Stop the running turns of every worker `session_id` spawned (workers run
-/// their own server-side turns, so cancelling only the coordinator left them
-/// spending tokens). Idle workers are left alone. Returns the stopped ids.
+/// Stop descendant turns and quota waits; leave idle workers alone.
 pub(super) async fn cancel_spawned_descendant_turns(
     session_id: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -117,6 +115,7 @@ pub(super) async fn cancel_spawned_descendant_turns(
     let descendants = swarm_descendants(&*swarm_members.read().await, session_id);
     let mut stopped = Vec::new();
     for descendant in descendants {
+        let pending_resume = super::usage_limit_resume::has_pending_resume(&descendant);
         let publication = turn_publication_for(&descendant).await;
         let mut publication_state = match publication.as_ref() {
             Some(publication) => Some(publication.state.lock().await),
@@ -125,26 +124,24 @@ pub(super) async fn cancel_spawned_descendant_turns(
         if publication_state
             .as_deref()
             .is_some_and(|state| *state != TurnPublicationState::Running)
+            && !pending_resume
         {
             continue;
         }
         let signals = crate::turn_cancel_registry::active_turn_signals(&descendant);
-        if signals.is_empty() && publication.is_none() {
+        if signals.is_empty() && publication.is_none() && !pending_resume {
             continue;
         }
         if let Some(state) = publication_state.as_deref_mut() {
             *state = TurnPublicationState::Cancelled;
         }
-        // Latch ownership before signalling. Do not defer firing across an
-        // await: the agent's RAII guard may reset its signal on completion.
+        super::usage_limit_resume::cancel_pending_resume(&descendant);
         for signal in &signals {
             signal.fire();
         }
         if let Some(publication) = &publication {
             publication.cancelled.cancel();
         }
-        // Workers usually have no attached client; the status update below
-        // is what the coordinator's swarm view shows.
         fanout_session_event(
             swarm_members,
             &descendant,
@@ -166,6 +163,7 @@ pub(super) async fn cancel_spawned_descendant_turns(
             swarm_event_tx,
         )
         .await;
+        super::swarm_persistence::persist_member_lifecycle(&descendant, swarm_members).await;
         stopped.push(descendant);
     }
     if !stopped.is_empty() {
@@ -185,9 +183,9 @@ enum TurnPublicationState {
     Superseded,
 }
 
-/// A server turn's terminal-publication ownership, independent of the agent's
-/// resettable interrupt signal. Holding this lock serializes cascade stop,
-/// completion, and replacement by a new generation.
+#[path = "swarm_turn_cancel.rs"]
+mod turn_cancel;
+pub(super) use turn_cancel::{cancel_session_turn, cancel_session_turn_with};
 pub(super) struct TurnPublication {
     session_id: String,
     state: Mutex<TurnPublicationState>,
@@ -1382,23 +1380,16 @@ pub(super) async fn remove_session_from_swarm(
         );
     }
 
-    if swarm_plans.read().await.contains_key(swarm_id) {
-        let swarm_state = SwarmState {
-            members: Arc::clone(swarm_members),
-            swarms_by_id: Arc::clone(swarms_by_id),
-            plans: Arc::clone(swarm_plans),
-            coordinators: Arc::clone(swarm_coordinators),
-        };
-        persist_swarm_state_for(swarm_id, &swarm_state).await;
-    } else {
-        let swarm_state = SwarmState {
-            members: Arc::clone(swarm_members),
-            swarms_by_id: Arc::clone(swarms_by_id),
-            plans: Arc::clone(swarm_plans),
-            coordinators: Arc::clone(swarm_coordinators),
-        };
-        remove_persisted_swarm_state_for(swarm_id, &swarm_state).await;
-    }
+    // Ad-hoc swarms still have durable members even without a plan. Rewrite
+    // their snapshot too, or a removed worker can return after a restart.
+    // The snapshot writer already handles dissolution when no state remains.
+    let swarm_state = SwarmState {
+        members: Arc::clone(swarm_members),
+        swarms_by_id: Arc::clone(swarms_by_id),
+        plans: Arc::clone(swarm_plans),
+        coordinators: Arc::clone(swarm_coordinators),
+    };
+    persist_swarm_state_for(swarm_id, &swarm_state).await;
 
     let remaining_member_count = swarms_by_id
         .read()
