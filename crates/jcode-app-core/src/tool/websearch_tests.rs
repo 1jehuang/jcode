@@ -1,4 +1,23 @@
 #[test]
+fn kagi_engine_order_is_explicit_and_deduplicated() {
+    assert_eq!(
+        local_engine_order(WebSearchEngine::Kagi, &[]),
+        vec![WebSearchEngine::Kagi]
+    );
+    assert_eq!(
+        local_engine_order(
+            WebSearchEngine::Kagi,
+            &[WebSearchEngine::Bing, WebSearchEngine::Kagi]
+        ),
+        vec![WebSearchEngine::Kagi, WebSearchEngine::Bing]
+    );
+    assert_eq!(
+        local_engine_order(WebSearchEngine::Duckduckgo, &[WebSearchEngine::Bing]),
+        vec![WebSearchEngine::Duckduckgo, WebSearchEngine::Bing]
+    );
+}
+
+#[test]
 fn websearch_schema_exposes_only_search_controls() {
     let schema = WebSearchTool::new().parameters_schema();
     let properties = schema["properties"].as_object().unwrap();
