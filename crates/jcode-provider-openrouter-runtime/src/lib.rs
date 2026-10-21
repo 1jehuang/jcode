@@ -1211,6 +1211,29 @@ impl OpenRouterProvider {
         }
     }
 
+    /// Provider-specific request fields that built-in profiles need by default.
+    /// User-supplied `JCODE_OPENAI_EXTRA_BODY` values win.
+    fn with_profile_default_extra_body(
+        profile_id: Option<&str>,
+        extra: Option<serde_json::Map<String, Value>>,
+    ) -> Option<serde_json::Map<String, Value>> {
+        if profile_id != Some("venice") {
+            return extra;
+        }
+        // Venice prepends its own system prompt unless told not to, which
+        // would compete with jcode's agent instructions.
+        let mut merged = extra.unwrap_or_default();
+        let params = merged
+            .entry("venice_parameters")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(params) = params.as_object_mut() {
+            params
+                .entry("include_venice_system_prompt")
+                .or_insert(Value::Bool(false));
+        }
+        Some(merged)
+    }
+
     pub fn supports_provider_routing_features(&self) -> bool {
         self.supports_provider_features
     }
@@ -1665,7 +1688,10 @@ impl OpenRouterProvider {
             ProviderRouting::default()
         };
         let max_tokens = Self::configured_max_tokens(profile_id.as_deref());
-        let extra_body = Self::resolve_extra_body(None, &configured_env_file_name());
+        let extra_body = Self::with_profile_default_extra_body(
+            profile_id.as_deref(),
+            Self::resolve_extra_body(None, &configured_env_file_name()),
+        );
         jcode_base::logging::info(&format!(
             "[TIMING] openrouter_new: pre_struct={}ms",
             new_start.elapsed().as_millis()
