@@ -24,6 +24,22 @@ const DEFAULT_API_BASE: &str = "https://api.jcode.sh/v1";
 const PROVISION_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_secs(4);
 
+/// A live multiplexed SSH master means the machine is awake and this client is
+/// already authorized, so the Jcode Cloud wake/authorize call can be skipped.
+pub(crate) fn master_is_live() -> bool {
+    let Ok(args) = ssh_args() else {
+        return false;
+    };
+    Command::new("ssh")
+        .args(args)
+        .args(["-O", "check", HOST])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 pub(crate) fn is_managed(host: &str) -> bool {
     host == HOST
 }

@@ -443,12 +443,19 @@ impl Target {
                 // Usually the machine is already running and this is one
                 // authorization request. `connect` reports real wake progress.
                 step("prepare", "connecting to your Jcode Cloud machine");
-                super::cloud_managed::connect(&mut |m| step("prepare", m))?;
+                timed_move_stage("cloud api connect", || {
+                    if super::cloud_managed::master_is_live() {
+                        return Ok(());
+                    }
+                    super::cloud_managed::connect(&mut |m| step("prepare", m)).map(|_| ())
+                })?;
                 let home = dirs::home_dir()
                     .map(|h| h.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                self.run_shell(host, &super::cloud_managed::prepare_script(&home)?)
-                    .context("prepare the Jcode Cloud machine")?;
+                timed_move_stage("host prepare script", || {
+                    self.run_shell(host, &super::cloud_managed::prepare_script(&home)?)
+                        .context("prepare the Jcode Cloud machine")
+                })?;
             }
             // Preserve custom transports that only support one remote invocation.
             if self.transport.is_none() {
@@ -775,6 +782,36 @@ fn record_preflight(key: &str) {
     }
 }
 
+fn memory_marker(host: &str, memory: &Path) -> Option<PathBuf> {
+    let name = hex::encode(Sha256::digest(
+        format!("{host}\n{}", memory.display()).as_bytes(),
+    ));
+    Some(
+        storage::jcode_dir()
+            .ok()?
+            .join("cloud-memory-sent")
+            .join(name),
+    )
+}
+
+/// The receiver installs project memory only when the host has none, so a
+/// copy it already accepted never needs to be sent again.
+fn memory_already_sent(host: &str, memory: &Path, bytes: &[u8]) -> bool {
+    let digest = hex::encode(Sha256::digest(bytes));
+    memory_marker(host, memory)
+        .and_then(|marker| std::fs::read_to_string(marker).ok())
+        .is_some_and(|sent| sent == digest)
+}
+
+fn mark_memory_sent(host: &str, memory: &Path, bytes: &[u8]) {
+    if let Some(marker) = memory_marker(host, memory) {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(marker, hex::encode(Sha256::digest(bytes)));
+    }
+}
+
 fn timed_move_stage<T>(stage: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let started = std::time::Instant::now();
     let result = operation();
@@ -811,7 +848,7 @@ pub(crate) fn run_move(
 
     // ---- prepare -------------------------------------------------------
     step("prepare", "checking the cloud host");
-    let (staging, sess, auth_accounts, epoch, repo) = std::thread::scope(|scope| {
+    let (staging, sess, auth_accounts, epoch, repo, base) = std::thread::scope(|scope| {
         let preflight = scope.spawn(|| target.preflight(&host));
         let prepared = timed_move_stage("local snapshot preparation", || -> Result<_> {
             step("prepare", "snapshotting session, repo and environment");
@@ -875,13 +912,36 @@ pub(crate) fn run_move(
                 serde_json::to_vec_pretty(&manifest)?,
             )?;
             copy_if_exists(&todo_file(&session_id)?, &stage.join("todos.json"))?;
+            // Last known account limits, so the cloud UI shows them instantly
+            // instead of waiting on fresh usage probes.
+            std::fs::write(
+                stage.join("limits.json"),
+                crate::usage::export_limits_snapshot(),
+            )?;
             if let Some(repo) = &repo {
-                copy_if_exists(
-                    &crate::memory::project_memory_file(Path::new(&repo.working_dir))?,
-                    &stage.join("project_memory.json"),
-                )?;
+                // Project memory can be megabytes and rarely changes between
+                // moves. The receiver never overwrites existing memory, so
+                // ship it only when it changed since the last move to here.
+                let memory = crate::memory::project_memory_file(Path::new(&repo.working_dir))?;
+                if let Ok(bytes) = std::fs::read(&memory)
+                    && !memory_already_sent(&host, &memory, &bytes)
+                {
+                    std::fs::write(stage.join("project_memory.json"), &bytes)?;
+                }
             }
             Ok((staging, sess, auth_accounts, epoch, repo))
+        });
+        // Probe remote history while the host check is still running. It only
+        // reads `git rev-list` on the host, so it need not wait for preflight.
+        let history = prepared.as_ref().ok().and_then(|(_, _, _, _, repo)| {
+            repo.clone().map(|repo| {
+                let host = &host;
+                scope.spawn(move || {
+                    timed_move_stage("common repository history", || {
+                        Ok(common_remote_commit(target, host, &repo))
+                    })
+                })
+            })
         });
         // Always join, including when local preparation failed. Nothing may
         // continue preparing the host after this move returns.
@@ -889,20 +949,21 @@ pub(crate) fn run_move(
             .join()
             .map_err(|_| anyhow::anyhow!("cloud host preflight thread panicked"))
             .and_then(|result| result);
+        let base = history
+            .and_then(|handle| handle.join().ok())
+            .and_then(|result| result.ok())
+            .flatten();
         match (prepared, checked) {
-            (Ok(prepared), Ok(())) => Ok(prepared),
+            (Ok((staging, sess, accounts, epoch, repo)), Ok(())) => {
+                Ok((staging, sess, accounts, epoch, repo, base))
+            }
             (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
             (Err(error), Err(preflight_error)) => Err(error.context(format!(
                 "cloud host preflight also failed: {preflight_error:#}"
             ))),
         }
     })?;
-    // Negotiate only after preflight is joined. Snapshotting can overlap host
-    // startup, while packing waits so known remote history need not be shipped.
     if let Some(repo) = &repo {
-        let base = timed_move_stage("common repository history", || {
-            Ok(common_remote_commit(target, &host, repo))
-        })?;
         timed_move_stage("repository bundle", || {
             create_repo_bundle(repo, &session_id, staging.path(), base.as_deref())
         })?;
@@ -917,6 +978,7 @@ pub(crate) fn run_move(
                 "session.json",
                 "todos.json",
                 "project_memory.json",
+                "limits.json",
                 "repo.bundle",
                 "ignored.tar",
             ],
@@ -926,11 +988,82 @@ pub(crate) fn run_move(
     let _staging = staging;
 
     // ---- transfer + verify ---------------------------------------------
+    // Upload and credential transfers are independent SSH round trips, so run
+    // them all at once. Credentials go to the host's account store, not the
+    // session, and are harmless if the move is later abandoned.
     step("transfer", &format!("uploading to `{host}`"));
-    let out = timed_move_stage("upload and receive", || {
-        retry_ssh(&host, "upload", || {
-            target.run_remote(&host, &["cloud", "receive", "--json"], Some(&tarball))
-        })
+    let router = if dry_run {
+        None
+    } else {
+        Some(export_router_credentials()?).filter(|router| !router.is_empty())
+    };
+    let accounts: &[CloudAccount] = if dry_run { &[] } else { &auth_accounts };
+    if !accounts.is_empty() || router.is_some() {
+        step(
+            "credentials",
+            "securely transferring accounts, keys and routing",
+        );
+    }
+    let (out, baselines) = std::thread::scope(|scope| -> Result<_> {
+        let router_handle = router.as_ref().map(|router| {
+            let host = &host;
+            scope.spawn(move || {
+                timed_move_stage("router credential transfer", || {
+                    retry_ssh(host, "provider key transfer", || {
+                        target.send_router_credentials(host, router.as_bytes())
+                    })
+                })
+            })
+        });
+        let handles: Vec<_> = accounts
+            .iter()
+            .map(|account| {
+                let host = &host;
+                scope.spawn(move || -> Result<CloudAuthBaseline> {
+                    // Export at send time so a token refreshed by another
+                    // local session during snapshotting is not shipped stale.
+                    let credentials = transfer::export_cloud_account_at(
+                        &storage::jcode_dir()?,
+                        account.provider,
+                        Some(&account.label),
+                    )?;
+                    timed_move_stage("credential transfer", || {
+                        retry_ssh(host, "credential transfer", || {
+                            target.exchange_credentials(host, account, Some(credentials.as_bytes()))
+                        })
+                    })?;
+                    Ok(CloudAuthBaseline {
+                        account: account.clone(),
+                        fingerprint: credential_fingerprint(&credentials),
+                    })
+                })
+            })
+            .collect();
+        let out = timed_move_stage("upload and receive", || {
+            retry_ssh(&host, "upload", || {
+                target.run_remote(&host, &["cloud", "receive", "--json"], Some(&tarball))
+            })
+        });
+        let baselines = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("credential transfer thread panicked"))?
+            })
+            .collect::<Result<Vec<_>>>();
+        let router_result = router_handle.map(|handle| {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("router transfer thread panicked"))
+                .and_then(|result| result)
+        });
+        let out = out?;
+        let baselines = baselines?;
+        if let Some(result) = router_result {
+            result?;
+        }
+        Ok((out, baselines))
     })?;
     let verify: ReceiveReport = serde_json::from_slice(&out).with_context(|| {
         format!(
@@ -977,60 +1110,8 @@ pub(crate) fn run_move(
         return Ok(report);
     }
 
-    if !auth_accounts.is_empty() {
-        step("credentials", "securely transferring OAuth accounts");
-    }
-    // Each account is an independent SSH round trip over the shared control
-    // connection, so send them concurrently instead of one after another.
-    let baselines = std::thread::scope(|scope| -> Result<Vec<CloudAuthBaseline>> {
-        let handles: Vec<_> = auth_accounts
-            .iter()
-            .map(|account| {
-                let host = &host;
-                scope.spawn(move || -> Result<CloudAuthBaseline> {
-                    // Snapshotting a large repository may take long enough for
-                    // another local session to refresh the account. Do not
-                    // ship the earlier token.
-                    let credentials = transfer::export_cloud_account_at(
-                        &storage::jcode_dir()?,
-                        account.provider,
-                        Some(&account.label),
-                    )?;
-                    timed_move_stage("credential transfer", || {
-                        retry_ssh(host, "credential transfer", || {
-                            target.exchange_credentials(host, account, Some(credentials.as_bytes()))
-                        })
-                    })?;
-                    Ok(CloudAuthBaseline {
-                        account: account.clone(),
-                        fingerprint: credential_fingerprint(&credentials),
-                    })
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("credential transfer thread panicked"))?
-            })
-            .collect()
-    })?;
     // API keys, other providers' token stores and the auto-switch order are
     // one-way: the cloud copy is never imported back.
-    let router = export_router_credentials()?;
-    if !router.is_empty() {
-        step(
-            "credentials",
-            "securely transferring provider keys and routing",
-        );
-        timed_move_stage("router credential transfer", || {
-            retry_ssh(&host, "provider key transfer", || {
-                target.send_router_credentials(&host, router.as_bytes())
-            })
-        })?;
-    }
     storage::write_json_secret(&baseline_path(&session_id)?, &baselines)?;
 
     // ---- commit ----------------------------------------------------------
@@ -1079,6 +1160,12 @@ pub(crate) fn run_move(
                 &repo.snapshot,
             ],
         );
+    }
+    if let Some(repo) = &repo
+        && let Ok(memory) = crate::memory::project_memory_file(Path::new(&repo.working_dir))
+        && let Ok(bytes) = std::fs::read(_staging.path().join("project_memory.json"))
+    {
+        mark_memory_sent(&host, &memory, &bytes);
     }
     step("done", &format!("session now lives on `{host}`"));
     Ok(report)
@@ -1427,7 +1514,29 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
             .map(PathBuf::from)
             .or_else(|| lease.repo_root.clone().map(PathBuf::from));
         let repo = match working_dir {
-            Some(dir) => snapshot_repo(&dir, session_id, stage)?,
+            Some(dir) => {
+                let repo = prepare_repo_snapshot(&dir, session_id, stage)?;
+                if let Some(repo) = &repo {
+                    // The laptop sent `last_sync_head` and the snapshot on top
+                    // of it, so it already has that history. Shipping the full
+                    // repository back made `/local` take over a minute. With
+                    // no new commits the base equals HEAD, which the bundle
+                    // must still advertise, so exclude its parent instead.
+                    let base = lease.last_sync_head.as_deref().and_then(|base| {
+                        if base == repo.head {
+                            git(
+                                Path::new(&repo.root),
+                                &["rev-parse", "--verify", "-q", &format!("{base}^")],
+                            )
+                            .ok()
+                        } else {
+                            Some(base.to_string())
+                        }
+                    });
+                    create_repo_bundle(repo, session_id, stage, base.as_deref())?;
+                }
+                repo
+            }
             None => None,
         };
         let manifest = MoveManifest {
@@ -1571,10 +1680,8 @@ fn git_env(dir: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Resul
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Build a commit capturing the full working tree state (tracked changes plus
-/// untracked non-ignored files) on top of HEAD without touching the index or
-/// working tree, bundle it with the branch history, and copy allowlisted
-/// ignored files.
+/// Full snapshot plus self-contained bundle (tests and fallbacks).
+#[cfg(test)]
 fn snapshot_repo(
     working_dir: &Path,
     session_id: &str,
@@ -2378,6 +2485,9 @@ fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
         }
         std::fs::copy(&todos, dest)?;
     }
+    if let Ok(limits) = std::fs::read(stage.join("limits.json")) {
+        crate::usage::import_limits_snapshot(&limits);
+    }
     let memory = stage.join("project_memory.json");
     if memory.is_file()
         && let Some(dir) = sess.working_dir.as_deref()
@@ -2611,8 +2721,10 @@ fn tar_dir(dir: &Path, out: &Path, names: &[&str]) -> Result<()> {
         .filter(|n| dir.join(n).exists())
         .collect();
     let mut command = Command::new("tar");
+    // Gzip: transcripts and memory JSON shrink ~50x, and upload bandwidth, not
+    // latency, dominated the move. GNU tar on the receiver auto-detects it.
     command
-        .arg("-cf")
+        .arg("-czf")
         .arg(out)
         .arg("-C")
         .arg(dir)
