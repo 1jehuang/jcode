@@ -58,6 +58,23 @@ fn ssh_cloud_handoff_previews_matching_transcript_once() {
             Some("gpt-5.4")
         );
         assert!(std::env::var_os("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION").is_none());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
+        let frame_text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            frame_text.contains("conversation before cloud handoff"),
+            "{frame_text}"
+        );
+        assert!(!frame_text.contains("loading session"), "{frame_text}");
 
         let ordinary_resume = App::new_for_remote(Some(local.id.clone()));
         assert!(ordinary_resume.display_messages().is_empty());
