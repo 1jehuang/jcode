@@ -123,6 +123,54 @@ class CloudCredentials(unittest.TestCase):
     def test_claude_roundtrip(self):
         self.roundtrip("claude")
 
+    def test_all_accounts_move_and_return_not_just_selected_account(self):
+        self.seed()
+        openai = json.loads((self.local / "openai-auth.json").read_text())
+        second = dict(openai["openai_accounts"][0], label="openai-otter",
+                      account_id="second-account")
+        openai["openai_accounts"].append(second)
+        (self.local / "openai-auth.json").write_text(json.dumps(openai))
+        claude = {"anthropic_accounts": [
+            {"label": label, "access": ACCESS, "refresh": REFRESH,
+             "expires": 1, "email": label + "@example.invalid"}
+            for label in ("claude-fox", "claude-otter")
+        ], "active_anthropic_account": "claude-otter"}
+        (self.local / "auth.json").write_text(json.dumps(claude))
+        (self.local / "auth.json").chmod(0o600)
+        self.move()
+        for filename, key, refresh in [
+            ("openai-auth.json", "openai_accounts", "refresh_token"),
+            ("auth.json", "anthropic_accounts", "refresh"),
+        ]:
+            store = self.remote / filename
+            data = json.loads(store.read_text())
+            self.assertEqual(len(data[key]), 2)
+            for account in data[key]:
+                account[refresh] = "synthetic-refreshed-refresh"
+            store.write_text(json.dumps(data))
+        self.assert_archives_secret_free()
+        self.return_home()
+        for filename, key, refresh in [
+            ("openai-auth.json", "openai_accounts", "refresh_token"),
+            ("auth.json", "anthropic_accounts", "refresh"),
+        ]:
+            data = json.loads((self.local / filename).read_text())
+            self.assertTrue(all(account[refresh] == "synthetic-refreshed-refresh"
+                                for account in data[key]))
+        # Importing the other provider must not change the local selection.
+        self.assertEqual(json.loads((self.local / "auth.json").read_text())[
+            "active_anthropic_account"], "claude-otter")
+
+    def test_handoff_replaces_stale_remote_token_with_equal_expiry(self):
+        self.seed()
+        data = json.loads((self.local / self.filename).read_text())
+        data[self.accounts][0]["refresh_token"] = "old-remote-refresh"
+        store = self.remote / self.filename
+        store.write_text(json.dumps(data))
+        store.chmod(0o600)
+        self.move()
+        self.assertEqual(json.loads(store.read_text())[self.accounts][0]["refresh_token"], REFRESH)
+
     def test_dry_run_does_not_copy_credentials(self):
         self.seed()
         self.move("--dry-run")

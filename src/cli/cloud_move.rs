@@ -21,9 +21,9 @@
 //!
 //! The remote half is the hidden `jcode cloud receive|activate|export`
 //! commands, invoked over `ssh <host>` (or `--transport` for tests).
-//! The selected Jcode-owned OpenAI/Claude OAuth account travels separately over
-//! SSH, never in the repository/session tarball. Moving is consent to copy that
-//! account to the chosen host. Other accounts and external logins stay local.
+//! Jcode-owned OpenAI/Claude OAuth accounts travel separately over
+//! SSH, never in the repository/session tarball. Moving is consent to copy those
+//! accounts to the chosen host. External logins and API keys stay local.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -86,6 +86,9 @@ pub(crate) struct MoveManifest {
     /// Account identity only. Tokens never enter this manifest or its tarball.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_account: Option<CloudAccount>,
+    /// All transferred identities, without credential values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_accounts: Vec<CloudAccount>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,8 +126,17 @@ fn baseline_path(session_id: &str) -> Result<PathBuf> {
 fn import_return_credentials(session_id: &str, account: &CloudAccount, bytes: &[u8]) -> Result<()> {
     let home = storage::jcode_dir()?;
     let path = baseline_path(session_id)?;
-    if path.exists() {
-        let baseline: CloudAuthBaseline = read_json(&path)?;
+    let baselines = if path.exists() {
+        let value: serde_json::Value = read_json(&path)?;
+        if value.is_array() {
+            serde_json::from_value::<Vec<CloudAuthBaseline>>(value)?
+        } else {
+            vec![serde_json::from_value::<CloudAuthBaseline>(value)?]
+        }
+    } else {
+        Vec::new()
+    };
+    for baseline in baselines {
         if baseline.account == *account {
             let local =
                 transfer::export_cloud_account_at(&home, account.provider, Some(&account.label))?;
@@ -147,6 +159,9 @@ fn import_return_credentials(session_id: &str, account: &CloudAccount, bytes: &[
             )
             .map_err(Into::into);
         }
+    }
+    if path.exists() {
+        bail!("the OAuth account was not part of this session's credential transfer");
     }
     transfer::import_cloud_at(&home, account.provider, &account.label, bytes).map_err(Into::into)
 }
@@ -193,6 +208,17 @@ fn session_credentials(sess: &session::Session) -> Result<Option<CloudCredential
     )?))
 }
 
+fn cloud_accounts() -> Result<Vec<CloudAccount>> {
+    Ok(transfer::cloud_accounts_at(&storage::jcode_dir()?)?
+        .into_iter()
+        .map(|(provider, label)| CloudAccount { provider, label })
+        .collect())
+}
+
+fn transferred_accounts_path(session_id: &str) -> Result<PathBuf> {
+    Ok(baseline_path(session_id)?.with_extension("accounts.json"))
+}
+
 fn run_credentials(provider: &str, account: &str, export: bool) -> Result<()> {
     let provider = provider.parse::<TransferProvider>()?;
     let home = storage::jcode_dir()?;
@@ -205,7 +231,7 @@ fn run_credentials(provider: &str, account: &str, export: bool) -> Result<()> {
         std::io::stdin()
             .take((transfer::MAX_TRANSFER_BYTES + 1) as u64)
             .read_to_end(&mut bytes)?;
-        transfer::import_cloud_at(&home, provider, account, &bytes)?;
+        transfer::import_cloud_handoff_at(&home, provider, account, &bytes)?;
     }
     Ok(())
 }
@@ -533,7 +559,7 @@ pub(crate) fn run_move(
 
     // ---- prepare -------------------------------------------------------
     step("prepare", "checking the cloud host");
-    let (staging, sess, auth_account, epoch, repo) = std::thread::scope(|scope| {
+    let (staging, sess, auth_accounts, epoch, repo) = std::thread::scope(|scope| {
         let preflight = scope.spawn(|| target.preflight(&host));
         let prepared = timed_move_stage("local snapshot preparation", || -> Result<_> {
             step("prepare", "snapshotting session, repo and environment");
@@ -547,6 +573,7 @@ pub(crate) fn run_move(
                 // Pin an implicit OAuth route to the exact account being transferred.
                 sess.route_api_method = Some(account.route());
             }
+            let auth_accounts = cloud_accounts()?;
             let epoch = storage::read_session_lease(&session_id)
                 .map(|lease| lease.epoch)
                 .unwrap_or(0)
@@ -581,6 +608,7 @@ pub(crate) fn run_move(
                 not_transferred,
                 mcp_servers: configured_mcp_servers(),
                 auth_account: auth_account.clone(),
+                auth_accounts: auth_accounts.clone(),
             };
 
             // The shipped transcript: current conversation plus a hidden notice that
@@ -601,7 +629,7 @@ pub(crate) fn run_move(
                     &stage.join("project_memory.json"),
                 )?;
             }
-            Ok((staging, sess, auth_account, epoch, repo))
+            Ok((staging, sess, auth_accounts, epoch, repo))
         });
         // Always join, including when local preparation failed. Nothing may
         // continue preparing the host after this move returns.
@@ -695,11 +723,9 @@ pub(crate) fn run_move(
         return Ok(report);
     }
 
-    if let Some(account) = &auth_account {
-        step(
-            "credentials",
-            "securely transferring the session's OAuth account",
-        );
+    let mut baselines = Vec::new();
+    for account in &auth_accounts {
+        step("credentials", "securely transferring OAuth accounts");
         // Snapshotting a large repository may take long enough for another
         // local session to refresh the account. Do not ship the earlier token.
         let credentials = transfer::export_cloud_account_at(
@@ -710,14 +736,12 @@ pub(crate) fn run_move(
         timed_move_stage("credential transfer", || {
             target.exchange_credentials(&host, account, Some(credentials.as_bytes()))
         })?;
-        storage::write_json_secret(
-            &baseline_path(&session_id)?,
-            &CloudAuthBaseline {
-                account: account.clone(),
-                fingerprint: credential_fingerprint(&credentials),
-            },
-        )?;
+        baselines.push(CloudAuthBaseline {
+            account: account.clone(),
+            fingerprint: credential_fingerprint(&credentials),
+        });
     }
+    storage::write_json_secret(&baseline_path(&session_id)?, &baselines)?;
 
     // ---- commit ----------------------------------------------------------
     // Local lease first: from here on local turns stop. If activation fails
@@ -839,7 +863,27 @@ pub(crate) fn run_return(
 
     // The cloud has stopped running turns, so export its final refreshed tokens.
     // On conflict, restore cloud ownership rather than strand the conversation.
-    if let Some(account) = &manifest.auth_account {
+    // The local departure record is authoritative, including when returning
+    // from an older host that does not retain the multi-account manifest field.
+    // Never import unrelated accounts selected or injected on the remote host.
+    let departure_path = baseline_path(&session_id)?;
+    let return_accounts = if departure_path.exists() {
+        let value: serde_json::Value = read_json(&departure_path)?;
+        let baselines = if value.is_array() {
+            serde_json::from_value::<Vec<CloudAuthBaseline>>(value)?
+        } else {
+            vec![serde_json::from_value::<CloudAuthBaseline>(value)?]
+        };
+        baselines
+            .into_iter()
+            .map(|baseline| baseline.account)
+            .collect::<Vec<_>>()
+    } else if manifest.auth_accounts.is_empty() {
+        manifest.auth_account.iter().cloned().collect::<Vec<_>>()
+    } else {
+        manifest.auth_accounts.clone()
+    };
+    for account in &return_accounts {
         step(
             "credentials",
             "bringing refreshed OAuth credentials back securely",
@@ -1023,6 +1067,10 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
             bail!("staged OAuth account does not match the session route");
         }
     }
+    storage::write_json_secret(
+        &transferred_accounts_path(session_id)?,
+        &manifest.auth_accounts,
+    )?;
     install_session(&sess, &dir)?;
     storage::write_session_lease(&storage::SessionLease {
         session_id: session_id.to_string(),
@@ -1093,6 +1141,10 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
                     provider: credentials.provider(),
                     label: credentials.label().to_string(),
                 }),
+            auth_accounts: match transferred_accounts_path(session_id)? {
+                path if path.exists() => read_json(&path)?,
+                _ => Vec::new(),
+            },
         };
         std::fs::write(stage.join("session.json"), serde_json::to_vec(&sess)?)?;
         std::fs::write(

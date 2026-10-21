@@ -1,15 +1,15 @@
 # Cloud session handoff and OAuth accounts
 
-`/cloud` (or `jcode cloud move`) copies the current session's **selected Jcode-owned OpenAI or Claude OAuth account** to the chosen SSH host. Choosing the destination and running the move authorizes that account copy. Use only a host you trust with the account's access and refresh tokens.
+`/cloud` (or `jcode cloud move`) copies **all stored Jcode-owned OpenAI and Claude OAuth accounts** to the chosen SSH host, not just the current session's selected account. Choosing the destination and running the move authorizes those account copies. Use only a host you trust with every account's access and refresh tokens.
 
 - The original account label is retained and the migrated session is pinned to it. A missing explicitly selected account is an error, not a reason to choose another login.
 - Tokens travel in a separate SSH stdin/stdout exchange. They are not included in the session/repository archive, manifests, command arguments, progress messages, or diagnostic output. Remote credential-command stderr is deliberately discarded to prevent accidental token reflection.
 - The destination store uses private permissions and atomic publication. Other accounts and the active selection are preserved. A conflicting identity is not overwritten. Current Jcode processes coordinate account-store transactions with a shared lock.
-- API keys, environment credentials, unrelated accounts, external-tool logins, and operating-system keychains are not included in this OAuth transfer.
+- API keys, environment credentials, external-tool logins, and operating-system keychains are not included in this OAuth transfer.
 - A dry run stages the ordinary session bundle but does not send credentials or change ownership.
 - Both sides must support the hidden `cloud receive`, `cloud credentials`, and `cloud cancel-return` commands. The client checks all three before uploading or sending secrets. Local snapshot preparation overlaps these checks. Managed-host preflight can update the installed CLI, but does not restart an already-running cloud daemon.
 
-`/local` (`jcode cloud return`) brings back the cloud account's refreshed tokens through the same separate channel. The local machine retains only a SHA-256 fingerprint of its departure credential envelope to detect an intervening local login or refresh. If the local account changed while the session was away, return refuses to overwrite it and restores cloud ownership. The fingerprint is removed after a successful return.
+`/local` (`jcode cloud return`) brings back refreshed tokens for every account in the local departure record through the same separate channel. The local machine retains only SHA-256 fingerprints of departure credential envelopes to detect an intervening local login or refresh. If a local account changed while the session was away, return refuses to overwrite it and restores cloud ownership. The fingerprints are removed after a successful return. Accounts added only on the cloud host are not imported implicitly.
 
 OAuth providers can rotate or revoke refresh tokens. Copying a login does not make two independently refreshing copies safe indefinitely. Avoid concurrently using the same account from local and cloud sessions. Store locks protect cooperating Jcode processes on one machine, not other machines, older Jcode binaries, or external credential editors.
 
@@ -18,6 +18,8 @@ OAuth providers can rotate or revoke refresh tokens. Copying a login does not ma
 The TUI accepts `/cloud`, `/cloud <host>`, and `/local` while the agent is working. For `/cloud`, it prepares the destination host while the current turn continues, without snapshotting the live repository or copying the session or credentials. The actual handoff starts automatically once preparation succeeds and the current turn finishes, rather than requiring you to interrupt the agent and retry the command. `/local` waits for the same safe turn boundary. The queued request is local to that TUI instance. Closing the client before dispatch does not persist the request.
 
 Use `/cloud status` to inspect the pending request, `/cloud cancel` (or `/local cancel`) to cancel it, or submit another handoff command to replace its destination. Cancellation prevents the handoff but does not stop host preparation that is already running. Once the actual transfer starts, it is allowed to finish rather than being killed halfway through.
+
+Unsent prompts, queued commands, and attachments are not part of the persisted session. The TUI refuses a handoff that would drop them. If you create new unsent work or switch sessions while a handoff is pending, it cancels the pending transfer rather than discarding that state. Send or save that work before retrying.
 
 This is a deferred handoff, not live process migration. An in-flight model stream or tool process is not moved between machines. Waiting for the turn boundary keeps tool results and the session snapshot consistent. Background processes are still local-only and are described in the migration notice.
 
