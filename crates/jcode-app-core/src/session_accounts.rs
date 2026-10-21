@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 
 #[path = "session_account_routes.rs"]
 mod routes;
-pub(crate) use routes::{ensure_bound_account_route, refresh_bound_account_route};
+pub(crate) use routes::{
+    ensure_bound_account_route, refresh_bound_account_route, sync_bound_account_pin_label,
+};
 
 /// Account state a child session (swarm worker, split, transfer, overnight
 /// coordinator) inherits from its parent.
