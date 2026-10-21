@@ -1071,8 +1071,8 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
     // the model. Consume them before slash routing, preview activation or the
     // nonempty-input guard, so empty values and /cancel work here too.
     if let Some(pending) = app.pending_account_input.take() {
-        let value = app.expand_paste_placeholders(&app.input);
-        app.input.clear();
+        let input = std::mem::take(&mut app.input);
+        let value = app.expand_paste_placeholders(&input);
         app.cursor_pos = 0;
         app.pasted_contents.clear();
         app.clear_input_undo_history();
