@@ -30,7 +30,7 @@ exec bwrap --die-with-parent \\
   --proc /proc --dev /dev --tmpfs /tmp \\
   --bind "$CLOUD_ROOT/home" /home/cloud \\
   --bind "$CLOUD_ROOT/repo" $REPO \\
-  --ro-bind "$JCODE_BIN" /opt/jcode/jcode-under-test \\
+  --ro-bind "${CLOUD_JCODE_BIN:-$JCODE_BIN}" /opt/jcode/jcode-under-test \\
   --clearenv \\
   --setenv HOME /home/cloud --setenv USER cloud --setenv PATH /usr/local/bin:/usr/bin \\
   --setenv JCODE_HOME /home/cloud/.jcode --setenv JCODE_CLOUD_HOST_LABEL cloud-e2e \\
@@ -47,6 +47,9 @@ export JCODE_NO_AUTO_UPDATE=1
 export JCODE_NO_TELEMETRY=1
 unset JCODE_SESSION_ID JCODE_SOCKET
 J() { "$JCODE_BIN" --no-update --no-selfdev "$@"; }
+# Local client used for returns. Set RETURN_JCODE_BIN to simulate a local
+# update between `cloud move` and `cloud return`.
+JR() { "${RETURN_JCODE_BIN:-$JCODE_BIN}" --no-update --no-selfdev "$@"; }
 CLOUD() { "$W/cloud-transport" "JCODE_HOME=/home/cloud/.jcode $*"; }
 RB=(--host cloud-e2e --remote-binary /opt/jcode/jcode-under-test)
 
@@ -149,7 +152,13 @@ printf 'shared line 1 edited locally\nshared line 2\nshared line 3\n' > notes.tx
 echo "local only" > local.txt
 
 echo "== 5. return merges both sides"
-J cloud return --session "$SID" "${RB[@]}" --json > "$W/return.json"
+if [ -n "${CLOUD_UPGRADE_TO:-}" ]; then
+  # Simulate the cloud host's jcode being updated while the session lives there.
+  [ -n "${CLOUD_JCODE_BIN:-}" ] || fail "CLOUD_UPGRADE_TO needs a writable CLOUD_JCODE_BIN copy"
+  cp "$CLOUD_UPGRADE_TO" "$CLOUD_JCODE_BIN.next" && mv -f "$CLOUD_JCODE_BIN.next" "$CLOUD_JCODE_BIN"
+  pass "cloud jcode upgraded mid-session to $(CLOUD '/opt/jcode/jcode-under-test --no-update --version')"
+fi
+JR cloud return --session "$SID" "${RB[@]}" --json > "$W/return.json"
 cat "$W/return.json"
 check "merge applied" grep -q '"result": "applied"' "$W/return.json"
 check "local branch fast-forwarded to cloud commits" bash -c "cd $REPO && git log --format=%s | grep -qx 'cloud: add cloud.txt'"
