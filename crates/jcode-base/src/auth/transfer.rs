@@ -973,7 +973,32 @@ fn identity_hints_match(
         TransferProvider::OpenAi => &["account_id", "email"],
         TransferProvider::Claude => &["email"],
     };
-    fields.iter().all(|key| old[*key] == new[*key])
+    let present = |value: &serde_json::Value| value.as_str().is_some_and(|s| !s.trim().is_empty());
+    // A hint missing on either side is not evidence of a different account:
+    // older refreshes dropped `email` when the grant omitted id_token. Any hint
+    // present on both sides must still match exactly, and at least one hint
+    // must be shared so an identity-less entry cannot absorb another account.
+    let mut shared = false;
+    for key in fields {
+        let (a, b) = (&old[*key], &new[*key]);
+        if present(a) && present(b) {
+            if a != b {
+                return false;
+            }
+            shared = true;
+        }
+    }
+    shared || fields.iter().all(|key| old[*key] == new[*key])
+}
+
+fn identity_hints_present(provider: TransferProvider, account: &serde_json::Value) -> bool {
+    let fields: &[&str] = match provider {
+        TransferProvider::OpenAi => &["account_id", "email"],
+        TransferProvider::Claude => &["email"],
+    };
+    fields
+        .iter()
+        .any(|key| account[*key].as_str().is_some_and(|s| !s.trim().is_empty()))
 }
 
 fn cloud_expiry(provider: TransferProvider, account: &serde_json::Value) -> Option<i64> {
@@ -1043,7 +1068,12 @@ fn import_cloud_inner(
             .find(|entry| entry["label"].as_str() == Some(label))
         {
             let old = cloud_account(provider, existing)?;
-            if !identity_hints_match(provider, &old, &envelope.credential) {
+            // Explicit handoff: a destination copy with no identity hints at all
+            // (older stores) is stale data for this label, not a different account.
+            let old_identityless = !identity_hints_present(provider, &old);
+            if !(authoritative && old_identityless)
+                && !identity_hints_match(provider, &old, &envelope.credential)
+            {
                 return Err(TransferError::AccountConflict);
             }
             if let Some(baseline) = &baseline {
@@ -1267,6 +1297,41 @@ mod tests {
             let conflicting = revised(&rotated, identity, json!("different-identity"));
             assert_eq!(
                 import_cloud_handoff_at(home.path(), provider, "chosen", &conflicting),
+                Err(TransferError::AccountConflict)
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_handoff_accepts_destination_entry_missing_identity_hints() {
+        // Older refreshes dropped `email` when the grant had no id_token, so a
+        // cloud copy can lack hints the laptop still has. That must not block
+        // the handoff, while a hint that is present and different still does.
+        for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
+            let home = tempfile::tempdir().unwrap();
+            let full = cloud_fixture(provider, "chosen");
+            let stripped = revised(
+                &revised(&full, "email", Value::Null),
+                "account_id",
+                Value::Null,
+            );
+            import_cloud_handoff_at(home.path(), provider, "chosen", &stripped).unwrap();
+            import_cloud_handoff_at(home.path(), provider, "chosen", &full).unwrap();
+            let exported = export_cloud_account_at(home.path(), provider, Some("chosen")).unwrap();
+            let value: Value = serde_json::from_slice(exported.as_bytes()).unwrap();
+            let identity = if provider == TransferProvider::OpenAi {
+                "account_id"
+            } else {
+                "email"
+            };
+            assert!(
+                value["credential"][identity]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty())
+            );
+            let other = revised(&full, identity, json!("someone-else"));
+            assert_eq!(
+                import_cloud_handoff_at(home.path(), provider, "chosen", &other),
                 Err(TransferError::AccountConflict)
             );
         }
