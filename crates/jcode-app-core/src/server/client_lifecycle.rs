@@ -18,6 +18,9 @@ use super::client_lifecycle_logging::{
 use super::client_lightweight_control::{
     LightweightControlContext, handle_lightweight_control_request, parse_swarm_spawn_mode,
 };
+use super::client_session::response_capability::{
+    disconnect as disconnect_response, refresh_session,
+};
 use super::client_session::{
     handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
 };
@@ -428,7 +431,6 @@ pub(super) async fn handle_client(
     // Old clients count unknown events against a stray-line budget, so
     // `session_account_changed` goes only to clients that opted in.
     let supports_session_accounts = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut supports_user_response = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
@@ -485,6 +487,7 @@ pub(super) async fn handle_client(
                 is_processing: false,
                 current_tool_name: None,
                 terminal_env: active_terminal_env.clone(),
+                supports_user_response: false,
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
@@ -1466,6 +1469,7 @@ pub(super) async fn handle_client(
             }
 
             Request::PrepareDisconnect { id } => {
+                disconnect_response(&sessions, &client_connections, &client_connection_id, &client_session_id).await;
                 drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
                 let json = encode_event(&ServerEvent::Done { id });
                 let mut w = writer.lock().await;
@@ -1538,13 +1542,13 @@ pub(super) async fn handle_client(
                     requested_session_accounts,
                     std::sync::atomic::Ordering::Relaxed,
                 );
-                supports_user_response = requested_user_response;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
                         info.client_instance_id = client_instance_id.clone();
+                        info.supports_user_response = requested_user_response;
                         info.terminal_env = active_terminal_env.clone();
                     }
                 }
@@ -1714,11 +1718,7 @@ pub(super) async fn handle_client(
                 // resumed session's stored pin.
                 apply_subscribe_account_pins(&agent, &requested_account_pins, &client_event_tx).await;
                 send_pending_account_notices(&agent, &client_event_tx);
-                super::client_session::apply_or_defer_desktop_response_capability(
-                    &agent,
-                    supports_user_response,
-                )
-                .await;
+                refresh_session(&sessions, &client_connections, &client_session_id).await;
                 client_subscribed = true;
                 provisional_session = false;
             }
@@ -1870,11 +1870,7 @@ pub(super) async fn handle_client(
                     provisional_session = false;
                 }
                 send_pending_account_notices(&agent, &client_event_tx);
-                super::client_session::apply_or_defer_desktop_response_capability(
-                    &agent,
-                    supports_user_response,
-                )
-                .await;
+                refresh_session(&sessions, &client_connections, &client_session_id).await;
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -3188,6 +3184,8 @@ pub(super) async fn handle_client(
         }
         if sdk_session_before_request != client_session_id {
             drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
+            refresh_session(&sessions, &client_connections, &sdk_session_before_request).await;
+            refresh_session(&sessions, &client_connections, &client_session_id).await;
         }
         if request_lifecycle_logged {
             log_request_lifecycle_handled(
@@ -3213,6 +3211,13 @@ pub(super) async fn handle_client(
     }.await;
 
     drop(_sdk_connection_guard);
+    disconnect_response(
+        &sessions,
+        &client_connections,
+        &client_connection_id,
+        &client_session_id,
+    )
+    .await;
 
     // Cleanup serializes the successor decision against live attachment claims.
     // A successor must inherit the active owner, including its completion receiver,
@@ -3685,11 +3690,22 @@ async fn cancel_processing_message(
     let stopped_session = session_label.as_str();
     super::swarm::cancel_session_turn_with(stopped_session, |had_turn| async move {
         if had_turn {
-            update_member_status(stopped_session, "stopped", Some("cancelled".into()), swarm.members,
-                swarm.swarms_by_id, Some(swarm.event_history), Some(swarm.event_counter), Some(swarm.event_tx)).await;
-            super::swarm_persistence::persist_member_lifecycle(stopped_session, swarm.members).await;
+            update_member_status(
+                stopped_session,
+                "stopped",
+                Some("cancelled".into()),
+                swarm.members,
+                swarm.swarms_by_id,
+                Some(swarm.event_history),
+                Some(swarm.event_counter),
+                Some(swarm.event_tx),
+            )
+            .await;
+            super::swarm_persistence::persist_member_lifecycle(stopped_session, swarm.members)
+                .await;
         }
-    }).await;
+    })
+    .await;
     // Stopping a session also stops the workers it spawned. This runs on
     // every path, including the idle one: a coordinator waiting on
     // `await_members` has no running turn of its own while its workers do.
