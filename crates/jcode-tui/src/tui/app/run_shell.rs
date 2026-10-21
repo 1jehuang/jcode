@@ -711,7 +711,7 @@ impl App {
                 self.process_turn_with_input(&mut terminal, &mut event_stream, &mut bus_receiver)
                     .await;
                 needs_redraw = true;
-            } else if self.pending_queued_dispatch {
+            } else if self.pending_queued_dispatch && !self.cloud_handoff_blocks_work() {
                 self.pending_queued_dispatch = false;
                 self.process_queued_messages(&mut terminal, &mut event_stream)
                     .await;
@@ -952,7 +952,7 @@ impl App {
                     break 'outer;
                 }
 
-                if self.pending_queued_dispatch {
+                if self.pending_queued_dispatch && !self.cloud_handoff_blocks_work() {
                     self.pending_queued_dispatch = false;
                     remote::process_remote_followups(&mut self, &mut remote_conn).await;
                     needs_redraw = true;

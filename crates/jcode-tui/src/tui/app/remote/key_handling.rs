@@ -1070,6 +1070,14 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
         return Ok(());
     }
     if !app.input.is_empty() {
+        if app.cloud_handoff_blocks_work()
+            && app_mod::commands_cloud::parse_cloud_command(app.input.trim()).is_none()
+        {
+            app.set_status_notice(
+                "Cloud handoff pending. Use /cloud cancel before submitting more work.",
+            );
+            return Ok(());
+        }
         let prepared = input::take_prepared_input(app);
         let trimmed = prepared.expanded.trim();
 

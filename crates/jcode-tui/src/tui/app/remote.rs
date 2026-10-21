@@ -244,6 +244,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
+    if app.cloud_handoff_blocks_work() {
+        return needs_redraw;
+    }
+
     if !app.is_processing {
         if let Some(request) = app.take_pending_catchup_resume() {
             match remote.resume_session(&request.target_session_id).await {
@@ -1351,6 +1355,9 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 }
 
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
+    if app.cloud_handoff_blocks_work() {
+        return;
+    }
     if app.pending_provider_failover.is_some()
         || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
     {

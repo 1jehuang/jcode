@@ -1373,6 +1373,7 @@ fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> St
 /// as soon as one starts a turn; the rest wait for that turn to end.
 pub(super) fn run_queued_commands_local(app: &mut App) {
     while !app.is_processing
+        && !app.cloud_handoff_blocks_work()
         && !app.pending_turn
         && !app.should_quit
         && !app.queued_commands.is_empty()
@@ -3890,6 +3891,14 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
+        if self.cloud_handoff_blocks_work()
+            && super::commands_cloud::parse_cloud_command(self.input.trim()).is_none()
+        {
+            self.set_status_notice(
+                "Cloud handoff pending. Use /cloud cancel before submitting more work.",
+            );
+            return;
+        }
         // Connected SSH input is dispatched through the wire client, never the
         // local submit fallback (which reads skills and persists prompts).
         if crate::tui::is_ssh_remote() {
@@ -4172,7 +4181,9 @@ impl App {
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) {
-        while !self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty() {
+        while !self.cloud_handoff_blocks_work()
+            && (!self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty())
+        {
             // Combine all currently queued messages into one, treating [SYSTEM: ...]
             // startup continuations as system reminders rather than user turns.
             let queued_messages = std::mem::take(&mut self.queued_messages);

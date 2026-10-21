@@ -4,6 +4,12 @@
 //! for the current session between turns, surfaces the result in the chat, and
 //! then reattaches at the new location (SSH attach for `/cloud`, local resume
 //! for `/local`). A failure leaves everything where it was.
+//!
+//! Mid-turn requests replace one pending destination. Only host preparation may
+//! run during a turn: it does not snapshot the session or migrate a process.
+//! Move/return waits for idle and no staged turn. Status preserves the pending
+//! request. Cancellation drops it but does not kill an already-running child.
+//! Preparation results belong to the exact request, never its replacement.
 
 use super::{App, CloudHandoff, DisplayMessage};
 
@@ -12,6 +18,8 @@ pub(super) enum CloudCommand {
     Move { host: Option<String> },
     Return,
     Where,
+    Cancel,
+    Prepare { host: Option<String> },
 }
 
 pub(super) fn parse_cloud_command(trimmed: &str) -> Option<CloudCommand> {
@@ -19,13 +27,18 @@ pub(super) fn parse_cloud_command(trimmed: &str) -> Option<CloudCommand> {
     match words.next()? {
         "/cloud" => match words.next() {
             None => Some(CloudCommand::Move { host: None }),
+            Some("cancel") => Some(CloudCommand::Cancel),
             Some("status") | Some("where") => Some(CloudCommand::Where),
             Some("back") | Some("return") => Some(CloudCommand::Return),
             Some(host) => Some(CloudCommand::Move {
                 host: Some(host.to_string()),
             }),
         },
-        "/local" => Some(CloudCommand::Return),
+        "/local" => Some(if words.next() == Some("cancel") {
+            CloudCommand::Cancel
+        } else {
+            CloudCommand::Return
+        }),
         _ => None,
     }
 }
@@ -35,15 +48,78 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
     let Some(command) = parse_cloud_command(trimmed) else {
         return false;
     };
-    if app.is_processing && !matches!(command, CloudCommand::Where) {
+    if command == CloudCommand::Cancel {
+        let message = if app.pending_cloud_handoff.take().is_some() {
+            "Pending cloud handoff canceled."
+        } else if app.cloud_job.is_some() {
+            "A cloud command is already running and cannot be canceled here."
+        } else {
+            "No pending cloud handoff."
+        };
+        app.push_display_message(DisplayMessage::system(message));
+        return true;
+    }
+    if app
+        .cloud_job
+        .as_ref()
+        .is_some_and(|job| !matches!(job.command, CloudCommand::Prepare { .. }))
+    {
         app.push_display_message(DisplayMessage::error(
-            "The agent is mid-turn. Wait for it to finish (or press Esc), then run the command again. The move happens between turns so nothing is lost.".to_string(),
+            "A cloud command is already in progress.".to_string(),
         ));
         return true;
     }
+    if command == CloudCommand::Where && app.pending_cloud_handoff.is_some() {
+        let pending = app.pending_cloud_handoff.as_ref().unwrap();
+        app.push_display_message(DisplayMessage::system(format!(
+            "Pending handoff: {} (session {}). Waiting for an idle turn boundary. Use /cloud cancel to cancel.",
+            pending.trimmed, pending.session_id
+        )));
+        return true;
+    }
+    if !matches!(command, CloudCommand::Where) {
+        app.pending_cloud_handoff = Some(PendingCloudHandoff {
+            command,
+            trimmed: trimmed.to_string(),
+            session_id: session_id.to_string(),
+            request_id: next_request_id(),
+            prepared: false,
+        });
+        app.push_display_message(DisplayMessage::system(
+            "Cloud handoff queued for the next idle turn boundary. The current turn continues here. Use /cloud cancel to cancel.",
+        ));
+        app.poll_cloud_job();
+        return true;
+    }
+    start_cloud_command(app, command, trimmed, session_id)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::tui) struct PendingCloudHandoff {
+    command: CloudCommand,
+    trimmed: String,
+    session_id: String,
+    request_id: u64,
+    prepared: bool,
+}
+
+fn next_request_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn start_cloud_command(
+    app: &mut App,
+    command: CloudCommand,
+    trimmed: &str,
+    session_id: &str,
+) -> bool {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(error) => {
+            if matches!(command, CloudCommand::Prepare { .. }) {
+                app.pending_cloud_handoff = None;
+            }
             app.push_display_message(DisplayMessage::error(format!(
                 "Cannot locate the jcode binary: {error}"
             )));
@@ -62,6 +138,13 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         CloudCommand::Return => {
             cmd.args(["return", "--json", "--session", session_id]);
         }
+        CloudCommand::Prepare { host } => {
+            cmd.args(["prepare", "--json"]);
+            if let Some(host) = host {
+                cmd.args(["--host", host]);
+            }
+        }
+        CloudCommand::Cancel => unreachable!("cancel does not spawn"),
         CloudCommand::Where => {
             cmd.args(["where", "--session", session_id]);
         }
@@ -78,6 +161,9 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
+            if matches!(command, CloudCommand::Prepare { .. }) {
+                app.pending_cloud_handoff = None;
+            }
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to run jcode cloud: {error}"
             )));
@@ -120,11 +206,15 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         steps,
         started: std::time::Instant::now(),
         frame: 0,
-        command,
+        command: command.clone(),
         trimmed: trimmed.to_string(),
         session_id: session_id.to_string(),
         rx,
         stderr: String::new(),
+        preparation_for: app
+            .pending_cloud_handoff
+            .clone()
+            .filter(|_| matches!(command, CloudCommand::Prepare { .. })),
     });
     true
 }
@@ -145,11 +235,49 @@ pub(in crate::tui) struct CloudJob {
     session_id: String,
     rx: std::sync::mpsc::Receiver<CloudEvent>,
     stderr: String,
+    preparation_for: Option<PendingCloudHandoff>,
 }
 
 impl App {
-    /// Drain the running `/cloud` job. Returns true when the UI should redraw.
+    /// Drain the running job or dispatch a pending handoff when idle.
+    pub(super) fn cloud_handoff_blocks_work(&self) -> bool {
+        self.pending_cloud_handoff.is_some()
+            || self.cloud_job.is_some()
+            || self.cloud_handoff_requested.is_some()
+    }
+
+    fn cloud_handoff_can_dispatch(&self) -> bool {
+        !self.is_processing
+            && !self.pending_turn
+            && self.cloud_job.is_none()
+            && self.cloud_handoff_requested.is_none()
+            && !self.should_quit
+    }
+
     pub(super) fn poll_cloud_job(&mut self) -> bool {
+        if self.cloud_job.is_none()
+            && !self.should_quit
+            && let Some(pending) = self.pending_cloud_handoff.as_ref()
+            && !pending.prepared
+            && let CloudCommand::Move { host } = &pending.command
+        {
+            return start_cloud_command(
+                self,
+                CloudCommand::Prepare { host: host.clone() },
+                "/cloud prepare",
+                "",
+            );
+        }
+        if self.cloud_handoff_can_dispatch()
+            && let Some(pending) = self.pending_cloud_handoff.take()
+        {
+            return start_cloud_command(
+                self,
+                pending.command,
+                &pending.trimmed,
+                &pending.session_id,
+            );
+        }
         let Some(job) = self.cloud_job.as_mut() else {
             return false;
         };
@@ -187,9 +315,14 @@ impl App {
         let job = self.cloud_job.take().expect("cloud job present");
         match result {
             Ok(output) => finish_cloud_command(self, job, output),
-            Err(error) => self.push_display_message(DisplayMessage::error(format!(
-                "Failed to run jcode cloud: {error}"
-            ))),
+            Err(error) => {
+                if job.preparation_for.as_ref() == self.pending_cloud_handoff.as_ref() {
+                    self.pending_cloud_handoff = None;
+                }
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to run jcode cloud: {error}"
+                )));
+            }
         }
         true
     }
@@ -258,6 +391,33 @@ fn format_cloud_failure(command: &str, stderr: &str) -> String {
 }
 
 fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Output) {
+    if matches!(job.command, CloudCommand::Prepare { .. }) {
+        // Canceled or replaced requests must never inherit stale host preparation.
+        if job.preparation_for.as_ref() != app.pending_cloud_handoff.as_ref() {
+            return;
+        }
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
+        if output.status.success()
+            && let Some(host) = report["host"].as_str().filter(|host| !host.is_empty())
+        {
+            if let Some(pending) = app.pending_cloud_handoff.as_mut() {
+                pending.command = CloudCommand::Move {
+                    host: Some(host.to_string()),
+                };
+                pending.prepared = true;
+            }
+            app.push_display_message(DisplayMessage::system(
+                "Cloud host ready. Transfer will start at the next idle turn boundary.",
+            ));
+        } else {
+            app.pending_cloud_handoff = None;
+            app.push_display_message(DisplayMessage::error(format!(
+                "Cloud host preparation failed. Pending handoff cleared; retry /cloud when ready.\n{}",
+                job.stderr.trim()
+            )));
+        }
+        return;
+    }
     let CloudJob {
         command,
         trimmed,
@@ -276,6 +436,9 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
         return;
     }
     match command {
+        CloudCommand::Cancel | CloudCommand::Prepare { .. } => {
+            unreachable!("handled before transfer completion")
+        }
         CloudCommand::Where => {
             let text = if stdout.trim().is_empty() {
                 "This session has never moved.".to_string()
@@ -332,6 +495,221 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
 mod tests {
     use super::*;
 
+    fn pending(command: CloudCommand, session_id: &str) -> PendingCloudHandoff {
+        PendingCloudHandoff {
+            command,
+            trimmed: "/cloud chosen".into(),
+            session_id: session_id.into(),
+            request_id: next_request_id(),
+            prepared: false,
+        }
+    }
+
+    fn fake_job(app: &mut App, command: CloudCommand) -> std::sync::mpsc::Sender<CloudEvent> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let progress_message = app.display_messages.len();
+        app.push_display_message(DisplayMessage::system("Cloud session transfer"));
+        app.cloud_job = Some(CloudJob {
+            progress_message,
+            steps: vec!["Starting cloud command".into()],
+            started: std::time::Instant::now(),
+            frame: 0,
+            preparation_for: app
+                .pending_cloud_handoff
+                .clone()
+                .filter(|_| matches!(command, CloudCommand::Prepare { .. })),
+            command,
+            trimmed: "/cloud".into(),
+            session_id: "original-session".into(),
+            rx,
+            stderr: String::new(),
+        });
+        tx
+    }
+
+    #[cfg(unix)]
+    fn output(success: bool, stdout: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 256 }),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn busy_return_queues_without_spawning_and_status_preserves_target() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_processing = true;
+        assert!(handle_cloud_command(&mut app, "/local", "original-session"));
+        let expected = app.pending_cloud_handoff.clone();
+        assert!(
+            app.cloud_job.is_none(),
+            "no transfer child may start during a turn"
+        );
+        assert!(!app.poll_cloud_job());
+        assert!(handle_cloud_command(
+            &mut app,
+            "/cloud status",
+            "different-session"
+        ));
+        assert_eq!(app.pending_cloud_handoff, expected);
+        assert_eq!(expected.unwrap().session_id, "original-session");
+        assert!(app.cloud_handoff_blocks_work());
+        app.input = "do more work".into();
+        app.submit_input();
+        assert_eq!(app.input, "do more work");
+        assert!(!app.pending_turn);
+        app.queued_commands.push("/cloud cancel".into());
+        app.queued_messages.push("queued followup".into());
+        app.is_processing = false;
+        super::super::input::run_queued_commands_local(&mut app);
+        assert_eq!(app.queued_commands, ["/cloud cancel"]);
+        assert_eq!(app.queued_messages, ["queued followup"]);
+        assert!(app.pending_cloud_handoff.is_some());
+        app.is_processing = true;
+        for cancel in ["/cloud cancel", "/local cancel"] {
+            handle_cloud_command(&mut app, cancel, "different-session");
+            assert!(app.pending_cloud_handoff.is_none());
+            assert!(app.cloud_job.is_none());
+            handle_cloud_command(&mut app, "/local", "original-session");
+        }
+    }
+
+    #[test]
+    fn dispatch_waits_for_idle_and_staged_turn_and_completed_handoff() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.pending_cloud_handoff = Some(pending(CloudCommand::Return, "original-session"));
+        app.is_processing = true;
+        assert!(!app.cloud_handoff_can_dispatch());
+        app.is_processing = false;
+        app.pending_turn = true;
+        assert!(!app.cloud_handoff_can_dispatch());
+        assert!(!app.poll_cloud_job());
+        assert!(app.cloud_job.is_none());
+        app.pending_turn = false;
+        assert!(app.cloud_handoff_can_dispatch());
+        let _tx = fake_job(&mut app, CloudCommand::Return);
+        assert!(!app.cloud_handoff_can_dispatch());
+        app.cloud_job = None;
+        app.cloud_handoff_requested = Some(CloudHandoff::Local {
+            session_id: "original-session".into(),
+        });
+        assert!(!app.cloud_handoff_can_dispatch());
+        app.cloud_handoff_requested = None;
+        app.should_quit = true;
+        assert!(!app.cloud_handoff_can_dispatch());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_host_is_pinned_without_starting_busy_transfer() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_processing = true;
+        app.pending_cloud_handoff = Some(pending(
+            CloudCommand::Move { host: None },
+            "original-session",
+        ));
+        let tx = fake_job(&mut app, CloudCommand::Prepare { host: None });
+        tx.send(CloudEvent::Done(Ok(output(
+            true,
+            r#"{"host":"resolved-host"}"#,
+        ))))
+        .unwrap();
+        assert!(app.poll_cloud_job());
+        let queued = app.pending_cloud_handoff.as_ref().unwrap();
+        assert_eq!(
+            queued.command,
+            CloudCommand::Move {
+                host: Some("resolved-host".into())
+            }
+        );
+        assert_eq!(queued.session_id, "original-session");
+        assert!(queued.prepared);
+        assert!(!app.poll_cloud_job());
+        assert!(app.cloud_job.is_none());
+        assert!(app.cloud_handoff_requested.is_none());
+        assert!(!app.should_quit);
+        app.is_processing = false;
+        assert!(app.cloud_handoff_can_dispatch());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_and_cancel_ignore_stale_preparation_results() {
+        for cancel in [false, true] {
+            let mut app = crate::tui::app::tests::create_test_app();
+            app.is_processing = true;
+            app.pending_cloud_handoff = Some(pending(
+                CloudCommand::Move {
+                    host: Some("old".into()),
+                },
+                "original-session",
+            ));
+            let tx = fake_job(
+                &mut app,
+                CloudCommand::Prepare {
+                    host: Some("old".into()),
+                },
+            );
+            handle_cloud_command(&mut app, "/cloud new", "replacement-session");
+            let expected = app.pending_cloud_handoff.clone();
+            assert_eq!(
+                expected.as_ref().unwrap().command,
+                CloudCommand::Move {
+                    host: Some("new".into())
+                }
+            );
+            if cancel {
+                handle_cloud_command(&mut app, "/local cancel", "replacement-session");
+            }
+            tx.send(CloudEvent::Done(Ok(output(true, r#"{"host":"old"}"#))))
+                .unwrap();
+            assert!(app.poll_cloud_job());
+            assert_eq!(
+                app.pending_cloud_handoff,
+                if cancel { None } else { expected }
+            );
+            assert!(app.cloud_handoff_requested.is_none());
+            assert!(!app.should_quit);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preparation_failure_clears_only_its_own_request() {
+        for replace in [false, true] {
+            let mut app = crate::tui::app::tests::create_test_app();
+            app.is_processing = true;
+            app.pending_cloud_handoff = Some(pending(
+                CloudCommand::Move { host: None },
+                "original-session",
+            ));
+            let tx = fake_job(&mut app, CloudCommand::Prepare { host: None });
+            if replace {
+                handle_cloud_command(&mut app, "/local", "replacement-session");
+            }
+            tx.send(CloudEvent::Done(Ok(output(false, "")))).unwrap();
+            app.poll_cloud_job();
+            assert_eq!(app.pending_cloud_handoff.is_some(), replace);
+            assert!(app.cloud_job.is_none());
+        }
+    }
+
+    #[test]
+    fn active_transfer_rejects_replacement_and_cancellation_without_killing_job() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let _tx = fake_job(&mut app, CloudCommand::Return);
+        handle_cloud_command(&mut app, "/cloud another", "different-session");
+        handle_cloud_command(&mut app, "/cloud cancel", "different-session");
+        assert!(app.pending_cloud_handoff.is_none());
+        assert_eq!(
+            app.cloud_job.as_ref().unwrap().command,
+            CloudCommand::Return
+        );
+        assert!(app.cloud_handoff_blocks_work());
+    }
+
     #[cfg(unix)]
     #[test]
     fn polling_keeps_all_steps_and_stops_spinner_on_failure() {
@@ -350,6 +728,7 @@ mod tests {
             session_id: "test".into(),
             rx,
             stderr: String::new(),
+            preparation_for: None,
         });
         tx.send(CloudEvent::Progress("Checking host".into()))
             .unwrap();
@@ -548,6 +927,14 @@ mod tests {
         assert_eq!(
             parse_cloud_command("/cloud status"),
             Some(CloudCommand::Where)
+        );
+        assert_eq!(
+            parse_cloud_command("/cloud cancel"),
+            Some(CloudCommand::Cancel)
+        );
+        assert_eq!(
+            parse_cloud_command("/local cancel"),
+            Some(CloudCommand::Cancel)
         );
         assert_eq!(parse_cloud_command("/cloudy"), None);
     }
