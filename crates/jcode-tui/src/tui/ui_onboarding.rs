@@ -193,10 +193,11 @@ fn telemetry_settings_lines(
     };
     let left_width = TelemetryCategory::ALL
         .iter()
-        .map(|c| 2 + c.label().width() + 2)
+        .map(|c| c.label().width())
         .max()
         .unwrap_or(0);
-    let row_width = left_width + COL_W * 2 + GAP.len();
+    // Layout: "> " gutter, Yes column, gap, No column, gap, label.
+    let row_width = 2 + COL_W * 2 + GAP.len() * 2 + left_width;
     let block_width = row_width;
     let pad = |used: usize| " ".repeat(block_width.saturating_sub(used));
 
@@ -207,11 +208,11 @@ fn telemetry_settings_lines(
     let header_style = dim.add_modifier(Modifier::BOLD);
     lines.push(
         Line::from(vec![
-            Span::raw(" ".repeat(left_width)),
+            Span::raw("  "),
             Span::styled(center_cell("Yes"), header_style),
             Span::raw(GAP),
             Span::styled(center_cell("No"), header_style),
-            Span::raw(pad(row_width)),
+            Span::raw(pad(2 + COL_W * 2 + GAP.len())),
         ])
         .alignment(align),
     );
@@ -234,12 +235,15 @@ fn telemetry_settings_lines(
                     if focused { "> " } else { "  " },
                     Style::default().fg(welcome_accent()),
                 ),
-                Span::styled(category.label(), label_style),
-                Span::raw(" ".repeat(left_width - 2 - category.label().width())),
                 Span::styled(center_cell(yes_glyph), yes_style),
                 Span::raw(GAP),
                 Span::styled(center_cell(no_glyph), no_style),
-                Span::raw(pad(row_width)),
+                Span::raw(GAP),
+                Span::styled(category.label(), label_style),
+                Span::raw(pad(2
+                    + COL_W * 2
+                    + GAP.len() * 2
+                    + category.label().width())),
             ])
             .alignment(align),
         );
