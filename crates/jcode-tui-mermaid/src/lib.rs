@@ -221,6 +221,8 @@ mod cache_render;
 mod content_render;
 #[path = "mermaid_inline.rs"]
 mod inline_image;
+#[path = "mermaid_kitty_classic.rs"]
+mod kitty_classic;
 #[path = "mermaid_runtime.rs"]
 mod runtime;
 #[path = "mermaid_viewport.rs"]
@@ -251,6 +253,7 @@ pub use inline_image::{
     inline_image_dims, inline_image_id, inline_image_is_materialized, materialize_inline_image,
     materialize_inline_image_by_id, rediscover_inline_image,
 };
+pub use kitty_classic::{begin_terminal_image_frame, finish_terminal_image_frame};
 pub use runtime::force_test_kitty_picker;
 pub use runtime::{
     error_lines_for, get_cached_png, get_font_size, image_protocol_available, init_picker,
@@ -928,6 +931,7 @@ struct KittyViewportState {
     unique_id: u32,
     full_cols: u16,
     full_rows: u16,
+    pixel_size: (u32, u32),
     pending_transmit: Option<String>,
     /// Exact bytes currently held by `pending_transmit`. Stored explicitly so
     /// cache accounting remains cheap and tests can exercise budget eviction
@@ -1029,13 +1033,26 @@ impl KittyViewportCache {
 
     #[cfg(feature = "renderer")]
     fn remove(&mut self, hash: &u64) {
-        if let Some(state) = self.entries.remove(hash) {
-            self.total_pending_transmit_bytes = self
-                .total_pending_transmit_bytes
-                .saturating_sub(state.pending_transmit_bytes);
-            queue_kitty_delete_if_transmitted(&state);
+        let variants = if runtime::use_classic_kitty() {
+            self.entries
+                .iter()
+                .filter_map(|(key, state)| {
+                    (kitty_classic::state_hash(*hash, state.fit_target, state.font_size) == *key)
+                        .then_some(*key)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![*hash]
+        };
+        for hash in variants {
+            if let Some(state) = self.entries.remove(&hash) {
+                self.total_pending_transmit_bytes = self
+                    .total_pending_transmit_bytes
+                    .saturating_sub(state.pending_transmit_bytes);
+                queue_kitty_delete_if_transmitted(&state);
+            }
+            self.recency.remove(&hash);
         }
-        self.recency.remove(hash);
     }
 
     fn clear(&mut self) {
@@ -1596,6 +1613,7 @@ pub fn evict_old_cache() {
 
 /// Clear image state (call on app exit to free memory)
 pub fn clear_image_state() {
+    kitty_classic::clear_placements();
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.clear();
     }
@@ -1617,7 +1635,9 @@ pub fn clear_image_state() {
 /// from the in-process caches. Exposed for TUI teardown, where there may be no
 /// later frame in which an image widget can carry the deferred cleanup.
 pub fn take_terminal_image_cleanup_payload() -> String {
-    viewport_render::take_kitty_delete_payloads()
+    let mut payload = kitty_classic::take_placement_cleanup();
+    payload.push_str(&viewport_render::take_kitty_delete_payloads());
+    payload
 }
 
 /// Attach pending Kitty deletion commands to the first cell of an ordinary TUI
