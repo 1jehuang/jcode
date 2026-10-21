@@ -320,3 +320,103 @@ fn test_accounts_direct_rename_preserves_spaces_and_uses_longest_saved_label() {
         });
     }
 }
+
+#[test]
+fn test_accounts_remote_rename_prompt_never_submits_a_model_message() {
+    use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind};
+    use tokio::io::AsyncBufReadExt;
+
+    for (value, enter_modifiers) in [
+        ("Remote  Research Team", KeyModifiers::empty()),
+        ("Remote  Research Team", KeyModifiers::CONTROL),
+        ("/cancel", KeyModifiers::empty()),
+        ("", KeyModifiers::empty()),
+        ("   ", KeyModifiers::empty()),
+    ] {
+        with_temp_jcode_home(|| {
+            let (original, other) = store_two_claude_accounts();
+            crate::auth::claude::set_active_account(&other).unwrap();
+            let mut app = create_test_app();
+            app.is_remote = true;
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let mut connection = crate::tui::backend::RemoteConnection::dummy();
+                let peer = connection.take_dummy_peer().expect("real socketpair peer");
+                let mut reader = tokio::io::BufReader::new(peer);
+                app.handle_account_picker_command(AccountPickerCommand::Rename {
+                    provider: AccountProviderKind::Anthropic,
+                    label: original.clone(),
+                });
+                assert!(matches!(&app.pending_account_input,
+                    Some(super::auth::PendingAccountInput::Rename { label, .. }) if label == &original));
+                let provider_messages_before = app.materialized_provider_messages().len();
+                let session_messages_before = app.session.messages.len();
+                let user_messages_before = app.display_messages().iter()
+                    .filter(|message| message.role == "user").count();
+                let prompt_history_before = app.persisted_prompt_history.clone();
+                let request_id_before = connection.next_request_id_for_test();
+
+                for character in value.chars() {
+                    remote::handle_remote_key(&mut app, KeyCode::Char(character), KeyModifiers::empty(), &mut connection)
+                        .await.unwrap();
+                }
+                remote::handle_remote_key(&mut app, KeyCode::Enter, enter_modifiers, &mut connection)
+                    .await.unwrap();
+
+                assert!(!app.is_processing(), "prompt value started model processing: {value:?}");
+                assert_eq!(app.materialized_provider_messages().len(), provider_messages_before);
+                assert_eq!(app.session.messages.len(), session_messages_before);
+                assert_eq!(app.display_messages().iter().filter(|message| message.role == "user").count(), user_messages_before);
+                assert_eq!(app.persisted_prompt_history, prompt_history_before);
+                assert_eq!(connection.next_request_id_for_test(), request_id_before);
+                let mut line = String::new();
+                assert!(tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_line(&mut line))
+                    .await.is_err(), "account input leaked a wire request: {line}");
+
+                let accounts = crate::auth::claude::list_accounts().unwrap();
+                assert_eq!(accounts.len(), 2);
+                assert!(accounts.iter().any(|account| account.label == other));
+                assert_eq!(crate::auth::claude::default_account_label().as_deref(), Some(other.as_str()));
+                if value.trim().is_empty() {
+                    assert!(matches!(&app.pending_account_input,
+                        Some(super::auth::PendingAccountInput::Rename { label, .. }) if label == &original));
+                    assert!(accounts.iter().any(|account| account.label == original));
+                    assert!(app.display_messages().last().unwrap().content.contains("cannot be empty"));
+
+                    let retry_label = "Remote Retry Account";
+                    for character in retry_label.chars() {
+                        remote::handle_remote_key(&mut app, KeyCode::Char(character), KeyModifiers::empty(), &mut connection)
+                            .await.unwrap();
+                    }
+                    remote::handle_remote_key(&mut app, KeyCode::Enter, KeyModifiers::empty(), &mut connection)
+                        .await.unwrap();
+                    assert!(app.pending_account_input.is_none());
+                    let accounts = crate::auth::claude::list_accounts().unwrap();
+                    assert_eq!(accounts.len(), 2);
+                    assert!(accounts.iter().any(|account| account.label == retry_label
+                        && account.email.as_deref() == Some("first@example.com")));
+                    assert!(!accounts.iter().any(|account| account.label == original));
+                    assert!(accounts.iter().any(|account| account.label == other));
+                    assert_eq!(crate::auth::claude::default_account_label().as_deref(), Some(other.as_str()));
+                    assert!(!app.is_processing());
+                    assert_eq!(app.materialized_provider_messages().len(), provider_messages_before);
+                    assert_eq!(app.session.messages.len(), session_messages_before);
+                    assert_eq!(app.display_messages().iter().filter(|message| message.role == "user").count(), user_messages_before);
+                    assert_eq!(app.persisted_prompt_history, prompt_history_before);
+                    assert_eq!(connection.next_request_id_for_test(), request_id_before);
+                    assert!(tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_line(&mut line))
+                        .await.is_err(), "retry input leaked a wire request: {line}");
+                } else if value == "/cancel" {
+                    assert!(app.pending_account_input.is_none());
+                    assert!(accounts.iter().any(|account| account.label == original));
+                    assert!(app.display_messages().last().unwrap().content.contains("cancelled"));
+                } else {
+                    assert!(app.pending_account_input.is_none());
+                    assert!(accounts.iter().any(|account| account.label == value
+                        && account.email.as_deref() == Some("first@example.com")));
+                    assert!(!accounts.iter().any(|account| account.label == original));
+                }
+            });
+        });
+    }
+}
