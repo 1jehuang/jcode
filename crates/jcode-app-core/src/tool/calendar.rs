@@ -10,6 +10,13 @@ use crate::google_calendar::{
 
 const DEFAULT_EVENT_MINUTES: i64 = 30;
 
+#[path = "calendar_duration.rs"]
+mod duration;
+
+#[cfg(test)]
+#[path = "calendar_http_tests.rs"]
+mod http_tests;
+
 pub struct CalendarTool {
     client: CalendarClient,
 }
@@ -225,6 +232,12 @@ impl CalendarTool {
             anyhow::bail!("Pass start together with end when changing an event's time");
         }
         if let Some(start) = start {
+            if !require_times && end.is_none() {
+                let (start, end) = self.preserved_times(params, calendar_id, &start).await?;
+                body.insert("start".into(), start);
+                body.insert("end".into(), end);
+                return Ok(body);
+            }
             let end = match end {
                 Some(end) => end,
                 None => default_end(&start)?,
@@ -280,7 +293,7 @@ impl Tool for CalendarTool {
                 },
                 "end": {
                     "type": "string",
-                    "description": "Same formats as start. Default: 30 minutes after start, or the next day for all-day."
+                    "description": "Same formats as start. Create default: start +30 minutes, or next day for all-day. Start-only update preserves the existing duration."
                 },
                 "time_zone": {
                     "type": "string",
@@ -305,7 +318,7 @@ impl Tool for CalendarTool {
                 "time_max": { "type": "string", "description": "List window end. Default 7 days after time_min." },
                 "query": { "type": "string", "description": "Free-text search for list." },
                 "text": { "type": "string", "description": "Text for quick_add." },
-                "max_results": { "type": "integer" },
+                "max_results": { "type": "integer", "description": "List page size (1-250, default 25). All matching pages are returned." },
                 "confirmed": {
                     "type": "boolean",
                     "description": "Confirm delete or emailing guests."
