@@ -39,6 +39,7 @@ mod memory;
 mod navigation;
 mod render;
 mod search_input;
+mod selection;
 
 #[cfg(test)]
 use loading::collect_recent_session_stems;
@@ -329,6 +330,8 @@ pub struct SessionPicker {
     /// Set once the user cycles the filter, so async reloads never replace
     /// their choice with the automatic current-project default.
     filter_mode_user_chosen: bool,
+    /// Navigation or marking is deliberate, unlike the automatic first-row highlight.
+    user_selection_intent: bool,
     /// Live process presence keyed by session ID (active-pid registry snapshot).
     /// Drives the working/ready badges in the list and the Active filter
     /// membership. Refreshed on load/reseed and periodically while the Active
@@ -390,6 +393,7 @@ impl SessionPicker {
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
+            user_selection_intent: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -438,6 +442,7 @@ impl SessionPicker {
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
+            user_selection_intent: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -518,6 +523,7 @@ impl SessionPicker {
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
+            user_selection_intent: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -839,16 +845,6 @@ impl SessionPicker {
 
     fn selection_count(&self) -> usize {
         self.selected_session_ids.len()
-    }
-
-    fn toggle_selected_session(&mut self) {
-        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
-            return;
-        };
-
-        if !self.selected_session_ids.insert(session_id.clone()) {
-            self.selected_session_ids.remove(&session_id);
-        }
     }
 
     pub fn clear_selected_sessions(&mut self) {
@@ -2284,20 +2280,6 @@ impl SessionPicker {
     /// Run the interactive picker, returns selected session ID or None if cancelled
     pub fn run(self) -> Result<Option<PickerResult>> {
         self.run_with_session_updates(None)
-    }
-
-    fn apply_session_list_update(&mut self, update: SessionListUpdate) -> Result<bool> {
-        let (sessions, finished) = match update {
-            SessionListUpdate::Cached(sessions) => (sessions, false),
-            SessionListUpdate::Fresh(sessions) => (sessions?, true),
-        };
-        let apply_project_default = self.selected_session().is_none();
-        self.reseed_grouped(sessions.0, sessions.1);
-        // Defaults may choose the first target, never replace one already shown.
-        if apply_project_default {
-            self.apply_resume_project_scope_default();
-        }
-        Ok(finished)
     }
 
     fn run_with_session_updates(
