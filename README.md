@@ -61,11 +61,11 @@ curl -fsSL https://jcode.sh/install | bash
 
 | Tool | First session | Each additional session | Comparison (additional) |
 |---|---|---|---|
-| **jcode** | **32.9 MB** | **~6.4 MB** | baseline |
-| **OpenCode** | 637.1 MB | ~5.9 MB | about the same |
-| **pi** | 84.0 MB | ~79.6 MB | **12.4× more RAM** |
-| **Claude Code** | 272.9 MB | ~169.3 MB | **26.5× more RAM** |
-| **Codex CLI** | 398.6 MB | ~194.1 MB | **30.3× more RAM** |
+| **jcode** | **71.3 MB** | **~3.3 MB** | baseline |
+| **OpenCode** | 637.1 MB | ~5.9 MB | **1.8× more RAM** |
+| **pi** | 84.0 MB | ~79.6 MB | **24.1× more RAM** |
+| **Claude Code** | 272.9 MB | ~169.3 MB | **51.3× more RAM** |
+| **Codex CLI** | 398.6 MB | ~194.1 MB | **58.8× more RAM** |
 
 [Reproduce](scripts/bench_headless_memory.py).
 
@@ -75,11 +75,11 @@ Time until typed text appears on screen, across 10 interactive launches.
 
 | Tool | Time to first input | Comparison |
 |---|---|---|
-| **jcode** | **48.7 ms** | baseline |
-| **pi** | 596.4 ms | **12.2× slower** |
-| **Codex CLI** | 905.8 ms | **18.6× slower** |
-| **OpenCode** | 1047.9 ms | **21.5× slower** |
-| **Claude Code** | 3512.8 ms | **72.2× slower** |
+| **jcode** | **19.1 ms** | baseline |
+| **pi** | 596.4 ms | **31.2× slower** |
+| **Codex CLI** | 905.8 ms | **47.4× slower** |
+| **OpenCode** | 1047.9 ms | **54.9× slower** |
+| **Claude Code** | 3512.8 ms | **183.9× slower** |
 
 Full numbers on [jcode.sh](https://jcode.sh).
 
