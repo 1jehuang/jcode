@@ -1255,6 +1255,10 @@ pub struct ProviderConfig {
     pub anthropic_reasoning_effort: Option<String>,
     /// Request one-hour Anthropic prompt caching instead of five minutes.
     pub anthropic_cache_ttl_1h: bool,
+    /// Optional cumulative retry-sleep allowance per Anthropic model request.
+    /// Unset preserves existing retries. Zero forbids positive retry sleeps.
+    /// Overridable via `JCODE_ANTHROPIC_RETRY_WAIT_BUDGET_SECS`.
+    pub anthropic_retry_wait_budget_secs: Option<u64>,
     /// OpenAI transport mode (auto|websocket|https)
     pub openai_transport: Option<String>,
     /// OpenAI service tier override (priority|ultrafast|flex|off). Ultrafast is opt-in.
@@ -1316,6 +1320,7 @@ impl Default for ProviderConfig {
             openai_reasoning_effort: Some("low".to_string()),
             anthropic_reasoning_effort: None,
             anthropic_cache_ttl_1h: true,
+            anthropic_retry_wait_budget_secs: None,
             openai_transport: None,
             openai_service_tier: Some("priority".to_string()),
             openai_native_compaction_mode: "auto".to_string(),

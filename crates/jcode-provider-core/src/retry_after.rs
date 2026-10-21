@@ -19,7 +19,11 @@ pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// arbitrarily long digit string is safe. Invalid values are ignored and let
 /// the caller fall back to its normal exponential backoff.
 pub fn retry_after(headers: &HeaderMap) -> Option<RetryAfter> {
-    retry_after_delay_at(headers, SystemTime::now()).map(RetryAfter::new)
+    retry_after_uncapped_delay_at(headers, SystemTime::now()).map(|required| {
+        let mut hint = RetryAfter::new(required.min(MAX_RETRY_AFTER));
+        hint.required = required;
+        hint
+    })
 }
 
 /// Parse a bounded retry delay from a provider JSON error body.
@@ -74,42 +78,44 @@ fn positive_seconds(value: &serde_json::Value) -> Option<u64> {
     (seconds.is_finite() && seconds > 0.0).then(|| seconds.ceil() as u64)
 }
 
+#[cfg(test)]
 fn retry_after_delay_at(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
+    retry_after_uncapped_delay_at(headers, now).map(|delay| delay.min(MAX_RETRY_AFTER))
+}
+
+fn retry_after_uncapped_delay_at(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if value.is_empty() {
         return None;
     }
 
     if value.bytes().all(|byte| byte.is_ascii_digit()) {
-        let max_secs = MAX_RETRY_AFTER.as_secs();
         let seconds = value.bytes().fold(0u64, |seconds, byte| {
             seconds
                 .saturating_mul(10)
                 .saturating_add(u64::from(byte - b'0'))
-                .min(max_secs)
         });
         return Some(Duration::from_secs(seconds));
     }
 
     let retry_at = httpdate::parse_http_date(value).ok()?;
-    Some(
-        retry_at
-            .duration_since(now)
-            .unwrap_or(Duration::ZERO)
-            .min(MAX_RETRY_AFTER),
-    )
+    Some(retry_at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// A bounded server retry hint represented as a monotonic deadline.
 #[derive(Clone, Copy, Debug)]
 pub struct RetryAfter {
     deadline: Instant,
+    received: Instant,
+    required: Duration,
 }
 
 impl RetryAfter {
     fn new(delay: Duration) -> Self {
         Self {
             deadline: Instant::now() + delay,
+            received: Instant::now(),
+            required: delay,
         }
     }
 
@@ -148,8 +154,22 @@ pub fn error_with_retry_after(message: String, retry_after: Option<RetryAfter>) 
     }
 }
 
-/// Recover a server retry hint from a provider error, including through anyhow
-/// context layers.
+/// Recover the full, uncapped server wait for opt-in retry budgets. Existing
+/// retry loops continue using the bounded accessor below. Oversized hints remain
+/// durations rather than deadlines, avoiding Instant overflow.
+pub fn retry_after_required_from_error(error: &Error) -> Option<Duration> {
+    error
+        .chain()
+        .find_map(|source| source.downcast_ref::<RetryAfterError>())
+        .map(|error| {
+            error
+                .retry_after
+                .required
+                .saturating_sub(error.retry_after.received.elapsed())
+        })
+}
+
+/// Recover a bounded server retry hint, including through anyhow context layers.
 pub fn retry_after_from_error(error: &Error) -> Option<Duration> {
     error
         .chain()
@@ -172,6 +192,40 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, value);
         headers
+    }
+
+    #[test]
+    fn uncapped_hint_survives_error_chain_without_changing_legacy_delay() {
+        let hint = retry_after(&headers(HeaderValue::from_static("3600")));
+        let error = error_with_retry_after("original 429".into(), hint).context("request failed");
+        let required = retry_after_required_from_error(&error).unwrap();
+        assert!(required > Duration::from_secs(3599));
+        assert!(required <= Duration::from_secs(3600));
+        assert!(retry_after_from_error(&error).unwrap() <= MAX_RETRY_AFTER);
+        assert_eq!(format!("{error:#}"), "request failed: original 429");
+    }
+
+    #[test]
+    fn uncapped_hint_saturates_without_deadline_overflow() {
+        let hint = retry_after(&headers(HeaderValue::from_static(
+            "999999999999999999999999999999999999",
+        )));
+        let error = error_with_retry_after("original 429".into(), hint);
+        assert!(
+            retry_after_required_from_error(&error).unwrap() > Duration::from_secs(u64::MAX - 1)
+        );
+        assert!(retry_after_from_error(&error).unwrap() <= MAX_RETRY_AFTER);
+    }
+
+    #[test]
+    fn uncapped_http_date_uses_full_duration() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let retry_at = now + Duration::from_secs(3600);
+        let value = HeaderValue::from_str(&httpdate::fmt_http_date(retry_at)).unwrap();
+        assert_eq!(
+            retry_after_uncapped_delay_at(&headers(value), now),
+            Some(Duration::from_secs(3600))
+        );
     }
 
     #[test]
@@ -329,8 +383,14 @@ mod tests {
     fn elapsed_hint_does_not_add_another_wait() {
         let retry_after = RetryAfter {
             deadline: Instant::now() - Duration::from_secs(1),
+            received: Instant::now() - Duration::from_secs(2),
+            required: Duration::from_secs(1),
         };
         let error = error_with_retry_after("rate limited".to_string(), Some(retry_after));
         assert_eq!(retry_after_from_error(&error), Some(Duration::ZERO));
+        assert_eq!(
+            retry_after_required_from_error(&error),
+            Some(Duration::ZERO)
+        );
     }
 }

@@ -102,6 +102,7 @@ fn http_retry_decision(
         "HOME",
         "JCODE_HOME",
         "JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
+        "JCODE_ANTHROPIC_RETRY_WAIT_BUDGET_SECS",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "JCODE_ANTHROPIC_API_KEY_NAME",
@@ -256,6 +257,7 @@ fn http_retry_decision(
                     Err(error) => panic!("local HTTP accept failed: {error}"),
                 }
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                 .unwrap();
@@ -576,7 +578,8 @@ fn http_retry_decision(
                         }
                         Ok(StreamEvent::RetryRollback { .. }) => rolled_back = true,
                         Ok(StreamEvent::ConnectionPhase {
-                            phase: ConnectionPhase::Retrying { .. },
+                            phase: ConnectionPhase::Retrying { .. }
+                                | ConnectionPhase::RetryingWithMetadata { .. },
                         }) => {
                             return (RetryDecision::Retry, rolled_back);
                         }

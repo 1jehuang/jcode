@@ -15,6 +15,62 @@ fn restore_env_var(key: &str, previous: Option<OsString>) {
 }
 
 #[test]
+fn anthropic_retry_wait_budget_config_is_opt_in_and_validated() {
+    assert_eq!(
+        ProviderConfig::default().anthropic_retry_wait_budget_secs,
+        None
+    );
+    let config: Config =
+        toml::from_str("[provider]\nanthropic_retry_wait_budget_secs = 30\n").unwrap();
+    assert_eq!(config.provider.anthropic_retry_wait_budget_secs, Some(30));
+    let encoded = toml::to_string(&config).unwrap();
+    let decoded: Config = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded.provider.anthropic_retry_wait_budget_secs, Some(30));
+    for value in ["-1", "1.5", "\"30\"", "18446744073709551616"] {
+        assert!(
+            toml::from_str::<Config>(&format!(
+                "[provider]\nanthropic_retry_wait_budget_secs = {value}\n"
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn anthropic_retry_wait_budget_env_precedence_validation_and_fingerprint() {
+    let _lock = crate::storage::lock_test_env();
+    let key = "JCODE_ANTHROPIC_RETRY_WAIT_BUDGET_SECS";
+    struct Restore(&'static str, Option<OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            restore_env_var(self.0, self.1.take());
+        }
+    }
+    let _restore = Restore(key, std::env::var_os(key));
+    crate::env::remove_var(key);
+    let baseline = config_env_fingerprint();
+    for (value, expected) in [
+        ("30", 30),
+        (" 0 ", 0),
+        ("-1", 7),
+        ("1.5", 7),
+        ("invalid", 7),
+        ("18446744073709551616", 7),
+    ] {
+        crate::env::set_var(key, value);
+        let mut config = Config::default();
+        config.provider.anthropic_retry_wait_budget_secs = Some(7);
+        config.apply_env_overrides();
+        assert_eq!(
+            config.provider.anthropic_retry_wait_budget_secs,
+            Some(expected),
+            "{value}"
+        );
+        assert_ne!(config_env_fingerprint(), baseline);
+    }
+}
+
+#[test]
 fn hibernation_environment_override_accepts_seconds_and_zero_but_not_invalid_values() {
     let _lock = crate::storage::lock_test_env();
     let key = "JCODE_HIBERNATION_IDLE_SECS";
