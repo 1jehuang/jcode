@@ -538,7 +538,7 @@ fn onboarding_golden_telemetry_settings_page() {
     ] {
         assert!(text.contains(label), "{label}: {text}");
     }
-    assert!(text.contains("[ ]") && text.contains("[✓]"), "checkboxes: {text}");
+    assert!(text.contains("○") && text.contains("●"), "dots: {text}");
     assert!(text.contains("/telemetry"), "later-change hint: {text}");
     // The import summary is hidden while the sub-page is open.
     assert!(

@@ -197,9 +197,9 @@ fn telemetry_settings_lines(
             Line::from(vec![
                 Span::styled(pointer, label_style),
                 if checked {
-                    Span::styled("[✓] ", check_style)
+                    Span::styled("● ", check_style)
                 } else {
-                    Span::styled("[ ] ", dim)
+                    Span::styled("○ ", dim)
                 },
                 Span::styled(category.label(), label_style),
             ])
