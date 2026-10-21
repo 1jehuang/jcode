@@ -9,18 +9,25 @@ fn rename_saved_account_preserves_identity_default_and_other_accounts() {
     set_active_account_override(None);
     for label in ["work", "personal"] {
         let saved_label = upsert_account(AnthropicAccount {
-            label: label.into(), access: format!("access-{label}"),
-            refresh: format!("refresh-{label}"), expires: 1234,
-            email: Some(format!("{label}@example.com")), scopes: vec!["user:profile".into()],
+            label: label.into(),
+            access: format!("access-{label}"),
+            refresh: format!("refresh-{label}"),
+            expires: 1234,
+            email: Some(format!("{label}@example.com")),
+            scopes: vec!["user:profile".into()],
             subscription_type: Some("max".into()),
-        }).unwrap();
+        })
+        .unwrap();
         rename_account(&saved_label, label).unwrap();
     }
     set_active_account("work").unwrap();
     let pin = pin_for_label("work").unwrap();
     rename_account("work", "  Research team  ").unwrap();
     assert_eq!(default_account_label().as_deref(), Some("Research team"));
-    assert_eq!(get_active_account_override().as_deref(), Some("Research team"));
+    assert_eq!(
+        get_active_account_override().as_deref(),
+        Some("Research team")
+    );
     assert_eq!(resolve_pin(&pin).as_deref(), Some("Research team"));
     let accounts = list_accounts().unwrap();
     assert_eq!(accounts.len(), 2);

@@ -9,25 +9,40 @@ fn rename_saved_account_preserves_identity_default_and_other_accounts() {
     set_active_account_override(None);
     for label in ["work", "personal"] {
         let saved_label = upsert_account(OpenAiAccount {
-            label: label.into(), access_token: format!("access-{label}"),
-            refresh_token: format!("refresh-{label}"), id_token: None,
-            account_id: Some(format!("workspace-{label}")), expires_at: Some(1234),
+            label: label.into(),
+            access_token: format!("access-{label}"),
+            refresh_token: format!("refresh-{label}"),
+            id_token: None,
+            account_id: Some(format!("workspace-{label}")),
+            expires_at: Some(1234),
             email: Some(format!("{label}@example.com")),
-        }).unwrap();
+        })
+        .unwrap();
         rename_account(&saved_label, label).unwrap();
     }
     set_active_account("work").unwrap();
     let pin = pin_for_label("work").unwrap();
     rename_account("work", "  Research team  ").unwrap();
     assert_eq!(default_account_label().as_deref(), Some("Research team"));
-    assert_eq!(get_active_account_override().as_deref(), Some("Research team"));
+    assert_eq!(
+        get_active_account_override().as_deref(),
+        Some("Research team")
+    );
     assert_eq!(resolve_pin(&pin).as_deref(), Some("Research team"));
     let accounts = list_accounts().unwrap();
     assert_eq!(accounts.len(), 2);
     assert_eq!(accounts[0].label, "Research team");
     assert_eq!(accounts[0].access_token, "access-work");
     assert_eq!(accounts[1].label, "personal");
-    update_account_tokens("Research team", "renewed-access", "renewed-refresh", None, None, Some(5678)).unwrap();
+    update_account_tokens(
+        "Research team",
+        "renewed-access",
+        "renewed-refresh",
+        None,
+        None,
+        Some(5678),
+    )
+    .unwrap();
     assert_eq!(default_account_label().as_deref(), Some("Research team"));
     assert_eq!(resolve_pin(&pin).as_deref(), Some("Research team"));
     let renewed = list_accounts().unwrap();
@@ -40,7 +55,17 @@ fn rename_saved_account_preserves_identity_default_and_other_accounts() {
     assert!(rename_account("missing", "missing").is_err());
     assert_eq!(list_accounts().unwrap()[0].label, "Research team");
     remove_account("Research team").unwrap();
-    assert!(update_account_tokens("Research team", "late-access", "late-refresh", None, None, Some(9999)).is_err());
+    assert!(
+        update_account_tokens(
+            "Research team",
+            "late-access",
+            "late-refresh",
+            None,
+            None,
+            Some(9999)
+        )
+        .is_err()
+    );
     assert_eq!(list_accounts().unwrap().len(), 1);
     set_active_account_override(None);
 }
