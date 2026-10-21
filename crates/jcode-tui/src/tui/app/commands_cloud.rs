@@ -107,6 +107,7 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
             session_id: session_id.to_string(),
             request_id: next_request_id(),
             prepared: false,
+            progress: None,
         });
         app.push_display_message(DisplayMessage::system(
             "Cloud handoff queued for the next idle turn boundary. The current turn continues here. Use /cloud cancel to cancel.",
@@ -115,7 +116,7 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         // Only the next tick may prepare or transfer, after that state is visible.
         return true;
     }
-    start_cloud_command(app, command, trimmed, session_id)
+    start_cloud_command(app, command, trimmed, session_id, None)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +126,8 @@ pub(in crate::tui) struct PendingCloudHandoff {
     session_id: String,
     request_id: u64,
     prepared: bool,
+    /// Checklist started by host preparation, continued by the transfer.
+    progress: Option<(usize, Vec<String>)>,
 }
 
 fn next_request_id() -> u64 {
@@ -137,6 +140,7 @@ fn start_cloud_command(
     command: CloudCommand,
     trimmed: &str,
     session_id: &str,
+    carried: Option<(usize, Vec<String>)>,
 ) -> bool {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -220,11 +224,22 @@ fn start_cloud_command(
         let _ = stderr_reader.join();
         let _ = tx.send(CloudEvent::Done(output.map_err(|e| e.to_string())));
     });
-    let progress_message = app.display_messages.len();
-    let steps = vec!["Starting cloud command".to_string()];
-    app.push_display_message(
-        DisplayMessage::system(render_cloud_steps(&steps, 0, None)).with_title("Cloud transfer"),
-    );
+    let carried = carried.filter(|(index, _)| *index < app.display_messages.len());
+    let (progress_message, steps) = match carried {
+        Some((index, steps)) => {
+            app.replace_display_message_content(index, render_cloud_steps(&steps, 0, None));
+            (index, steps)
+        }
+        None => {
+            let index = app.display_messages.len();
+            let steps = vec!["Starting cloud command".to_string()];
+            app.push_display_message(
+                DisplayMessage::system(render_cloud_steps(&steps, 0, None))
+                    .with_title("Cloud transfer"),
+            );
+            (index, steps)
+        }
+    };
     app.cloud_job = Some(CloudJob {
         progress_message,
         steps,
@@ -335,6 +350,7 @@ impl App {
                 CloudCommand::Prepare { host: host.clone() },
                 "/cloud prepare",
                 "",
+                None,
             );
         }
         let had_pending = self.pending_cloud_handoff.is_some();
@@ -344,6 +360,7 @@ impl App {
                 pending.command,
                 &pending.trimmed,
                 &pending.session_id,
+                pending.progress.clone(),
             );
         }
         let Some(job) = self.cloud_job.as_mut() else {
@@ -354,7 +371,7 @@ impl App {
         while let Ok(event) = job.rx.try_recv() {
             match event {
                 CloudEvent::Progress(text) => {
-                    job.steps.push(text);
+                    push_cloud_step(&mut job.steps, text);
                     redraw = true;
                 }
                 CloudEvent::Stderr(text) => job.stderr = text,
@@ -396,9 +413,22 @@ impl App {
     }
 }
 
+/// Replace the startup placeholder and skip steps already shown, so host
+/// preparation and the transfer that follows read as one checklist.
+fn push_cloud_step(steps: &mut Vec<String>, text: String) {
+    const PLACEHOLDER: &str = "Starting cloud command";
+    if steps.iter().any(|step| step.eq_ignore_ascii_case(&text)) {
+        return;
+    }
+    if steps.len() == 1 && steps[0] == PLACEHOLDER {
+        steps.clear();
+    }
+    steps.push(text);
+}
+
 fn render_cloud_steps(steps: &[String], frame: usize, finished: Option<bool>) -> String {
     const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let mut lines = vec!["Cloud session transfer".to_string()];
+    let mut lines = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         let last = index + 1 == steps.len();
         let marker = if !last || finished == Some(true) {
@@ -459,15 +489,22 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
         if output.status.success()
             && let Some(host) = report["host"].as_str().filter(|host| !host.is_empty())
         {
+            let mut steps = job.steps.clone();
+            push_cloud_step(
+                &mut steps,
+                "cloud host ready, transfer starts at the next idle turn".to_string(),
+            );
+            app.replace_display_message_content(
+                job.progress_message,
+                render_cloud_steps(&steps, 0, Some(true)),
+            );
             if let Some(pending) = app.pending_cloud_handoff.as_mut() {
                 pending.command = CloudCommand::Move {
                     host: Some(host.to_string()),
                 };
                 pending.prepared = true;
+                pending.progress = Some((job.progress_message, steps));
             }
-            app.push_display_message(DisplayMessage::system(
-                "Cloud host ready. Transfer will start at the next idle turn boundary.",
-            ));
         } else {
             app.pending_cloud_handoff = None;
             app.push_display_message(DisplayMessage::error(format_cloud_failure(
@@ -561,6 +598,7 @@ mod tests {
             session_id: session_id.into(),
             request_id: next_request_id(),
             prepared: false,
+            progress: None,
         }
     }
 
@@ -986,8 +1024,8 @@ mod tests {
             .unwrap();
         assert!(app.poll_cloud_job());
         let content = &app.display_messages[index].content;
-        assert!(content.contains("✓ 2. Checking host"));
-        assert!(content.contains("3. Uploading session"));
+        assert!(content.contains("✓ 1. Checking host"));
+        assert!(content.contains("2. Uploading session"));
         let before = content.clone();
         app.cloud_job.as_mut().unwrap().started =
             std::time::Instant::now() - std::time::Duration::from_millis(250);
@@ -997,7 +1035,7 @@ mod tests {
             &before, after,
             "active spinner must advance without new events"
         );
-        assert!(after.contains("✓ 2. Checking host"));
+        assert!(after.contains("✓ 1. Checking host"));
         tx.send(CloudEvent::Stderr("Error: test failure".into()))
             .unwrap();
         tx.send(CloudEvent::Done(Ok(std::process::Output {
@@ -1011,7 +1049,7 @@ mod tests {
         assert!(
             app.display_messages[index]
                 .content
-                .contains("✗ 3. Uploading session")
+                .contains("✗ 2. Uploading session")
         );
         assert!(!app.poll_cloud_job());
     }
