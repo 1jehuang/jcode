@@ -29,6 +29,7 @@ const MAX_OUTPUT_LEN: usize = 30000;
 const DEFAULT_TIMEOUT_MS: u64 = 120000;
 const STDIN_POLL_INTERVAL_MS: u64 = 500;
 const STDIN_INITIAL_DELAY_MS: u64 = 300;
+const STDIN_RESPONSE_TIMEOUT_MS: u64 = 1500;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
 const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
@@ -1091,8 +1092,17 @@ impl BashTool {
                                         break;
                                     }
 
-                                    match response_rx.await {
-                                        Ok(input) => {
+                                    // Most clients cannot answer stdin prompts. Without a
+                                    // prompt reply, close stdin so commands that read it
+                                    // (e.g. `rg pattern` with no path) see EOF instead of
+                                    // hanging until the tool timeout.
+                                    match tokio::time::timeout(
+                                        Duration::from_millis(STDIN_RESPONSE_TIMEOUT_MS),
+                                        response_rx,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(input)) => {
                                             let line = if input.ends_with('\n') {
                                                 input
                                             } else {
@@ -1106,7 +1116,10 @@ impl BashTool {
                                                 break;
                                             }
                                         }
-                                        Err(_) => break,
+                                        Ok(Err(_)) | Err(_) => {
+                                            drop(stdin_pipe);
+                                            break;
+                                        }
                                     }
 
                                     tokio::time::sleep(Duration::from_millis(100)).await;

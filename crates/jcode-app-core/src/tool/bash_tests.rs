@@ -537,6 +537,29 @@ async fn test_stderr_captured_with_stdin() {
     );
 }
 
+#[tokio::test]
+async fn unanswered_stdin_request_closes_stdin_instead_of_hanging() {
+    // Client receives the request but never answers, like the TUI does.
+    let (tx, mut rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+    let held = tokio::spawn(async move {
+        let mut pending = Vec::new();
+        while let Some(req) = rx.recv().await {
+            pending.push(req);
+        }
+    });
+    let tool = BashTool::new();
+    let input = json!({"command": "cat; echo got_eof", "timeout": 20000});
+    let started = std::time::Instant::now();
+    let result = tool.execute(input, make_ctx(Some(tx))).await.unwrap();
+    assert!(result.output.contains("got_eof"), "{}", result.output);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
+    held.abort();
+}
+
 #[path = "bash_tests/progress_parsing.rs"]
 mod progress_parsing;
 
