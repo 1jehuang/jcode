@@ -13,6 +13,12 @@
 
 OAuth providers can rotate or revoke refresh tokens. Copying a login does not make two independently refreshing copies safe indefinitely. Avoid concurrently using the same account from local and cloud sessions. Store locks protect cooperating Jcode processes on one machine, not other machines, older Jcode binaries, or external credential editors.
 
+## Requests during a turn
+
+The TUI accepts `/cloud`, `/cloud <host>`, and `/local` while the agent is working. For `/cloud`, it prepares the destination host while the current turn continues, without snapshotting the live repository or copying the session or credentials. The actual handoff starts automatically once preparation succeeds and the current turn finishes, rather than requiring you to interrupt the agent and retry the command. `/local` waits for the same safe turn boundary. The queued request is local to that TUI instance. Closing the client before dispatch does not persist the request.
+
+This is a deferred handoff, not live process migration. An in-flight model stream or tool process is not moved between machines. Waiting for the turn boundary keeps tool results and the session snapshot consistent. Background processes are still local-only and are described in the migration notice.
+
 ## Managed-host release compatibility
 
 For the managed `jcode-cloud` host, a published client selects its own exact runtime release tag for any required upgrade. For example, client `v0.99.123` downloads `v0.99.123`, not a hardcoded old version or an unbounded `latest`. A newer installed stable release is kept when it already supports all three handoff commands. An older installation, or one lacking a required command, is replaced only after the selected release passes verification.

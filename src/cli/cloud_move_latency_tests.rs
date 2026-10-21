@@ -91,6 +91,8 @@ fn isolated_preflight_and_parallel_preparation_regressions() {
         "ssh-failure",
         "transport",
         "transport-failure",
+        "prepare",
+        "prepare-failure",
         "overlap",
         "join-error",
         "history",
@@ -259,7 +261,34 @@ fn isolated_latency_child() {
         );
         return;
     }
-    let result = target.preflight("latency-test.invalid");
+    let result = if mode.starts_with("prepare") {
+        let mut sess = session::Session::create_with_id("latency-session".into(), None, None);
+        sess.working_dir = Some(root.to_string_lossy().into_owned());
+        sess.save_prepared().unwrap();
+        storage::mark_streaming("latency-session");
+        assert!(storage::streaming_session_ids().contains(&"latency-session".to_string()));
+        let path = session::session_path("latency-session").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let result = prepare_host(&target);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "preparation must not change the transcript"
+        );
+        assert!(storage::read_session_lease("latency-session").is_none());
+        assert!(
+            !root.join("local-started").exists(),
+            "preparation must not snapshot the repository"
+        );
+        assert!(
+            !baseline_path("latency-session").unwrap().exists(),
+            "preparation must not transfer credentials"
+        );
+        storage::unmark_streaming("latency-session");
+        result.map(|host| assert_eq!(host, "latency-test.invalid"))
+    } else {
+        target.preflight("latency-test.invalid")
+    };
     if mode.ends_with("failure") {
         let error = format!("{:#}", result.unwrap_err());
         assert!(error.contains("complete cloud handoff protocol"), "{error}");

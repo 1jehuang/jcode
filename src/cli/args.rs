@@ -725,6 +725,15 @@ pub(crate) enum CloudCommand {
         action: CloudSessionsCommand,
     },
 
+    /// Prepare the destination without reading or moving a live session.
+    #[command(hide = true)]
+    Prepare {
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Move a live session (transcript, repo state, env notes) to a cloud host
     /// and keep working there. Your local files stay editable. Git reconciles
     /// both sides when the session comes back with `jcode cloud return`.

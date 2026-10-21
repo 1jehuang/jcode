@@ -1750,6 +1750,23 @@ fn snapshot_worktree_tree(root: &Path, scratch: &Path) -> Result<String> {
 // CLI glue
 // ---------------------------------------------------------------------------
 
+/// Prepare only the destination. In particular, do not read the transcript,
+/// snapshot the repository, copy credentials, or change session ownership.
+/// This may safely run while the source agent is still working.
+fn prepare_host(target: &Target) -> Result<String> {
+    let host = target.resolve_host()?;
+    step(
+        "prepare",
+        "preparing destination while the current turn continues",
+    );
+    target.preflight(&host)?;
+    step(
+        "ready",
+        "destination ready; waiting for a safe turn boundary",
+    );
+    Ok(host)
+}
+
 pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
     use super::args::CloudCommand as C;
     let target_of = |t: super::args::CloudMoveTarget| Target {
@@ -1762,6 +1779,15 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
     };
     match command {
         C::Sessions { .. } => unreachable!("handled by the cloud sessions dispatcher"),
+        C::Prepare { target, json } => {
+            let host = prepare_host(&target_of(target))?;
+            if json {
+                println!("{}", serde_json::json!({ "host": host }));
+            } else {
+                println!("Cloud host `{host}` is ready. No session was moved.");
+            }
+            Ok(())
+        }
         C::Move {
             session,
             target,
@@ -2297,6 +2323,8 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
                 command.env("JCODE_SSH_LOCAL_WORKING_DIR", &dir);
             }
             command.arg("--resume").arg(&session_id);
+            // Only an explicit handoff may preview the matching local transcript.
+            command.env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", &session_id);
             command.env(
                 "JCODE_CLOUD_CONTINUE_MESSAGE",
                 "[jcode cloud] This session just moved to the cloud host. Read the migration notice above, verify the environment you need is here, then continue the task exactly where you left off.",
