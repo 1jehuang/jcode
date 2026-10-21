@@ -167,3 +167,32 @@ fn cloud_restore_rejects_missing_bundle_prerequisite_before_checkout_changes() {
     );
     assert!(!dest.path().join("file.txt").exists());
 }
+
+#[test]
+fn returned_session_state_does_not_block_a_new_session() {
+    let (root, _stage, _repo) = repository();
+    let incoming = tempfile::tempdir().unwrap();
+    let repo = snapshot_repo(root.path(), "new-session", incoming.path())
+        .unwrap()
+        .unwrap();
+    let stage = incoming;
+    // The earlier session edited files on the cloud and was then returned:
+    // export recorded exactly this working state as its outgoing snapshot.
+    std::fs::write(root.path().join("file.txt"), "returned cloud work\n").unwrap();
+    std::fs::write(root.path().join("untracked.txt"), "also returned\n").unwrap();
+    let returned = tempfile::tempdir().unwrap();
+    snapshot_repo(root.path(), "earlier-session", returned.path())
+        .unwrap()
+        .unwrap();
+    restore_repo(
+        &repo,
+        &stage.path().join("repo.bundle"),
+        &stage.path().join("ignored.tar"),
+        "new-session",
+    )
+    .expect("state already returned by another session must not block a new move");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
+        "original\n"
+    );
+}

@@ -1750,7 +1750,7 @@ fn restore_repo(
         // placed or exported here. Anything else is work that never came back.
         let scratch = tempfile::tempdir()?;
         let current = snapshot_worktree_tree(&root, scratch.path())?;
-        let known: Vec<String> = ["base", "outgoing"]
+        let mut known: Vec<String> = ["base", "outgoing"]
             .iter()
             .filter_map(|name| {
                 git(
@@ -1763,6 +1763,30 @@ fn restore_repo(
                 .ok()
             })
             .collect();
+        // A different session that already returned exported this exact state
+        // back, so nothing here is unreturned work. Sessions still living on
+        // this host are excluded: their working files are live.
+        let exported = git(
+            &root,
+            &["for-each-ref", "--format=%(refname)", SNAPSHOT_REF_PREFIX],
+        )
+        .unwrap_or_default();
+        for refname in exported.lines() {
+            let Some(other) = refname
+                .strip_prefix("refs/jcode-cloud/")
+                .and_then(|rest| rest.strip_suffix("/outgoing"))
+            else {
+                continue;
+            };
+            if other == session_id
+                || storage::read_session_lease(other).is_some_and(|lease| lease.is_here())
+            {
+                continue;
+            }
+            if let Ok(tree) = git(&root, &["rev-parse", &format!("{refname}^{{tree}}")]) {
+                known.push(tree);
+            }
+        }
         let head_tree = git(&root, &["rev-parse", "HEAD^{tree}"]).ok();
         if !known.contains(&current) && head_tree.as_deref() != Some(current.as_str()) {
             let owners = git(
