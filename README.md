@@ -28,20 +28,11 @@
 
 <div align="center">
 
-## Screenshots
+  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10.mp4">
+    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10-30fps.webp" alt="jcode performance demonstration" width="900">
+  </a>
 
-[Browse the interactive gallery on jcode.sh](https://jcode.sh/#screenshots).
-
-<table>
-  <tr>
-    <td align="center"><a href="https://jcode.sh/screenshots/inline-image-read.webp"><img src="https://jcode.sh/screenshots/thumbs/inline-image-read.webp" alt="Jcode rendering an image inline after reading it" width="440" /></a><br>Inline images</td>
-    <td align="center"><a href="https://jcode.sh/screenshots/deep-swarm-investigation.webp"><img src="https://jcode.sh/screenshots/thumbs/deep-swarm-investigation.webp" alt="Jcode coordinating a deep swarm investigation" width="440" /></a><br>Deep swarm investigation</td>
-  </tr>
-  <tr>
-    <td align="center"><a href="https://jcode.sh/screenshots/latex-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/latex-rendering.webp" alt="Jcode rendering LaTeX mathematics inline" width="440" /></a><br>Inline LaTeX</td>
-    <td align="center"><a href="https://jcode.sh/screenshots/info-widgets.webp"><img src="https://jcode.sh/screenshots/thumbs/info-widgets.webp" alt="Jcode showing information widgets beside an active session" width="440" /></a><br>Info widgets</td>
-  </tr>
-</table>
+  <p><em>jcode performance demonstration</em></p>
 
 <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.mp4">
   <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.webp" alt="jcode YC launch video" width="800">
@@ -94,11 +85,20 @@ Full numbers on [jcode.sh](https://jcode.sh).
 
 <div align="center">
 
-  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10.mp4">
-    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10-30fps.webp" alt="jcode performance demonstration" width="900">
-  </a>
+## Screenshots
 
-  <p><em>jcode performance demonstration</em></p>
+[Browse the interactive gallery on jcode.sh](https://jcode.sh/#screenshots).
+
+<table>
+  <tr>
+    <td align="center"><a href="https://jcode.sh/screenshots/inline-image-read.webp"><img src="https://jcode.sh/screenshots/thumbs/inline-image-read.webp" alt="Jcode rendering an image inline after reading it" width="440" /></a><br>Inline images</td>
+    <td align="center"><a href="https://jcode.sh/screenshots/deep-swarm-investigation.webp"><img src="https://jcode.sh/screenshots/thumbs/deep-swarm-investigation.webp" alt="Jcode coordinating a deep swarm investigation" width="440" /></a><br>Deep swarm investigation</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://jcode.sh/screenshots/latex-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/latex-rendering.webp" alt="Jcode rendering LaTeX mathematics inline" width="440" /></a><br>Inline LaTeX</td>
+    <td align="center"><a href="https://jcode.sh/screenshots/info-widgets.webp"><img src="https://jcode.sh/screenshots/thumbs/info-widgets.webp" alt="Jcode showing information widgets beside an active session" width="440" /></a><br>Info widgets</td>
+  </tr>
+</table>
 
 </div>
 
