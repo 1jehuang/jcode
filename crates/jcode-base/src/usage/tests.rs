@@ -809,7 +809,23 @@ fn test_account_usage_probe_prefers_best_available_alternative() {
 
     let guidance = probe.switch_guidance().expect("expected switch guidance");
     assert!(guidance.contains("`backup`"));
-    assert!(guidance.contains("/account openai switch backup"));
+    assert!(guidance.contains("/accounts openai switch backup"));
+}
+
+#[test]
+fn saved_account_switch_guidance_uses_only_plural_command() {
+    for (provider, expected) in [
+        (
+            MultiAccountProviderKind::Anthropic,
+            "/accounts switch Research  Team",
+        ),
+        (
+            MultiAccountProviderKind::OpenAI,
+            "/accounts openai switch Research  Team",
+        ),
+    ] {
+        assert_eq!(provider.switch_command("Research  Team"), expected);
+    }
 }
 
 #[test]

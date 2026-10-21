@@ -311,7 +311,7 @@ impl AuthStatus {
         status
     }
 
-    /// Fast auth snapshot for interactive UI surfaces like `/account`.
+    /// Fast auth snapshot for interactive UI surfaces like `/accounts`.
     ///
     /// Prefers a recent full probe, and otherwise falls back to a cheap
     /// local-files/env-only probe that avoids subprocesses such as
