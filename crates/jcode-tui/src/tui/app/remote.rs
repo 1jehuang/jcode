@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 mod input_dispatch;
 mod key_handling;
+mod login_completion;
 mod queue_recovery;
 mod reconnect;
 mod server_event_handlers;
@@ -707,28 +708,12 @@ pub(super) async fn handle_bus_event(
             app.handle_usage_report_progress(progress);
             true
         }
+        Ok(BusEvent::SavedAccountLoginCompleted(completion)) => {
+            login_completion::handle_saved_account_login_completed_event(app, remote, completion)
+                .await
+        }
         Ok(BusEvent::LoginCompleted(login)) => {
-            if crate::tui::is_ssh_remote() {
-                app.set_status_notice("Local login does not change SSH server credentials");
-                return true;
-            }
-            let success = login.success && login.provider != "copilot_code";
-            let provider_hint = auth_provider_hint_for_login_provider(&login.provider);
-            let auth = auth_changed_event_for_login_provider(&login.provider);
-            let prefer_strongest = success && app.onboarding_should_prefer_strongest_model();
-            app.handle_login_completed(login);
-            if success
-                && let Err(error) = remote
-                    .notify_auth_changed_event(provider_hint, auth, prefer_strongest)
-                    .await
-            {
-                crate::logging::warn(&format!(
-                    "Failed to notify server about refreshed auth: {error}"
-                ));
-                app.finish_auth_catalog_refresh();
-                app.set_status_notice("Model setup will retry after reconnect");
-            }
-            true
+            login_completion::handle_login_completed_event(app, remote, login).await
         }
         Ok(BusEvent::OnboardingModelValidated(result)) => {
             app.handle_onboarding_model_validated(result)

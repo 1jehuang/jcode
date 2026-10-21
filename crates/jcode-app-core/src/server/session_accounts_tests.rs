@@ -278,6 +278,105 @@ async fn session_pin(server: &TestServer, session_id: &str) -> Option<String> {
 }
 
 #[tokio::test]
+async fn replacement_request_migrates_only_the_sender_and_rejects_stale_identities() {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+    let runtime = tempfile::TempDir::new().expect("runtime");
+    crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+    store_three_claude_accounts();
+    let server = test_server(Arc::new(PinRecordingProvider::new()));
+    let (_t1, s1) = (server.connect)();
+    let (_t2, s2) = (server.connect)();
+    let mut c1 = TestClient::new(s1);
+    let mut c2 = TestClient::new(s2);
+    let id1 = c1.subscribe(10, sandbox.root(), true).await;
+    let id2 = c2.subscribe(20, sandbox.root(), true).await;
+    for client in [&mut c1, &mut c2] {
+        client
+            .send(serde_json::json!({
+                "type": "set_session_account", "id": 30,
+                "provider": "claude", "label": "claude-fox"
+            }))
+            .await;
+        client
+            .until(|e| matches!(e, ServerEvent::Done { id: 30 }))
+            .await;
+    }
+    // Empty windows intentionally have no transcript on disk. Start a synthetic
+    // conversation before asserting that a later identity migration is durable.
+    c1.send(serde_json::json!({"type": "message", "id": 29, "content": "hello"}))
+        .await;
+    c1.until(|e| matches!(e, ServerEvent::Done { id: 29 }))
+        .await;
+    let old = AccountPin::new("claude-fox", Some("fox@example.com".into()));
+    let new = AccountPin::new("claude-fox", Some("replacement@example.invalid".into()));
+    crate::auth::claude::replace_account_if_unchanged(
+        "claude-fox",
+        old.identity.as_deref(),
+        claude_account("claude-fox", "replacement@example.invalid"),
+    )
+    .expect("save verified synthetic replacement");
+
+    // A stale replacement target and an unrelated old pin must both be no-ops.
+    for (request_id, old_identity, new_identity) in [
+        (31, "fox@example.com", "stale@example.invalid"),
+        (32, "another@example.invalid", "replacement@example.invalid"),
+    ] {
+        c1.send(serde_json::json!({
+            "type": "replace_session_account_identity", "id": request_id,
+            "provider": "claude", "label": "claude-fox",
+            "old_identity": old_identity, "new_identity": new_identity
+        }))
+        .await;
+        c1.until(|e| matches!(e, ServerEvent::Done { id } if *id == request_id))
+            .await;
+        let agent = server.sessions.read().await.get(&id1).cloned().unwrap();
+        assert_eq!(agent.lock().await.account_pins().get("claude"), Some(&old));
+    }
+
+    c1.send(serde_json::json!({
+        "type": "replace_session_account_identity", "id": 33,
+        "provider": "claude", "label": "claude-fox",
+        "old_identity": old.identity, "new_identity": new.identity
+    }))
+    .await;
+    c1.until(|e| matches!(e, ServerEvent::Done { id: 33 }))
+        .await;
+    for (session_id, expected) in [(&id1, &new), (&id2, &old)] {
+        let agent = server
+            .sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap();
+        let guard = agent.lock().await;
+        assert_eq!(guard.account_pins().get("claude"), Some(expected));
+        assert_eq!(
+            guard
+                .provider_handle()
+                .account_pin(AccountProviderKind::Claude)
+                .as_ref(),
+            Some(expected),
+        );
+    }
+    assert_eq!(
+        crate::session::Session::load(&id1)
+            .unwrap()
+            .account_pins
+            .get("claude"),
+        Some(&new),
+        "the migrated identity must survive a daemon restart",
+    );
+    assert_eq!(stored_claude_default().as_deref(), Some("claude-otter"));
+    assert_eq!(crate::auth::claude::list_accounts().unwrap().len(), 3);
+    assert!(c1.events.iter().any(|event| matches!(
+        event, ServerEvent::SessionAccountChanged { reason: Some(reason), .. }
+            if reason.contains("replaced login")
+    )));
+    crate::env::remove_var("JCODE_RUNTIME_DIR");
+}
+
+#[tokio::test]
 async fn set_session_account_does_not_change_other_sessions_or_default() {
     let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
     let runtime = tempfile::TempDir::new().expect("runtime");

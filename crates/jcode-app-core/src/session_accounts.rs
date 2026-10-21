@@ -379,6 +379,63 @@ pub fn apply_manual_pin(
     Ok(())
 }
 
+/// Conditionally migrate a replaced login's identity. The session pin and the
+/// failover home are each rewritten from `expected` to `replacement` only when
+/// they exactly equal `expected`; the provider instance is only touched when it
+/// agrees with the session (same value, or no value at all). Unlike
+/// [`apply_manual_pin`] this never clears the failover home, so the
+/// "return home after reset" target survives the identity swap, and it never
+/// overrides a pin or home the user or failover has since moved elsewhere.
+/// Returns whether anything changed; the caller saves the session.
+pub fn migrate_pin_identity(
+    provider: &dyn Provider,
+    session: &mut Session,
+    kind: AccountProviderKind,
+    expected: &AccountPin,
+    replacement: &AccountPin,
+) -> Result<bool> {
+    // Nothing to rewrite when the identity did not actually change.
+    if expected == replacement {
+        return Ok(false);
+    }
+    let key = kind.key();
+    let pin_matches = session.account_pins.get(key) == Some(expected) && {
+        let provider_pin = provider.account_pin(kind);
+        provider_pin.is_none() || provider_pin.as_ref() == Some(expected)
+    };
+    let home_matches = session.account_failover_home.get(key) == Some(expected) && {
+        let provider_home = provider.account_failover_home(kind);
+        provider_home.is_none() || provider_home.as_ref() == Some(expected)
+    };
+    if !pin_matches && !home_matches {
+        return Ok(false);
+    }
+    // Capture the provider's home first: some runtimes reset it when the pin
+    // changes, and a migration must leave it exactly as decided below.
+    let target_home = if home_matches {
+        Some(replacement.clone())
+    } else {
+        provider.account_failover_home(kind)
+    };
+    if pin_matches {
+        provider.set_account_pin(kind, Some(replacement.clone()))?;
+    }
+    if provider.account_failover_home(kind) != target_home {
+        provider.set_account_failover_home(kind, target_home);
+    }
+    if pin_matches {
+        session
+            .account_pins
+            .insert(key.to_string(), replacement.clone());
+    }
+    if home_matches {
+        session
+            .account_failover_home
+            .insert(key.to_string(), replacement.clone());
+    }
+    Ok(true)
+}
+
 /// Per-provider pin the provider reported after the last pin change or sync.
 /// Only a change from this baseline is a move the provider made itself.
 pub type ObservedPins = BTreeMap<AccountProviderKind, Option<AccountPin>>;
@@ -639,5 +696,177 @@ mod metadata_tests {
             "an authoritative live unpin must not be resurrected"
         );
         assert!(info.is_default);
+    }
+}
+
+#[cfg(test)]
+mod migrate_pin_identity_tests {
+    use super::*;
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::EventStream;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    const KIND: AccountProviderKind = AccountProviderKind::Claude;
+
+    /// Provider that keeps a real pin and failover home for KIND.
+    #[derive(Clone, Default)]
+    struct StatefulProvider {
+        pin: Arc<Mutex<Option<AccountPin>>>,
+        home: Arc<Mutex<Option<AccountPin>>>,
+    }
+
+    #[async_trait]
+    impl Provider for StatefulProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            anyhow::bail!("migration tests must not invoke inference")
+        }
+
+        fn name(&self) -> &str {
+            "stateful-pin"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+
+        fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+            (kind == KIND)
+                .then(|| self.pin.lock().unwrap().clone())
+                .flatten()
+        }
+
+        fn set_account_pin(
+            &self,
+            kind: AccountProviderKind,
+            pin: Option<AccountPin>,
+        ) -> Result<()> {
+            if kind == KIND {
+                *self.pin.lock().unwrap() = pin;
+                *self.home.lock().unwrap() = None;
+            }
+            Ok(())
+        }
+
+        fn account_failover_home(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+            (kind == KIND)
+                .then(|| self.home.lock().unwrap().clone())
+                .flatten()
+        }
+
+        fn set_account_failover_home(&self, kind: AccountProviderKind, home: Option<AccountPin>) {
+            if kind == KIND {
+                *self.home.lock().unwrap() = home;
+            }
+        }
+    }
+
+    fn pin(label: &str, identity: &str) -> AccountPin {
+        AccountPin::new(label, Some(identity.to_string()))
+    }
+
+    /// A session and provider that agree on the given pin and failover home.
+    fn setup(pin: Option<&AccountPin>, home: Option<&AccountPin>) -> (StatefulProvider, Session) {
+        let provider = StatefulProvider::default();
+        let mut session = Session::create(None, None);
+        if let Some(pin) = pin {
+            session
+                .account_pins
+                .insert(KIND.key().to_string(), pin.clone());
+            *provider.pin.lock().unwrap() = Some(pin.clone());
+        }
+        if let Some(home) = home {
+            session
+                .account_failover_home
+                .insert(KIND.key().to_string(), home.clone());
+            *provider.home.lock().unwrap() = Some(home.clone());
+        }
+        (provider, session)
+    }
+
+    /// Session and provider must both hold exactly this pin and home.
+    fn assert_state(
+        provider: &StatefulProvider,
+        session: &Session,
+        pin: Option<&AccountPin>,
+        home: Option<&AccountPin>,
+    ) {
+        assert_eq!(session.account_pins.get(KIND.key()), pin, "session pin");
+        assert_eq!(
+            session.account_failover_home.get(KIND.key()),
+            home,
+            "session failover home"
+        );
+        assert_eq!(provider.account_pin(KIND).as_ref(), pin, "provider pin");
+        assert_eq!(
+            provider.account_failover_home(KIND).as_ref(),
+            home,
+            "provider failover home"
+        );
+    }
+
+    #[test]
+    fn exact_old_pin_and_home_migrate_independently() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let old = pin("claude-fox", "old@example.invalid");
+        let new = pin("claude-fox", "new@example.invalid");
+        let elsewhere = pin("claude-panda", "panda@example.invalid");
+
+        // Only the pin matches: the home that moved elsewhere is left alone.
+        let (provider, mut session) = setup(Some(&old), Some(&elsewhere));
+        assert!(migrate_pin_identity(&provider, &mut session, KIND, &old, &new).unwrap());
+        assert_state(&provider, &session, Some(&new), Some(&elsewhere));
+
+        // Only the home matches: the pin that moved elsewhere is left alone.
+        let (provider, mut session) = setup(Some(&elsewhere), Some(&old));
+        assert!(migrate_pin_identity(&provider, &mut session, KIND, &old, &new).unwrap());
+        assert_state(&provider, &session, Some(&elsewhere), Some(&new));
+
+        // Both match: both move, and the home is kept rather than cleared.
+        let (provider, mut session) = setup(Some(&old), Some(&old));
+        assert!(migrate_pin_identity(&provider, &mut session, KIND, &old, &new).unwrap());
+        assert_state(&provider, &session, Some(&new), Some(&new));
+    }
+
+    #[test]
+    fn nonmatching_pin_and_home_are_untouched() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let old = pin("claude-fox", "old@example.invalid");
+        let new = pin("claude-fox", "new@example.invalid");
+        let stale = pin("claude-fox", "stale@example.invalid");
+        let other_label = pin("claude-panda", "panda@example.invalid");
+
+        // Same label with a different identity, and a different label.
+        let (provider, mut session) = setup(Some(&stale), Some(&other_label));
+        assert!(!migrate_pin_identity(&provider, &mut session, KIND, &old, &new).unwrap());
+        assert_state(&provider, &session, Some(&stale), Some(&other_label));
+
+        // No pin and no home at all.
+        let (provider, mut session) = setup(None, None);
+        assert!(!migrate_pin_identity(&provider, &mut session, KIND, &old, &new).unwrap());
+        assert_state(&provider, &session, None, None);
+
+        // Session pin matches but the live provider has moved elsewhere.
+        let (provider, mut session) = setup(Some(&old), None);
+        *provider.pin.lock().unwrap() = Some(other_label.clone());
+        assert!(!migrate_pin_identity(&provider, &mut session, KIND, &old, &new).unwrap());
+        assert_eq!(session.account_pins.get(KIND.key()), Some(&old));
+        assert_eq!(provider.account_pin(KIND), Some(other_label));
+    }
+
+    #[test]
+    fn equal_expected_and_replacement_is_a_noop() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let same = pin("claude-fox", "same@example.invalid");
+
+        let (provider, mut session) = setup(Some(&same), Some(&same));
+        assert!(!migrate_pin_identity(&provider, &mut session, KIND, &same, &same).unwrap());
+        assert_state(&provider, &session, Some(&same), Some(&same));
     }
 }

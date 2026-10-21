@@ -123,6 +123,7 @@ fn accounts_root_has_one_entry_per_login_and_no_action_clumps() {
     assert!(picker.filtered.iter().all(|index| !matches!(
         picker.items[*index].command,
         AccountPickerCommand::Login { .. }
+            | AccountPickerCommand::Replace { .. }
             | AccountPickerCommand::Rename { .. }
             | AccountPickerCommand::Remove { .. }
     )));
@@ -145,7 +146,7 @@ fn account_submenu_targets_exact_provider_and_restores_search_and_selection() {
         OverlayAction::Continue
     ));
     assert!(matches!(picker.view, AccountPickerView::Account(_)));
-    assert_eq!(picker.filtered.len(), 5);
+    assert_eq!(picker.filtered.len(), 6);
     for index in &picker.filtered {
         assert_eq!(
             account_target(&picker.items[*index].command),
@@ -161,7 +162,7 @@ fn account_submenu_targets_exact_provider_and_restores_search_and_selection() {
     assert_eq!(provider, AccountProviderKind::Anthropic);
     assert_eq!(label, "work one");
     key(&mut picker, KeyCode::Esc);
-    assert_eq!(picker.filtered.len(), 5);
+    assert_eq!(picker.filtered.len(), 6);
     key(&mut picker, KeyCode::Esc);
     assert_eq!(picker.view, AccountPickerView::Accounts);
     assert_eq!(picker.filter, "claude work one");

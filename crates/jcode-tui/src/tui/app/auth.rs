@@ -1,3 +1,6 @@
+#[path = "auth_login_exchange.rs"]
+mod login_exchange;
+
 #[path = "auth_subscription_status.rs"]
 mod subscription_status;
 
@@ -531,6 +534,9 @@ impl App {
     }
 
     fn begin_pending_login(&mut self, pending: PendingLogin) {
+        if let Some(previous) = self.pending_login.as_ref() {
+            previous.cancel_saved_attempt();
+        }
         if let Some((provider, method)) = pending.telemetry_context() {
             crate::telemetry::record_auth_started(&provider, &method);
         }
@@ -865,6 +871,17 @@ impl App {
     }
 
     pub(super) fn start_claude_login_for_account(&mut self, label: &str) {
+        self.start_claude_login_for_account_mode(label, false);
+    }
+
+    pub(super) fn start_claude_login_for_account_mode(&mut self, label: &str, replace: bool) {
+        if let Some(previous) = self.pending_login.take() {
+            if !previous.cancel_saved_attempt() {
+                self.pending_login = Some(previous);
+                self.set_status_notice("Login is already saving; waiting for completion");
+                return;
+            }
+        }
         let target_snapshot = match Self::saved_login_snapshot("claude", label) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -872,6 +889,12 @@ impl App {
                 return;
             }
         };
+        if replace && !target_snapshot.0 {
+            self.push_display_message(DisplayMessage::error(
+                "The saved login was removed. No credentials were replaced.".to_string(),
+            ));
+            return;
+        }
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         use sha2::{Digest, Sha256};
 
@@ -934,46 +957,33 @@ impl App {
             Some(callback_available),
         );
 
-        // Spawn the loopback waiter. On success it publishes LoginCompleted just
-        // like the manual paste path, so onboarding and account UI react
-        // identically.
+        let attempt = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let completion = self.saved_login_completion(
+            "claude",
+            label,
+            &verifier,
+            target_snapshot.1.clone(),
+            replace,
+            attempt.clone(),
+        );
+        // Both callback paths share one cancellation/commit guard.
         if let (Some(listener), true) = (callback_listener, callback_available) {
             let verifier_clone = verifier.clone();
             let label_clone = label.to_string();
             let redirect_clone = redirect_uri.clone();
             let callback_snapshot = target_snapshot.clone();
+            let mut completion = completion.clone();
             tokio::spawn(async move {
-                match Self::claude_login_callback(
+                let result = Self::claude_login_callback(
                     verifier_clone,
                     label_clone,
                     redirect_clone,
                     listener,
                     callback_snapshot,
+                    &mut completion,
                 )
-                .await
-                {
-                    Ok(msg) => {
-                        crate::logging::info(&format!("Claude login: {}", msg));
-                        Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                            provider: "claude".to_string(),
-                            success: true,
-                            message: msg,
-                        }));
-                    }
-                    Err(e) => {
-                        crate::logging::info(&format!(
-                            "Claude automatic callback did not complete: {}",
-                            e
-                        ));
-                        if e.contains("No credentials were replaced") {
-                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                                provider: "claude".to_string(),
-                                success: false,
-                                message: format!("Claude login failed: {e}"),
-                            }));
-                        }
-                    }
-                }
+                .await;
+                Self::publish_saved_login_completion(completion, result);
             });
         }
 
@@ -1014,6 +1024,8 @@ impl App {
             verifier,
             expected_existing: target_snapshot.0,
             expected_identity: target_snapshot.1,
+            replace,
+            attempt: attempt.clone(),
             label: label.to_string(),
             redirect_uri: if callback_available {
                 Some(redirect_uri)
@@ -1021,25 +1033,6 @@ impl App {
                 None
             },
         });
-    }
-
-    async fn claude_login_callback(
-        verifier: String,
-        label: String,
-        redirect_uri: String,
-        listener: tokio::net::TcpListener,
-        target_snapshot: (bool, Option<String>),
-    ) -> Result<String, String> {
-        // Claude uses the PKCE verifier as the OAuth `state` value.
-        let code = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            crate::auth::oauth::wait_for_callback_async_on_listener(listener, &verifier),
-        )
-        .await
-        .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())?
-        .map_err(|e| format!("Callback failed: {}", e))?;
-
-        Self::claude_token_exchange(verifier, code, &label, Some(redirect_uri), target_snapshot).await
     }
 
     pub(super) fn remove_account(&mut self, label: &str) {
@@ -1083,6 +1076,17 @@ impl App {
     }
 
     pub(super) fn start_openai_login_for_account(&mut self, label: &str) {
+        self.start_openai_login_for_account_mode(label, false);
+    }
+
+    pub(super) fn start_openai_login_for_account_mode(&mut self, label: &str, replace: bool) {
+        if let Some(previous) = self.pending_login.take() {
+            if !previous.cancel_saved_attempt() {
+                self.pending_login = Some(previous);
+                self.set_status_notice("Login is already saving; waiting for completion");
+                return;
+            }
+        }
         let target_snapshot = match Self::saved_login_snapshot("openai", label) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1090,6 +1094,12 @@ impl App {
                 return;
             }
         };
+        if replace && !target_snapshot.0 {
+            self.push_display_message(DisplayMessage::error(
+                "The saved login was removed. No credentials were replaced.".to_string(),
+            ));
+            return;
+        }
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         use sha2::{Digest, Sha256};
 
@@ -1135,44 +1145,33 @@ impl App {
         let callback_available = callback_listener.is_some();
         let browser_opened = Self::open_auth_browser(&auth_url);
         let label_owned = label.to_string();
+        let attempt = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let completion = self.saved_login_completion(
+            "openai",
+            label,
+            &verifier,
+            target_snapshot.1.clone(),
+            replace,
+            attempt.clone(),
+        );
 
         if let Some(listener) = callback_listener {
             let verifier_clone = verifier.clone();
             let state_clone = state.clone();
             let label_clone = label_owned.clone();
             let callback_snapshot = target_snapshot.clone();
+            let mut completion = completion.clone();
             tokio::spawn(async move {
-                match Self::openai_login_callback(
+                let result = Self::openai_login_callback(
                     verifier_clone,
                     state_clone,
                     Some(label_clone),
                     listener,
                     callback_snapshot,
+                    &mut completion,
                 )
-                .await
-                {
-                    Ok(msg) => {
-                        crate::logging::info(&format!("OpenAI login: {}", msg));
-                        Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                            provider: "openai".to_string(),
-                            success: true,
-                            message: msg,
-                        }));
-                    }
-                    Err(e) => {
-                        crate::logging::info(&format!(
-                            "OpenAI automatic callback did not complete: {}",
-                            e
-                        ));
-                        if e.contains("No credentials were replaced") {
-                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                                provider: "openai".to_string(),
-                                success: false,
-                                message: format!("OpenAI login failed: {e}"),
-                            }));
-                        }
-                    }
-                }
+                .await;
+                Self::publish_saved_login_completion(completion, result);
             });
         }
 
@@ -1222,76 +1221,12 @@ impl App {
             verifier,
             expected_existing: target_snapshot.0,
             expected_identity: target_snapshot.1,
+            replace,
+            attempt: attempt.clone(),
             label: label.to_string(),
             expected_state: state,
             redirect_uri,
         });
-    }
-
-    async fn openai_login_callback(
-        verifier: String,
-        expected_state: String,
-        label: Option<String>,
-        listener: tokio::net::TcpListener,
-        target_snapshot: (bool, Option<String>),
-    ) -> Result<String, String> {
-        let port = crate::auth::oauth::openai::DEFAULT_PORT;
-        let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
-        let code = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            crate::auth::oauth::wait_for_callback_async_on_listener(listener, &expected_state),
-        )
-        .await
-        .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())?
-        .map_err(|e| format!("Callback failed: {}", e))?;
-
-        Self::openai_token_exchange(verifier, code, label, None, &redirect_uri, target_snapshot).await
-    }
-
-    async fn openai_token_exchange(
-        verifier: String,
-        input: String,
-        label: Option<String>,
-        expected_state: Option<String>,
-        redirect_uri: &str,
-        target_snapshot: (bool, Option<String>),
-    ) -> Result<String, String> {
-        let oauth_tokens = if let Some(expected_state) = expected_state {
-            crate::auth::oauth::exchange_openai_callback_input(
-                &verifier,
-                input.trim(),
-                &expected_state,
-                redirect_uri,
-            )
-            .await
-            .map_err(|e| e.to_string())?
-        } else {
-            crate::auth::oauth::exchange_openai_code(&input, &verifier, redirect_uri)
-                .await
-                .map_err(|e| e.to_string())?
-        };
-
-        let label = label.unwrap_or_else(crate::auth::codex::primary_account_label);
-        Self::verify_saved_openai_login(&label, oauth_tokens.id_token.as_deref(), &target_snapshot)?;
-        if target_snapshot.0 {
-            crate::auth::codex::update_account_tokens(
-                &label,
-                &oauth_tokens.access_token,
-                &oauth_tokens.refresh_token,
-                oauth_tokens.id_token.clone(),
-                oauth_tokens.id_token.as_deref().and_then(crate::auth::codex::extract_account_id),
-                Some(oauth_tokens.expires_at),
-            )
-            .map_err(|e| format!("Failed to update the saved login: {e}"))?;
-        } else {
-            crate::auth::oauth::save_openai_tokens_for_account(&oauth_tokens, &label)
-                .map_err(|e| format!("Failed to save tokens: {}", e))?;
-        }
-
-        Ok(format!(
-            "Successfully logged in to OpenAI! (account: {})",
-            label
-        ))
     }
 
     fn start_gemini_login(&mut self) {
@@ -1954,45 +1889,15 @@ impl App {
         });
     }
 
-    async fn antigravity_token_exchange(
-        verifier: String,
-        input: String,
-        expected_state: Option<String>,
-        redirect_uri: String,
-    ) -> Result<String, String> {
-        let trimmed = input.trim();
-        let tokens =
-            if antigravity_input_requires_state_validation(trimmed, expected_state.as_deref()) {
-                crate::auth::antigravity::exchange_callback_input(
-                    &verifier,
-                    trimmed,
-                    expected_state.as_deref(),
-                    &redirect_uri,
-                )
-                .await
-            } else {
-                crate::auth::antigravity::exchange_callback_code(trimmed, &verifier, &redirect_uri)
-                    .await
-            }
-            .map_err(|e| e.to_string())?;
-
-        let mut msg = if let Some(email) = tokens.email.as_deref() {
-            format!(
-                "Successfully logged in to Antigravity! (account: {})",
-                email
-            )
-        } else {
-            "Successfully logged in to Antigravity!".to_string()
-        };
-        if let Some(project_id) = tokens.project_id.as_deref() {
-            msg.push_str(&format!(" (project: {})", project_id));
-        }
-        Ok(msg)
-    }
-
     pub(super) fn handle_login_input(&mut self, pending: PendingLogin, input: String) {
         let trimmed = input.trim();
         if trimmed == "/cancel" {
+            if !pending.cancel_saved_attempt() {
+                self.pending_login = Some(pending);
+                self.set_status_notice("Login is already saving; waiting for completion");
+                return;
+            }
+            self.pending_login = None;
             if let Some((provider, method)) = pending.telemetry_context() {
                 crate::telemetry::record_auth_cancelled(&provider, &method);
             }
@@ -2038,6 +1943,14 @@ impl App {
             _ => {}
         }
 
+        // Keep the attempt available for cancellation and completion correlation
+        // while a manually pasted callback is being exchanged.
+        if matches!(
+            &pending,
+            PendingLogin::ClaudeAccount { .. } | PendingLogin::OpenAiAccount { .. }
+        ) {
+            self.pending_login = Some(pending.clone());
+        }
         match pending {
             PendingLogin::Remote => {
                 // SSH input must never fall through to laptop credential handlers.
@@ -2059,36 +1972,35 @@ impl App {
                 label,
                 expected_existing,
                 expected_identity,
+                replace,
+                attempt,
                 redirect_uri,
             } => {
                 self.set_status_notice(format!("Login [{}]: exchanging...", label));
                 let input_owned = input.clone();
                 let label_clone = label.clone();
+                let mut completion = self.saved_login_completion(
+                    "claude",
+                    &label,
+                    &verifier,
+                    expected_identity.clone(),
+                    replace,
+                    attempt,
+                );
+                if Self::begin_saved_login_exchange(&mut completion).is_err() {
+                    return;
+                }
                 tokio::spawn(async move {
-                    match Self::claude_token_exchange(
+                    let result = Self::claude_token_exchange(
                         verifier,
                         input_owned,
                         &label_clone,
                         redirect_uri,
                         (expected_existing, expected_identity),
+                        &mut completion,
                     )
-                    .await
-                    {
-                        Ok(msg) => {
-                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                                provider: "claude".to_string(),
-                                success: true,
-                                message: msg,
-                            }));
-                        }
-                        Err(e) => {
-                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                                provider: "claude".to_string(),
-                                success: false,
-                                message: format!("Claude login [{}] failed: {}", label_clone, e),
-                            }));
-                        }
-                    }
+                    .await;
+                    Self::publish_saved_login_completion(completion, result);
                 });
                 self.push_display_message(DisplayMessage::system(format!(
                     "Exchanging authorization code for account {}...",
@@ -2100,38 +2012,37 @@ impl App {
                 label,
                 expected_existing,
                 expected_identity,
+                replace,
+                attempt,
                 expected_state,
                 redirect_uri,
             } => {
                 self.set_status_notice(format!("Login [{}]: exchanging...", label));
                 let input_owned = input.clone();
                 let label_clone = label.clone();
+                let mut completion = self.saved_login_completion(
+                    "openai",
+                    &label,
+                    &verifier,
+                    expected_identity.clone(),
+                    replace,
+                    attempt,
+                );
+                if Self::begin_saved_login_exchange(&mut completion).is_err() {
+                    return;
+                }
                 tokio::spawn(async move {
-                    match Self::openai_token_exchange(
+                    let result = Self::openai_token_exchange(
                         verifier,
                         input_owned,
                         Some(label_clone.clone()),
                         Some(expected_state),
                         &redirect_uri,
                         (expected_existing, expected_identity),
+                        &mut completion,
                     )
-                    .await
-                    {
-                        Ok(msg) => {
-                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                                provider: "openai".to_string(),
-                                success: true,
-                                message: msg,
-                            }));
-                        }
-                        Err(e) => {
-                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                                provider: "openai".to_string(),
-                                success: false,
-                                message: format!("OpenAI login [{}] failed: {}", label_clone, e),
-                            }));
-                        }
-                    }
+                    .await;
+                    Self::publish_saved_login_completion(completion, result);
                 });
                 self.push_display_message(DisplayMessage::system(format!(
                     "Exchanging OpenAI callback for account {}...",
@@ -3253,6 +3164,15 @@ impl App {
             }
             return;
         }
+        // Saved OAuth uses a correlated event. An unrelated provider's global
+        // completion must not dismiss or retarget this pending attempt.
+        if matches!(
+            self.pending_login.as_ref(),
+            Some(PendingLogin::ClaudeAccount { .. } | PendingLogin::OpenAiAccount { .. })
+        ) {
+            return;
+        }
+        self.finish_account_manager_login(&login.provider, login.success, &login.message);
         crate::auth::AuthStatus::invalidate_cache();
         crate::logging::event_info(
             "login_completed",
@@ -3338,65 +3258,6 @@ impl App {
         if self.pending_login.is_some() {
             self.pending_login = None;
         }
-    }
-
-    async fn claude_token_exchange(
-        verifier: String,
-        input: String,
-        label: &str,
-        redirect_uri: Option<String>,
-        target_snapshot: (bool, Option<String>),
-    ) -> Result<String, String> {
-        let fallback_redirect_uri =
-            redirect_uri.unwrap_or_else(|| crate::auth::oauth::claude::REDIRECT_URI.to_string());
-        let redirect_uri =
-            crate::auth::oauth::claude_redirect_uri_for_input(input.trim(), &fallback_redirect_uri);
-        let oauth_tokens =
-            crate::auth::oauth::exchange_claude_code(&verifier, input.trim(), &redirect_uri)
-                .await
-                .map_err(|e| e.to_string())?;
-
-        Self::verify_saved_claude_login(label, &oauth_tokens.access_token, &target_snapshot).await?;
-        if target_snapshot.0 {
-            crate::auth::claude::update_account_tokens(
-                label,
-                &oauth_tokens.access_token,
-                &oauth_tokens.refresh_token,
-                oauth_tokens.expires_at,
-            )
-            .map_err(|e| format!("Failed to update the saved login: {e}"))?;
-        } else {
-            crate::auth::oauth::save_claude_tokens_for_account(&oauth_tokens, label)
-                .map_err(|e| format!("Failed to save tokens: {}", e))?;
-        }
-
-        let profile_suffix = if target_snapshot.0 {
-            // Identity was verified before persistence. Do not perform another
-            // profile fetch that could erase its email if metadata is omitted.
-            String::new()
-        } else {
-            match crate::auth::oauth::update_claude_account_profile(
-                label,
-                &oauth_tokens.access_token,
-            )
-            .await
-            {
-                Ok(Some(email)) => format!(" (email: {})", mask_email(&email)),
-                Ok(None) => String::new(),
-                Err(e) => {
-                    crate::logging::warn(&format!(
-                        "Claude login [{}] profile fetch failed: {}",
-                        label, e
-                    ));
-                    String::new()
-                }
-            }
-        };
-
-        Ok(format!(
-            "Successfully logged in to Claude! (account: {}){}",
-            label, profile_suffix
-        ))
     }
 
     fn save_azure_config(

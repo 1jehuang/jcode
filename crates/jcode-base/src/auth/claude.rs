@@ -440,15 +440,19 @@ pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
         anyhow::bail!("New account name cannot be empty");
     }
     if matches!(new_label, "default" | "main")
-        || new_label.strip_prefix("claude-").is_some_and(|suffix| {
-            !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
-        })
+        || new_label
+            .strip_prefix("claude-")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
     {
         anyhow::bail!("That name is reserved for legacy account migration; choose a custom name");
     }
     let mut auth = load_auth_file()?;
     if new_label == old_label {
-        if auth.anthropic_accounts.iter().any(|account| account.label == old_label) {
+        if auth
+            .anthropic_accounts
+            .iter()
+            .any(|account| account.label == old_label)
+        {
             return Ok(());
         }
         anyhow::bail!("No account with label '{}' found", old_label);
@@ -506,6 +510,16 @@ pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: 
         anyhow::bail!("No account with label '{}' found for token update", label);
     }
 }
+
+#[path = "claude_replacement.rs"]
+mod replacement;
+pub use replacement::replace_account_if_unchanged;
+#[cfg(test)]
+use replacement::replace_saved_login;
+
+#[cfg(test)]
+#[path = "claude_replacement_tests.rs"]
+mod replacement_tests;
 
 /// Update profile metadata for a specific account.
 pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> {

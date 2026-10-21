@@ -10,6 +10,8 @@ pub(crate) enum PendingLogin {
         label: String,
         expected_existing: bool,
         expected_identity: Option<String>,
+        replace: bool,
+        attempt: std::sync::Arc<std::sync::atomic::AtomicU8>,
         redirect_uri: Option<String>,
     },
     /// Waiting for user to paste an OpenAI OAuth callback URL/query for a specific stored account.
@@ -18,6 +20,8 @@ pub(crate) enum PendingLogin {
         label: String,
         expected_existing: bool,
         expected_identity: Option<String>,
+        replace: bool,
+        attempt: std::sync::Arc<std::sync::atomic::AtomicU8>,
         expected_state: String,
         redirect_uri: String,
     },
@@ -71,6 +75,37 @@ pub(crate) enum PendingLogin {
 }
 
 impl PendingLogin {
+    pub(crate) fn cancel_saved_attempt(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        match self {
+            Self::ClaudeAccount { attempt, .. } | Self::OpenAiAccount { attempt, .. } => loop {
+                let state = attempt.load(Ordering::Acquire);
+                match state {
+                    0 | 4 => {
+                        if attempt
+                            .compare_exchange(state, 2, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            break true;
+                        }
+                    }
+                    1 => break false,
+                    _ => break true,
+                }
+            },
+            _ => true,
+        }
+    }
+
+    pub(crate) fn is_exchanging(&self) -> bool {
+        match self {
+            Self::ClaudeAccount { attempt, .. } | Self::OpenAiAccount { attempt, .. } => {
+                matches!(attempt.load(std::sync::atomic::Ordering::Acquire), 1 | 4)
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn telemetry_context(&self) -> Option<(String, String)> {
         match self {
             Self::Remote => None,
@@ -146,6 +181,10 @@ pub(crate) enum AccountCommand {
     Add {
         provider_id: String,
         label: Option<String>,
+    },
+    Replace {
+        provider_id: String,
+        label: String,
     },
     Reauthenticate {
         provider_id: String,

@@ -3,6 +3,18 @@ use super::*;
 impl AccountPicker {
     /// Keep the full command catalog, but expose saved accounts before their actions.
     pub fn with_account_menus(mut self) -> Self {
+        self.manager_scope.get_or_insert(None);
+        let replacements: Vec<_> = self.items.iter().filter_map(|item| {
+            let AccountPickerCommand::Switch { provider, label } = &item.command else {
+                return None;
+            };
+            Some(AccountPickerItem::action(
+                &item.provider_id, &item.provider_label, "Replace login",
+                "Replace this saved login after OAuth succeeds; a different identity is allowed",
+                AccountPickerCommand::Replace { provider: provider.clone(), label: label.clone() },
+            ))
+        }).collect();
+        self.items.extend(replacements);
         let defaults: Vec<_> = self
             .items
             .iter()
@@ -163,6 +175,7 @@ fn account_target(command: &AccountPickerCommand) -> Option<(&AccountProviderKin
     match command {
         AccountPickerCommand::Switch { provider, label }
         | AccountPickerCommand::SetDefault { provider, label }
+        | AccountPickerCommand::Replace { provider, label }
         | AccountPickerCommand::Login { provider, label }
         | AccountPickerCommand::Rename { provider, label }
         | AccountPickerCommand::Remove { provider, label } => Some((provider, label)),

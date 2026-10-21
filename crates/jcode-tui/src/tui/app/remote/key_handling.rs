@@ -1,11 +1,11 @@
+mod accounts;
 #[path = "key_handling/rewind.rs"]
 mod rewind;
-use rewind::*;
-
 use super::*;
 use crate::tui::app as app_mod;
 use crate::tui::app::PendingRemoteRewindNotice;
 use crate::tui::core;
+use rewind::*;
 
 pub(in crate::tui::app) fn handle_remote_char_input(app: &mut App, c: char) {
     input::handle_text_input(app, &c.to_string());
@@ -138,42 +138,6 @@ pub(super) async fn apply_remote_effort_direction(
         }
     }
     Ok(())
-}
-
-impl App {
-    pub(super) async fn handle_account_picker_command_remote(
-        &mut self,
-        remote: &mut RemoteConnection,
-        command: crate::tui::account_picker::AccountPickerCommand,
-    ) -> Result<()> {
-        match command {
-            crate::tui::account_picker::AccountPickerCommand::OpenAccountCenter {
-                provider_filter,
-            } => self.open_account_center(provider_filter.as_deref()),
-            crate::tui::account_picker::AccountPickerCommand::OpenAddReplaceFlow {
-                provider_filter,
-            } => self.open_account_add_replace_flow(provider_filter.as_deref()),
-            crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) => {
-                crate::tui::app::auth::handle_account_command_remote(self, &input, remote).await?;
-            }
-            crate::tui::account_picker::AccountPickerCommand::PromptValue {
-                prompt,
-                command_prefix,
-                empty_value,
-                status_notice,
-            } => self.prompt_account_value(prompt, command_prefix, empty_value, status_notice),
-            crate::tui::account_picker::AccountPickerCommand::PromptNew { provider } => {
-                self.prompt_new_account_label(provider)
-            }
-            other => {
-                if let Some(command) = crate::tui::app::auth::account_command_from_picker(&other) {
-                    crate::tui::app::auth::execute_account_command_remote(self, command, remote)
-                        .await?;
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 pub(in crate::tui::app) async fn handle_remote_key(

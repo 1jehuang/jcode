@@ -234,6 +234,15 @@ pub(super) fn handle_bus_event(
             app.handle_usage_report_progress(progress);
             true
         }
+        Ok(BusEvent::SavedAccountLoginCompleted(completion)) => {
+            let success = completion.login.success;
+            let provider = completion.login.provider.clone();
+            let handled = app.handle_saved_account_login_completed(completion);
+            if handled && success {
+                app.release_rate_limit_hold_after_credentials_changed(Some(&provider));
+            }
+            handled
+        }
         Ok(BusEvent::LoginCompleted(login)) => {
             let success = login.success;
             let provider = login.provider.clone();

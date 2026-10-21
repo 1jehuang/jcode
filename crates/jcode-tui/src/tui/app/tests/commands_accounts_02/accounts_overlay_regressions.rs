@@ -44,6 +44,7 @@ fn assert_accounts_overlay_actions(app: &mut App, providers: &[&str]) {
                 "Use",
                 "Rename account",
                 "Re-login account",
+                "Replace login",
                 "Remove account",
                 "Make default",
             ] {
@@ -59,7 +60,7 @@ fn assert_accounts_overlay_actions(app: &mut App, providers: &[&str]) {
                     ));
                     let profile = picker.debug_memory_profile();
                     assert_eq!(profile["view"], "account");
-                    assert_eq!(profile["filtered_count"], 5);
+                    assert_eq!(profile["filtered_count"], 6);
                     if title == "Use" {
                         picker.select_account(provider_id, Some(label));
                     } else {
@@ -86,7 +87,7 @@ fn assert_accounts_overlay_actions(app: &mut App, providers: &[&str]) {
                 let mut action = picker
                     .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
                     .unwrap();
-                if title == "Remove account" {
+                if matches!(title, "Remove account" | "Replace login") {
                     assert!(matches!(action, OverlayAction::Continue));
                     action = picker
                         .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
@@ -99,6 +100,7 @@ fn assert_accounts_overlay_actions(app: &mut App, providers: &[&str]) {
                     ("Use", AccountPickerCommand::Switch { provider, label })
                     | ("Rename account", AccountPickerCommand::Rename { provider, label })
                     | ("Re-login account", AccountPickerCommand::Login { provider, label })
+                    | ("Replace login", AccountPickerCommand::Replace { provider, label })
                     | ("Remove account", AccountPickerCommand::Remove { provider, label })
                     | ("Make default", AccountPickerCommand::SetDefault { provider, label }) => {
                         (provider, label)

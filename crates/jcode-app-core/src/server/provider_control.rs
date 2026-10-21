@@ -1,10 +1,13 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
+#[path = "provider_control_replacement.rs"]
+mod replacement;
 use crate::agent::Agent;
 use crate::auth::lifecycle::{AuthActivationRequest, AuthActivationResult};
 use crate::protocol::{AuthChanged, NotificationType, ServerEvent};
 use crate::provider::{ModelCatalogRefreshSummary, ModelRoute, Provider, RouteSelection};
 use jcode_provider_core::ModelCatalogSnapshot;
+pub(super) use replacement::handle_replace_session_account_identity;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -14,13 +17,11 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 static AUTH_REFRESH_GENERATIONS: OnceLock<StdMutex<HashMap<String, u64>>> = OnceLock::new();
 static NEXT_AUTH_REFRESH_GENERATION: AtomicU64 = AtomicU64::new(1);
-
 struct AuthRefreshTargets {
     providers: Vec<Arc<dyn Provider>>,
     session_providers: Vec<Arc<dyn Provider>>,
     deferred_agents: Vec<Arc<Mutex<Agent>>>,
 }
-
 fn begin_auth_refresh(session_id: &str) -> u64 {
     let generation = NEXT_AUTH_REFRESH_GENERATION.fetch_add(1, Ordering::Relaxed);
     let mut generations = AUTH_REFRESH_GENERATIONS
@@ -30,7 +31,6 @@ fn begin_auth_refresh(session_id: &str) -> u64 {
     generations.insert(session_id.to_string(), generation);
     generation
 }
-
 fn auth_refresh_is_current(session_id: &str, generation: u64) -> bool {
     let generations = AUTH_REFRESH_GENERATIONS
         .get_or_init(|| StdMutex::new(HashMap::new()))
