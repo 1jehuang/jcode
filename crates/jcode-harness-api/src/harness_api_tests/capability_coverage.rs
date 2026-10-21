@@ -71,6 +71,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),
     ("SetSessionSaved", Covered),
+    ("PersistSession", ClientInternal),
     ("SetSubagentModel", ClientInternal),
     ("SetTransport", ClientInternal),
     ("SoftInterrupt", Covered),

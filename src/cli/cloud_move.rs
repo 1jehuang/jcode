@@ -317,6 +317,41 @@ pub(crate) struct RepoManifest {
 // Entry points
 // ---------------------------------------------------------------------------
 
+/// `ssh` exits 255 for connection-level failures (DNS, refused, reset, timeout
+/// while the machine wakes). Those are safe to retry for idempotent calls.
+const SSH_CONNECTION_FAILURE: i32 = 255;
+const SSH_ATTEMPTS: u32 = 3;
+
+fn ssh_connection_failed(status: &std::process::ExitStatus) -> bool {
+    status.code() == Some(SSH_CONNECTION_FAILURE)
+}
+
+/// Run an idempotent remote command, retrying connection-level SSH failures
+/// with a short backoff. Remote command failures are returned immediately.
+fn output_with_ssh_retry(
+    mut build: impl FnMut() -> Result<Command>,
+    host: &str,
+) -> Result<std::process::Output> {
+    let mut attempt = 1;
+    loop {
+        let output = build()?
+            .output()
+            .with_context(|| format!("failed to reach cloud host `{host}`"))?;
+        if output.status.success()
+            || !ssh_connection_failed(&output.status)
+            || attempt >= SSH_ATTEMPTS
+        {
+            return Ok(output);
+        }
+        step(
+            "prepare",
+            &format!("connection to `{host}` dropped, retrying ({attempt}/{SSH_ATTEMPTS})"),
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
+        attempt += 1;
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Target {
     pub host: Option<String>,
@@ -368,37 +403,45 @@ impl Target {
                 let binary = shell_quote(&self.remote_binary());
                 let mut script =
                     String::from("PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH\n");
+                // Distinguish a missing or broken binary (exit 127/126, or a
+                // dangling wrapper target) from an old one lacking a command.
+                script.push_str(&format!(
+                    "version=$({binary} --no-update --no-selfdev --version 2>&1) || {{ printf 'cloud jcode is not runnable: %s\\n' \"$version\" >&2; exit 3; }}\n"
+                ));
                 for command in REQUIRED_REMOTE_COMMANDS {
                     script.push_str(&format!(
-                    "{binary} --no-update --no-selfdev cloud {command} --help || {{ printf '%s\\n' 'cloud protocol probe failed: {command}' >&2; exit 1; }}\n"
+                    "out=$({binary} --no-update --no-selfdev cloud {command} --help 2>&1 >/dev/null) || {{ printf '%s\\ncloud protocol probe failed: {command} (remote %s)\\n' \"$out\" \"$version\" >&2; exit 4; }}\n"
                 ));
                 }
-                let probe = (|| -> Result<()> {
-                    let output = Self::ssh_command(host)?
-                        .arg(&script)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::piped())
-                        .output()
-                        .with_context(|| format!("failed to reach cloud host `{host}`"))?;
-                    if !output.status.success() {
-                        bail!(
-                            "remote cloud protocol probes failed ({}): {}",
-                            output.status,
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        );
-                    }
-                    Ok(())
-                })();
-                if let Err(error) = probe {
-                    if format!("{error:#}").contains("unrecognized") {
-                        bail!(
-                            "jcode on `{host}` does not support the complete cloud handoff protocol. Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build): {error:#}"
-                        );
-                    }
-                    return Err(error.context(format!("could not run jcode on `{host}`")));
-                }
-                return Ok(());
+                let output = output_with_ssh_retry(
+                    || {
+                        let mut command = Self::ssh_command(host)?;
+                        command
+                            .arg(&script)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::piped());
+                        Ok(command)
+                    },
+                    host,
+                )?;
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return match output.status.code() {
+                    Some(0) => Ok(()),
+                    Some(3) => bail!(
+                        "jcode on `{host}` could not start. Reinstall it there (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY): {stderr}"
+                    ),
+                    Some(4) => bail!(
+                        "jcode on `{host}` is too old for cloud handoff. Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build): {stderr}"
+                    ),
+                    Some(SSH_CONNECTION_FAILURE) => bail!(
+                        "could not connect to cloud host `{host}` after {SSH_ATTEMPTS} attempts: {stderr}"
+                    ),
+                    _ => bail!(
+                        "could not run jcode on `{host}` ({}): {stderr}",
+                        output.status
+                    ),
+                };
             }
             for command in REQUIRED_REMOTE_COMMANDS {
                 if let Err(error) = self.run_remote(host, &["cloud", command, "--help"], None) {
@@ -429,23 +472,42 @@ impl Target {
 
     /// Run a raw shell script on the target (managed-machine preparation).
     fn run_shell(&self, host: &str, script: &str) -> Result<()> {
-        let mut command = Self::ssh_command(host)?;
-        command.arg("bash -s");
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn()?;
-        child
-            .stdin
-            .take()
-            .context("ssh stdin")?
-            .write_all(script.as_bytes())?;
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+        let mut attempt = 1;
+        loop {
+            let mut command = Self::ssh_command(host)?;
+            command.arg("bash -s");
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn()?;
+            // A dropped connection can close stdin early. The exit status
+            // below is authoritative, so ignore the write error here.
+            let _ = child
+                .stdin
+                .take()
+                .context("ssh stdin")?
+                .write_all(script.as_bytes());
+            let output = child.wait_with_output()?;
+            if output.status.success() {
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            // The prepare script is idempotent and serialized by its own lock.
+            if ssh_connection_failed(&output.status) && attempt < SSH_ATTEMPTS {
+                step(
+                    "prepare",
+                    &format!("connection to `{host}` dropped, retrying ({attempt}/{SSH_ATTEMPTS})"),
+                );
+                std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
+                attempt += 1;
+                continue;
+            }
+            if stderr.is_empty() {
+                bail!("remote script failed ({})", output.status);
+            }
+            bail!("{stderr}");
         }
-        Ok(())
     }
 
     fn remote_command(&self, host: &str, args: &[&str]) -> Result<Command> {
@@ -488,11 +550,14 @@ impl Target {
             .output()
             .with_context(|| format!("failed to reach cloud host `{host}`"))?;
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if ssh_connection_failed(&output.status) {
+                bail!("lost the connection to cloud host `{host}`: {stderr}");
+            }
             bail!(
-                "remote `jcode {}` on `{host}` failed ({}):\n{}",
-                args.first().copied().unwrap_or_default(),
+                "remote `jcode {}` on `{host}` failed ({}):\n{stderr}",
+                args.iter().take(2).copied().collect::<Vec<_>>().join(" "),
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
             );
         }
         Ok(output.stdout)

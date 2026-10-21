@@ -1680,27 +1680,32 @@ fn render_message_into(
                 acc.copy_targets
                     .push(offset_copy_target(target, error_start_line));
             }
-            let raw_line = acc.raw_plain_lines.len();
-            acc.raw_plain_lines.push(msg.content.clone());
-            let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
-            let prefix_width =
-                unicode_width::UnicodeWidthStr::width(if centered { "✗ " } else { "  ✗ " });
-            acc.lines.push(
-                Line::from(vec![
-                    Span::styled(
-                        if centered { "✗ " } else { "  ✗ " },
-                        Style::default().fg(Color::Red),
-                    ),
-                    Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
-                ])
-                .alignment(align),
-            );
-            acc.line_raw_overrides.push(Some(WrappedLineMap {
-                raw_line,
-                start_col: 0,
-                end_col: raw_width,
-            }));
-            acc.line_copy_offsets.push(prefix_width);
+            // Multi-line diagnostics (cloud failures, error chains) keep one
+            // logical line per row instead of collapsing into a single row.
+            let prefix = if centered { "✗ " } else { "  ✗ " };
+            let continuation = if centered { "  " } else { "    " };
+            let prefix_width = unicode_width::UnicodeWidthStr::width(prefix);
+            for (index, text) in msg.content.lines().enumerate() {
+                let raw_line = acc.raw_plain_lines.len();
+                acc.raw_plain_lines.push(text.to_string());
+                let raw_width = unicode_width::UnicodeWidthStr::width(text);
+                acc.lines.push(
+                    Line::from(vec![
+                        Span::styled(
+                            if index == 0 { prefix } else { continuation },
+                            Style::default().fg(Color::Red),
+                        ),
+                        Span::styled(text.to_string(), Style::default().fg(Color::Red)),
+                    ])
+                    .alignment(align),
+                );
+                acc.line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: raw_width,
+                }));
+                acc.line_copy_offsets.push(prefix_width);
+            }
         }
         _ => {}
     }

@@ -114,6 +114,7 @@ fn isolated_preflight_and_parallel_preparation_regressions() {
         executable(
             &root.path().join("remote ' binary"),
             r#"#!/bin/sh
+if [ "$3" = --version ]; then echo 'jcode v0.0.0-test'; exit 0; fi
 printf '%s\n' "$*" >> "$JCODE_CLOUD_LATENCY_TEST_ROOT/probes"
 case "$JCODE_CLOUD_LATENCY_TEST_MODE" in
   *failure)
@@ -291,7 +292,11 @@ fn isolated_latency_child() {
     };
     if mode.ends_with("failure") {
         let error = format!("{:#}", result.unwrap_err());
-        assert!(error.contains("complete cloud handoff protocol"), "{error}");
+        assert!(
+            error.contains("complete cloud handoff protocol")
+                || error.contains("too old for cloud handoff"),
+            "{error}"
+        );
         assert!(error.contains("credentials"), "{error}");
     } else {
         result.unwrap();

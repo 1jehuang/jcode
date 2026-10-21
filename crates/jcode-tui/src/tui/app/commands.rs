@@ -1692,6 +1692,16 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if super::commands_cloud::parse_cloud_command(trimmed).is_some() {
         let session_id = active_session_id(app);
+        if matches!(
+            super::commands_cloud::parse_cloud_command(trimmed),
+            Some(super::commands_cloud::CloudCommand::Move { .. })
+        ) && let Err(error) = app.session.save_prepared()
+        {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Could not save this session before moving it: {error}. Nothing moved."
+            )));
+            return true;
+        }
         super::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
         return true;
     }

@@ -435,6 +435,12 @@ pub enum Request {
         label: Option<String>,
     },
 
+    /// Write the active session to disk now, even before its first message.
+    /// Out-of-process tools such as `jcode cloud move` read the session file,
+    /// so a fresh session must exist on disk with its model and account.
+    #[serde(rename = "persist_session")]
+    PersistSession { id: u64 },
+
     /// Split the current session — clone conversation into a new session
     #[serde(rename = "split")]
     Split { id: u64 },

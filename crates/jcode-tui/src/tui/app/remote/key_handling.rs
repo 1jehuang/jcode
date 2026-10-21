@@ -1102,6 +1102,20 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                         ));
                 return Ok(());
             }
+            if matches!(
+                app_mod::commands_cloud::parse_cloud_command(trimmed),
+                Some(app_mod::commands_cloud::CloudCommand::Move { .. })
+            ) {
+                // A fresh session is not on disk until its first message, and
+                // `jcode cloud move` loads it from disk. The daemon holds the
+                // model, effort and account, so ask it to write the file now.
+                if let Err(error) = remote.persist_session().await {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Could not save this session before moving it: {error}. Nothing moved."
+                    )));
+                    return Ok(());
+                }
+            }
             app_mod::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
             return Ok(());
         }

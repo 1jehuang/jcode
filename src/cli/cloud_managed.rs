@@ -470,11 +470,24 @@ backend={backend}
 root="$HOME/.local/share/jcode/cloud-releases"
 mkdir -p "$HOME/.local/bin" "$root"
 # Serialize cooperating preflights without terminating any running process.
+# Wait briefly for a concurrent prepare instead of failing the move, and
+# reclaim a lock left behind by a prepare that was killed mid-run.
 lock="$root/.prepare-lock"
-if ! mkdir "$lock" 2>/dev/null; then
-  echo '[cloud prepare] another upgrade is running; retry after it finishes' >&2
-  exit 1
-fi
+waited=0
+until mkdir "$lock" 2>/dev/null; do
+  if [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+    echo '[cloud prepare] reclaiming a stale upgrade lock' >&2
+    rmdir "$lock" 2>/dev/null || rm -rf "$lock"
+    continue
+  fi
+  if [ "$waited" -ge 120 ]; then
+    echo '[cloud prepare] another upgrade is still running after 2 minutes; retry after it finishes' >&2
+    exit 1
+  fi
+  [ "$waited" -eq 0 ] && echo '[cloud prepare] waiting for another upgrade to finish' >&2
+  sleep 2
+  waited=$((waited + 2))
+done
 stage=
 backup=
 next=

@@ -97,19 +97,6 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         )));
         return true;
     }
-    if matches!(command, CloudCommand::Move { .. })
-        && !app
-            .display_messages
-            .iter()
-            .any(|m| m.role == "user" || m.role == "assistant")
-    {
-        // Sessions are persisted only after the first message, so the move
-        // subprocess would fail with "No session found matching ...".
-        app.push_display_message(DisplayMessage::error(
-            "Nothing to move yet: this session has no messages, so it has not been saved. Send a message first, then retry /cloud.".to_string(),
-        ));
-        return true;
-    }
     if !matches!(command, CloudCommand::Where) {
         if !check_cloud_handoff_input(app, trimmed) {
             return true;
@@ -450,17 +437,8 @@ fn format_cloud_failure(command: &str, stderr: &str) -> String {
         message.push_str("\n\nNo error details were returned by the cloud command.");
         return message;
     }
-    // Nested fences in diagnostics must not break out of the literal block.
-    let fence = "`".repeat(
-        details
-            .split(|c| c != '`')
-            .map(str::len)
-            .max()
-            .unwrap_or(0)
-            .max(2)
-            + 1,
-    );
-    message.push_str(&format!("\n\n{fence}text\n{details}\n{fence}"));
+    // Error rows render verbatim, one per line, so no Markdown fence is needed.
+    message.push_str(&format!("\n\n{}", details.replace("\r\n", "\n")));
     if (details.contains("Saved account '") && details.contains("' no longer exists."))
         || ((details.contains("No account with label '")
             || details.contains("No OpenAI account with label '"))
@@ -492,9 +470,9 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
             ));
         } else {
             app.pending_cloud_handoff = None;
-            app.push_display_message(DisplayMessage::error(format!(
-                "Cloud host preparation failed. Pending handoff cleared; retry /cloud when ready.\n{}",
-                job.stderr.trim()
+            app.push_display_message(DisplayMessage::error(format_cloud_failure(
+                "Cloud host preparation",
+                &job.stderr,
             )));
         }
         return;
@@ -912,7 +890,6 @@ mod tests {
         for cancel in [false, true] {
             let mut app = crate::tui::app::tests::create_test_app();
             app.is_processing = true;
-            app.push_display_message(DisplayMessage::user("hi".to_string()));
             app.pending_cloud_handoff = Some(pending(
                 CloudCommand::Move {
                     host: Some("old".into()),
@@ -1092,16 +1069,10 @@ mod tests {
             "/cloud",
             "Error: remote failed\n\nCaused by:\n    No OpenAI account with label 'work' found",
         );
-        let rendered = crate::tui::markdown::render_markdown_with_width(&error, Some(80));
-        let rows: Vec<String> = rendered
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect()
-            })
-            .collect();
+        // Error rows render one logical line per row (see
+        // test_prepare_messages_keeps_multiline_error_rows), so the message
+        // itself must keep each diagnostic on its own line.
+        let rows: Vec<&str> = error.lines().collect();
         let error_row = rows
             .iter()
             .position(|row| row.contains("Error: remote failed"))
@@ -1151,7 +1122,8 @@ mod tests {
         assert!(!message.contains("post-quantum"));
         assert!(!message.contains("store now"));
         assert!(!message.contains("openssh.com"));
-        assert!(message.contains("```text\nError: remote failed\n\nCaused by:\n    Permission denied (publickey).\nWARNING: host key changed\n```"));
+        assert!(message.contains("\n\nError: remote failed\n\nCaused by:\n    Permission denied (publickey).\nWARNING: host key changed"));
+        assert!(!message.contains("```"));
         assert!(!message.contains("Sign in"));
     }
 
@@ -1177,7 +1149,8 @@ mod tests {
         assert!(message.contains("No error details were returned"));
         assert!(!message.contains("```"));
         let message = format_cloud_failure("/cloud", "Error:\r\n```shell\r\nfailed\r\n```\r\n");
-        assert!(message.contains("````text\nError:\n```shell\nfailed\n```\n````"));
+        assert!(message.ends_with("\n\nError:\n```shell\nfailed\n```"));
+        assert!(!message.contains('\r'));
     }
 
     #[test]

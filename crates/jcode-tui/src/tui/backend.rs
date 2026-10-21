@@ -967,6 +967,14 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Ask the daemon to write the active session to disk now.
+    pub async fn persist_session(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::PersistSession { id }).await?;
+        Ok(id)
+    }
+
     pub async fn rename_session(&mut self, title: Option<String>) -> Result<()> {
         let request = Request::RenameSession {
             id: self.next_request_id,

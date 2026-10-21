@@ -2126,6 +2126,20 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::PersistSession { id } => {
+                // Wait for the lock instead of rejecting: this runs at an idle
+                // turn boundary and must not fail spuriously.
+                let result = agent.lock().await.persist_session_now();
+                let _ = client_event_tx.send(match result {
+                    Ok(()) => ServerEvent::Done { id },
+                    Err(error) => ServerEvent::Error {
+                        id,
+                        message: crate::util::format_error_chain(&error),
+                        retry_after_secs: None,
+                    },
+                });
+            }
+
             Request::RenameSession { id, title } => {
                 if reject_if_agent_busy_for_request(
                     id,

@@ -783,6 +783,7 @@ impl Request {
             Request::SetCompactionMode { id, .. } => *id,
             Request::RenameSession { id, .. } => *id,
             Request::SetSessionSaved { id, .. } => *id,
+            Request::PersistSession { id } => *id,
             Request::Split { id } => *id,
             Request::Transfer { id } => *id,
             Request::Compact { id } => *id,
