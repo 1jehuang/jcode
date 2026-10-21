@@ -165,7 +165,7 @@ docker run --rm \
         # must not publish an artifact that cannot complete the handoff protocol.
         built="$CARGO_TARGET_DIR/$JCODE_COMPAT_TARGET/$JCODE_COMPAT_PROFILE/jcode"
         "$built" --no-update --no-selfdev --version
-        for command in receive credentials cancel-return; do
+        for command in receive credentials router-credentials cancel-return; do
           "$built" --no-update --no-selfdev cloud "$command" --help >/dev/null
         done
         # Running inside the baseline image also checks dynamic dependencies;

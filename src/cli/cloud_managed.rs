@@ -522,6 +522,7 @@ probe() {{
 capable() {{
   probe "$1" cloud receive --help >/dev/null 2>&1 &&
     probe "$1" cloud credentials --help >/dev/null 2>&1 &&
+    probe "$1" cloud router-credentials --help >/dev/null 2>&1 &&
     probe "$1" cloud cancel-return --help >/dev/null 2>&1
 }}
 version_output() {{

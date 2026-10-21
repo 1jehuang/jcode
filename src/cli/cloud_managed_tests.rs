@@ -61,6 +61,7 @@ case "$*" in
   '--no-update --no-selfdev cloud receive --help') exit 0 ;;
   '--no-update --no-selfdev cloud cancel-return --help') exit 0 ;;
   '--no-update --no-selfdev cloud credentials --help') {credentials} ;;
+  '--no-update --no-selfdev cloud router-credentials --help') {credentials} ;;
   *) exit 95 ;;
 esac
 "#
