@@ -220,35 +220,89 @@ pub(super) async fn handle_comm_summary(
     }
 
     let limit = limit.unwrap_or(10);
-    let agent_sessions = sessions.read().await;
-    if let Some(agent) = agent_sessions.get(&target_session) {
-        let tool_calls = if let Ok(agent) = agent.try_lock() {
-            agent.get_tool_call_summaries(limit)
-        } else {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "Session '{}' is busy; try summary again shortly",
-                    target_session
-                ),
-                retry_after_secs: Some(1),
-                server_resumes: false,
-            });
+    // Clone under the registry guard, then release it before locking the agent
+    // or reading persistence. A busy hosted agent must never fall back to disk.
+    let agent = sessions.read().await.get(&target_session).cloned();
+    if agent
+        .as_ref()
+        .is_some_and(|agent| agent.try_lock().is_err())
+    {
+        send_summary_busy(id, &target_session, client_event_tx);
+        return;
+    }
+
+    let saved_id = target_session.clone();
+    let durable =
+        tokio::task::spawn_blocking(move || crate::session::Session::load(&saved_id)).await;
+    let durable = match durable {
+        Ok(Ok(session)) => Some(session),
+        _ => None,
+    };
+
+    let tool_calls = if let Some(agent) = agent {
+        // Recheck after I/O: the agent may have started work or advanced while
+        // the durable transcript was loading. Never overwrite its live state.
+        let Ok(agent) = agent.try_lock() else {
+            send_summary_busy(id, &target_session, client_event_tx);
             return;
         };
-        let _ = client_event_tx.send(ServerEvent::CommSummaryResponse {
-            id,
-            session_id: target_session,
-            tool_calls,
-        });
+        let live = agent.session_for_split();
+        match durable.as_ref() {
+            Some(saved)
+                if saved.updated_at > live.updated_at
+                    // A stale resident can append newer metadata after an
+                    // external read. Replay retains that read but takes the
+                    // resident's timestamp, so a strict ID-prefix extension
+                    // is also newer transcript evidence when timestamps tie.
+                    || (saved.updated_at == live.updated_at
+                        && saved.messages.len() > live.messages.len()
+                        && live.messages.iter().zip(&saved.messages).all(|(live, saved)| {
+                            live.id == saved.id
+                        })) =>
+            {
+                crate::session::summarize_tool_calls(saved, limit)
+            }
+            _ => agent.get_tool_call_summaries(limit),
+        }
+    } else if let Some(saved) = durable.as_ref() {
+        crate::session::summarize_tool_calls(saved, limit)
     } else {
-        let _ = client_event_tx.send(ServerEvent::CommSummaryResponse {
+        // Do not misrepresent unavailable/corrupt persistence as an empty
+        // transcript, or expose paths, prompts, or deserialization details.
+        let _ = client_event_tx.send(ServerEvent::Error {
             id,
-            session_id: target_session,
-            tool_calls: Vec::new(),
+            message: format!("Session '{}' summary is unavailable", target_session),
+            retry_after_secs: None,
+            server_resumes: false,
         });
-    }
+        return;
+    };
+    let _ = client_event_tx.send(ServerEvent::CommSummaryResponse {
+        id,
+        session_id: target_session,
+        tool_calls,
+    });
 }
+
+fn send_summary_busy(
+    id: u64,
+    target_session: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let _ = client_event_tx.send(ServerEvent::Error {
+        id,
+        message: format!(
+            "Session '{}' is busy; try summary again shortly",
+            target_session
+        ),
+        retry_after_secs: Some(1),
+        server_resumes: false,
+    });
+}
+
+#[cfg(test)]
+#[path = "comm_sync_summary_tests.rs"]
+mod summary_tests;
 
 #[expect(
     clippy::too_many_arguments,

@@ -359,7 +359,14 @@ pub(super) async fn handle_comm_await_members(
         {
             let current_still_satisfies =
                 initial_statuses.is_empty() || mode_satisfied(&initial_statuses, mode.as_deref());
-            if current_still_satisfies {
+            // The key identifies a wait predicate, not a worker attempt. A
+            // failed worker can complete later while both statuses satisfy it.
+            // Replay only when no current member is available after reload or
+            // cleanup; otherwise the fresh rows below own statuses and reports.
+            let current_members_unavailable = initial_statuses
+                .iter()
+                .all(|member| member.status == "unknown");
+            if current_members_unavailable && current_still_satisfies {
                 let _ = ctx
                     .client_event_tx
                     .send(ServerEvent::CommAwaitMembersResponse {

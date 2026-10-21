@@ -60,6 +60,33 @@ pub(super) fn parse_swarm_spawn_mode(
     }
 }
 
+/// Checkpoint a reported lifecycle change before acknowledging the report.
+/// Standalone resumed agents update these maps through a lightweight request,
+/// without a server-owned turn completion to persist the new status for them.
+pub(super) async fn persist_reported_member_swarm(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+) {
+    let swarm_id = {
+        let members = swarm_members.read().await;
+        members
+            .get(session_id)
+            .and_then(|member| member.swarm_id.clone())
+    };
+    if let Some(swarm_id) = swarm_id {
+        let swarm_state = super::SwarmState {
+            members: Arc::clone(swarm_members),
+            swarms_by_id: Arc::clone(swarms_by_id),
+            plans: Arc::clone(swarm_plans),
+            coordinators: Arc::clone(swarm_coordinators),
+        };
+        super::persist_swarm_state_for(&swarm_id, &swarm_state).await;
+    }
+}
+
 /// Extract the session_id from a Comm* request that carries one, so the
 /// lightweight control path can ensure swarm membership before dispatching.
 /// Returns None for requests that do not reference a swarm session.
@@ -886,6 +913,14 @@ pub(super) async fn handle_lightweight_control_request(
                 Some(swarm_event_tx),
             )
             .await;
+            persist_reported_member_swarm(
+                &req_session_id,
+                swarm_members,
+                swarms_by_id,
+                swarm_plans,
+                swarm_coordinators,
+            )
+            .await;
             let _ = client_event_tx.send(ServerEvent::CommReportResponse {
                 id,
                 status,
@@ -1121,6 +1156,10 @@ pub(super) async fn handle_lightweight_control_request(
     let _ = event_handle.await;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "comm_report_durability_tests.rs"]
+mod comm_report_durability_tests;
 
 #[cfg(test)]
 mod lightweight_swarm_member_tests {
