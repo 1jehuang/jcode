@@ -292,12 +292,23 @@ return (async () => {
   function isStopButton(e) {
     return /^stop( (generating|streaming|response))?$/i.test((e.getAttribute('aria-label') || '').trim()) || e.getAttribute('data-testid') === 'stop-button';
   }
+  // ChatGPT's built-in shell, which runs on OpenAI's remote machine. jcode
+  // runs the same command locally instead (see chatgpt_web/sandbox.rs).
+  function isSandboxExec(m) { return m?.role === 'assistant' && m.recipient === 'container.exec' && m.type === 'code'; }
+  // Visible text written before index `end`, then the sandbox call itself.
+  function sandboxCallOf(messages, end, code) {
+    const before = messages.slice(0, end).filter(m => m.role === 'assistant' && m.recipient === 'all' && m.type === 'text' && m.text.trim()).map(m => m.text);
+    return { tool: messages[end].recipient, code, before };
+  }
   // The rendered DOM is lossy: markdown hides backslashes, and ChatGPT can
   // render wrapped markup such as <escape>...</escape> as an empty message.
   // Read the owned conversation's raw assistant text from the same-origin
   // backend instead. The session token never leaves the page.
-  async function transcript() {
-    const id = location.pathname.match(/^\/c\/([0-9a-f-]{36})$/i)?.[1];
+  async function transcript(key) {
+    // The stream names its conversation. A dropped stream can leave the tab
+    // without /c/<id> in its URL, so fall back to the id the stream gave.
+    const streamed = globalThis.__jcodeChatGptWebStream?.turns.filter(t => t.key === key).at(-1)?.conversationId;
+    const id = location.pathname.match(/^\/c\/([0-9a-f-]{36})$/i)?.[1] || (/^[0-9a-f-]{36}$/i.test(streamed || '') ? streamed : null);
     if (!id) return { available: false, reason: 'the owned tab has no conversation id yet' };
     // jcode reads the unmasked transcript; the page sees the placeholder.
     const fetch = globalThis.__jcodeChatGptWebStream?.original || globalThis.fetch;
@@ -314,7 +325,10 @@ return (async () => {
     const texts = assistant.filter(m => (m.recipient ?? 'all') === 'all' && m.content?.content_type === 'text')
       .map(m => (m.content.parts || []).filter(part => typeof part === 'string').join('')).filter(text => text.trim());
     const last = turn.at(-1);
+    const flat = turn.map(m => ({ role: m.author?.role, recipient: m.recipient ?? 'all', type: m.content?.content_type, text: (m.content?.parts || []).filter(part => typeof part === 'string').join('') }));
+    const callIndex = flat.findIndex(isSandboxExec);
     return { available: true, temporary: data.is_temporary_chat === true, texts,
+      sandboxCall: callIndex < 0 ? null : sandboxCallOf(flat, callIndex, String(turn[callIndex].content.text ?? '')),
       complete: last?.author?.role === 'assistant' && last.end_turn === true && last.status === 'finished_successfully',
       builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))] };
   }
@@ -370,7 +384,15 @@ return (async () => {
             throw error;
           }
         }
-        const response = await net.original.call(this ?? globalThis, input, init);
+        let response;
+        try {
+          response = await net.original.call(this ?? globalThis, input, init);
+        } catch (error) {
+          // The turn POST failed before any response ("Failed to fetch"):
+          // ChatGPT never got it, so jcode can retry instead of waiting.
+          if (substituted) net.fetchError = { key: substituted.key, message: String(error?.message || error) };
+          throw error;
+        }
         if (isConversationRead && net.mask && response.ok) return maskedResponse(response, await response.text(), net.mask);
         if (!isTurn || !response.body || !net.key) return response;
         const turn = { key: net.key, status: response.status, substituted, buffer: '', events: 0, messages: {}, order: [], lastPath: null, current: null, done: false, error: null, started: Date.now(), firstToken: null };
@@ -475,6 +497,7 @@ return (async () => {
     turn.events++;
     // The server reports a failed turn as {message:null, error:"..."}.
     if (typeof event.error === 'string' && event.error && !event.type) { turn.error = event.error; return; }
+    if (typeof event.conversation_id === 'string' && !turn.conversationId) turn.conversationId = event.conversation_id;
     if (event.type) {
       if (event.type === 'message_stream_complete') turn.done = true;
       if (event.error) turn.error = String(event.error);
@@ -487,7 +510,8 @@ return (async () => {
         if (!m?.id) return;
         if (!turn.messages[m.id]) turn.order.push(m.id);
         turn.messages[m.id] = { role: m.author?.role, recipient: m.recipient ?? 'all', channel: m.channel ?? null, type: m.content?.content_type,
-          text: (m.content?.parts || []).filter(p => typeof p === 'string').join(''), status: m.status, endTurn: m.end_turn };
+          text: (m.content?.parts || []).filter(p => typeof p === 'string').join(''), status: m.status, endTurn: m.end_turn,
+          code: m.content?.content_type === 'code' ? String(m.content.text ?? '') : null };
         // The server reports which model and thinking level actually ran.
         const meta = m.metadata || {};
         if (m.author?.role !== 'user') {
@@ -505,6 +529,8 @@ return (async () => {
       if (/^\/message\/content\/parts\/0$/.test(path)) {
         entry.text = op === 'replace' ? String(value ?? '') : entry.text + String(value ?? '');
         if (entry.role === 'assistant' && entry.text && !turn.firstToken) turn.firstToken = Date.now();
+      } else if (path === '/message/content/text' && entry.code != null) {
+        entry.code = op === 'replace' ? String(value ?? '') : entry.code + String(value ?? '');
       } else if (path === '/message/status' && op === 'replace') entry.status = value;
       else if (path === '/message/end_turn' && op === 'replace') entry.endTurn = value;
     };
@@ -522,11 +548,25 @@ return (async () => {
   function streamState(key) {
     const net = globalThis.__jcodeChatGptWebStream;
     const turn = net?.turns.filter(t => t.key === key).at(-1);
-    if (!turn) return { started: false, sendError: net?.sendError?.key === key ? net.sendError.message : null, pending: net?.pending?.key === key };
+    if (!turn) {
+      // No response yet. `pending` still set means the page never sent the
+      // turn POST (the click did not reach it); cleared means the POST is in
+      // flight and ChatGPT has not answered yet.
+      const alert = all('[role="alert"], [data-testid*="error" i]').filter(visible).map(e => (e.innerText || '').trim()).filter(Boolean).join(' | ').slice(0, 300);
+      const send = one(submitSelector);
+      return { started: false, sendError: net?.sendError?.key === key ? net.sendError.message : null, fetchError: net?.fetchError?.key === key ? net.fetchError.message : null, pending: net?.pending?.key === key,
+        alert: alert || null, sendEnabled: !!send && !send.disabled, title: String(document.title || '').slice(0, 80) };
+    }
     const assistant = turn.order.map(id => turn.messages[id]).filter(m => m.role === 'assistant');
     const texts = assistant.filter(m => m.recipient === 'all' && m.type === 'text' && m.text.trim()).map(m => m.text);
     const last = assistant.at(-1);
-    return { started: true, status: turn.status, done: turn.done, error: turn.error, interrupted: turn.interrupted || null, events: turn.events, texts, substituted: turn.substituted,
+    // A sandbox call is final once its message is complete or the sandbox's
+    // output (any later message) has arrived.
+    const ordered = turn.order.map(id => turn.messages[id]);
+    const callIndex = ordered.findIndex(isSandboxExec);
+    const call = ordered[callIndex];
+    const sandboxCall = call && (call.status === 'finished_successfully' || callIndex < ordered.length - 1) ? sandboxCallOf(ordered, callIndex, call.code ?? '') : null;
+    return { started: true, status: turn.status, sandboxCall, done: turn.done, error: turn.error, interrupted: turn.interrupted || null, events: turn.events, texts, substituted: turn.substituted,
       served: turn.served || null, servedEffort: turn.servedEffort || null,
       complete: turn.done && !!last && last.endTurn === true && last.status === 'finished_successfully',
       builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))],
@@ -567,7 +607,7 @@ return (async () => {
     return { cancelled: true, quiescent: true };
   }
   if (request.op === 'response') return responseState();
-  if (request.op === 'transcript') return await transcript();
+  if (request.op === 'transcript') return await transcript(request.key);
   if (request.op === 'arm_stream') return armStream(request.key);
   if (request.op === 'arm_send') return armSend(request.key, request.text, request.placeholder, request.route);
   if (request.op === 'catalog') return await catalog();
@@ -597,6 +637,19 @@ return (async () => {
     await until(() => temporary() && !!one(editorSelector), 'loading the temporary composer');
     requireTemporary(true);
     return { ready: true, temporary: true };
+  }
+  if (request.op === 'click_send') {
+    // Re-click Send for a turn whose first click never reached the page. Only
+    // while the hook still holds this turn's prompt: once the page sends, the
+    // hook clears `pending`, so a second click can never send a duplicate or
+    // the bare placeholder.
+    const net = globalThis.__jcodeChatGptWebStream;
+    if (typeof request.armedKey !== 'string' || net?.pending?.key !== request.armedKey || globalThis.fetch !== net.wrapper) return { clicked: false, reason: 'not armed' };
+    if (net.turns.some(t => t.key === request.armedKey)) return { clicked: false, reason: 'already sent' };
+    const send = one(submitSelector);
+    if (!send || send.disabled) return { clicked: false, reason: 'send unavailable' };
+    setTimeout(() => send.click(), 0);
+    return { clicked: true };
   }
   if (request.op === 'submit') {
     if (typeof request.cancelKey !== 'string' || !request.cancelKey.startsWith('jcode-')) throw Error('ChatGPT submission lacks its owned cancellation key');

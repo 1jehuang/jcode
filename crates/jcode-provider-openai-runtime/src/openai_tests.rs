@@ -272,6 +272,7 @@ fn openai_credential_mode_runtime_provider_identity_round_trips() {
 
 #[tokio::test]
 async fn openai_available_efforts_follow_active_model_catalog_metadata() {
+    let _guard = jcode_base::storage::lock_test_env();
     let provider = OpenAIProvider::new_browser_only();
     *provider.model.write().await = "gpt-5.6".to_string();
     provider
