@@ -52,14 +52,60 @@ impl MultiProvider {
         Ok(())
     }
 
+    pub(super) fn saved_account_binding_exists(
+        &self,
+        target: ActiveProvider,
+        label: &str,
+    ) -> Result<bool> {
+        match target {
+            ActiveProvider::OpenAI => {
+                if let Some(pin) = self.account_pin(AccountProviderKind::OpenAi) {
+                    return Ok(crate::auth::codex::resolve_pin(&pin).as_deref() == Some(label));
+                }
+                Ok(crate::auth::codex::list_accounts()?
+                    .iter()
+                    .any(|account| account.label == label))
+            }
+            ActiveProvider::Claude => {
+                if let Some(pin) = self.account_pin(AccountProviderKind::Claude) {
+                    return Ok(crate::auth::claude::resolve_pin(&pin).as_deref() == Some(label));
+                }
+                Ok(crate::auth::claude::list_accounts()?
+                    .iter()
+                    .any(|account| account.label == label))
+            }
+            _ => Ok(true),
+        }
+    }
+
     pub(super) fn selected_account_for_provider(&self, target: ActiveProvider) -> Option<String> {
         let runtime = match target {
             ActiveProvider::Claude => self.anthropic_provider(),
             ActiveProvider::OpenAI => self.openai_provider(),
             _ => None,
         }?;
-        (runtime.credential_mode() == CredentialMode::OAuth)
-            .then(|| runtime.oauth_account_label())
-            .flatten()
+        if runtime.credential_mode() != CredentialMode::OAuth {
+            return None;
+        }
+        let kind = match target {
+            ActiveProvider::Claude => AccountProviderKind::Claude,
+            ActiveProvider::OpenAI => AccountProviderKind::OpenAi,
+            _ => return None,
+        };
+        // The label is presentation, not account identity. Another process can
+        // rename this login while this runtime and its session stay alive.
+        // Keep an unresolved label so the request gate still fails closed for
+        // a genuinely removed account rather than selecting the default.
+        runtime.account_pin(kind).map_or_else(
+            || runtime.oauth_account_label(),
+            |pin| {
+                let label = match kind {
+                    AccountProviderKind::Claude => crate::auth::claude::resolve_pin(&pin),
+                    AccountProviderKind::OpenAi => crate::auth::codex::resolve_pin(&pin),
+                    _ => None,
+                };
+                Some(label.unwrap_or(pin.label))
+            },
+        )
     }
 }
