@@ -214,6 +214,7 @@ impl Agent {
     /// session's route metadata is rewritten to match, so swarm workers and
     /// later resumes inherit the route this session actually runs on.
     pub(crate) fn restore_session_model_from_session(&mut self) {
+        crate::session_accounts::refresh_bound_account_route(&mut self.session);
         let Some(model) = self.session.model.clone() else {
             self.session.model = Some(self.provider_model());
             return;
