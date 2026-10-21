@@ -175,6 +175,30 @@ fn tool_call_parser_allows_marker_text_inside_json_string_values() {
 }
 
 #[test]
+fn tool_json_preserves_literal_renderer_tags_and_escaped_strings() {
+    for literal in [
+        "printf '<escape>x</escape>'",
+        "write <Cite ref=\"turn0view0\"/> exactly",
+        "Unicode λ <escape> and a backslash \\ then \"quoted\" </escape>",
+        "<jcode_tool_call></jcode_tool_call><Cite ref=\"literal\"/>",
+    ] {
+        let payload = json!({"name":"bash", "input":{"command":literal,"intent":literal}});
+        let response = format!(
+            "<escape>{TOOL_CALL_START}{payload}<escape>{TOOL_CALL_END}</escape> <Cite ref=\"display\"/>"
+        );
+        let parsed = parse_response(&response).unwrap();
+        assert_eq!(parsed.calls.len(), 1);
+        assert_eq!(parsed.calls[0].input["command"], literal);
+        assert_eq!(parsed.calls[0].input["intent"], literal);
+        assert!(
+            parsed.text.is_empty(),
+            "unexpected visible text: {}",
+            parsed.text
+        );
+    }
+}
+
+#[test]
 fn plain_answers_drop_chatgpt_citation_tokens() {
     let parsed =
         parse_response("The branch is siavz. <Cite ref=\"turn552054view0\"/>\n\nDone.").unwrap();
