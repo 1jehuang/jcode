@@ -22,6 +22,7 @@ STAGING_DIR=""
 PREVIOUS_SERVER=""
 HAS_CHANGED_CHANNELS=0
 HAS_ATTEMPTED_RELOAD=0
+HAS_DIRECTORY_LOCK=0
 
 usage() {
   cat <<EOF
@@ -48,8 +49,38 @@ fail() {
 
 get_binary_hash() {
   local checksum
-  checksum="$(sha256sum < "$1")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    checksum="$(sha256sum < "$1")"
+  else
+    checksum="$(shasum -a 256 < "$1")"
+  fi
   printf '%s\n' "${checksum%% *}"
+}
+
+# Resolve existing paths without GNU readlink -f/-m (absent on stock macOS).
+resolve_path() {
+  local path="$1" target count=0
+  while :; do
+    path="$(cd -P -- "$(dirname -- "$path")" && pwd)/$(basename -- "$path")" || return
+    [[ -L "$path" ]] || { [[ -e "$path" ]] && printf '%s\n' "$path"; return; }
+    ((count += 1))
+    [[ "$count" -le 40 ]] || return 1
+    target="$(readlink "$path")" || return
+    case "$target" in
+      /*) path="$target" ;;
+      *) path="$(dirname -- "$path")/$target" ;;
+    esac
+  done
+}
+
+replace_path() {
+  # BSD -h and GNU -T both replace a destination symlink rather than following
+  # a symlink to a directory. Plain mv -f is unsafe for channel/launcher links.
+  if [[ "$(uname -s)" == Darwin ]]; then
+    mv -fh -- "$1" "$2"
+  else
+    mv -Tf -- "$1" "$2"
+  fi
 }
 
 require_safe_paths() {
@@ -89,14 +120,14 @@ replace_link() {
   local target="$1" path="$2" staged="$2.ghe-install-$$"
   [[ ! -e "$staged" && ! -L "$staged" ]] || fail "Staging path already exists: $staged"
   ln -s -- "$target" "$staged"
-  mv -Tf -- "$staged" "$path"
+  replace_path "$staged" "$path"
 }
 
 replace_marker() {
   local version="$1" path="$2" staged="$2.ghe-install-$$"
   [[ ! -e "$staged" && ! -L "$staged" ]] || fail "Staging path already exists: $staged"
   printf '%s\n' "$version" > "$staged"
-  mv -Tf -- "$staged" "$path"
+  replace_path "$staged" "$path"
 }
 
 save_channels() {
@@ -110,21 +141,53 @@ save_channels() {
     fi
   done
   printf '%s\n' "$INSTALL_DIR" > "$BACKUP_DIR/install-directory"
-  PREVIOUS_SERVER="$(readlink -f "$BUILDS_DIR/shared-server/jcode" || true)"
+  PREVIOUS_SERVER="$(resolve_path "$BUILDS_DIR/shared-server/jcode" || true)"
   if [[ ! -x "$PREVIOUS_SERVER" ]]; then
-    PREVIOUS_SERVER="$(readlink -f "$BUILDS_DIR/stable/jcode" || true)"
+    PREVIOUS_SERVER="$(resolve_path "$BUILDS_DIR/stable/jcode" || true)"
   fi
   printf '%s\n' "$PREVIOUS_SERVER" > "$BACKUP_DIR/previous-server"
+  # Snapshot resolved executable targets, including indirect/relative launcher
+  # links. Pruners keep these immutable versions for the lifetime of the backup.
+  for index in 0 1 4; do
+    path="${PATHS[$index]}"
+    if [[ -L "$path" ]]; then
+      resolve_path "$path" > "$BACKUP_DIR/target-$index" ||
+        fail "Cannot back up a dangling executable: $path"
+    fi
+  done
+}
+
+validate_backup_targets() {
+  local index target
+  # Check everything before restoring even the first channel. Old backups did
+  # not record resolved targets, so validate their saved links as well.
+  for index in 0 1 4; do
+    if [[ -f "$BACKUP_DIR/target-$index" ]]; then
+      target="$(cat "$BACKUP_DIR/target-$index")"
+      [[ -x "$target" ]] || { printf 'Missing rollback executable: %s\n' "$target" >&2; return 1; }
+    fi
+    if [[ -L "$BACKUP_DIR/$index" ]]; then
+      target="$(readlink "$BACKUP_DIR/$index")"
+      # Relative links were saved from their channel, not the backup directory.
+      [[ "$target" == /* ]] || target="$(dirname "${PATHS[$index]}")/$target"
+      [[ -x "$target" ]] || { printf 'Missing rollback executable: %s\n' "$target" >&2; return 1; }
+    fi
+  done
+  if [[ -n "$PREVIOUS_SERVER" && ! -x "$PREVIOUS_SERVER" ]]; then
+    printf 'Missing rollback server: %s\n' "$PREVIOUS_SERVER" >&2
+    return 1
+  fi
 }
 
 restore_channels() {
   local index path staged
+  validate_backup_targets || return
   for index in "${!PATHS[@]}"; do
     path="${PATHS[$index]}"
     staged="$path.ghe-install-$$"
     if [[ -e "$BACKUP_DIR/$index" || -L "$BACKUP_DIR/$index" ]]; then
       cp -P -- "$BACKUP_DIR/$index" "$staged" || return
-      mv -Tf -- "$staged" "$path" || return
+      replace_path "$staged" "$path" || return
     else
       rm -f -- "$path" || return
     fi
@@ -163,12 +226,15 @@ cleanup() {
   for path in "${PATHS[@]}"; do
     rm -f -- "$path.ghe-install-$$"
   done
+  if [[ "$HAS_DIRECTORY_LOCK" == 1 ]]; then
+    rmdir -- "$BUILDS_DIR/.ghe-install.lock.d"
+  fi
 }
 
 rollback_install() {
   local requested="$1" version backups_root
-  backups_root="$(readlink -f -- "$BACKUPS_DIR")"
-  BACKUP_DIR="$(readlink -f -- "$requested")"
+  backups_root="$(resolve_path "$BACKUPS_DIR")"
+  BACKUP_DIR="$(resolve_path "$requested")"
   [[ "$BACKUP_DIR" == "$backups_root/"* && -d "$BACKUP_DIR" ]] ||
     fail "Backup must be inside $BACKUPS_DIR"
   [[ "$(cat "$BACKUP_DIR/install-directory")" == "$INSTALL_DIR" ]] ||
@@ -182,7 +248,7 @@ rollback_install() {
      "$(readlink "$INSTALL_DIR/jcode")" == "$BUILDS_DIR/current/jcode" ]] ||
     fail "Channels changed since this install; refusing to overwrite newer state."
   PREVIOUS_SERVER="$(cat "$BACKUP_DIR/previous-server")"
-  restore_channels
+  restore_channels || fail "Rollback targets are unavailable; channels were not changed."
   if [[ -x "$PREVIOUS_SERVER" ]]; then
     reload_server "$PREVIOUS_SERVER" ||
       fail "Channels restored, but old server handoff was not confirmed; inspect status without killing it."
@@ -202,24 +268,31 @@ main() {
     [[ "$#" -le 1 ]] || { usage >&2; exit 1; }
     binary="${1:-$REPO_ROOT/target/selfdev/jcode}"
     [[ -f "$binary" && -x "$binary" ]] || fail "Already-built executable not found: $binary"
-    binary="$(readlink -f -- "$binary")"
+    binary="$(resolve_path "$binary")"
     require_updates_disabled
   fi
   [[ "$INSTALL_DIR" == /* ]] || fail "JCODE_INSTALL_DIR must be absolute."
-  for binary_tool in flock sha256sum readlink install awk; do
+  for binary_tool in readlink install awk; do
     command -v "$binary_tool" >/dev/null || fail "Required tool not found: $binary_tool"
   done
-  builds_root="$(readlink -m -- "$BUILDS_DIR")"
-  install_root="$(readlink -m -- "$INSTALL_DIR")"
+  require_safe_paths
+  builds_root="$(resolve_path "$BUILDS_DIR")"
+  install_root="$(resolve_path "$INSTALL_DIR")"
   [[ "$install_root" != "$builds_root" && "$install_root" != "$builds_root/"* ]] ||
     fail "JCODE_INSTALL_DIR must be outside the build store to preserve stable and immutable versions."
-  require_safe_paths
   [[ ! -L "$BUILDS_DIR/.ghe-install.lock" &&
      ( ! -e "$BUILDS_DIR/.ghe-install.lock" || -f "$BUILDS_DIR/.ghe-install.lock" ) ]] ||
     fail "Refusing non-regular installer lock."
-  exec 9>"$BUILDS_DIR/.ghe-install.lock"
-  flock -n 9 || fail "Another GHE installer is active."
   trap cleanup EXIT
+  # mkdir is atomic on both BSD and GNU systems. Do not auto-break a stale lock:
+  # a killed installer requires inspection before a second channel transaction.
+  mkdir -- "$BUILDS_DIR/.ghe-install.lock.d" 2>/dev/null || fail "Another GHE installer is active (or a stale .ghe-install.lock.d needs inspection)."
+  HAS_DIRECTORY_LOCK=1
+  # Honor locks held by older Linux installers during the transition as well.
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$BUILDS_DIR/.ghe-install.lock"
+    flock -n 9 || fail "Another GHE installer is active."
+  fi
   if [[ "${1:-}" == --rollback ]]; then
     rollback_install "$2"
     return
@@ -239,7 +312,7 @@ main() {
     install -m 755 -- "$binary" "$STAGING_DIR/jcode"
     [[ "$(get_binary_hash "$STAGING_DIR/jcode")" == "$checksum" ]] ||
       fail "Source binary changed during installation; retry after the build finishes."
-    mv -T -- "$STAGING_DIR" "$version_dir"
+    mv -- "$STAGING_DIR" "$version_dir"
     STAGING_DIR=""
   fi
   save_channels
