@@ -563,21 +563,22 @@ impl App {
             let Some(review) = self.onboarding_import_review_mut() else {
                 return false;
             };
-            if let Some(level) = review.telemetry {
-                // Telemetry settings sub-page: three stacked options, most
-                // sharing first. Up/Down move, Enter commits and returns,
-                // Esc returns without changing anything.
+            if let Some(settings) = review.telemetry.as_mut() {
+                // Telemetry settings sub-page: Continue button on top
+                // (focused), then one checkbox per category. Up/Down move,
+                // Space/Enter toggle a row, Enter on Continue saves and
+                // returns, a/n set all on/off, Esc returns unchanged.
                 match code {
-                    KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                        review.telemetry_step(false)
-                    }
-                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                        review.telemetry_step(true)
-                    }
+                    KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => settings.step(false),
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => settings.step(true),
+                    KeyCode::Char('a') | KeyCode::Char('A') => settings.set_all(true),
+                    KeyCode::Char('n') | KeyCode::Char('N') => settings.set_all(false),
                     KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => review.close_telemetry(),
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        telemetry_choice = Some(level);
-                        review.close_telemetry();
+                        if !settings.toggle() {
+                            telemetry_choice = Some(*settings);
+                            review.close_telemetry();
+                        }
                     }
                     _ => return false,
                 }
@@ -641,7 +642,7 @@ impl App {
                 self.set_status_notice(format!("{} (rehearsal, not saved)", level.status_label()));
             } else {
                 level.persist();
-                self.set_status_notice(level.status_label().to_string());
+                self.set_status_notice(level.status_label());
             }
             return true;
         }
@@ -797,7 +798,7 @@ impl App {
             let secs = review.seconds_remaining();
             let notice = if !review.choosing {
                 if review.telemetry.is_some() {
-                    "Telemetry settings - arrows move, Enter chooses, Esc goes back".to_string()
+                    "Telemetry settings - arrows move, Space toggles, Enter on Continue saves, Esc goes back".to_string()
                 } else {
                     format!(
                         "Found {total} login{} - Enter imports all (auto in {secs}s), or pick \"Import less\"",

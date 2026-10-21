@@ -155,15 +155,15 @@ fn import_summary_pills_line(
     Line::from(spans).alignment(align)
 }
 
-/// The telemetry settings sub-page: three stacked pills, most sharing first,
-/// each with a dim one-line consequence caption. Reached from the "Telemetry
-/// settings" pill on the import summary; Esc returns without changing anything.
+/// The telemetry settings sub-page: a preselected "Continue" pill on top, then
+/// one checkbox per telemetry category with a dim caption. Reached from the
+/// "Telemetry settings" pill on the import summary; Esc returns unchanged.
 fn telemetry_settings_lines(
-    highlighted: crate::tui::TelemetryChoice,
+    page: crate::tui::TelemetryPage,
     env_forced_off: bool,
     align: Alignment,
 ) -> Vec<Line<'static>> {
-    use crate::tui::TelemetryChoice as Choice;
+    use crate::telemetry::TelemetryCategory;
     let dim = Style::default().fg(dim_color());
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(
@@ -176,29 +176,38 @@ fn telemetry_settings_lines(
         .alignment(align),
     );
     lines.push(Line::from(""));
+    lines.push(Line::from(lozenge_pill_spans("Continue", page.cursor == 0)).alignment(align));
+    lines.push(Line::from(""));
 
-    let options = [
-        (
-            Choice::Everything,
-            "Share full transcripts (30-day retention)",
-            "Includes provider account email, prompts, responses, reasoning, code, and tool input/output",
-        ),
-        (
-            Choice::NoContent,
-            "No prompts or transcripts",
-            "Usage stats, provider account email, and crash reports. No content",
-        ),
-        (
-            Choice::Nothing,
-            "Send nothing",
-            "We stop seeing crashes and can't fix them",
-        ),
-    ];
-    for (choice, label, caption) in options {
-        lines.push(Line::from(lozenge_pill_spans(label, choice == highlighted)).alignment(align));
-        lines.push(Line::from(Span::styled(caption, dim)).alignment(align));
-        lines.push(Line::from(""));
+    let check_style = Style::default()
+        .fg(rgb(126, 211, 159))
+        .add_modifier(Modifier::BOLD);
+    for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
+        let focused = page.cursor == i + 1;
+        let checked = page.checked[i];
+        let pointer = if focused { "› " } else { "  " };
+        let label_style = if focused {
+            Style::default()
+                .fg(welcome_accent())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(
+            Line::from(vec![
+                Span::styled(pointer, label_style),
+                if checked {
+                    Span::styled("[✓] ", check_style)
+                } else {
+                    Span::styled("[ ] ", dim)
+                },
+                Span::styled(category.label(), label_style),
+            ])
+            .alignment(align),
+        );
+        lines.push(Line::from(Span::styled(category.caption(), dim)).alignment(align));
     }
+    lines.push(Line::from(""));
 
     if env_forced_off {
         lines.push(
@@ -211,7 +220,7 @@ fn telemetry_settings_lines(
     }
     lines.push(
         Line::from(Span::styled(
-            "Esc goes back. Change this later with /telemetry.",
+            "Space toggles, a/n all on/off, Esc goes back. Change later with /telemetry.",
             dim,
         ))
         .alignment(align),
@@ -475,9 +484,9 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                 Some(prompt) if !prompt.choosing => {
                     // Telemetry settings sub-page takes over the body while
                     // it is open, then returns to the summary below.
-                    if let Some(choice) = prompt.telemetry {
+                    if let Some(page) = prompt.telemetry {
                         lines.extend(telemetry_settings_lines(
-                            choice,
+                            page,
                             prompt.telemetry_env_forced_off,
                             align,
                         ));

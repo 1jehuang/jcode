@@ -3959,8 +3959,8 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-/// `/telemetry [everything|no-prompts|nothing]` - show or change the same
-/// three-way telemetry level offered by the onboarding "Telemetry settings"
+/// `/telemetry [all|none|<category> on|off]` - show or change the same
+/// per-category telemetry choices offered by the onboarding "Telemetry settings"
 /// page, so the promise made there ("change this later with /telemetry") holds.
 pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/telemetry") else {
@@ -3976,39 +3976,64 @@ pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
-    use crate::tui::app::onboarding_flow::TelemetryLevel;
-    let arg = rest.trim().to_ascii_lowercase();
-    let level = match arg.as_str() {
-        "" => {
-            let current = TelemetryLevel::current();
-            let detail = match current {
-                TelemetryLevel::Everything => {
-                    "Sending usage stats, provider account email, crash reports, prompts, and transcripts. Thank you."
-                }
-                TelemetryLevel::NoContent => {
-                    "Sending usage stats, provider account email, and crash reports. No prompts or transcripts."
-                }
-                TelemetryLevel::Nothing => "Sending nothing.",
-            };
-            app.push_display_message(DisplayMessage::system(format!(
-                "{detail}\nChange it with /telemetry everything | no-prompts | nothing."
-            )));
-            app.set_status_notice(current.status_label());
-            return true;
-        }
-        "everything" | "all" => TelemetryLevel::Everything,
-        "no-prompts" | "no-content" | "usage" => TelemetryLevel::NoContent,
-        "nothing" | "off" | "none" => TelemetryLevel::Nothing,
-        other => {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Unknown telemetry level \"{other}\". Use everything, no-prompts, or nothing."
-            )));
-            return true;
-        }
+    use crate::telemetry::TelemetryCategory;
+    use crate::tui::app::onboarding_flow::status_label_for;
+    let args: Vec<String> = rest
+        .split_whitespace()
+        .map(|a| a.to_ascii_lowercase())
+        .collect();
+    let mut checked = crate::telemetry::category_settings();
+    let parse_on = |v: &str| match v {
+        "on" | "yes" | "true" | "1" => Some(true),
+        "off" | "no" | "false" | "0" => Some(false),
+        _ => None,
     };
-    level.persist();
-    app.push_display_message(DisplayMessage::system(level.status_label().to_string()));
-    app.set_status_notice(level.status_label());
+    let usage = "Usage: /telemetry [all|none] or /telemetry <category> on|off. Categories: content, usage, crashes, features, cost, accounts.";
+    match args.as_slice() {
+        [] => {
+            let mut text = String::from("Telemetry settings:\n");
+            for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
+                text.push_str(&format!(
+                    "  [{}] {} ({}): {}\n",
+                    if checked[i] { "x" } else { " " },
+                    category.label(),
+                    category.key(),
+                    category.caption()
+                ));
+            }
+            if crate::telemetry::opt_out_forced_by_env() {
+                text.push_str("Your environment disables all telemetry (JCODE_NO_TELEMETRY / DO_NOT_TRACK).\n");
+            }
+            text.push_str(usage);
+            app.push_display_message(DisplayMessage::system(text));
+            app.set_status_notice(status_label_for(checked));
+            return true;
+        }
+        [all] if matches!(all.as_str(), "all" | "everything" | "on") => checked = [true; 6],
+        [none] if matches!(none.as_str(), "none" | "nothing" | "off") => checked = [false; 6],
+        [all, value] if all == "all" && parse_on(value).is_some() => {
+            checked = [parse_on(value).unwrap_or(false); 6]
+        }
+        [key, value] => match (TelemetryCategory::from_key(key), parse_on(value)) {
+            (Some(category), Some(on)) => {
+                if let Some(i) = TelemetryCategory::ALL.iter().position(|c| *c == category) {
+                    checked[i] = on;
+                }
+            }
+            _ => {
+                app.push_display_message(DisplayMessage::error(usage.to_string()));
+                return true;
+            }
+        },
+        _ => {
+            app.push_display_message(DisplayMessage::error(usage.to_string()));
+            return true;
+        }
+    }
+    crate::telemetry::set_category_settings(checked);
+    let label = status_label_for(checked);
+    app.push_display_message(DisplayMessage::system(label.clone()));
+    app.set_status_notice(label);
     true
 }
 

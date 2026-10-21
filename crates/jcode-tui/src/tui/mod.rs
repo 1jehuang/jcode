@@ -1561,7 +1561,7 @@ pub struct LoginImportPrompt {
     pub summary_pill: ImportSummaryPill,
     /// `Some` while the telemetry settings sub-page is open, holding the
     /// highlighted choice.
-    pub telemetry: Option<TelemetryChoice>,
+    pub telemetry: Option<TelemetryPage>,
     /// Whether the environment (JCODE_NO_TELEMETRY / DO_NOT_TRACK) already
     /// forces telemetry off, so the sub-page should say so.
     pub telemetry_env_forced_off: bool,
@@ -1582,15 +1582,13 @@ pub enum ImportSummaryPill {
     Telemetry,
 }
 
-/// The highlighted option on the telemetry settings sub-page.
+/// The telemetry settings sub-page: a Continue button (row 0) followed by one
+/// checkbox per [`crate::telemetry::TelemetryCategory`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TelemetryChoice {
-    /// Usage stats plus prompt/transcript content.
-    Everything,
-    /// Usage stats and crash reports only.
-    NoContent,
-    /// Nothing at all.
-    Nothing,
+pub struct TelemetryPage {
+    /// 0 = Continue, 1.. = category rows.
+    pub cursor: usize,
+    pub checked: [bool; 6],
 }
 
 /// One row in the login-import checkbox list.

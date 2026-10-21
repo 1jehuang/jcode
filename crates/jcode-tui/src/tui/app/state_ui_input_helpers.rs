@@ -1461,7 +1461,7 @@ impl App {
     /// the active guided flow phase. Defaults to the starter suggestion cards.
     pub fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
         use crate::tui::OnboardingWelcomeKind;
-        use crate::tui::app::onboarding_flow::{OnboardingPhase, SummaryPill, TelemetryLevel};
+        use crate::tui::app::onboarding_flow::{OnboardingPhase, SummaryPill};
         match self.onboarding_phase() {
             Some(OnboardingPhase::Login { import }) => {
                 let prompt = import.as_ref().map(|review| {
@@ -1485,10 +1485,9 @@ impl App {
                             SummaryPill::ImportLess => crate::tui::ImportSummaryPill::ImportLess,
                             SummaryPill::Telemetry => crate::tui::ImportSummaryPill::Telemetry,
                         },
-                        telemetry: review.telemetry.map(|level| match level {
-                            TelemetryLevel::Everything => crate::tui::TelemetryChoice::Everything,
-                            TelemetryLevel::NoContent => crate::tui::TelemetryChoice::NoContent,
-                            TelemetryLevel::Nothing => crate::tui::TelemetryChoice::Nothing,
+                        telemetry: review.telemetry.map(|t| crate::tui::TelemetryPage {
+                            cursor: t.cursor,
+                            checked: t.checked,
                         }),
                         telemetry_env_forced_off: crate::telemetry::opt_out_forced_by_env(),
                         checked_count: review.checked_count(),
