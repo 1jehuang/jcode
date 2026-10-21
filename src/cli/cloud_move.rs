@@ -1055,18 +1055,20 @@ pub(crate) fn run_return(
     // ---- export (cloud stops owning at `epoch`) --------------------------
     step("export", &format!("collecting the session from `{host}`"));
     let epoch_arg = epoch.to_string();
-    let bytes = target.run_remote(
-        &host,
-        &[
-            "cloud",
-            "export",
-            "--session",
-            &session_id,
-            "--epoch",
-            &epoch_arg,
-        ],
-        None,
-    )?;
+    let bytes = retry_ssh(&host, "export", || {
+        target.run_remote(
+            &host,
+            &[
+                "cloud",
+                "export",
+                "--session",
+                &session_id,
+                "--epoch",
+                &epoch_arg,
+            ],
+            None,
+        )
+    })?;
     let staging = tempfile::Builder::new()
         .prefix("jcode-cloud-return-")
         .tempdir()?;
@@ -1106,12 +1108,13 @@ pub(crate) fn run_return(
             "credentials",
             "bringing refreshed OAuth credentials back securely",
         );
-        let imported = target
-            .exchange_credentials(&host, account, None)
-            .and_then(|bytes| import_return_credentials(&session_id, account, &bytes));
+        let imported = retry_ssh(&host, "credential return", || {
+            target.exchange_credentials(&host, account, None)
+        })
+        .and_then(|bytes| import_return_credentials(&session_id, account, &bytes));
         if let Err(error) = imported {
-            target
-                .run_remote(
+            retry_ssh(&host, "cancel return", || {
+                target.run_remote(
                     &host,
                     &[
                         "cloud",
@@ -1123,7 +1126,8 @@ pub(crate) fn run_return(
                     ],
                     None,
                 )
-                .context("credential return failed and cloud ownership could not be restored")?;
+            })
+            .context("credential return failed and cloud ownership could not be restored")?;
             storage::write_session_lease(&storage::SessionLease {
                 epoch,
                 ..lease.clone()
@@ -1316,10 +1320,13 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
 pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
     let lease = storage::read_session_lease(session_id)
         .with_context(|| format!("session {session_id} is not a migrated session on this host"))?;
-    if !lease.is_here() {
+    // A retried export after a dropped connection finds this host already
+    // released at the same epoch. Snapshotting again only reads, so allow it.
+    let re_export = lease.epoch == epoch && lease.away_host.as_deref() == Some("returned");
+    if !re_export && !lease.is_here() {
         bail!("session {session_id} does not live on this host");
     }
-    if epoch <= lease.epoch {
+    if !re_export && epoch <= lease.epoch {
         bail!("stale export epoch {epoch} (host is at {})", lease.epoch);
     }
     if storage::streaming_session_ids().contains(&session_id.to_string()) {
