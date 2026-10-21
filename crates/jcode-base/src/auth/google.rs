@@ -183,6 +183,11 @@ pub struct GoogleTokens {
     /// only ever requested Gmail scopes, so a missing field means Gmail.
     #[serde(default = "default_services")]
     pub services: Vec<GoogleService>,
+    /// The OAuth client that issued this grant. Bundling it with the tokens
+    /// makes client replacement a single atomic secret-file write. Older files
+    /// fall back to google_credentials.json.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<GoogleCredentials>,
 }
 
 impl GoogleTokens {
@@ -230,9 +235,26 @@ pub fn tokens_path() -> Result<std::path::PathBuf> {
 }
 
 pub fn load_credentials() -> Result<GoogleCredentials> {
-    let path = credentials_path()?;
-    crate::storage::harden_secret_file_permissions(&path);
-    let data = match std::fs::read_to_string(&path) {
+    load_credentials_from_paths(&credentials_path()?, &tokens_path()?)
+}
+
+fn load_credentials_from_paths(
+    credentials_path: &std::path::Path,
+    tokens_path: &std::path::Path,
+) -> Result<GoogleCredentials> {
+    crate::storage::harden_secret_file_permissions(tokens_path);
+    if tokens_path.exists()
+        && let Ok(tokens) = crate::storage::read_json::<GoogleTokens>(tokens_path)
+        && let Some(creds) = tokens.credentials
+    {
+        return Ok(creds);
+    }
+    load_legacy_credentials(credentials_path)
+}
+
+fn load_legacy_credentials(path: &std::path::Path) -> Result<GoogleCredentials> {
+    crate::storage::harden_secret_file_permissions(path);
+    let data = match std::fs::read_to_string(path) {
         Ok(d) => d,
         Err(_) => return Err(anyhow::anyhow!("no_credentials")),
     };
@@ -313,7 +335,16 @@ pub async fn login(
     tier: GmailAccessTier,
     no_browser: bool,
 ) -> Result<GoogleTokens> {
-    let creds = load_credentials()?;
+    login_with_credentials(&load_credentials()?, services, tier, no_browser).await
+}
+
+/// Authorize a staged client without changing the active login until success.
+pub async fn login_with_credentials(
+    creds: &GoogleCredentials,
+    services: &[GoogleService],
+    tier: GmailAccessTier,
+    no_browser: bool,
+) -> Result<GoogleTokens> {
     let (verifier, challenge) = super::oauth::generate_pkce_public();
     let state = super::oauth::generate_state_public();
 
@@ -324,7 +355,7 @@ pub async fn login(
         .map(|addr| format!("http://127.0.0.1:{}", addr.port()))
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", DEFAULT_PORT));
 
-    let auth_url = build_auth_url(&creds, services, tier, &redirect_uri, &challenge, &state);
+    let auth_url = build_auth_url(creds, services, tier, &redirect_uri, &challenge, &state);
 
     eprintln!("\nOpening browser for Google login...\n");
     eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
@@ -379,7 +410,12 @@ pub async fn login(
     };
 
     eprintln!("Exchanging code for tokens...");
-    exchange_code(&creds, &verifier, &code, &redirect_uri, services, tier).await
+    persist_login(
+        &tokens_path()?,
+        creds,
+        exchange_code(creds, &verifier, &code, &redirect_uri, services, tier),
+    )
+    .await
 }
 
 fn read_manual_callback_code(expected_state: &str) -> Result<String> {
@@ -416,7 +452,34 @@ pub async fn exchange_callback_input(
     if callback_state != expected_state {
         anyhow::bail!("OAuth state mismatch. Start login again and use the latest callback URL.");
     }
-    exchange_code(creds, verifier, &code, redirect_uri, services, tier).await
+    persist_login(
+        &tokens_path()?,
+        creds,
+        exchange_code(creds, verifier, &code, redirect_uri, services, tier),
+    )
+    .await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+tokio::task_local! {
+    static TEST_TOKEN_EXCHANGE: (
+        GoogleCredentials,
+        std::result::Result<GoogleTokens, String>,
+    );
+}
+
+/// Run a synthetic token endpoint response in this task only. The expected
+/// client assertion catches accidental use of an old grant's bound client.
+/// No endpoint override or global transport state exists in production.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn with_test_token_exchange<F: std::future::Future>(
+    expected_client: GoogleCredentials,
+    response: std::result::Result<GoogleTokens, String>,
+    future: F,
+) -> F::Output {
+    TEST_TOKEN_EXCHANGE
+        .scope((expected_client, response), future)
+        .await
 }
 
 async fn exchange_code(
@@ -427,6 +490,15 @@ async fn exchange_code(
     services: &[GoogleService],
     tier: GmailAccessTier,
 ) -> Result<GoogleTokens> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Ok((expected_client, response)) = TEST_TOKEN_EXCHANGE.try_with(Clone::clone) {
+        anyhow::ensure!(
+            creds == &expected_client,
+            "Unexpected synthetic Google OAuth client"
+        );
+        return response.map_err(anyhow::Error::msg);
+    }
+
     let client = crate::provider::shared_http_client();
     let resp = client
         .post(TOKEN_URL)
@@ -483,9 +555,23 @@ async fn exchange_code(
         tier,
         email,
         services,
+        credentials: None,
     };
 
-    save_tokens(&tokens)?;
+    Ok(tokens)
+}
+
+/// No active file is touched while the exchange is pending, fails, or is
+/// cancelled. Once it succeeds there is no further await before the atomic
+/// write of the matching client and token pair.
+async fn persist_login(
+    path: &std::path::Path,
+    creds: &GoogleCredentials,
+    exchange: impl std::future::Future<Output = Result<GoogleTokens>>,
+) -> Result<GoogleTokens> {
+    let mut tokens = exchange.await?;
+    tokens.credentials = Some(creds.clone());
+    crate::storage::write_json_secret(path, &tokens)?;
     Ok(tokens)
 }
 
@@ -507,9 +593,22 @@ pub async fn refresh_tokens(tokens: &GoogleTokens) -> Result<GoogleTokens> {
     .await
 }
 
+/// Refresh must use the client attached to this exact grant, not whichever
+/// client a concurrent login selected. Unbound legacy files retain their old
+/// separate-credentials fallback.
+fn credentials_for_tokens(
+    tokens: &GoogleTokens,
+    legacy_path: &std::path::Path,
+) -> Result<GoogleCredentials> {
+    match &tokens.credentials {
+        Some(creds) => Ok(creds.clone()),
+        None => load_legacy_credentials(legacy_path),
+    }
+}
+
 async fn refresh_tokens_uncoordinated(tokens: &GoogleTokens) -> Result<GoogleTokens> {
     let result: Result<GoogleTokens> = async {
-        let creds = load_credentials()?;
+        let creds = credentials_for_tokens(tokens, &credentials_path()?)?;
         let refreshed = crate::auth::google_oauth::refresh_access_token(
             "Google",
             &creds.client_id,
@@ -526,6 +625,7 @@ async fn refresh_tokens_uncoordinated(tokens: &GoogleTokens) -> Result<GoogleTok
             tier: tokens.tier,
             email: tokens.email.clone(),
             services: tokens.services.clone(),
+            credentials: Some(creds),
         };
 
         save_tokens(&new_tokens)?;
@@ -632,6 +732,162 @@ async fn fetch_gmail_email(access_token: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_client(project: &str) -> GoogleCredentials {
+        GoogleCredentials {
+            client_id: format!("synthetic-{project}.apps.googleusercontent.com"),
+            client_secret: format!("synthetic-{project}-secret"),
+        }
+    }
+
+    fn synthetic_tokens(project: &str) -> GoogleTokens {
+        GoogleTokens {
+            access_token: format!("synthetic-{project}-access"),
+            refresh_token: format!("synthetic-{project}-refresh"),
+            expires_at: 4_102_444_800_000,
+            tier: GmailAccessTier::Full,
+            email: None,
+            services: vec![GoogleService::Gmail],
+            credentials: None,
+        }
+    }
+
+    struct LoginFiles {
+        _dir: tempfile::TempDir,
+        client: std::path::PathBuf,
+        tokens: std::path::PathBuf,
+        original_client: Vec<u8>,
+        original_tokens: Vec<u8>,
+    }
+
+    impl LoginFiles {
+        fn new(bound: bool) -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let client = dir.path().join("google_credentials.json");
+            let tokens = dir.path().join("google_oauth.json");
+            let old_client = synthetic_client("old-project");
+            let mut old_tokens = synthetic_tokens("old-project");
+            if bound {
+                old_tokens.credentials = Some(old_client.clone());
+            }
+            crate::storage::write_json_secret(&client, &old_client).unwrap();
+            crate::storage::write_json_secret(&tokens, &old_tokens).unwrap();
+            let original_client = std::fs::read(&client).unwrap();
+            let original_tokens = std::fs::read(&tokens).unwrap();
+            Self {
+                _dir: dir,
+                client,
+                tokens,
+                original_client,
+                original_tokens,
+            }
+        }
+
+        fn assert_unchanged(&self) {
+            assert_eq!(std::fs::read(&self.client).unwrap(), self.original_client);
+            assert_eq!(std::fs::read(&self.tokens).unwrap(), self.original_tokens);
+            assert_eq!(
+                load_credentials_from_paths(&self.client, &self.tokens).unwrap(),
+                synthetic_client("old-project")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transactional_google_login_exchange_failure_preserves_active_files() {
+        for bound in [false, true] {
+            let files = LoginFiles::new(bound);
+            let new_client = synthetic_client("other-project");
+            // Fake transport: an OAuth denial or token-endpoint failure. No HTTP.
+            let exchange = std::future::ready(Err(anyhow::anyhow!("synthetic access_denied")));
+            let error = persist_login(&files.tokens, &new_client, exchange)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("access_denied"));
+            files.assert_unchanged();
+        }
+    }
+
+    #[tokio::test]
+    async fn transactional_google_login_cancel_preserves_active_files() {
+        for bound in [false, true] {
+            let files = LoginFiles::new(bound);
+            let new_client = synthetic_client("other-project");
+            {
+                // Poll the real commit wrapper while a fake transport is waiting,
+                // then drop it, exactly as task cancellation does.
+                let exchange = std::future::pending::<Result<GoogleTokens>>();
+                let login = persist_login(&files.tokens, &new_client, exchange);
+                tokio::pin!(login);
+                tokio::select! {
+                    biased;
+                    _ = &mut login => panic!("pending exchange completed"),
+                    _ = std::future::ready(()) => {}
+                }
+                files.assert_unchanged();
+            }
+            files.assert_unchanged();
+        }
+    }
+
+    #[tokio::test]
+    async fn transactional_google_login_success_commits_matching_pair() {
+        for bound in [false, true] {
+            let files = LoginFiles::new(bound);
+            let new_client = synthetic_client("other-project");
+            let exchange = std::future::ready(Ok(synthetic_tokens("other-project")));
+            let committed = persist_login(&files.tokens, &new_client, exchange)
+                .await
+                .unwrap();
+            let stored: GoogleTokens = crate::storage::read_json(&files.tokens).unwrap();
+            assert_eq!(stored.refresh_token, "synthetic-other-project-refresh");
+            assert_eq!(stored.credentials.as_ref(), Some(&new_client));
+            assert_eq!(committed.credentials.as_ref(), Some(&new_client));
+            assert_eq!(
+                load_credentials_from_paths(&files.client, &files.tokens).unwrap(),
+                new_client
+            );
+            // The old separate client file need not change: the authoritative
+            // matching pair is now in one atomically replaced secret file.
+            assert_eq!(std::fs::read(&files.client).unwrap(), files.original_client);
+            assert_eq!(
+                credentials_for_tokens(&stored, &files.client).unwrap(),
+                new_client
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&files.tokens)
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transactional_google_login_refresh_uses_bound_client_or_legacy_fallback() {
+        let files = LoginFiles::new(false);
+        let mut tokens = synthetic_tokens("other-project");
+        assert_eq!(
+            credentials_for_tokens(&tokens, &files.client).unwrap(),
+            synthetic_client("old-project")
+        );
+        tokens.credentials = Some(synthetic_client("other-project"));
+        assert_eq!(
+            credentials_for_tokens(&tokens, &files.client).unwrap(),
+            synthetic_client("other-project")
+        );
+        // A bound grant remains usable even if the legacy client file is gone.
+        assert_eq!(
+            credentials_for_tokens(&tokens, &files._dir.path().join("absent.json")).unwrap(),
+            synthetic_client("other-project")
+        );
+    }
 
     #[test]
     fn legacy_token_file_defaults_to_gmail_only() {

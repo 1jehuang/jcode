@@ -40,7 +40,7 @@ pub struct LoginOptions {
     pub google_services: Option<Vec<auth::google::GoogleService>>,
     /// Run the guided Google Cloud OAuth client setup even when a client is saved.
     pub google_setup: bool,
-    /// OAuth client JSON path (or `auto`) to import before Google login.
+    /// OAuth client JSON path (or `auto`) to stage until Google login succeeds.
     pub google_client_json: Option<String>,
     pub openai_compatible_api_base: Option<String>,
     pub openai_compatible_api_key: Option<String>,
@@ -149,6 +149,9 @@ enum PendingScriptableLogin {
         /// requested Gmail.
         #[serde(default = "default_pending_google_services")]
         services: Vec<auth::google::GoogleService>,
+        /// The client selected for this flow, never the active client until success.
+        #[serde(default)]
+        credentials: Option<auth::google::GoogleCredentials>,
     },
     Copilot {
         device_code: String,
@@ -272,11 +275,6 @@ pub async fn run_login_provider(
     if options.cancel {
         return cancel_scriptable_login(provider, &options);
     }
-    if provider.target == LoginProviderTarget::Google
-        && let Some(source) = options.google_client_json.as_deref()
-    {
-        import_google_client_json(source, options.json)?;
-    }
     crate::telemetry::record_provider_selected(provider.id);
     crate::telemetry::record_auth_started(provider.id, provider.auth_kind.label());
     let explicit_scriptable_flow = options.uses_scriptable_flow()?;
@@ -286,6 +284,7 @@ pub async fn run_login_provider(
     let google_wizard = provider.target == LoginProviderTarget::Google
         && !explicit_scriptable_flow
         && io::stdin().is_terminal()
+        && options.google_client_json.is_none()
         && (options.google_setup || auth::google::load_credentials().is_err());
     let auto_scriptable_reason = if explicit_scriptable_flow || google_wizard {
         None
@@ -404,6 +403,7 @@ pub async fn run_login_provider(
                 options.google_access_tier,
                 options.google_services.clone(),
                 options.google_setup,
+                options.google_client_json.as_deref(),
             )
             .await
             .map(|_| LoginFlowOutcome::Completed),
