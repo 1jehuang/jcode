@@ -30,10 +30,14 @@ impl SessionPicker {
     }
 
     /// Periodically re-snapshot live presence while the picker is on screen so
-    /// working/ready badges track reality. Rebuilds the list when the Active
-    /// view is showing and membership or streaming state changed (a session
-    /// finished its turn, went idle, or exited). Returns true when anything
-    /// changed so callers can redraw.
+    /// working/ready badges track reality. Rebuilds the list when membership
+    /// or streaming state changed (a session finished its turn, went idle, or
+    /// exited): live-dependent views (Active/Working) re-filter, and every
+    /// other view re-sorts, since running sessions float above stopped ones.
+    /// Latest is the exception: pure recency order, no triage, and
+    /// presence-independent membership, so it skips the rebuild (badges still
+    /// update because they read live_presence at draw time). Returns true when
+    /// anything changed so callers can redraw.
     pub fn maybe_refresh_live_presence(&mut self) -> bool {
         if self.loading_message.is_some() {
             return false;
@@ -49,8 +53,27 @@ impl SessionPicker {
         self.refresh_live_presence();
         let closures_changed = closures_before != self.recent_window_closures;
         let changed = before != self.live_presence || closures_changed;
-        if closures_changed || (changed && self.filter_mode == SessionFilterMode::Active) {
+        if closures_changed || (changed && self.filter_mode != SessionFilterMode::Latest) {
+            // The rebuild preserves the highlighted session by id, so it can
+            // also preserve the user's reading position. Without this, a
+            // background session starting or finishing would snap the preview
+            // back to the bottom (auto-scroll) mid-read. Mirrors the save and
+            // restore in `reseed_grouped`, including the auto-scroll flag:
+            // disarming it while the transcript is still loading left the
+            // preview stuck at the top once the content landed.
+            let selected_id = self.selected_session().map(|session| session.id.clone());
+            let preview_scroll = self.scroll_offset;
+            let preview_auto_scroll = self.auto_scroll_preview;
+            let list_offset = self.list_state.offset();
             self.rebuild_items();
+            let still_selected = selected_id
+                .as_deref()
+                .is_some_and(|id| self.selected_session().is_some_and(|s| s.id == id));
+            if still_selected {
+                self.scroll_offset = preview_scroll;
+                self.auto_scroll_preview = preview_auto_scroll;
+                *self.list_state.offset_mut() = list_offset;
+            }
         }
         changed
     }

@@ -1,5 +1,28 @@
-use super::loading::session_matches_picker_query;
+use super::loading::{parse_search_query, query_is_pure_free_text, session_matches_picker_query};
 use super::*;
+
+/// Short label for the current-directory group header: keep the path readable
+/// in a one-line list row. Full paths up to ~40 chars render as-is; longer
+/// ones collapse to the leading segments plus the basename so the project
+/// name stays visible (e.g. `~/jcode`).
+pub(super) fn short_dir_label(dir: &str) -> String {
+    const MAX_LABEL_CHARS: usize = 40;
+    if dir.chars().count() <= MAX_LABEL_CHARS {
+        return dir.to_string();
+    }
+    let (dir_part, basename) = match dir.rfind('/') {
+        // Root itself is longer than the budget: keep it intact.
+        Some(0) => return dir.to_string(),
+        Some(idx) => (&dir[..idx], &dir[idx + 1..]),
+        None => ("", dir),
+    };
+    let prefix: &str = if dir_part.starts_with("/home/") || dir_part.starts_with("/Users/") {
+        "~/"
+    } else {
+        "/…/"
+    };
+    format!("{}{}", prefix, basename)
+}
 
 impl SessionPicker {
     fn normalized_search_query(query: &str) -> String {
@@ -139,17 +162,33 @@ impl SessionPicker {
                 }))
             });
         }
-        if filter_mode == SessionFilterMode::Active {
-            // Triage order for the active sessions manager: sessions that are
-            // ready for input (done streaming) float above ones still working,
-            // each group keeping the recency order from the sort above.
-            filtered.sort_by_key(|session_ref| {
-                self.session_by_ref(*session_ref)
-                    .map(|session| self.session_is_streaming(session))
-                    .unwrap_or(false)
-            });
+        // The Latest view is a pure newest-first sort: no running-state triage
+        // on top, so the order is exactly the recency order above. Every other
+        // view floats live sessions above stopped ones (and within the running
+        // group the ones ready for input above the ones still working, matching
+        // the Active view's triage). `sort_by` is stable, so each triage group
+        // keeps the recency order above.
+        if filter_mode != SessionFilterMode::Latest {
+            filtered.sort_by_key(|session_ref| self.session_running_state_rank(*session_ref));
         }
         filtered
+    }
+
+    /// Sort rank for the running-state triage: 0 = live and ready for input,
+    /// 1 = live and still streaming (working), 2 = no live process.
+    /// Lower rank sorts first, so running sessions float to the top.
+    fn session_running_state_rank(&self, session_ref: SessionRef) -> u8 {
+        self.session_by_ref(session_ref)
+            .map(|session| {
+                if !self.session_is_live(session) {
+                    2
+                } else if self.session_is_streaming(session) {
+                    1
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(2)
     }
 
     fn hidden_test_count_for_refs(
@@ -210,12 +249,13 @@ impl SessionPicker {
         filter_mode: SessionFilterMode,
     ) -> bool {
         match filter_mode {
-            SessionFilterMode::All => true,
+            SessionFilterMode::All | SessionFilterMode::Latest => true,
             SessionFilterMode::CurrentDir => self.session_in_current_dir(session),
             SessionFilterMode::CatchUp => session.needs_catchup,
             SessionFilterMode::Saved => session.saved,
             SessionFilterMode::Cloud => session.server_icon.as_deref() == Some("☁"),
             SessionFilterMode::Active => self.session_is_live(session),
+            SessionFilterMode::Working => self.session_is_streaming(session),
             SessionFilterMode::ClaudeCode => Self::session_is_claude_code(session),
             SessionFilterMode::Codex => Self::session_is_codex(session),
             SessionFilterMode::Pi => Self::session_is_pi(session),
@@ -238,6 +278,12 @@ impl SessionPicker {
         let filter_mode = self.filter_mode;
         let search_query = self.search_query.clone();
         let search_matches = self.search_matched_session_refs(&search_query);
+        // An explicit `debug:yes` in the query is the user asking to see debug
+        // sessions right now, so it overrides the default hiding rule (which
+        // stays available via the `d` toggle when the query is absent).
+        let query_asks_debug =
+            parse_search_query(&Self::normalized_search_query(&search_query)).debug == Some(true);
+        let show_test = show_test || query_asks_debug;
         let filtered_refs = self.filtered_session_refs(&search_matches, show_test, filter_mode);
 
         self.items.clear();
@@ -266,6 +312,38 @@ impl SessionPicker {
             return;
         }
 
+        // Sessions from the directory `/resume` was opened from float to the
+        // top of the All view under their own header so the current project is
+        // immediately visible. They stay there even when saved or grouped under
+        // a server (the later sections skip them) so a session never renders
+        // twice. `filtered_refs` is recency-sorted, so the pinned group is
+        // newest-first too.
+        let current_dir = self.current_dir.clone();
+        let mut current_dir_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut current_dir_sessions: Vec<SessionRef> = Vec::new();
+        if let Some(dir_label) = current_dir.as_deref() {
+            for session_ref in &filtered_refs {
+                if let Some(session) = self.session_by_ref(*session_ref)
+                    && self.session_in_current_dir(session)
+                {
+                    current_dir_ids.insert(session.id.clone());
+                    current_dir_sessions.push(*session_ref);
+                }
+            }
+            if !current_dir_sessions.is_empty() {
+                self.items.push(PickerItem::CurrentDirHeader {
+                    label: short_dir_label(dir_label),
+                    session_count: current_dir_sessions.len(),
+                });
+                self.item_to_session.push(None);
+
+                for session_ref in current_dir_sessions {
+                    self.push_visible_session(session_ref);
+                }
+            }
+        }
+
         let mut saved_sessions: Vec<SessionRef> = Vec::new();
         let mut saved_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -289,12 +367,17 @@ impl SessionPicker {
             if let Some(session) = self.session_by_ref(*session_ref)
                 && !saved_ids.contains(&session.id)
                 && placement.boosted(session, now)
+                && !current_dir_ids.contains(&session.id)
             {
                 saved_ids.insert(session.id.clone());
                 saved_sessions.push(*session_ref);
             }
         }
 
+        // Re-sorted newest-first. Keep the running-state triage from
+        // `filtered_refs` inside the saved group too (stable sort): a saved
+        // session that is still running still floats above saved ones that
+        // are not, matching the rest of the list.
         saved_sessions.sort_by(|a, b| {
             let a = self
                 .session_by_ref(*a)
@@ -306,6 +389,7 @@ impl SessionPicker {
                 .unwrap_or_default();
             b.cmp(&a)
         });
+        saved_sessions.sort_by_key(|session_ref| self.session_running_state_rank(*session_ref));
 
         if !saved_sessions.is_empty() {
             self.items.push(PickerItem::SavedHeader {
@@ -332,10 +416,9 @@ impl SessionPicker {
                     session_idx,
                 } = session_ref
                     && let Some(group) = self.all_server_groups.get(group_idx)
-                    && group
-                        .sessions
-                        .get(session_idx)
-                        .is_some_and(|session| !saved_ids.contains(&session.id))
+                    && let Some(session) = group.sessions.get(session_idx)
+                    && !saved_ids.contains(&session.id)
+                    && !current_dir_ids.contains(&session.id)
                 {
                     group_buckets[group_idx].push(session_ref);
                 }
@@ -378,10 +461,12 @@ impl SessionPicker {
                 .iter()
                 .copied()
                 .filter(|session_ref| match session_ref {
-                    SessionRef::Orphan(idx) => self
-                        .all_orphan_sessions
-                        .get(*idx)
-                        .is_some_and(|session| !saved_ids.contains(&session.id)),
+                    SessionRef::Orphan(idx) => {
+                        self.all_orphan_sessions.get(*idx).is_some_and(|session| {
+                            !saved_ids.contains(&session.id)
+                                && !current_dir_ids.contains(&session.id)
+                        })
+                    }
                     SessionRef::Group {
                         group_idx,
                         session_idx,
@@ -417,10 +502,9 @@ impl SessionPicker {
                 .iter()
                 .copied()
                 .filter(|session_ref| match session_ref {
-                    SessionRef::Flat(idx) => self
-                        .all_sessions
-                        .get(*idx)
-                        .is_some_and(|session| !saved_ids.contains(&session.id)),
+                    SessionRef::Flat(idx) => self.all_sessions.get(*idx).is_some_and(|session| {
+                        !saved_ids.contains(&session.id) && !current_dir_ids.contains(&session.id)
+                    }),
                     _ => false,
                 })
                 .collect();
@@ -493,7 +577,10 @@ impl SessionPicker {
     pub(super) fn cycle_filter_mode(&mut self) {
         self.filter_mode_user_chosen = true;
         self.filter_mode = self.filter_mode.next();
-        if self.filter_mode == SessionFilterMode::Active {
+        if matches!(
+            self.filter_mode,
+            SessionFilterMode::Active | SessionFilterMode::Working
+        ) {
             self.refresh_live_presence();
         }
         self.rebuild_items();
@@ -502,7 +589,10 @@ impl SessionPicker {
     pub(super) fn cycle_filter_mode_backwards(&mut self) {
         self.filter_mode_user_chosen = true;
         self.filter_mode = self.filter_mode.previous();
-        if self.filter_mode == SessionFilterMode::Active {
+        if matches!(
+            self.filter_mode,
+            SessionFilterMode::Active | SessionFilterMode::Working
+        ) {
             self.refresh_live_presence();
         }
         self.rebuild_items();

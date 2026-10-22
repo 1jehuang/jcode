@@ -214,3 +214,124 @@ fn test_maybe_refresh_live_presence_throttles_and_detects_changes() {
     picker.set_live_presence_for_test(vec![live_presence("session_live", true)]);
     assert!(!picker.maybe_refresh_live_presence());
 }
+#[test]
+fn test_latest_view_sorts_strictly_by_recency_without_triage() {
+    // Oldest first in the input vector so the test proves the sort, not the
+    // insertion order.
+    let mut oldest = make_session("oldest", "oldest", false, SessionStatus::Closed);
+    oldest.last_message_time = Utc::now() - ChronoDuration::hours(5);
+    let mut newer = make_session("newer", "newer", false, SessionStatus::Closed);
+    newer.last_message_time = Utc::now() - ChronoDuration::hours(2);
+    let mut newest = make_session("newest", "newest", false, SessionStatus::Closed);
+    newest.last_message_time = Utc::now() - ChronoDuration::minutes(1);
+
+    let mut picker = SessionPicker::new(vec![oldest, newer, newest]);
+    picker.set_current_dir(Some("/tmp".to_string()));
+    picker.set_live_presence_for_test(vec![live_presence("newer", false)]);
+    picker.cycle_filter_mode();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Latest);
+
+    // Flat newest-first list: no headers, no running-state float, current-dir
+    // pinning does not apply (every session lives in /tmp here anyway).
+    let ids: Vec<&str> = picker
+        .visible_session_iter()
+        .map(|session| session.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["newest", "newer", "oldest"]);
+    assert_eq!(picker.items.len(), picker.visible_sessions.len());
+    assert!(
+        picker
+            .items
+            .iter()
+            .all(|item| matches!(item, PickerItem::Session))
+    );
+}
+
+#[test]
+fn test_latest_view_groups_flatten_by_recency_across_groups() {
+    // Grouped layout must produce the same flat newest-first list: sessions
+    // from different server groups and orphans interleave by last activity,
+    // with no group headers.
+    let mut older_group = make_session("group_older", "older", false, SessionStatus::Closed);
+    older_group.last_message_time = Utc::now() - ChronoDuration::hours(3);
+    let mut group_newest = make_session("group_newest", "newest", false, SessionStatus::Closed);
+    group_newest.last_message_time = Utc::now() - ChronoDuration::minutes(1);
+    let mut orphan_middle = make_session("orphan_middle", "middle", false, SessionStatus::Closed);
+    orphan_middle.last_message_time = Utc::now() - ChronoDuration::hours(1);
+
+    let groups = vec![ServerGroup {
+        name: "main".to_string(),
+        icon: "🛰".to_string(),
+        version: "v0.1.0".to_string(),
+        git_hash: "abc1234".to_string(),
+        is_running: true,
+        sessions: vec![older_group, group_newest],
+    }];
+    let mut picker = SessionPicker::new_grouped(groups, vec![orphan_middle]);
+    picker.cycle_filter_mode(); // All -> Latest
+    assert_eq!(picker.filter_mode, SessionFilterMode::Latest);
+
+    let ids: Vec<&str> = picker
+        .visible_session_iter()
+        .map(|session| session.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["group_newest", "orphan_middle", "group_older"]);
+    assert_eq!(picker.items.len(), picker.visible_sessions.len());
+    assert!(
+        picker
+            .items
+            .iter()
+            .all(|item| matches!(item, PickerItem::Session))
+    );
+}
+
+
+#[test]
+fn test_working_filter_shows_only_streaming_sessions() {
+    let live_working = make_session("session_working", "alpha", false, SessionStatus::Active);
+    let live_ready = make_session("session_ready", "beta", false, SessionStatus::Active);
+    let dead = make_session("session_dead", "dead", false, SessionStatus::Closed);
+
+    let mut picker = SessionPicker::new(vec![live_working, live_ready, dead]);
+
+    // Cycle from All into the Working view like the 's' key does. Cycling into
+    // a live view re-snapshots presence from the real registry, so the
+    // synthetic snapshot is injected after landing in the view, exactly like
+    // the presence poll would deliver it.
+    picker.cycle_filter_mode(); // Latest
+    picker.cycle_filter_mode(); // CurrentDir
+    picker.cycle_filter_mode(); // CatchUp
+    picker.cycle_filter_mode(); // Saved
+    picker.cycle_filter_mode(); // Active
+    picker.cycle_filter_mode(); // Working
+    assert_eq!(picker.filter_mode, SessionFilterMode::Working);
+    picker.set_live_presence_for_test(vec![
+        live_presence("session_working", true),
+        live_presence("session_ready", false),
+    ]);
+
+    let visible: Vec<&str> = picker
+        .visible_session_iter()
+        .map(|session| session.id.as_str())
+        .collect();
+    // Only the still-streaming session shows; the live-but-idle one is ready
+    // for input, not working, and the dead one is neither.
+    assert_eq!(visible, vec!["session_working"]);
+    assert!(
+        picker
+            .visible_session_iter()
+            .all(|session| picker.session_is_streaming(session))
+    );
+
+    // 'S' cycles back through Active, not straight to All.
+    picker.cycle_filter_mode_backwards();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Active);
+
+    // When the stream ends, the Working view drops the session on the next
+    // presence refresh.
+    picker.cycle_filter_mode(); // back to Working
+    picker.set_live_presence_for_test(vec![live_presence("session_working", false)]);
+    assert_eq!(picker.filter_mode, SessionFilterMode::Working);
+    assert_eq!(picker.visible_sessions.len(), 0);
+}
+

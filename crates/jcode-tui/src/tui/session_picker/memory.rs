@@ -153,5 +153,6 @@ fn estimate_picker_item_bytes(item: &PickerItem) -> usize {
             ..
         } => name.capacity() + icon.capacity() + version.capacity(),
         PickerItem::Session | PickerItem::OrphanHeader { .. } | PickerItem::SavedHeader { .. } => 0,
+        PickerItem::CurrentDirHeader { label, .. } => label.capacity(),
     }
 }
