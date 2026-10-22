@@ -31,11 +31,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function q(db, sql, params = []) {
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/d1/database/${db}/query`,
-      { method: "POST", headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ sql, params }) },
-    );
+    let res;
+    try {
+      res = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/d1/database/${db}/query`,
+        { method: "POST", headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ sql, params }), signal: AbortSignal.timeout(120_000) },
+      );
+    } catch (e) {
+      // Network failures (timeouts, resets) are transient: back off and retry.
+      if (attempt >= 20) throw e;
+      console.error(`network error, retrying: ${e.cause?.code || e.message}`);
+      await sleep(Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)));
+      continue;
+    }
     const json = await res.json().catch(() => null);
     if (process.env.DEBUG) console.error(`${db.slice(0, 4)} ${Math.round(json?.result?.at(-1)?.meta?.duration ?? -1)}ms ok=${json?.success} ${sql.slice(0, 60).replace(/\s+/g, " ")} ${json?.success ? "" : JSON.stringify(json?.errors)}`);
     if (json?.success) return json.result.at(-1).results ?? [];
