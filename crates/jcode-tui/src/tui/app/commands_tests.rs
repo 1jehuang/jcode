@@ -425,3 +425,144 @@ fn cache_extend_saves_preference_and_reset_survives_reload() {
     );
     assert_eq!(std::fs::read_to_string(path).unwrap(), "[broken");
 }
+
+/// Behavioral tests for `/settings risk-gate`, driven through the real `App`
+/// dispatch path to cover what a user types: show status, toggle on/off,
+/// persistence, and error handling.
+mod settings {
+    use crate::tui::app::commands_dispatch::dispatch_local_command;
+    use crate::tui::app::tests::create_test_app;
+
+    fn lock_shared_state() -> std::sync::MutexGuard<'static, ()> {
+        crate::storage::lock_test_env()
+    }
+
+    /// Text of the last message the app pushed, whatever its role.
+    fn last_message(app: &crate::tui::app::App) -> String {
+        app.display_messages
+            .last()
+            .map(|message| message.content.clone())
+            .unwrap_or_default()
+    }
+
+    fn with_clean_config(body: impl FnOnce()) {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let mut config = crate::config::Config::load();
+                config.provider.risk_gate_enabled = true;
+                let _ = config.save();
+            }
+        }
+        let _lock = lock_shared_state();
+        let _restore = Restore;
+        {
+            let mut config = crate::config::Config::load();
+            config.provider.risk_gate_enabled = true;
+            let _ = config.save();
+        }
+        body();
+    }
+
+    #[test]
+    fn settings_show_displays_current_risk_gate_status() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            assert!(dispatch_local_command(&mut app, "/settings"));
+            let output = last_message(&app);
+            assert!(
+                output.contains("Risk Gate ..... enabled"),
+                "/settings should show 'Risk Gate ..... enabled', got: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn settings_risk_gate_off_persists_and_reports() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            assert!(dispatch_local_command(&mut app, "/settings risk-gate off"));
+            let output = last_message(&app);
+            assert!(
+                output.contains("disabled"),
+                "toggling off should report 'disabled', got: {output}"
+            );
+            assert!(
+                !crate::config::Config::load().provider.risk_gate_enabled,
+                "risk_gate_enabled should be false after /settings risk-gate off"
+            );
+        });
+    }
+
+    #[test]
+    fn settings_risk_gate_on_persists_and_reports() {
+        with_clean_config(|| {
+            // First disable, then re-enable
+            let mut app = create_test_app();
+            assert!(dispatch_local_command(&mut app, "/settings risk-gate off"));
+            assert!(dispatch_local_command(&mut app, "/settings risk-gate on"));
+            let output = last_message(&app);
+            assert!(
+                output.contains("enabled"),
+                "toggling on should report 'enabled', got: {output}"
+            );
+            assert!(
+                crate::config::Config::load().provider.risk_gate_enabled,
+                "risk_gate_enabled should be true after /settings risk-gate on"
+            );
+        });
+    }
+
+    #[test]
+    fn settings_risk_gate_invalid_value_shows_usage() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            assert!(dispatch_local_command(
+                &mut app,
+                "/settings risk-gate maybe"
+            ));
+            let output = last_message(&app);
+            assert!(
+                output.contains("Usage"),
+                "invalid value should show usage, got: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn settings_bare_risk_gate_shows_usage() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            assert!(dispatch_local_command(&mut app, "/settings risk-gate"));
+            let output = last_message(&app);
+            assert!(
+                output.contains("Usage"),
+                "bare '/settings risk-gate' should show usage, got: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn settings_unknown_subcommand_shows_usage() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            assert!(dispatch_local_command(&mut app, "/settings frobnicate"));
+            let output = last_message(&app);
+            assert!(
+                output.contains("Usage"),
+                "unknown subcommand should show usage, got: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn non_settings_command_is_not_swallowed() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            assert!(
+                !dispatch_local_command(&mut app, "/setting"),
+                "/setting must not be claimed by /settings"
+            );
+        });
+    }
+}

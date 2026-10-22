@@ -262,6 +262,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_QUEUE_MODE",
     "JCODE_REASONING_DISPLAY",
     "JCODE_REDRAW_FPS",
+    "JCODE_RISK_GATE_ENABLED",
     "JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
     "JCODE_SCROLL_BOOKMARK_KEY",
     "JCODE_SCROLL_DOWN_FALLBACK_KEY",
@@ -976,6 +977,10 @@ mod config_file;
 mod default_file;
 mod display_summary;
 mod env_overrides;
+
+/// Single parser for `JCODE_RISK_GATE_ENABLED`, shared by the bash
+/// destructive gate, env overrides, and the `/settings` display.
+pub use env_overrides::risk_gate;
 
 #[cfg(test)]
 #[path = "config_tests.rs"]

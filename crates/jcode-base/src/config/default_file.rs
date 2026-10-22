@@ -498,6 +498,13 @@ cross_provider_failover = "countdown"
 # Env override: JCODE_WAKE_MODE
 wake_mode = "internal"
 
+# Destructive-command risk gate for the bash tool (issue #604).
+# When enabled (default), catastrophic commands (rm -rf /, rm -rf ~, credential
+# destruction) are denied outright, and risky commands require a justification
+# that matches the user's actual request. When disabled, all commands run
+# without the gate. Also overridable per-launch via JCODE_RISK_GATE_ENABLED.
+# risk_gate_enabled = true
+
 [agents]
 # Swarm root settings and defaults for helper agents (workers, subagents, sidecars).
 # All keys are optional; the values below are the built-in defaults.
