@@ -149,3 +149,36 @@ leak-assert hits, blocklist coverage).
 - `cargo fmt -p jcode-plan`: clean.
 - `cargo check -p jcode-plan -p jcode-swarm-core -p jcode-protocol`: clean
   (all downstream consumers of `jcode-plan`).
+
+## CI integration verification (2026-10-22)
+
+The PR's merge-result CI exposed an integration failure hidden by testing its
+older branch alone: upstream commit `774613c90` removed `serde_json` from
+`jcode-plan`, while refinement's hooks validator now requires it. The branch
+merges master `59fa887c8dd9bb76f8216012e3ed5eaf1ab20f0f` and explicitly restores
+the dependency and lockfile edge. The unused `glob` and `ignore` app-core
+dependency declarations are removed, not exempted from the dependency audit.
+
+Four quality ratchets also fail on a pristine archive of that same master.
+Their baseline reconciliation is deliberately a separate commit, with the JSON
+generated **only from the pristine upstream archive**, not the PR source. Each
+of the four committed JSON files is byte-identical to that upstream-only result.
+This acknowledges inherited master debt, including increases, rather than
+claiming it was cleaned up. Thresholds, scanners, and CI checks are unchanged.
+It grants no allowance to the new refinement files. To reproduce the baseline
+provenance, archive the pinned master into an empty scratch directory, run its
+four `scripts/check_{code_size,test_size,panic,swallowed_error}_budget.py` scripts
+with `--update` there, and compare each generated JSON to this branch's file.
+
+New-code violations are fixed instead: review regressions live in public-API
+integration tests rather than pushing `surface.rs` over 1,200 lines, a missing
+trigger file is explicitly created through the map entry API, and an empty
+selection pool returns an error rather than manufacturing an empty label.
+The documented unmapped-anonymous-ID case remains an explicit empty ID.
+
+Observed local results: all 72 plan tests pass (69 unit, 3 integration), strict
+plan Clippy passes, the exact CI dependency auditor `cargo-machete 0.9.2` reports
+no unused dependencies, app-core compiles, all four reconciled ratchets pass,
+and dependency boundaries, module resolution, wildcard exports, workspace
+formatting, and locked Cargo metadata pass. Hosted builds and review approval
+must still be checked independently before claiming merge readiness.
