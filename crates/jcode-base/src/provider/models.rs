@@ -12,7 +12,8 @@ pub(crate) use catalog::parse_anthropic_model_catalog;
 pub use catalog::{
     AnthropicModelCatalog, ModelCatalogHttpStatus, OpenAIModelCatalog,
     fetch_anthropic_model_catalog, fetch_anthropic_model_catalog_oauth,
-    fetch_openai_api_key_model_catalog, fetch_openai_context_limits, fetch_openai_model_catalog,
+    fetch_anthropic_model_catalog_with_headers, fetch_openai_api_key_model_catalog,
+    fetch_openai_context_limits, fetch_openai_model_catalog,
 };
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{

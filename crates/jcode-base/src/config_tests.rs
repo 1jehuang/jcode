@@ -1793,3 +1793,57 @@ fn removed_overscroll_status_key_still_loads_config() {
     assert!(config.display.centered);
     assert_eq!(config.display.usage_display, "used");
 }
+
+#[test]
+fn provider_header_overrides_parse_from_toml() {
+    let config: Config = toml::from_str(
+        r#"
+        [provider]
+        user_agent = "corp-agent/9.9"
+
+        [provider.headers]
+        x-tenant-id = "tenant-42"
+        x-route = "openai"
+        "#,
+    )
+    .expect("[provider] user_agent and headers should parse");
+    assert_eq!(
+        config.provider.user_agent.as_deref(),
+        Some("corp-agent/9.9")
+    );
+    assert_eq!(
+        config
+            .provider
+            .headers
+            .get("x-tenant-id")
+            .map(String::as_str),
+        Some("tenant-42")
+    );
+    assert_eq!(
+        config.provider.headers.get("x-route").map(String::as_str),
+        Some("openai")
+    );
+}
+
+#[test]
+fn named_provider_user_agent_and_headers_parse_from_toml() {
+    let config: Config = toml::from_str(
+        r#"
+        [providers.corp]
+        type = "openai-compatible"
+        base_url = "https://llm.corp.example/v1"
+
+        user_agent = "profile-agent/2.0"
+
+        [providers.corp.headers]
+        x-route = "profile"
+        "#,
+    )
+    .expect("named provider user_agent and headers should parse");
+    let profile = config.providers.get("corp").expect("profile should parse");
+    assert_eq!(profile.user_agent.as_deref(), Some("profile-agent/2.0"));
+    assert_eq!(
+        profile.headers.get("x-route").map(String::as_str),
+        Some("profile")
+    );
+}
