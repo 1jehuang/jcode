@@ -1084,7 +1084,14 @@ fn post_json_retries_transient_http_responses_against_local_server() {
                 }
             };
             stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
+                // The listener is nonblocking and macOS hands that flag to
+                // accepted sockets, making reads return WouldBlock while the
+                // client is between connect and write. Reads here want plain
+                // blocking-with-timeout behavior.
+                .set_nonblocking(false)
+                .unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
             let mut reader = std::io::BufReader::new(&stream);
             let mut content_length = 0;

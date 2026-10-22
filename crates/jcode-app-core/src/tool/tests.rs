@@ -718,6 +718,9 @@ async fn tool_descriptions_stay_under_token_cap() {
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
     // codemode documents its sandbox API; compile_remote a credit/consent notice.
+    // macos_computer_use is macOS-gated and keeps its live-machine safety policy.
+    // bash keeps the repository-search guidance (fixes #1804); the three pinned
+    // phrases alone exceed the cap, so shortening cannot satisfy it.
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -727,6 +730,8 @@ async fn tool_descriptions_stay_under_token_cap() {
         "applet",
         "codemode",
         "compile_remote",
+        "macos_computer_use",
+        "bash",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -790,6 +795,7 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // applet placement lists every shorthand so the model can pick a surface
     // without a round trip. desktop_selfdev action carries a safety warning:
     // killing the harness bridge by hand strands the calling session.
+    // macos_computer_use action/element document its live-machine safety surface.
     const EXEMPT: &[(&str, &str)] = &[
         (
             "todo",
@@ -797,6 +803,8 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         ),
         ("applet", "$.properties.placement"),
         ("desktop_selfdev", "$.properties.action"),
+        ("macos_computer_use", "$.properties.action"),
+        ("macos_computer_use", "$.properties.element"),
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);

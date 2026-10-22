@@ -192,7 +192,35 @@ fn non_model_pickers_still_reserve_inline_panel_height() {
 
 #[test]
 fn model_suggestions_full_frame_keeps_composer_position() {
+    // The composer row is layout-driven, and this test compares two frames
+    // against each other, so sibling pollution shifts it between renders:
+    //   1. JCODE_SSH_REMOTE flips the header between SSH mode (one row) and
+    //      local account-router mode (two rows). The ssh_inline_picker tests
+    //      set it process-wide, and without the env lock their window can land
+    //      between this test's two renders.
+    //   2. The header account inventory is loaded in the background from the
+    //      ambient JCODE_HOME, so real machine credentials can appear (or
+    //      not) between the two renders.
+    //   3. Leftover render state (flicker history, scrollbar hysteresis)
+    //      changes the notification row between renders.
+    // Hold the env lock before the render lock (env-then-render order) and run
+    // in local mode, pin the inventory empty, and reset the shared render
+    // state so both frames below compare the same world.
+    let _env = crate::storage::lock_test_env();
+    struct RestoreSshRemote(Option<std::ffi::OsString>);
+    impl Drop for RestoreSshRemote {
+        fn drop(&mut self) {
+            if let Some(host) = self.0.take() {
+                crate::env::set_var("JCODE_SSH_REMOTE", host);
+            }
+        }
+    }
+    let previous_ssh = std::env::var_os("JCODE_SSH_REMOTE");
+    crate::env::remove_var("JCODE_SSH_REMOTE");
+    let _restore_ssh = RestoreSshRemote(previous_ssh);
     let _lock = viewport_snapshot_test_lock();
+    let _inventory = crate::tui::ui::header::scoped_empty_inventory_for_tests();
+    crate::tui::ui::clear_test_render_state_for_tests();
     let mut state = model_picker_state();
     state.input = "/model ".to_string();
     state.display_messages = vec![DisplayMessage::user("hello".to_string())];

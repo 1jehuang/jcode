@@ -2812,8 +2812,15 @@ pub(super) fn handle_modal_key(
     if let Some(ref picker) = app.inline_interactive_state
         && !picker.preview
     {
-        app.handle_inline_interactive_key(code, modifiers)?;
-        return Ok(true);
+        // Ctrl+C/Ctrl+D keep their global meaning (interrupt the blocked
+        // turn, quit when idle) even while a non-preview picker is open:
+        // swallowing them here made the first press a dead key and forced
+        // the user to Esc out of the picker first.
+        if !(modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'd')))
+        {
+            app.handle_inline_interactive_key(code, modifiers)?;
+            return Ok(true);
+        }
     }
 
     app.handle_inline_interactive_preview_key(&code, modifiers)

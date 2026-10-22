@@ -323,8 +323,40 @@ fn global_events_reports_bounded_queue_overflow() {
     assert_eq!(error.code(), "event_buffer_overflow");
 }
 
+/// Saves `TMPDIR` on creation and puts the original value back on drop,
+/// including panic unwind. The private temp dir this guard points the env at
+/// is deleted when the test ends, so leaving it set would strand every later
+/// test in this process on a missing temp root.
+struct TmpdirGuard(Option<PathBuf>);
+
+impl TmpdirGuard {
+    fn set(private_temp: &std::path::Path) -> Self {
+        // Single-threaded test start: no other threads exist yet, so mutating
+        // the environment here cannot race a concurrent getenv.
+        let previous = std::env::var_os("TMPDIR").map(PathBuf::from);
+        unsafe { std::env::set_var("TMPDIR", private_temp) };
+        Self(previous)
+    }
+}
+
+impl Drop for TmpdirGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(original) => unsafe { std::env::set_var("TMPDIR", original) },
+            None => unsafe { std::env::remove_var("TMPDIR") },
+        }
+    }
+}
+
 #[test]
 fn missing_launch_binary_is_typed_and_cleans_up_its_temporary_home() {
+    // `launch_instance` creates its ephemeral home in std::env::temp_dir().
+    // Nextest runs test binaries concurrently, and unit tests in the jcode-sdk
+    // lib binary also create `jcode-sdk-instance-*` homes in the shared temp
+    // root, which races the before/after count below. Point TMPDIR at a private
+    // dir for this process so the count only sees this test's homes.
+    let private_temp = tempfile::tempdir().expect("private temp root");
+    let _tmpdir = TmpdirGuard::set(private_temp.path());
     let before = std::fs::read_dir(std::env::temp_dir())
         .expect("temp root")
         .flatten()
