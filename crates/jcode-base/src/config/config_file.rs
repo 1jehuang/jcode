@@ -812,6 +812,15 @@ impl Config {
         }
         Ok(())
     }
+
+    /// Update the persisted memory sidecar model and invalidate the config cache.
+    pub fn set_memory_model(model: &str) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.agents.memory_model = Some(model.to_string());
+        cfg.save()?;
+        crate::logging::info(&format!("Saved memory sidecar model: {}", model));
+        Ok(())
+    }
 }
 
 #[cfg(test)]

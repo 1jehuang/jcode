@@ -1,5 +1,34 @@
 use serde::{Deserialize, Serialize};
 
+pub const MIN_AUTO_RETRY_BASE_DELAY_SECS: u64 = 1;
+pub const MAX_AUTO_RETRY_BACKOFF_SECS: u64 = 300;
+
+pub fn clamp_auto_retry_base_delay_secs(value: u64) -> u64 {
+    value.max(MIN_AUTO_RETRY_BASE_DELAY_SECS)
+}
+
+fn default_auto_retry_base_delay_secs() -> u64 {
+    2
+}
+
+fn deserialize_auto_retry_base_delay_secs<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    Ok(clamp_auto_retry_base_delay_secs(value))
+}
+
+fn deserialize_optional_auto_retry_base_delay_secs<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<u64>::deserialize(deserializer)?;
+    Ok(value.map(clamp_auto_retry_base_delay_secs))
+}
+
 mod display;
 mod update_policy;
 pub use update_policy::{CrossProviderFailoverMode, UpdateChannel};
@@ -461,6 +490,23 @@ pub struct NamedProviderConfig {
     /// provider/model capability settings continue to work.
     #[serde(default, alias = "disable-reasoning-heuristics")]
     pub disable_reasoning_heuristics: bool,
+    /// Per-provider override for `[provider] auto_retry_base_delay_secs`.
+    /// When unset, the global value is used. Lets you be gentler on a shared
+    /// gateway that returns 429 without retry-after.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_auto_retry_base_delay_secs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_retry_base_delay_secs: Option<u64>,
+    /// Per-provider override for `[provider] auto_retry_enabled`.
+    /// When unset, the global value is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_retry_enabled: Option<bool>,
+    /// Per-provider override for `[provider] auto_retry_max_attempts`.
+    /// When unset, the global value is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_retry_max_attempts: Option<u8>,
 }
 
 impl Default for NamedProviderConfig {
@@ -484,6 +530,9 @@ impl Default for NamedProviderConfig {
             extra_body: None,
             supports_reasoning_effort: None,
             disable_reasoning_heuristics: false,
+            auto_retry_base_delay_secs: None,
+            auto_retry_enabled: None,
+            auto_retry_max_attempts: None,
         }
     }
 }
@@ -1285,6 +1334,23 @@ pub struct ProviderConfig {
     /// (OpenAI API), and WebSocket permessage-deflate (Responses sockets).
     /// Overridable via `JCODE_REQUEST_COMPRESSION`.
     pub request_compression: String,
+    /// Base delay (seconds) between auto-retry attempts after a remote request
+    /// error. The actual backoff is linear: `base * attempt_number`. Default: 2.
+    /// Overridable via `JCODE_AUTO_RETRY_BASE_DELAY_SECS`. Raise this for shared
+    /// gateways that return 429 without a `retry-after` header, so retries are
+    /// gentler instead of hammering the endpoint at 2s/4s/6s.
+    #[serde(
+        default = "default_auto_retry_base_delay_secs",
+        deserialize_with = "deserialize_auto_retry_base_delay_secs"
+    )]
+    pub auto_retry_base_delay_secs: u64,
+    /// Whether jcode should automatically retry transient remote failures.
+    /// Default: true. Overridable via `JCODE_AUTO_RETRY_ENABLED`.
+    pub auto_retry_enabled: bool,
+    /// Maximum auto-retry attempts before giving up and surfacing the error.
+    /// Default: 3. Overridable via `JCODE_AUTO_RETRY_MAX_ATTEMPTS`. Raise this
+    /// for shared services that need more time to free up capacity.
+    pub auto_retry_max_attempts: u8,
 }
 
 impl Default for ProviderConfig {
@@ -1310,6 +1376,9 @@ impl Default for ProviderConfig {
             max_retries: 8,
             retry_backoff_cap_secs: 30,
             request_compression: "auto".to_string(),
+            auto_retry_base_delay_secs: 2,
+            auto_retry_enabled: true,
+            auto_retry_max_attempts: 3,
         }
     }
 }

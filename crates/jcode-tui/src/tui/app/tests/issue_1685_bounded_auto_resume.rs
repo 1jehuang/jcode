@@ -69,7 +69,7 @@ fn issue_1685_stale_rate_limit_stops_after_bounded_resumes() {
     app.rate_limit_pending_message = Some(issue_1685_user_turn("continue the adapter", false, 0));
     let error = "429 Too Many Requests: rate limit exceeded, retry after 30 seconds";
 
-    for attempt in 1..=App::AUTO_RETRY_MAX_ATTEMPTS {
+    for attempt in 1..=app.effective_auto_retry_max_attempts() {
         app.last_submitted_input = Some("continue the adapter".to_string());
         app.is_processing = true;
         app.handle_server_event(
@@ -114,7 +114,7 @@ fn issue_1685_provider_dns_failure_has_bounded_resumes() {
     app.rate_limit_pending_message = Some(issue_1685_user_turn("continue the adapter", false, 0));
     let error = "Failed to send OpenAI-compatible chat request: client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known";
 
-    for attempt in 1..=App::AUTO_RETRY_MAX_ATTEMPTS {
+    for attempt in 1..=app.effective_auto_retry_max_attempts() {
         app.last_submitted_input = Some("continue the adapter".to_string());
         app.is_processing = true;
         app.handle_server_event(
