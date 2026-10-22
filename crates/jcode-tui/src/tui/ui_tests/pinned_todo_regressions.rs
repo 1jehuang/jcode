@@ -67,8 +67,12 @@ fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
 
 #[test]
 fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() {
-    let _render_lock = viewport_snapshot_test_lock();
+    // Env lock before render lock: with_pinned_todos_config takes the shared
+    // test-env lock, and sibling suites (idle-animation) acquire env-then-
+    // render. Taking render first here deadlocks against them when the test
+    // binary runs its threads in parallel.
     with_pinned_todos_config(|| {
+        let _render_lock = viewport_snapshot_test_lock();
         let _changelog = header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
         reset_prompt_viewport_state_for_test();
         struct RestoreDebug(bool);
@@ -129,8 +133,11 @@ fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() 
 
 #[test]
 fn pinned_todo_regression_hidden_message_has_zero_length_cache_boundary() {
-    let _render_lock = viewport_snapshot_test_lock();
+    // Same env-then-render order as the test above: render-then-env against
+    // the idle-animation suite's env-then-render deadlocks under parallel
+    // execution.
     with_pinned_todos_config(|| {
+        let _render_lock = viewport_snapshot_test_lock();
         let mut state = TestState {
             display_messages: vec![
                 DisplayMessage::user("Preserve the original prompt"),
