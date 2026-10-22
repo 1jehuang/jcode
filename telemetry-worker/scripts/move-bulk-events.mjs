@@ -20,8 +20,12 @@ const FAMILIES = {
 const PAGE = Number(process.env.PAGE || 200);
 const STATE = process.env.STATE || "move-bulk-state.json";
 const DRY = process.argv.includes("--dry-run");
-const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
-if (!TOKEN) throw new Error("CLOUDFLARE_API_TOKEN required");
+// Without CLOUDFLARE_API_TOKEN, reuse wrangler's OAuth login and re-read it on
+// every request so a long run survives `wrangler whoami` token refreshes.
+const WRANGLER_CFG = `${process.env.HOME}/.wrangler/config/default.toml`;
+const token = () => process.env.CLOUDFLARE_API_TOKEN
+  || readFileSync(WRANGLER_CFG, "utf8").match(/^oauth_token = "(.*)"/m)?.[1];
+if (!token()) throw new Error("CLOUDFLARE_API_TOKEN or wrangler login required");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -29,7 +33,7 @@ async function q(db, sql, params = []) {
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/d1/database/${db}/query`,
-      { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      { method: "POST", headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
         body: JSON.stringify({ sql, params }) },
     );
     const json = await res.json().catch(() => null);
@@ -71,7 +75,8 @@ async function insertChunked(db, table, rows, drop) {
 }
 
 const state = existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : {};
-for (const [event, detail] of Object.entries(FAMILIES)) {
+// Families are independent, so move them concurrently.
+await Promise.all(Object.entries(FAMILIES).map(async ([event, detail]) => {
   let cursor = state[event] ?? 0;
   let moved = 0;
   const started = Date.now();
@@ -108,5 +113,5 @@ for (const [event, detail] of Object.entries(FAMILIES)) {
     if (DRY || (process.env.MAX_PAGES && moved >= PAGE * Number(process.env.MAX_PAGES))) break;
   }
   console.log(`${event}: moved ${moved}`);
-}
+}));
 console.log("done");
