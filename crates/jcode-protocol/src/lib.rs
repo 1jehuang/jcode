@@ -39,7 +39,7 @@ mod comm_format;
 mod notifications;
 
 pub use comm_format::*;
-pub use jcode_session_types::TurnStopReason;
+pub use jcode_session_types::{RewindCheckpoint, RewindMode, RewindResult, TurnStopReason};
 pub use notifications::{FeatureToggle, NotificationType};
 
 use jcode_batch_types::BatchProgress;
@@ -637,6 +637,7 @@ impl Request {
             Request::Clear { id } => *id,
             Request::Rewind { id, .. } => *id,
             Request::RewindUndo { id } => *id,
+            Request::ListRewindCheckpoints { id } | Request::RewindCheckpoint { id, .. } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::DebugCommand { id, .. } => *id,

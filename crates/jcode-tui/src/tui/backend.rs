@@ -754,6 +754,34 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    pub async fn list_rewind_checkpoints(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ListRewindCheckpoints { id })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn rewind_checkpoint(
+        &mut self,
+        checkpoint_id: String,
+        mode: crate::protocol::RewindMode,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RewindCheckpoint {
+            id,
+            checkpoint_id,
+            mode,
+        })
+        .await?;
+        // Conversation restores redeliver History before their completion.
+        if mode.restores_conversation() {
+            self.has_loaded_history = false;
+        }
+        Ok(id)
+    }
+
     /// Ask the server to truncate the active session to a 1-based message index.
     pub async fn rewind(&mut self, message_index: usize) -> Result<u64> {
         let id = self.next_request_id;

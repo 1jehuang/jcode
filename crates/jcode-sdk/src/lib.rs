@@ -199,3 +199,4 @@ pub use jcode_harness_api::{
 pub use jcode_harness_api::{
     ModelUsage, RuntimeCommand, RuntimeCommandOutput, compare_model_usage,
 };
+pub use jcode_harness_api::{RewindCheckpoint, RewindMode, RewindResult};

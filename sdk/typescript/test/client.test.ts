@@ -37,6 +37,32 @@ test("handshake records server identity and capabilities", async () => {
   await server.close();
 });
 
+test("checkpoint helpers return typed results after streamed history", async () => {
+  const checkpoint = { id: "cp1", message_index: 0, prompt: "original", can_restore_files: true, changed_file_count: 1 };
+  const result = { mode: "conversation_only" as const, prompt: "original", removed_messages: 2, restored_files: 0 };
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "list_rewind_checkpoints") {
+        assert.equal(request.session_id, "s1");
+        send({ v: 1, reply_to: request.id, ev: "rewind_checkpoints", session_id: "s1", checkpoints: [checkpoint] });
+      } else if (request.req === "rewind_checkpoint") {
+        assert.equal(request.checkpoint_id, "cp1");
+        assert.equal(request.mode, "conversation_only");
+        send({ v: 1, ev: "history", session_id: "s1", messages: [] });
+        send({ v: 1, reply_to: request.id, ev: "rewind_complete", session_id: "s1", result });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    assert.deepEqual(await client.listRewindCheckpoints("s1"), [checkpoint]);
+    assert.deepEqual(await client.rewindCheckpoint("s1", "cp1", "conversation_only"), result);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
 test("replies are correlated by id even when out of order", async () => {
   const server = await startMockHarness({
     onRequest(request, send) {

@@ -8,7 +8,26 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 11;
+export const API_VERSION_MINOR = 12;
+
+export type RewindMode = "conversation_and_files" | "conversation_only" | "files_only";
+
+export interface RewindCheckpoint {
+  id: string;
+  message_index: number;
+  prompt: string;
+  timestamp?: string;
+  can_restore_files: boolean;
+  changed_file_count: number;
+}
+
+export interface RewindResult {
+  mode: RewindMode;
+  prompt: string;
+  removed_messages: number;
+  restored_files: number;
+  skipped_files?: string[];
+}
 
 export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
 
@@ -189,6 +208,8 @@ export type ApiRequest =
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
+  | { req: "list_rewind_checkpoints"; session_id: string }
+  | { req: "rewind_checkpoint"; session_id: string; checkpoint_id: string; mode: RewindMode }
   | {
       req: "permission_response";
       session_id: string;
@@ -287,6 +308,8 @@ export type ApiEvent =
   | { ev: "attached"; session: SessionInfo }
   | { ev: "session_forked"; session: SessionInfo }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
+  | { ev: "rewind_checkpoints"; session_id: string; checkpoints: RewindCheckpoint[] }
+  | { ev: "rewind_complete"; session_id: string; result: RewindResult }
   | { ev: "pong" }
   | { ev: "text_delta"; session_id: string; text: string; message_id?: string }
   | { ev: "text_done"; session_id: string; message_id?: string }
@@ -455,6 +478,8 @@ export type ServerFrame = { v: number; reply_to?: number } & UnknownApiEvent;
 
 /** Every event tag the SDK knows about, for drift checks and routing. */
 export const KNOWN_EVENT_KINDS = [
+  "rewind_checkpoints",
+  "rewind_complete",
   "runtime_command_result",
   "hello_ok",
   "ok",
@@ -507,6 +532,8 @@ export const KNOWN_EVENT_KINDS = [
 
 /** Every request tag the SDK can send. */
 export const KNOWN_REQUEST_KINDS = [
+  "list_rewind_checkpoints",
+  "rewind_checkpoint",
   "runtime_command",
   "hello",
   "list_sessions",

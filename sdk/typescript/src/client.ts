@@ -30,6 +30,9 @@ import {
   type ModelRouteInfo,
   type PermissionDecision,
   type RenderedImage,
+  type RewindCheckpoint,
+  type RewindMode,
+  type RewindResult,
   type RuntimeCommand,
   type ServerFrame,
   type SessionInfo,
@@ -757,6 +760,27 @@ export class JcodeClient extends EventEmitter {
 
   async rewind(sessionId: string, messageIndex: number): Promise<void> {
     await this.requestOk({ req: "rewind", session_id: sessionId, message_index: messageIndex });
+  }
+
+  async listRewindCheckpoints(sessionId: string): Promise<RewindCheckpoint[]> {
+    const frame = await this.expectReply(
+      { req: "list_rewind_checkpoints", session_id: sessionId },
+      "rewind_checkpoints",
+    );
+    return frame.checkpoints;
+  }
+
+  /** Conversation History is streamed before this completion reply. */
+  async rewindCheckpoint(
+    sessionId: string,
+    checkpointId: string,
+    mode: RewindMode,
+  ): Promise<RewindResult> {
+    const frame = await this.expectReply(
+      { req: "rewind_checkpoint", session_id: sessionId, checkpoint_id: checkpointId, mode },
+      "rewind_complete",
+    );
+    return frame.result;
   }
 
   async respondToPermission(

@@ -147,7 +147,12 @@ impl Tool for ApplyPatchTool {
                     }
                     let existed = resolved.exists();
                     let old = tokio::fs::read_to_string(&resolved).await.ok();
-                    tokio::fs::write(&resolved, contents).await?;
+                    crate::file_history::tracked_write(
+                        &ctx.session_id,
+                        &resolved,
+                        contents.as_bytes(),
+                    )
+                    .await?;
                     super::edit_stats::record(
                         &ctx,
                         old.as_deref().unwrap_or(""),
@@ -190,7 +195,10 @@ impl Tool for ApplyPatchTool {
                     }
                     let old = tokio::fs::read_to_string(&resolved).await.ok();
                     let old_contents = old.as_deref().unwrap_or("");
-                    if tokio::fs::remove_file(&resolved).await.is_ok() {
+                    if crate::file_history::tracked_remove(&ctx.session_id, &resolved)
+                        .await
+                        .is_ok()
+                    {
                         super::edit_stats::record(&ctx, old_contents, "", old.is_none()).await;
                         let diff = generate_diff_summary(old_contents, "");
                         publish_file_touch(
@@ -227,8 +235,16 @@ impl Tool for ApplyPatchTool {
                                 }
                                 let dest_existed = dest_resolved.exists();
                                 let dest_old = tokio::fs::read_to_string(&dest_resolved).await.ok();
-                                tokio::fs::write(&dest_resolved, &new_contents).await?;
-                                if tokio::fs::remove_file(&resolved).await.is_ok() {
+                                crate::file_history::tracked_write(
+                                    &ctx.session_id,
+                                    &dest_resolved,
+                                    new_contents.as_bytes(),
+                                )
+                                .await?;
+                                if crate::file_history::tracked_remove(&ctx.session_id, &resolved)
+                                    .await
+                                    .is_ok()
+                                {
                                     super::edit_stats::record(
                                         &ctx,
                                         &old_contents,
@@ -289,7 +305,12 @@ impl Tool for ApplyPatchTool {
                                     ));
                                 }
                             } else {
-                                tokio::fs::write(&resolved, &new_contents).await?;
+                                crate::file_history::tracked_write(
+                                    &ctx.session_id,
+                                    &resolved,
+                                    new_contents.as_bytes(),
+                                )
+                                .await?;
                                 super::edit_stats::record(
                                     &ctx,
                                     &old_contents,

@@ -151,6 +151,18 @@ pub enum Request {
     #[serde(rename = "rewind_undo")]
     RewindUndo { id: u64 },
 
+    /// List durable checkpoints taken before user prompts in this session.
+    #[serde(rename = "list_rewind_checkpoints")]
+    ListRewindCheckpoints { id: u64 },
+
+    /// Restore state before a user prompt, addressed by its stable checkpoint ID.
+    #[serde(rename = "rewind_checkpoint")]
+    RewindCheckpoint {
+        id: u64,
+        checkpoint_id: String,
+        mode: RewindMode,
+    },
+
     /// Health check
     #[serde(rename = "ping")]
     Ping { id: u64 },

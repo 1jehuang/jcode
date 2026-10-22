@@ -51,6 +51,18 @@ pub enum ApiEvent {
     /// Reply to `Ping`.
     Pong,
 
+    /// Reply to `ListRewindCheckpoints`.
+    RewindCheckpoints {
+        session_id: String,
+        checkpoints: Vec<crate::RewindCheckpoint>,
+    },
+
+    /// Reply after checkpoint restoration and any refreshed History event.
+    RewindComplete {
+        session_id: String,
+        result: crate::RewindResult,
+    },
+
     // --- Streaming events (carry session_id, not tied to a request id) ---
     /// Assistant text delta.
     TextDelta {

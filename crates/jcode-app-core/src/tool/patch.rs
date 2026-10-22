@@ -227,7 +227,7 @@ async fn apply_patch_with_diff(
         if path.exists() {
             let old = tokio::fs::read_to_string(path).await.ok();
             let old_content = old.as_deref().unwrap_or("");
-            tokio::fs::remove_file(path).await?;
+            crate::file_history::tracked_remove(&ctx.session_id, path).await?;
             super::edit_stats::record(ctx, old_content, "", old.is_none()).await;
             let diff = generate_diff(old_content, "", 1);
             return Ok(("deleted".to_string(), diff));
@@ -255,7 +255,7 @@ async fn apply_patch_with_diff(
             .map(|l| format!("{}\n", l))
             .collect();
 
-        tokio::fs::write(path, &content).await?;
+        crate::file_history::tracked_write(&ctx.session_id, path, content.as_bytes()).await?;
         super::edit_stats::record(ctx, "", &content, false).await;
         let diff = generate_diff("", &content, 1);
         return Ok(("created".to_string(), diff));
@@ -282,7 +282,7 @@ async fn apply_patch_with_diff(
     }
 
     let new_content = lines.join("\n") + "\n";
-    tokio::fs::write(path, &new_content).await?;
+    crate::file_history::tracked_write(&ctx.session_id, path, new_content.as_bytes()).await?;
     super::edit_stats::record(ctx, &old_content, &new_content, false).await;
 
     let diff = generate_diff(&old_content, &new_content, first_line);

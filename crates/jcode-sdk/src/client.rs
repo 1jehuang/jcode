@@ -1,9 +1,6 @@
 //! Connected harness client: handshake, reply correlation, event streaming.
 //!
-//! Mirrors the TypeScript SDK's `JcodeClient` capability for capability. The
-//! shapes differ where Rust and TS differ honestly (`Result` instead of
-//! throwing, channels instead of `EventEmitter`), but every method here has a
-//! counterpart there and vice versa; `parity.rs` enforces that.
+//! `parity.rs` enforces matching TypeScript capabilities with idiomatic Rust types.
 //!
 //! Blocking, thread-based, and `Clone`. A desktop app has a UI thread that
 //! must never block on a socket and a worker that reads it forever, so the
@@ -26,6 +23,7 @@ use std::sync::mpsc::{
 };
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+mod rewind;
 
 /// How a client reaches the harness.
 pub struct ConnectOptions {
@@ -1905,6 +1903,8 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | Models { session_id, .. }
         | Compacted { session_id, .. }
         | SessionRenamed { session_id, .. }
+        | RewindCheckpoints { session_id, .. }
+        | RewindComplete { session_id, .. }
         | History { session_id, .. } => Some(session_id.as_str()),
         Attached { session } => Some(session.session_id.as_str()),
         _ => None,

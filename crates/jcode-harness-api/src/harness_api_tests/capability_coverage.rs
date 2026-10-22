@@ -62,6 +62,8 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("ResumeAllSessions", ClientInternal),
     ("ResumeSession", ClientInternal),
     ("Rewind", Covered),
+    ("ListRewindCheckpoints", Covered),
+    ("RewindCheckpoint", Covered),
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
     // Per-window account pins, default account and failover toggle, like

@@ -6,12 +6,12 @@ use async_trait::async_trait;
 use futures::stream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
+#[path = "client_checkpoint_tests.rs"]
+mod checkpoint_tests;
 struct IsolatedRuntimeDir {
     _prev_runtime: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
 }
-
 struct IsolatedReloadRecoveryEnv {
     prev_home: Option<std::ffi::OsString>,
     prev_runtime: Option<std::ffi::OsString>,

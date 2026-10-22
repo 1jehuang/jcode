@@ -40,6 +40,7 @@ pub(super) async fn connection_presence_pong(
             "soft_interrupt_ids".into(),
             "runtime_commands".into(),
             "session_connections".into(),
+            "rewind_checkpoints".into(),
         ],
         user_connected_session_ids: Some(user_connected_session_ids),
     }

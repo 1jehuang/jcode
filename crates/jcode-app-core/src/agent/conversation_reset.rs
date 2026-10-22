@@ -1,6 +1,59 @@
 use super::*;
 
 impl Agent {
+    pub(super) fn checkpoint_user_input(
+        &mut self,
+        prompt: &str,
+        has_images: bool,
+        synthetic: bool,
+    ) -> Result<Option<String>> {
+        if !synthetic && (!prompt.trim().is_empty() || has_images) {
+            Ok(Some(self.session.create_rewind_checkpoint(prompt)?.id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(super) fn bind_user_checkpoint(&mut self, checkpoint_id: Option<String>) -> Result<()> {
+        if let Some(checkpoint_id) = checkpoint_id {
+            let input_id = self
+                .session
+                .messages
+                .last()
+                .expect("user input was appended")
+                .id
+                .clone();
+            self.session
+                .bind_rewind_checkpoint(&checkpoint_id, &input_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn rewind_checkpoints(&self) -> Result<Vec<jcode_session_types::RewindCheckpoint>, String> {
+        self.session.rewind_checkpoints()
+    }
+
+    pub async fn rewind_checkpoint(
+        &mut self,
+        checkpoint_id: &str,
+        mode: jcode_session_types::RewindMode,
+    ) -> Result<jcode_session_types::RewindResult, String> {
+        let previous_len = self.session.messages.len();
+        let result = self.session.rewind_checkpoint(checkpoint_id, mode).await;
+        if mode.restores_conversation() && self.session.messages.len() < previous_len {
+            self.provider_session_id = None;
+            self.reset_runtime_state_for_session_change();
+            // Unlike best-effort session startup seeding, rewind must never
+            // retain a summary containing the discarded future on contention.
+            let compaction = self.registry.compaction();
+            let mut manager = compaction.write().await;
+            manager.reset();
+            manager.set_budget(self.provider.input_token_limit());
+            manager.seed_restored_stored_messages_with(&self.session.messages);
+        }
+        result
+    }
+
     /// Clear conversation history
     pub fn clear(&mut self) {
         let preserve_canary = self.session.is_canary;

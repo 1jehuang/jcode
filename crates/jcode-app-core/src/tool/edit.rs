@@ -213,7 +213,7 @@ impl Tool for EditTool {
         let content = tokio::fs::read_to_string(&path).await?;
         let (new_content, applied) = apply_edits(&content, &edits, &params.file_path)?;
 
-        tokio::fs::write(&path, &new_content).await?;
+        crate::file_history::tracked_write(&ctx.session_id, &path, new_content.as_bytes()).await?;
         super::edit_stats::record(&ctx, &content, &new_content, false).await;
 
         let intent = params

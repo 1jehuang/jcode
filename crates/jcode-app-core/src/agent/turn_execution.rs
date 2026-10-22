@@ -22,6 +22,7 @@ impl Agent {
 
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
+        let rewind_checkpoint = self.checkpoint_user_input(user_message, false, false)?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         let input_id = self.add_message(
@@ -31,6 +32,7 @@ impl Agent {
                 cache_control: None,
             }],
         );
+        self.bind_user_checkpoint(rewind_checkpoint)?;
         if !user_message.trim().is_empty() {
             self.begin_model_usage_turn(&input_id);
         }
@@ -58,6 +60,8 @@ impl Agent {
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
+        let rewind_checkpoint =
+            self.checkpoint_user_input(user_message, false, display_role.is_some())?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         let input_id = self.add_message_with_display_role(
@@ -68,6 +72,7 @@ impl Agent {
             }],
             display_role,
         );
+        self.bind_user_checkpoint(rewind_checkpoint)?;
         if !user_message.trim().is_empty() {
             self.begin_model_usage_turn(&input_id);
         }
@@ -104,6 +109,8 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
+        let rewind_checkpoint =
+            self.checkpoint_user_input(user_message, !images.is_empty(), display_role.is_some())?;
         // Inject any pending notifications before the user message
         let alerts = self.take_alerts();
         if !alerts.is_empty() {
@@ -149,6 +156,7 @@ impl Agent {
             display_role,
             continues_turn,
         )?;
+        self.bind_user_checkpoint(rewind_checkpoint)?;
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
@@ -185,7 +193,9 @@ impl Agent {
         user_message: &str,
         images: Vec<(String, String)>,
     ) -> Result<()> {
-        self.append_user_context_message_with_display_role(user_message, images, None, false)
+        let checkpoint = self.checkpoint_user_input(user_message, !images.is_empty(), false)?;
+        self.append_user_context_message_with_display_role(user_message, images, None, false)?;
+        self.bind_user_checkpoint(checkpoint)
     }
 
     fn append_user_context_message_with_display_role(

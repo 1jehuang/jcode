@@ -50,6 +50,8 @@ const CAPABILITIES: &[Capability] = &[
     cap("peek_session", "peekSession"),
     cap("clear", "clear"),
     cap("rewind", "rewind"),
+    cap("list_rewind_checkpoints", "listRewindCheckpoints"),
+    cap("rewind_checkpoint", "rewindCheckpoint"),
     cap("rewind_undo", "rewindUndo"),
     cap("respond_to_permission", "respondToPermission"),
     cap("list_models", "listModels"),
@@ -209,7 +211,7 @@ const TS_ONLY: &[(&str, &str)] = &[("close", "Rust closes through Drop")];
 
 fn rust_client_source() -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    ["client.rs", "structured.rs"]
+    ["client.rs", "client/rewind.rs", "structured.rs"]
         .into_iter()
         .map(|file| {
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|error| {
