@@ -3397,9 +3397,7 @@ dependencies = [
  "dirs",
  "flate2",
  "futures",
- "glob",
  "global-hotkey",
- "ignore",
  "jcode-agent-runtime",
  "jcode-ambient-types",
  "jcode-applet-types",
@@ -3791,6 +3789,7 @@ name = "jcode-plan"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

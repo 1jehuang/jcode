@@ -163,12 +163,10 @@ pub fn resolve_choice(
     // Mirror the source's `_fallback`: the fallback still resolves its
     // anon id (empty when the label was never anonymized), so downstream
     // records keep the same shape as a real choice.
-    let anon_of = |label: &str| {
-        id_map
-            .iter()
-            .find(|(_, l)| l.as_str() == label)
-            .map(|(a, _)| a.clone())
-            .unwrap_or_default()
+    let anon_of = |label: &str| match id_map.iter().find(|(_, l)| l.as_str() == label) {
+        Some((anon, _)) => anon.clone(),
+        // Unmapped fallback labels intentionally have no anonymous id.
+        None => String::new(),
     };
     let mut bases: Vec<&String> = pool.keys().filter(|l| is_base(l.as_str())).collect();
     bases.sort();
@@ -213,12 +211,11 @@ pub fn trivial_selection(
         ));
     }
     let (pool, _, dropped) = render_pool(candidates, artifacts);
-    if pool.is_empty() {
+    let Some(label) = pool.keys().next().cloned() else {
         return Err(format!(
             "no candidate produced an artifact (finals-only pool has no base fallback; dropped: {dropped:?})"
         ));
-    }
-    let label = pool.keys().next().cloned().unwrap_or_default();
+    };
     Ok(("A".to_string(), label))
 }
 
