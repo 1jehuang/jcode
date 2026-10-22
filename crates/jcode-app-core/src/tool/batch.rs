@@ -9,34 +9,8 @@ use std::collections::HashMap;
 
 const MAX_PARALLEL: usize = 10;
 
-const BATCH_DESCRIPTION: &str = r#"Run independent tool calls in parallel instead of making them sequentially. Put each tool's input inside `parameters`, separate from the batch routing field `tool`. This is essential for mcp_call and other tools whose input also contains `tool`, `name`, or `arguments`. Flat inputs remain supported for compatibility. Example:
-{
-  "intent": "Inspect the relevant files in parallel",
-  "tool_calls": [
-    {
-      "tool": "read",
-      "intent": "Read the configuration",
-      "parameters": {
-        "file_path": "src/config.rs",
-        "start_line": 1,
-        "limit": 200
-      }
-    },
-    {
-      "tool": "agentgrep",
-      "intent": "Find configuration usage",
-      "parameters": {
-        "query": "Config",
-        "path": "src",
-        "glob": "**/*.rs",
-        "max_files": 20,
-        "max_regions": 20
-      }
-    }
-  ]
-}
-For an MCP call, keep the selectors at different levels:
-{"tool_calls":[{"tool":"mcp_call","intent":"Call the discovered MCP tool","parameters":{"server":"example","tool":"raw_tool_name","arguments":{}}}]}"#;
+const BATCH_DESCRIPTION: &str = r#"Run independent tool calls in parallel (1-10). Use tool, intent, parameters: {"tool":"mcp_call","parameters":{"tool":"raw","arguments":{}}}. Flat inputs work. No dependent calls or nested batch."#;
+
 pub(crate) fn generic_batch_schema() -> Value {
     json!({
         "type": "object",

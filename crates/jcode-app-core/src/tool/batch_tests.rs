@@ -185,11 +185,12 @@ async fn batch_fails_cleanly_after_registry_tool_map_is_dropped() {
 }
 
 #[test]
-fn description_is_compact_and_explains_flat_parallel_calls() {
+fn description_is_compact_and_explains_collision_free_parallel_calls() {
     assert!(BATCH_DESCRIPTION.contains("Run independent tool calls in parallel"));
-    assert!(BATCH_DESCRIPTION.contains("sibling fields"));
-    assert!(BATCH_DESCRIPTION.contains("tool, intent"));
-    assert!(BATCH_DESCRIPTION.contains("Do not batch dependent calls or nest batch"));
+    assert!(BATCH_DESCRIPTION.contains("tool, intent, parameters"));
+    assert!(BATCH_DESCRIPTION.contains(r#""parameters":{"tool":"raw","arguments":{}}"#));
+    assert!(BATCH_DESCRIPTION.contains("Flat inputs work"));
+    assert!(BATCH_DESCRIPTION.contains("No dependent calls or nested batch"));
     assert!(BATCH_DESCRIPTION.len() <= 200);
 }
 
