@@ -174,9 +174,9 @@ fn telemetry_settings_lines(
         ))
         .alignment(align),
         Line::from(""),
-        Line::from(lozenge_pill_spans("Continue", page.cursor == 0)).alignment(align),
-        Line::from(""),
     ];
+    lines.push(Line::from(lozenge_pill_spans("Continue", page.cursor == 0)).alignment(align));
+    lines.push(Line::from(""));
 
     // Same Yes/No two-column layout as the "Import less" page: a header row,
     // then one row per category with a filled dot under the chosen column and

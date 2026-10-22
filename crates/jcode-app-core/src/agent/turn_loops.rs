@@ -751,6 +751,7 @@ impl Agent {
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
                             stdin_request_tx: self.stdin_request_tx.clone(),
+                            decision_request_tx: self.decision_request_tx.clone(),
                             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
@@ -875,15 +876,6 @@ impl Agent {
                     usage_cache_read,
                     usage_cache_creation,
                 );
-                let output = usage_output.unwrap_or(0);
-                let total = self
-                    .effective_context_tokens_from_usage(
-                        usage_input.unwrap_or(0),
-                        usage_cache_read,
-                        usage_cache_creation,
-                    )
-                    .saturating_add(output);
-                crate::session_metrics::record_token_usage(&self.session.id, total, output);
             }
 
             if print_output
@@ -1208,6 +1200,7 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
                     stdin_request_tx: self.stdin_request_tx.clone(),
+                    decision_request_tx: self.decision_request_tx.clone(),
                     graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                     execution_mode: ToolExecutionMode::AgentTurn,
                 };

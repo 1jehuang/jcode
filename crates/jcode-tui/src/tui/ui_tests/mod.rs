@@ -135,6 +135,7 @@ struct TestState {
     remote_startup_phase_active: bool,
     inline_view_state: Option<crate::tui::InlineViewState>,
     inline_interactive_state: Option<crate::tui::InlineInteractiveState>,
+    pending_decision_state: Option<crate::tui::app::PendingDecision>,
     changelog_scroll: Option<usize>,
     help_scroll: Option<usize>,
     chat_native_scrollbar: bool,
@@ -444,6 +445,9 @@ impl crate::tui::TuiState for TestState {
     fn inline_view_state(&self) -> Option<&crate::tui::InlineViewState> {
         self.inline_view_state.as_ref()
     }
+    fn pending_decision(&self) -> Option<&crate::tui::app::PendingDecision> {
+        self.pending_decision_state.as_ref()
+    }
     fn changelog_scroll(&self) -> Option<usize> {
         self.changelog_scroll
     }
@@ -525,6 +529,8 @@ mod basic;
 mod diagrams;
 #[path = "expanded_diff.rs"]
 mod expanded_diff;
+#[path = "inline_decision.rs"]
+mod inline_decision;
 #[path = "inline_picker.rs"]
 mod inline_picker;
 #[path = "onboarding.rs"]

@@ -20,39 +20,24 @@ const FAMILIES = {
 const PAGE = Number(process.env.PAGE || 200);
 const STATE = process.env.STATE || "move-bulk-state.json";
 const DRY = process.argv.includes("--dry-run");
-// Without CLOUDFLARE_API_TOKEN, reuse wrangler's OAuth login and re-read it on
-// every request so a long run survives `wrangler whoami` token refreshes.
-const WRANGLER_CFG = `${process.env.HOME}/.wrangler/config/default.toml`;
-const token = () => process.env.CLOUDFLARE_API_TOKEN
-  || readFileSync(WRANGLER_CFG, "utf8").match(/^oauth_token = "(.*)"/m)?.[1];
-if (!token()) throw new Error("CLOUDFLARE_API_TOKEN or wrangler login required");
+const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+if (!TOKEN) throw new Error("CLOUDFLARE_API_TOKEN required");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function q(db, sql, params = []) {
   for (let attempt = 0; ; attempt++) {
-    let res;
-    try {
-      res = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/d1/database/${db}/query`,
-        { method: "POST", headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ sql, params }), signal: AbortSignal.timeout(120_000) },
-      );
-    } catch (e) {
-      // Network failures (timeouts, resets) are transient: back off and retry.
-      if (attempt >= 20) throw e;
-      console.error(`network error, retrying: ${e.cause?.code || e.message}`);
-      await sleep(Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)));
-      continue;
-    }
+    const res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/d1/database/${db}/query`,
+      { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ sql, params }) },
+    );
     const json = await res.json().catch(() => null);
     if (process.env.DEBUG) console.error(`${db.slice(0, 4)} ${Math.round(json?.result?.at(-1)?.meta?.duration ?? -1)}ms ok=${json?.success} ${sql.slice(0, 60).replace(/\s+/g, " ")} ${json?.success ? "" : JSON.stringify(json?.errors)}`);
     if (json?.success) return json.result.at(-1).results ?? [];
     const msg = JSON.stringify(json?.errors ?? res.status);
     // Only overload/transient errors are worth retrying.
-    // 7500 is usually a persistent statement problem, but D1 also returns it
-    // transiently under load, so give it a few backed-off retries first.
-    if (json?.errors?.some((e) => e.code === 7500) && attempt >= 5) throw new Error(msg);
+    if (json?.errors?.some((e) => e.code === 7500)) throw new Error(msg);
     if (attempt >= 20) throw new Error(msg);
     await sleep(Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)));
   }
@@ -86,8 +71,7 @@ async function insertChunked(db, table, rows, drop) {
 }
 
 const state = existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : {};
-// Families are independent, so move them concurrently.
-await Promise.all(Object.entries(FAMILIES).map(async ([event, detail]) => {
+for (const [event, detail] of Object.entries(FAMILIES)) {
   let cursor = state[event] ?? 0;
   let moved = 0;
   const started = Date.now();
@@ -124,5 +108,5 @@ await Promise.all(Object.entries(FAMILIES).map(async ([event, detail]) => {
     if (DRY || (process.env.MAX_PAGES && moved >= PAGE * Number(process.env.MAX_PAGES))) break;
   }
   console.log(`${event}: moved ${moved}`);
-}));
+}
 console.log("done");

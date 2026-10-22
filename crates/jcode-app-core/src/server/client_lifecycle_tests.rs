@@ -852,6 +852,7 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         supports_pdf_panels: false,
         supports_user_response: false,
         supports_server_failover: false,
+        supports_decisions: false,
         id: 1,
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
@@ -2303,3 +2304,6 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool) {
 
 #[path = "client_lifecycle_tests/system_prompt.rs"]
 mod system_prompt;
+
+#[path = "client_lifecycle_tests/decisions.rs"]
+mod decisions;

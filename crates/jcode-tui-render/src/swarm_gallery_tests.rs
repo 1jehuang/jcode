@@ -16,9 +16,6 @@ fn member(id: &str, status: &str, role: Option<&str>, body: &[&str]) -> GalleryM
         auth_method: None,
         effort: None,
         elapsed_secs: None,
-        context_tokens: None,
-        context_limit: None,
-        output_tokens: None,
     }
 }
 
