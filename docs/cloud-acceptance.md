@@ -18,6 +18,11 @@ A workflow definition or successful build alone is not an acceptance result.
 The agent and TUI use `scripts/fake_openai_server.py`, a deterministic local
 OpenAI-compatible provider. It records requests and can hold/release turns.
 Provider context assertions test the handoff protocol, not model intelligence.
+The TUI submits real terminal keystrokes. It reads the client's debug `state`
+endpoint only to observe idle boundaries, never to seed or mutate client state.
+An old answer still present in terminal history cannot satisfy a new destination
+turn: the harness requires a fresh agent HTTP request with the cloud continuation.
+Connectivity probes and background memory extraction do not count as agent turns.
 
 The TUI scenarios are:
 
@@ -32,8 +37,10 @@ The TUI scenarios are:
   ownership intact, then a retry moves successfully.
 - `transfer_outage_retry`: an SSH failure after preparation preserves local
   ownership and epoch, then a retry moves successfully.
+- `destination_binary_retry`: missing and protocol-incompatible destination
+  binaries fail before ownership changes, then a corrected destination works.
 
-With the current six TUI scenarios, a full `--repeat 2` invocation records 18
+With the current seven TUI scenarios, a full `--repeat 2` invocation records 20
 stage results. Credential test cases are grouped into one stage per repetition.
 The runner continues after a failed stage and returns nonzero if any stage fails.
 Missing tools or failed namespace/bubblewrap probes are **failures, never skips**.
@@ -59,6 +66,16 @@ intended to access your real accounts, shared daemon or managed VM. Never add
 production tokens, account files or SSH keys to the fixtures or workflow.
 
 ## Manual use and focused diagnosis
+
+Check the test machinery itself with:
+
+```bash
+python3 tests/test_cloud_acceptance_harness.py
+```
+
+These fast contracts check failure propagation, timeouts, report generation,
+provider gates, and fixture-only process cleanup. They are not a substitute for
+running the actual acceptance matrix below.
 
 Use an already-built executable, with an absolute path recommended:
 
