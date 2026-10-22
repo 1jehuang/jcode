@@ -182,25 +182,22 @@ fn script_refs(src: &str) -> Vec<String> {
         // Runs of whitespace between the interpreter and the path are fine.
         let tail: &str = raw_tail.trim_start_matches([' ', '\t']);
         // Quoted path: `"scripts/x.py"` / `'scripts/x.py'`.
-        let token: String =
+        let (token, consumed) =
             if let Some(quoted) = tail.strip_prefix('"').or_else(|| tail.strip_prefix('\'')) {
                 let quote = tail.chars().next().unwrap_or('"');
-                quoted.chars().take_while(|&c| c != quote).collect()
+                let end = quoted.find(quote).unwrap_or(quoted.len());
+                let consumed = 1 + end + usize::from(end < quoted.len());
+                (&quoted[..end], consumed)
             } else {
-                tail.chars()
-                    .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\'' && *c != '`')
-                    .collect()
+                let end = tail
+                    .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '`')
+                    .unwrap_or(tail.len());
+                (&tail[..end], end)
             };
-        // Sentence punctuation and wrapping brackets are not part of the path.
-        let token = token.trim_matches(|c| {
-            c == '('
-                || c == ')'
-                || c == ','
-                || c == ';'
-                || c == '.'
-                || c == ':'
-                || c == '!'
-                || c == '?'
+        // Preserve leading dots in Codex paths. Only trailing punctuation
+        // and opening wrapping brackets are prose, not part of the path.
+        let token = token.trim_start_matches('(').trim_end_matches(|c| {
+            c == ')' || c == ',' || c == ';' || c == '.' || c == ':' || c == '!' || c == '?'
         });
         if token.contains("scripts/") && token.ends_with(".py") {
             let t = token
@@ -212,9 +209,11 @@ fn script_refs(src: &str) -> Vec<String> {
             }
         }
         // `tail` extends to the end of `src` (only front-trimmed), so its
-        // start index is `src.len() - tail.len()`; advance past the token.
-        // The start is always ahead of `base`, so progress is guaranteed.
-        cursor = (src.len() - tail.len() + token.len()).max(base + 1);
+        // start index is `src.len() - tail.len()`. Advance by the original
+        // bytes consumed, including quotes and punctuation, not the cleaned
+        // path length. Every resulting cursor is a UTF-8 boundary, and the
+        // tail starts beyond `base`, guaranteeing progress even if empty.
+        cursor = src.len() - tail.len() + consumed;
     }
     out
 }
@@ -618,8 +617,8 @@ pub fn validate(
                 let mut resolved = reference.clone();
                 if !have.contains(resolved.as_str()) && rel.starts_with(&skill_prefix) {
                     let invoking = rel[skill_prefix.len()..].split('/').next().unwrap_or("");
-                    let skill_relative = reference.strip_prefix(&skill_prefix).is_none()
-                        || reference.starts_with(&format!("{skill_prefix}{invoking}/"));
+                    let skill_relative = reference == format!("scripts/{base}")
+                        || reference == format!("{invoking}/scripts/{base}");
                     if skill_relative {
                         let candidate = format!("{skill_prefix}{invoking}/scripts/{base}");
                         if have.contains(candidate.as_str()) {
@@ -1030,6 +1029,74 @@ mod tests {
                 .unwrap_err()
                 .contains("needs a `description:`")
         );
+    }
+
+    #[test]
+    fn review_regression_unicode_cursor() {
+        for surface in [&OPENCODE_SURFACE, &CODEX_SURFACE] {
+            for argument in ["\"中\"", "'😀'", "(中)", "中", "\"\"", ""] {
+                let prose = format!("python {argument} then python scripts/missing.py.");
+                let t = tree(&[(surface.always_on[0], &prose)]);
+                let err = validate(surface, &t, false).unwrap_err();
+                assert!(err.contains("invokes `scripts/missing.py`"), "{err}");
+            }
+            for prose in ["python \"中\"", "python \"中", "python '😀", "python (中)"] {
+                let t = tree(&[(surface.always_on[0], prose)]);
+                validate(surface, &t, false).expect("Unicode argument must not panic");
+            }
+        }
+    }
+
+    #[test]
+    fn review_regression_codex_explicit_helper() {
+        for command in [
+            "python .agents/skills/s/scripts/helper.py",
+            "python './.agents/skills/s/scripts/helper.py'",
+            "python \".agents/skills/s/scripts/helper.py\".",
+        ] {
+            let mut t = tree(&[
+                ("AGENTS.md", command),
+                (".agents/skills/s/SKILL.md", "description: s skill"),
+                (".agents/skills/s/scripts/helper.py", "print(1)"),
+            ]);
+            validate(&CODEX_SURFACE, &t, false).expect("shipped Codex helper passes");
+            t.remove(".agents/skills/s/scripts/helper.py");
+            let err = validate(&CODEX_SURFACE, &t, false).unwrap_err();
+            assert!(
+                err.contains("invokes `.agents/skills/s/scripts/helper.py`"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_regression_helper_fallback_is_exact() {
+        for surface in [&OPENCODE_SURFACE, &CODEX_SURFACE] {
+            for reference in [
+                format!("{}/b/scripts/helper.py", surface.skill_dir),
+                "b/scripts/helper.py".to_string(),
+                "other/scripts/helper.py".to_string(),
+                "scripts/nested/helper.py".to_string(),
+            ] {
+                let skill = format!("{}/a/SKILL.md", surface.skill_dir);
+                let helper = format!("{}/a/scripts/helper.py", surface.skill_dir);
+                let prose = format!("name: a\ndescription: review\npython {reference}");
+                let mut t = tree(&[
+                    (surface.always_on[0], "load a"),
+                    (&skill, &prose),
+                    (&helper, "print(1)"),
+                ]);
+                let err = validate(surface, &t, false).unwrap_err();
+                assert!(err.contains(&format!("invokes `{reference}`")), "{err}");
+                for relative in ["scripts/helper.py", "a/scripts/helper.py"] {
+                    t.insert(
+                        skill.clone(),
+                        format!("name: a\ndescription: review\npython {relative}"),
+                    );
+                    validate(surface, &t, false).expect("supported skill-relative helper passes");
+                }
+            }
+        }
     }
 
     #[test]
