@@ -2541,7 +2541,7 @@ impl OpenRouterProvider {
     fn get_api_key() -> Option<String> {
         let key_name = configured_api_key_name();
         let env_file = configured_env_file_name();
-        load_api_key_from_env_or_config(&key_name, &env_file)
+        jcode_base::provider_catalog::load_runtime_api_key(&key_name, &env_file)
     }
 
     /// Replace the stale built-in placeholder (`DEFAULT_MODEL`) with the newest

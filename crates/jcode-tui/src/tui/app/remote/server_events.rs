@@ -2564,6 +2564,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     }
                 }
                 app.remote_swarm_members = members;
+                app.remote_swarm_members_received_at = Some(std::time::Instant::now());
                 persist_swarm_status_snapshot(app);
             } else {
                 app.remote_swarm_members.clear();

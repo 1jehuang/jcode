@@ -603,7 +603,7 @@ fn publish_in(
         return Err(TransferError::Io);
     }
     let staged = Staged {
-        directory: &directory,
+        directory,
         name: temporary,
     };
     let mut file = unsafe { File::from_raw_fd(fd) };
@@ -771,10 +771,11 @@ fn cloud_store(
         return Err(TransferError::InvalidStore);
     }
     let (accounts, active, _, _) = cloud_keys(provider);
-    if let Some(selection) = value.get(active) {
-        if !selection.is_null() && !selection.as_str().is_some_and(valid_cloud_label) {
-            return Err(TransferError::InvalidStore);
-        }
+    if let Some(selection) = value.get(active)
+        && !selection.is_null()
+        && !selection.as_str().is_some_and(valid_cloud_label)
+    {
+        return Err(TransferError::InvalidStore);
     }
     if let Some(entries) = value.get(accounts) {
         let entries = entries.as_array().ok_or(TransferError::InvalidStore)?;

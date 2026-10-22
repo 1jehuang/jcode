@@ -73,12 +73,14 @@ fn parse(
     if fields.len() != 7 || fields[0] != b"jcode-machine-v1" || !fields[6].is_empty() {
         return None;
     }
-    let mut stats = CloudMachineStats::default();
-    stats.hostname = std::str::from_utf8(fields[1])
-        .ok()
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
-        .map(str::to_owned);
+    let mut stats = CloudMachineStats {
+        hostname: std::str::from_utf8(fields[1])
+            .ok()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+            .map(str::to_owned),
+        ..Default::default()
+    };
     let mut ticks = None;
     if let Ok(text) = std::str::from_utf8(fields[2]) {
         let mut count = 0u32;
