@@ -471,6 +471,18 @@ pub const CELERIS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const GMI_CLOUD_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "gmi-cloud",
+    display_name: "GMI Cloud",
+    api_base: "https://api.gmi-serving.com/v1",
+    api_key_env: "GMI_API_KEY",
+    env_file: "gmi-cloud.env",
+    setup_url: "https://console.gmicloud.ai",
+    // GMI's catalog changes often; pick from the live /models list.
+    default_model: None,
+    requires_api_key: true,
+};
+
 pub const VENICE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "venice",
     display_name: "Venice AI",
@@ -509,7 +521,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 46] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -551,6 +563,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     MUSE_SUBSCRIPTION_PROFILE,
     CELERIS_PROFILE,
     VENICE_PROFILE,
+    GMI_CLOUD_PROFILE,
     YOLO_AUTO_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -1264,6 +1277,19 @@ pub const VENICE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
 };
 
+pub const GMI_CLOUD_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "gmi-cloud",
+    display_name: "GMI Cloud",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["gmi", "gmicloud", "gmicloud.ai"],
+    menu_detail: "OpenAI-compatible GPU cloud inference",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(GMI_CLOUD_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
+};
+
 pub const YOLO_AUTO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "yolo-auto",
     display_name: "Yolo-Auto",
@@ -1290,7 +1316,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 58] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1338,6 +1364,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
     CELERIS_LOGIN_PROVIDER,
     VENICE_LOGIN_PROVIDER,
+    GMI_CLOUD_LOGIN_PROVIDER,
     YOLO_AUTO_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,

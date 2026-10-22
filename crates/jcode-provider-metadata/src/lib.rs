@@ -706,6 +706,10 @@ mod tests {
             Some("fireworks")
         );
         assert_eq!(
+            resolve_login_provider("gmicloud.ai").map(|provider| provider.id),
+            Some("gmi-cloud")
+        );
+        assert_eq!(
             resolve_login_provider("minimax-ai").map(|provider| provider.id),
             Some("minimax")
         );
