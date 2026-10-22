@@ -548,7 +548,6 @@ impl App {
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
-            remote_swarm_members_received_at: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -806,6 +805,12 @@ impl App {
             let provider_clone = Arc::clone(&provider);
             handle.spawn(async move {
                 let _ = provider_clone.prefetch_models().await;
+                // Standalone providers (e.g. Cursor ACP) discover their model
+                // catalog asynchronously via prefetch. The `/model` picker
+                // opened before prefetch completes shows a placeholder; publish
+                // ModelsUpdated so the picker cache invalidates and the next
+                // `/model` open reads the populated catalog.
+                crate::bus::Bus::global().publish_models_updated();
             });
         }
 
@@ -1034,7 +1039,6 @@ impl App {
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
-            remote_swarm_members_received_at: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,

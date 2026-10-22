@@ -348,6 +348,7 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
         "github copilot" | "copilot" => "copilot",
         "openrouter" => "openrouter",
         "cursor" => "cursor",
+        "cursor acp" | "cursor-acp" => "cursor-acp",
         "gemini" => "gemini",
         "antigravity" => "antigravity",
         "" => return None,

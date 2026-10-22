@@ -1564,6 +1564,18 @@ impl EventMapper {
                 "sessionUpdate": "session_info_update",
                 "title": display_title,
             })],
+            ServerEvent::TokenUsage {
+                input,
+                output,
+                cache_read_input,
+                cache_creation_input,
+            } => vec![json!({
+                "sessionUpdate": "usage_update",
+                "inputTokens": input,
+                "outputTokens": output,
+                "cacheReadInputTokens": cache_read_input,
+                "cacheCreationInputTokens": cache_creation_input,
+            })],
             ServerEvent::McpStatus { servers } if self.profile.is_extended() => vec![json!({
                 "sessionUpdate": "agent_message_chunk",
                 "content": {
@@ -2051,6 +2063,39 @@ mod tests {
         });
         assert_eq!(done[0]["status"], "completed");
         assert_eq!(done[0]["content"][0]["content"]["text"], "ok");
+    }
+
+    #[test]
+    fn event_mapper_maps_token_usage_to_usage_update() {
+        let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+        let updates = mapper.map_event(ServerEvent::TokenUsage {
+            input: 1200,
+            output: 340,
+            cache_read_input: Some(800),
+            cache_creation_input: Some(200),
+        });
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["sessionUpdate"], "usage_update");
+        assert_eq!(updates[0]["inputTokens"], 1200);
+        assert_eq!(updates[0]["outputTokens"], 340);
+        assert_eq!(updates[0]["cacheReadInputTokens"], 800);
+        assert_eq!(updates[0]["cacheCreationInputTokens"], 200);
+    }
+
+    #[test]
+    fn event_mapper_maps_token_usage_without_cache_fields() {
+        let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+        let updates = mapper.map_event(ServerEvent::TokenUsage {
+            input: 100,
+            output: 50,
+            cache_read_input: None,
+            cache_creation_input: None,
+        });
+        assert_eq!(updates[0]["sessionUpdate"], "usage_update");
+        assert_eq!(updates[0]["inputTokens"], 100);
+        assert_eq!(updates[0]["outputTokens"], 50);
+        assert!(updates[0]["cacheReadInputTokens"].is_null());
+        assert!(updates[0]["cacheCreationInputTokens"].is_null());
     }
 
     #[test]

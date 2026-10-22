@@ -65,7 +65,7 @@ SERVER COMMANDS (server: prefix or no prefix):
   create_session:selfdev:<path> - Create headless self-dev session
   destroy_session:<id>     - Destroy a session
   set_model:<model>        - Switch model (may change provider)
-  set_provider:<name>      - Switch provider (claude/openai/openrouter/cursor/copilot/gemini/antigravity)
+  set_provider:<name>      - Switch provider (claude/openai/openrouter/cursor/cursor-acp/copilot/gemini/antigravity)
   trigger_extraction       - Force end-of-session memory extraction
   available_models         - List all available models
   reload                   - Trigger server reload with current binary

@@ -39,8 +39,6 @@ struct SessionMetrics {
     turns: u64,
     cumulative_total_tokens: u64,
     cumulative_output_tokens: u64,
-    /// Context size reported by the most recent provider response.
-    latest_context_tokens: u64,
     /// Last observed activity of any kind: token usage, turn start, tool
     /// events, or swarm task heartbeats/checkpoints. Used to answer "is this
     /// agent actually doing something right now" independently of lifecycle
@@ -87,7 +85,6 @@ pub fn record_token_usage(session_id: &str, total_tokens: u64, output_tokens: u6
         entry.cumulative_total_tokens = entry.cumulative_total_tokens.saturating_add(total_tokens);
         entry.cumulative_output_tokens =
             entry.cumulative_output_tokens.saturating_add(output_tokens);
-        entry.latest_context_tokens = total_tokens;
         entry.last_activity = Some(now);
         entry.prune(now);
     });
@@ -126,16 +123,6 @@ pub fn last_activity_age_secs(session_id: &str) -> Option<u64> {
         map.get(session_id)
             .and_then(|entry| entry.last_activity)
             .map(|at| at.elapsed().as_secs())
-    })
-    .flatten()
-}
-
-/// Latest context size and cumulative output tokens for a session.
-pub fn token_totals(session_id: &str) -> Option<(u64, u64)> {
-    with_registry(|map| {
-        map.get(session_id)
-            .filter(|entry| entry.latest_context_tokens > 0 || entry.cumulative_output_tokens > 0)
-            .map(|entry| (entry.latest_context_tokens, entry.cumulative_output_tokens))
     })
     .flatten()
 }

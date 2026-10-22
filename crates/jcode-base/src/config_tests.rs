@@ -743,6 +743,7 @@ fn acp_config_defaults_to_standard_profile_and_acp_tools() {
     let cfg = Config::default();
     assert_eq!(cfg.acp.profile, "standard");
     assert_eq!(cfg.acp.tool_profile, "acp");
+    assert_eq!(cfg.acp.permission_mode, "jcode");
 }
 
 #[test]

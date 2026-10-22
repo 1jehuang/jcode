@@ -216,6 +216,19 @@ fn is_telemetry_subcommand_invocation(
 /// registration in this one function so the composition-root wiring stays
 /// discoverable as more providers move out of the base crate.
 pub fn register_external_provider_runtimes() {
+    // Propagate the ACP permission mode from config.toml to the env var the
+    // Cursor ACP runtime reads, unless the env var is already set explicitly.
+    // This keeps the runtime crate decoupled from config while still honoring
+    // the [acp] permission_mode setting when jcode drives Cursor's agent.
+    let permission_mode = crate::config::config()
+        .acp
+        .permission_mode
+        .trim()
+        .to_string();
+    if !permission_mode.is_empty() && std::env::var("JCODE_CURSOR_ACP_PERMISSION").is_err() {
+        crate::env::set_var("JCODE_CURSOR_ACP_PERMISSION", &permission_mode);
+    }
+
     crate::provider::external::register_external_provider(
         crate::provider::external::GROK_BUILD_RUNTIME,
         || std::sync::Arc::new(jcode_provider_grok_build_runtime::GrokBuildProvider::new()),
@@ -227,6 +240,10 @@ pub fn register_external_provider_runtimes() {
     crate::provider::external::register_external_provider(
         crate::provider::external::CURSOR_RUNTIME,
         || std::sync::Arc::new(jcode_provider_cursor_runtime::CursorCliProvider::new()),
+    );
+    crate::provider::external::register_external_provider(
+        crate::provider::external::CURSOR_ACP_RUNTIME,
+        || std::sync::Arc::new(jcode_provider_cursor_acp_runtime::CursorAcpProvider::new()),
     );
     crate::provider::external::register_external_provider(
         crate::provider::external::ANTIGRAVITY_RUNTIME,
@@ -779,6 +796,7 @@ mod tests {
                 crate::provider::external::ANTIGRAVITY_RUNTIME,
                 "antigravity",
             ),
+            (crate::provider::external::CURSOR_ACP_RUNTIME, "cursor-acp"),
         ] {
             assert!(
                 crate::provider::external::external_provider_registered(key),

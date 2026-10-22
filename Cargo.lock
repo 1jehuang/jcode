@@ -3312,7 +3312,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.99.1"
+version = "0.99.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3333,6 +3333,7 @@ dependencies = [
  "jcode-provider-antigravity-runtime",
  "jcode-provider-copilot-runtime",
  "jcode-provider-core",
+ "jcode-provider-cursor-acp-runtime",
  "jcode-provider-cursor-runtime",
  "jcode-provider-doctor",
  "jcode-provider-gemini-runtime",
@@ -3973,6 +3974,20 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "zstd",
+]
+
+[[package]]
+name = "jcode-provider-cursor-acp-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "jcode-message-types",
+ "jcode-provider-core",
+ "libc",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

@@ -358,7 +358,7 @@ impl App {
                 if is_cancelled() {
                     return;
                 }
-                *slot = Some(credentials);
+                *slot = Some(*credentials);
             } else {
                 return;
             }
