@@ -33,6 +33,7 @@ pub(super) struct SessionJournalMeta {
     pub(super) subagent_model: Option<String>,
     #[serde(default)]
     pub(super) agent_model_overrides: super::AgentModelOverrides,
+    pub(super) memory_model: Option<String>,
     pub(super) improve_mode: Option<SessionImproveMode>,
     pub(super) autoreview_enabled: Option<bool>,
     pub(super) autojudge_enabled: Option<bool>,

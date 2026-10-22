@@ -583,7 +583,28 @@ swarm_stall_after_secs = 600
 # (OpenAI defaults to gpt-5.6-luna with reasoning effort "none").
 # Env overrides: JCODE_MEMORY_SIDECAR_ENABLED, JCODE_MEMORY_MODEL
 # memory_sidecar_enabled = true
+# Model for the memory sidecar (extraction). Unset = sidecar auto-select
+# (OpenAI defaults to gpt-5.6-luna with reasoning effort "none").
+# When memory_sidecar_backend = "provider", this is applied to the active provider
+# via set_model before complete_simple, so it can be any model your active provider
+# supports (e.g. a custom OpenAI-compatible gateway model).
 # memory_model = "gpt-5.6-luna"
+#
+# Backend for the memory sidecar. Unset or "auto" = auto-select (OpenAI > Claude
+# > active provider). "openai" = force OpenAI Responses API. "claude" = force
+# Claude Messages API. "provider" = dispatch through the active agent provider
+# via complete_simple (works with any provider: Copilot, Gemini, Cursor, Bedrock,
+# OpenRouter, custom OpenAI-compatible, etc.). Use "provider" when you want the
+# sidecar to use your main provider's model instead of OpenAI/Claude.
+# Env override: JCODE_MEMORY_SIDECAR_BACKEND
+# memory_sidecar_backend = "auto"
+#
+# Fallback behavior when no memory model is marked (neither via the TUI model
+# picker nor via memory_model above). Default "openai_claude" preserves the
+# legacy auto-select (OpenAI > Claude > active provider). "provider" uses the
+# active provider's current model directly. "none" disables the sidecar when
+# no model is explicitly marked. Env: JCODE_MEMORY_SIDECAR_FALLBACK
+# memory_sidecar_fallback = "openai_claude"
 # Legacy memory_rerank_* and memory_embedding_* settings are accepted for
 # backwards compatibility, but have no effect on Jev recall.
 

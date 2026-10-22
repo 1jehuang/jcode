@@ -160,6 +160,12 @@ pub struct Session {
     /// Session worker routing. Missing keys follow saved global defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_model_overrides: AgentModelOverrides,
+    /// Model marked as the dedicated memory sidecar model for this session.
+    /// When set, the memory sidecar uses this model instead of the coding
+    /// model. Priority: session memory_model > config memory_model > active
+    /// provider's current model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_model: Option<String>,
     /// Last requested `/improve` mode for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub improve_mode: Option<SessionImproveMode>,
@@ -257,6 +263,7 @@ struct SessionStartupStub {
     subagent_model: Option<String>,
     #[serde(default)]
     agent_model_overrides: AgentModelOverrides,
+    memory_model: Option<String>,
     #[serde(default)]
     improve_mode: Option<SessionImproveMode>,
     #[serde(default)]
@@ -372,6 +379,7 @@ impl Session {
         session.reasoning_effort = stub.reasoning_effort;
         session.subagent_model = stub.subagent_model;
         session.agent_model_overrides = stub.agent_model_overrides;
+        session.memory_model = stub.memory_model;
         session.improve_mode = stub.improve_mode;
         session.autoreview_enabled = stub.autoreview_enabled;
         session.autojudge_enabled = stub.autojudge_enabled;
@@ -411,6 +419,7 @@ impl Session {
         session.reasoning_effort = snapshot.reasoning_effort;
         session.subagent_model = snapshot.subagent_model;
         session.agent_model_overrides = snapshot.agent_model_overrides;
+        session.memory_model = snapshot.memory_model;
         session.improve_mode = snapshot.improve_mode;
         session.autoreview_enabled = snapshot.autoreview_enabled;
         session.autojudge_enabled = snapshot.autojudge_enabled;
@@ -552,6 +561,7 @@ impl Session {
             reasoning_effort: self.reasoning_effort.clone(),
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
+            memory_model: self.memory_model.clone(),
             improve_mode: self.improve_mode,
             autoreview_enabled: self.autoreview_enabled,
             autojudge_enabled: self.autojudge_enabled,
@@ -798,6 +808,7 @@ impl Session {
             reasoning_effort: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
+            memory_model: None,
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -856,6 +867,7 @@ impl Session {
             reasoning_effort: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
+            memory_model: None,
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1790,6 +1802,7 @@ struct RemoteStartupSessionSnapshot {
     subagent_model: Option<String>,
     #[serde(default)]
     agent_model_overrides: AgentModelOverrides,
+    memory_model: Option<String>,
     #[serde(default)]
     improve_mode: Option<SessionImproveMode>,
     #[serde(default)]

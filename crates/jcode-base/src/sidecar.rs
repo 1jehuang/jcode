@@ -13,6 +13,8 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 /// Fast/cheap OpenAI model used when Codex credentials are available.
 pub const SIDECAR_OPENAI_MODEL: &str = "gpt-5.6-luna";
@@ -44,6 +46,23 @@ const CLAUDE_CODE_JCODE_NOTICE: &str = "You are jcode, powered by Claude Code. Y
 
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
+const LLM_BACKEND_AVAILABLE_CACHE_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy)]
+struct LlmBackendAvailabilityCache {
+    checked_at: Instant,
+    available: bool,
+}
+
+static LLM_BACKEND_AVAILABLE_CACHE: LazyLock<Mutex<Option<LlmBackendAvailabilityCache>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Clear the [`Sidecar::llm_backend_available`] TTL cache. Tests use this so
+/// each case observes the current config instead of a stale 5s answer.
+#[cfg(test)]
+pub(crate) fn clear_llm_backend_available_cache_for_tests() {
+    *LLM_BACKEND_AVAILABLE_CACHE.lock().unwrap() = None;
+}
 
 /// Whether retrying a failed sidecar request can reasonably succeed without a
 /// configuration or credential change.
@@ -132,6 +151,22 @@ enum SidecarBackend {
     Provider,
 }
 
+/// What memory-sidecar model resolution produced. Dormancy is an explicit
+/// resolution outcome, not an inferred string sentinel: an empty model can
+/// never silently misclassify an active selection as dormant (or vice versa).
+#[derive(Debug)]
+enum MemorySidecarSelection {
+    /// A backend and model were selected; dispatch completions as usual.
+    Active {
+        backend: SidecarBackend,
+        model: String,
+        provider_model_override: Option<String>,
+    },
+    /// `memory_sidecar_fallback = "none"` with no model marked at any level:
+    /// the memory system must treat the sidecar as unavailable.
+    Dormant,
+}
+
 /// Lightweight client for fast sidecar calls
 #[derive(Clone)]
 pub struct Sidecar {
@@ -149,19 +184,41 @@ pub struct Sidecar {
     /// per-model behavior applies. Used by the memory benchmark to pin
     /// GPT-5.5 with no thinking.
     reasoning_override: Option<String>,
+    /// When the backend is `Provider`, this holds the user-configured
+    /// `memory_model` so that `complete_via_provider` can call `set_model`
+    /// on the forked provider before `complete_simple`. `None` means no
+    /// explicit override (use the provider's own default model).
+    provider_model_override: Option<String>,
+    /// When `true`, resolution explicitly produced a dormant sidecar:
+    /// `memory_sidecar_fallback = "none"` and no model was marked at any
+    /// level (session, config, or persisted TUI marker). `complete` calls
+    /// return an error. Set only by the `MemorySidecarSelection::Dormant`
+    /// resolution outcome, never inferred from an empty model string.
+    dormant: bool,
 }
 
 impl Sidecar {
     /// Create a new sidecar client, auto-selecting the best available backend.
     /// Prefers OpenAI (GPT-5.6 Luna with no reasoning) if creds exist, falls back to Claude.
     pub fn new() -> Self {
-        let configured_model = crate::config::config().agents.memory_model.clone();
-        Self::with_configured_model(configured_model)
+        let cfg = &crate::config::config().agents;
+        let configured_model = cfg.memory_model.clone();
+        let configured_backend = cfg.memory_sidecar_backend.clone();
+        Self::with_session_memory_model(configured_model, configured_backend, None)
     }
 
     pub fn for_session(session: &crate::session::Session) -> Self {
-        let model = session
-            .effective_agent_model("memory", crate::config::Config::load().agents.memory_model);
+        // The Alt+M session marker wins over the `/agents memory` override and
+        // the config default; an empty marker means "nothing marked here" and
+        // falls through to the override chain unchanged.
+        let marked = session
+            .memory_model
+            .as_deref()
+            .and_then(|model| (!model.trim().is_empty()).then(|| model.to_string()));
+        let model = marked.or_else(|| {
+            session
+                .effective_agent_model("memory", crate::config::Config::load().agents.memory_model)
+        });
         let inherit = model.as_deref() == Some("inherit");
         let model = if inherit {
             session.model.clone()
@@ -188,6 +245,8 @@ impl Sidecar {
                     backend: SidecarBackend::Provider,
                     provider: Some(provider),
                     reasoning_override: None,
+                    provider_model_override: None,
+                    dormant: false,
                 };
             }
         }
@@ -200,25 +259,170 @@ impl Sidecar {
                 .map(|(_, id)| id.to_string())
                 .unwrap_or(model)
         });
-        Self::with_configured_model(model)
+        let cfg = &crate::config::config().agents;
+        Self::with_session_memory_model(model, cfg.memory_sidecar_backend.clone(), None)
     }
 
-    fn with_configured_model(configured_model: Option<String>) -> Self {
-        let (backend, model, provider) = if let Some(model) = configured_model {
-            match crate::provider::provider_for_model(&model) {
-                Some("openai") => (SidecarBackend::OpenAI, model, None),
-                Some("claude") => (SidecarBackend::Claude, model, None),
-                _ => {
-                    crate::logging::warn(&format!(
-                        "Ignoring unsupported memory sidecar model override '{}'; expected an OpenAI or Claude model",
-                        model
-                    ));
-                    Self::auto_select_backend()
+    /// Create a sidecar with a session-level memory model override.
+    ///
+    /// Model resolution priority:
+    /// 1. `session_memory_model` (marked via TUI model picker, persisted in Session)
+    /// 2. `configured_model` (from config `memory_model` or env `JCODE_MEMORY_MODEL`)
+    /// 3. Fallback based on `memory_sidecar_fallback` config:
+    ///    - `"openai_claude"` (default): try OpenAI, then Claude, then active provider
+    ///    - `"provider"`: use the active provider's current model
+    ///    - `"none"`: return a dormant sidecar (no model)
+    ///
+    /// The fallback only applies when NO model is marked. An explicit
+    /// `memory_sidecar_backend`, `memory_model`, or session-level marker wins
+    /// even when the fallback is `"none"`.
+    pub fn with_session_memory_model(
+        configured_model: Option<String>,
+        configured_backend: Option<String>,
+        session_memory_model: Option<String>,
+    ) -> Self {
+        let selection = Self::resolve_memory_sidecar_selection(
+            configured_model,
+            configured_backend,
+            session_memory_model,
+        );
+        Self::from_selection(selection)
+    }
+
+    /// Resolve the memory-sidecar selection for the given model inputs.
+    /// Split out from [`Sidecar::with_session_memory_model`] so
+    /// [`Sidecar::memory_sidecar_dormant`] answers the same question without
+    /// building a client: does any level (session > config > persisted TUI
+    /// marker) or explicit backend make a memory sidecar available, even when
+    /// `memory_sidecar_fallback = "none"`?
+    fn resolve_memory_sidecar_selection(
+        configured_model: Option<String>,
+        configured_backend: Option<String>,
+        session_memory_model: Option<String>,
+    ) -> MemorySidecarSelection {
+        // Session-level override wins over config-level.
+        let effective_model = session_memory_model
+            .filter(|m| !m.is_empty())
+            .or_else(|| configured_model.filter(|m| !m.is_empty()));
+        match configured_backend.as_deref().map(str::trim) {
+            Some("provider") => {
+                // Force dispatch through the active agent provider. When
+                // a memory model is set (session or config), we pass it to
+                // the forked provider via set_model. When unset, the
+                // provider keeps its own default model.
+                let override_model = effective_model.map(String::from);
+                let model = override_model.clone().unwrap_or_else(|| {
+                    crate::provider::active_provider_fork()
+                        .map(|p| p.model())
+                        .unwrap_or_else(|| "provider".to_string())
+                });
+                MemorySidecarSelection::Active {
+                    backend: SidecarBackend::Provider,
+                    model,
+                    provider_model_override: override_model,
                 }
             }
-        } else {
-            Self::auto_select_backend()
+            Some("openai") => MemorySidecarSelection::Active {
+                backend: SidecarBackend::OpenAI,
+                model: effective_model.unwrap_or_else(|| SIDECAR_OPENAI_MODEL.to_string()),
+                provider_model_override: None,
+            },
+            Some("claude") => MemorySidecarSelection::Active {
+                backend: SidecarBackend::Claude,
+                model: effective_model.unwrap_or_else(|| SIDECAR_CLAUDE_MODEL.to_string()),
+                provider_model_override: None,
+            },
+            _ => {
+                // "auto" or unset: use the effective memory model if set to
+                // route to the right backend. If no model is set, apply the
+                // fallback setting.
+                if let Some(model) = effective_model {
+                    match crate::provider::provider_for_model(&model) {
+                        Some("openai") => MemorySidecarSelection::Active {
+                            backend: SidecarBackend::OpenAI,
+                            model,
+                            provider_model_override: None,
+                        },
+                        Some("claude") => MemorySidecarSelection::Active {
+                            backend: SidecarBackend::Claude,
+                            model,
+                            provider_model_override: None,
+                        },
+                        _ => {
+                            // Unknown model: route through the active provider.
+                            MemorySidecarSelection::Active {
+                                backend: SidecarBackend::Provider,
+                                model: model.clone(),
+                                provider_model_override: Some(model),
+                            }
+                        }
+                    }
+                } else {
+                    // No memory model set at any level. Apply the fallback.
+                    let fallback = crate::config::config()
+                        .agents
+                        .memory_sidecar_fallback
+                        .trim()
+                        .to_ascii_lowercase();
+                    match fallback.as_str() {
+                        "provider" => {
+                            let model = crate::provider::active_provider_fork()
+                                .map(|p| p.model())
+                                .unwrap_or_else(|| "provider".to_string());
+                            MemorySidecarSelection::Active {
+                                backend: SidecarBackend::Provider,
+                                model,
+                                provider_model_override: None,
+                            }
+                        }
+                        "none" => MemorySidecarSelection::Dormant,
+                        _ => {
+                            // "openai_claude" or unset: legacy auto-select.
+                            let (b, m, _) = Self::auto_select_backend();
+                            MemorySidecarSelection::Active {
+                                backend: b,
+                                model: m,
+                                provider_model_override: None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build the client from an explicit resolution outcome.
+    fn from_selection(selection: MemorySidecarSelection) -> Self {
+        let (backend, model, provider_model_override, dormant) = match selection {
+            MemorySidecarSelection::Active {
+                backend,
+                model,
+                provider_model_override,
+            } => (backend, model, provider_model_override, false),
+            MemorySidecarSelection::Dormant => {
+                (SidecarBackend::Provider, String::new(), None, true)
+            }
         };
+
+        // Fork the active provider for Provider-backend dispatch. The fork is
+        // snapshotted here so the sidecar keeps a stable provider even if the
+        // global active provider is swapped between construction and dispatch.
+        let provider = if backend == SidecarBackend::Provider && !dormant {
+            crate::provider::active_provider_fork()
+        } else {
+            None
+        };
+
+        crate::logging::debug(&format!(
+            "Sidecar backend selected: {} (model: {}, dormant: {})",
+            match backend {
+                SidecarBackend::OpenAI => "openai",
+                SidecarBackend::Claude => "claude",
+                SidecarBackend::Provider => "provider",
+            },
+            model,
+            dormant
+        ));
 
         Self {
             client: crate::provider::shared_http_client(),
@@ -227,7 +431,20 @@ impl Sidecar {
             backend,
             provider,
             reasoning_override: None,
+            provider_model_override,
+            dormant,
         }
+    }
+
+    /// Compatibility wrapper for existing tests that called the old
+    /// `with_configured_model`. Delegates to `with_session_memory_model`
+    /// with no session-level override.
+    #[cfg(test)]
+    fn with_configured_model(
+        configured_model: Option<String>,
+        configured_backend: Option<String>,
+    ) -> Self {
+        Self::with_session_memory_model(configured_model, configured_backend, None)
     }
 
     /// Pick the best available sidecar backend.
@@ -280,15 +497,65 @@ impl Sidecar {
     /// real Codex/Claude credentials exist or a live agent provider is
     /// registered.
     ///
-    /// Re-evaluated live (reads credentials/provider state on each call) so that
-    /// adding or removing a login is reflected without a restart. This is the
-    /// signal the memory system uses to decide whether the LLM precision judge
-    /// can run; if it returns `false`, memory's sidecar mode is treated as
-    /// unavailable rather than silently degrading to the no-LLM path.
+    /// Cached briefly so repeated memory activity checks do not re-read
+    /// credentials or fork the active provider on every call. The short TTL keeps
+    /// login/provider changes visible without requiring a restart.
+    ///
+    /// `memory_sidecar_fallback = "none"` only makes the sidecar unavailable
+    /// when NO model or backend is marked anywhere: per the documented
+    /// semantics the fallback applies to the unmarked case, so an explicit
+    /// `memory_sidecar_backend`, a `memory_model` config value, or the persisted
+    /// TUI marker (Alt+M) keeps the sidecar available. The decision reuses the
+    /// exact resolution from [`Sidecar::with_session_memory_model`] so the
+    /// availability gate can never disagree with the sidecar it gates.
     pub fn llm_backend_available() -> bool {
-        auth::codex::load_credentials().is_ok()
+        if Self::memory_sidecar_dormant() {
+            return false;
+        }
+
+        let now = Instant::now();
+        if let Ok(cache) = LLM_BACKEND_AVAILABLE_CACHE.lock()
+            && let Some(cache) = *cache
+            && now.duration_since(cache.checked_at) < LLM_BACKEND_AVAILABLE_CACHE_TTL
+        {
+            return cache.available;
+        }
+
+        let available = auth::codex::load_credentials().is_ok()
             || auth::claude::load_credentials().is_ok()
-            || crate::provider::active_provider_fork().is_some()
+            || crate::provider::active_provider_fork().is_some();
+
+        if let Ok(mut cache) = LLM_BACKEND_AVAILABLE_CACHE.lock() {
+            *cache = Some(LlmBackendAvailabilityCache {
+                checked_at: now,
+                available,
+            });
+        }
+
+        available
+    }
+
+    /// Whether the current configuration resolves to a dormant sidecar:
+    /// `memory_sidecar_fallback = "none"` with no model marked at any level
+    /// (config `memory_model`, explicit `memory_sidecar_backend`, or the
+    /// persisted TUI marker). Uses the same resolution as sidecar
+    /// construction so gate and sidecar can never disagree.
+    fn memory_sidecar_dormant() -> bool {
+        let fallback_is_none = crate::config::config()
+            .agents
+            .memory_sidecar_fallback
+            .trim()
+            .eq_ignore_ascii_case("none");
+        if !fallback_is_none {
+            return false;
+        }
+        let cfg = &crate::config::config().agents;
+        let selection = Self::resolve_memory_sidecar_selection(
+            cfg.memory_model.clone(),
+            cfg.memory_sidecar_backend.clone(),
+            crate::memory::load_persisted_memory_model(),
+        );
+        matches!(selection, MemorySidecarSelection::Dormant)
     }
 
     /// Return the currently selected sidecar model name.
@@ -307,6 +574,8 @@ impl Sidecar {
             backend: SidecarBackend::Claude,
             provider: None,
             reasoning_override: None,
+            provider_model_override: None,
+            dormant: false,
         }
     }
 
@@ -321,6 +590,8 @@ impl Sidecar {
             backend: SidecarBackend::OpenAI,
             provider: None,
             reasoning_override: reasoning_effort,
+            provider_model_override: None,
+            dormant: false,
         }
     }
 
@@ -336,11 +607,23 @@ impl Sidecar {
     /// Simple completion - send a prompt, get a response.
     /// Routes to the correct API based on the detected backend.
     pub async fn complete(&self, system: &str, user_message: &str) -> Result<String> {
+        if self.dormant {
+            anyhow::bail!(
+                "Memory sidecar is dormant: memory_sidecar_fallback is \"none\" and no memory model is set"
+            );
+        }
         match self.backend {
             SidecarBackend::OpenAI => self.complete_openai(system, user_message).await,
             SidecarBackend::Claude => self.complete_claude(system, user_message).await,
             SidecarBackend::Provider => self.complete_via_provider(system, user_message).await,
         }
+    }
+
+    /// Whether this sidecar instance is dormant (no model set and fallback is
+    /// "none"). When dormant, `complete` returns an error and the memory
+    /// system should treat the sidecar as unavailable.
+    pub fn is_dormant(&self) -> bool {
+        self.dormant
     }
 
     /// Complete via the live agent provider (`complete_simple`).
@@ -353,6 +636,17 @@ impl Sidecar {
         let provider = self.provider.as_ref().context(
             "No active provider registered for sidecar; memory features require a logged-in provider",
         )?;
+        // Apply the user's memory_model override if one was configured. If the
+        // provider does not support model switching, we log a warning and proceed
+        // with the default model rather than failing the sidecar call.
+        if let Some(model) = &self.provider_model_override
+            && let Err(err) = provider.set_model(model)
+        {
+            crate::logging::warn(&format!(
+                "Sidecar: provider does not support switching to memory_model '{}': {}; using provider default model",
+                model, err
+            ));
+        }
         let (text, usage) = provider
             .complete_simple_with_usage(user_message, system)
             .await
@@ -479,6 +773,8 @@ impl Sidecar {
                             backend: SidecarBackend::Claude,
                             provider: None,
                             reasoning_override: None,
+                            provider_model_override: None,
+                            dormant: false,
                         };
                         claude.complete_claude(system, user_message).await
                     }
@@ -1239,7 +1535,6 @@ mod tests {
     use super::*;
     use crate::auth::codex;
     use std::ffi::OsString;
-
     #[test]
     fn sidecar_model_prefers_reported_identity_with_requested_fallback() {
         assert_eq!(
@@ -1275,7 +1570,6 @@ mod tests {
         assert_eq!(parsed.cache_creation_input_tokens, None);
         assert!(parse_openai_usage(&serde_json::json!({})).is_none());
     }
-
     #[test]
     fn sse_completed_event_exposes_response_usage() {
         let data = r#"{"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":3}}}"#;
@@ -1289,7 +1583,6 @@ mod tests {
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 3);
     }
-
     #[test]
     fn claude_response_usage_includes_cache_buckets() {
         let body = r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":400,"cache_creation_input_tokens":30}}"#;
@@ -1300,14 +1593,18 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, Some(400));
         assert_eq!(usage.cache_creation_input_tokens, Some(30));
     }
-
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
     }
-
     impl EnvVarGuard {
         fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            crate::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
             crate::env::set_var(key, value);
             Self { key, previous }
@@ -1319,7 +1616,6 @@ mod tests {
             Self { key, previous }
         }
     }
-
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(previous) = &self.previous {
@@ -1329,13 +1625,11 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn test_sidecar_fast_model() {
         assert_eq!(SIDECAR_FAST_MODEL, "gpt-5.6-luna");
         assert_eq!(SIDECAR_CLAUDE_MODEL, "claude-haiku-4-5-20251001");
     }
-
     #[test]
     fn sidecar_http_error_classifies_permanent_client_failures() {
         for status in [
@@ -1353,7 +1647,6 @@ mod tests {
             assert_eq!(classify_error(&error), SidecarErrorKind::Permanent);
         }
     }
-
     #[test]
     fn sidecar_http_error_classifies_retryable_failures() {
         for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
@@ -1370,7 +1663,6 @@ mod tests {
             SidecarErrorKind::Transient
         );
     }
-
     #[test]
     fn test_backend_selection_prefers_openai() {
         // Make backend selection deterministic by isolating credentials.
@@ -1392,13 +1684,12 @@ mod tests {
         })
         .expect("write Claude test auth");
 
-        let sidecar = Sidecar::with_configured_model(None);
+        let sidecar = Sidecar::with_configured_model(None, None);
         assert_eq!(sidecar.backend, SidecarBackend::OpenAI);
         assert_eq!(sidecar.model, SIDECAR_OPENAI_MODEL);
         codex::set_active_account_override(None);
         crate::auth::claude::set_active_account_override(None);
     }
-
     #[test]
     fn test_chatgpt_oauth_uses_luna_with_no_reasoning_when_available() {
         let _guard = crate::storage::lock_test_env();
@@ -1417,7 +1708,6 @@ mod tests {
 
         codex::set_active_account_override(None);
     }
-
     #[test]
     fn test_chatgpt_oauth_falls_back_to_gpt_5_4_low_when_luna_unavailable() {
         let _guard = crate::storage::lock_test_env();
@@ -1435,7 +1725,6 @@ mod tests {
 
         codex::set_active_account_override(None);
     }
-
     #[test]
     fn test_build_openai_request_uses_configured_default_and_fallback_reasoning() {
         let request = build_openai_request(
@@ -1464,16 +1753,13 @@ mod tests {
             serde_json::json!({"effort": SIDECAR_OPENAI_REASONING})
         );
     }
-
     #[test]
     fn test_openai_api_key_mode_uses_luna_with_no_reasoning() {
         let (model, reasoning) = resolve_openai_request_model(SIDECAR_OPENAI_MODEL, false);
         assert_eq!(model, SIDECAR_OPENAI_MODEL);
         assert_eq!(reasoning, Some(SIDECAR_OPENAI_REASONING));
     }
-
     // ---- Provider-backed sidecar (works on ALL providers) -------------------
-
     /// Minimal provider stub that echoes a fixed reply for `complete`, so the
     /// default `complete_simple` path the sidecar uses can be exercised without
     /// network access. Stands in for any of the 8 real providers.
@@ -1481,7 +1767,6 @@ mod tests {
         name: &'static str,
         reply: String,
     }
-
     #[async_trait::async_trait]
     impl crate::provider::Provider for StubProvider {
         async fn complete(
@@ -1513,10 +1798,8 @@ mod tests {
             })
         }
     }
-
     /// Stub that records the model it was switched to.
     struct SwitchableProvider(std::sync::Mutex<String>);
-
     #[async_trait::async_trait]
     impl crate::provider::Provider for SwitchableProvider {
         async fn complete(
@@ -1546,7 +1829,6 @@ mod tests {
             std::sync::Arc::new(SwitchableProvider(std::sync::Mutex::new(self.model())))
         }
     }
-
     /// The local TUI end-of-session path builds its sidecar with
     /// `for_session`, so a session's `/agents memory` choice must win over the
     /// global default there too.
@@ -1579,7 +1861,48 @@ mod tests {
             "global-memory-model"
         );
     }
+    /// Alt+M writes `session.memory_model`; on the extraction path it must
+    /// outrank both the `/agents memory` override and the config default.
+    /// A missing or empty marker keeps the override chain unchanged.
+    #[test]
+    fn session_sidecar_memory_marker_beats_override_and_config() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[agents]\nmemory_model = \"global-memory-model\"\n",
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        crate::provider::set_active_provider(std::sync::Arc::new(SwitchableProvider(
+            std::sync::Mutex::new("coordinator-model".into()),
+        )));
+        let mut session =
+            crate::session::Session::create_with_id("sidecar_memory_marker".into(), None, None);
+        session.save_prepared().unwrap();
+        session
+            .set_agent_model_override("memory", Some("override-memory-model".into()))
+            .unwrap();
 
+        session.memory_model = Some("marker-memory-model".into());
+        assert_eq!(
+            Sidecar::for_session(&session).model_name(),
+            "marker-memory-model"
+        );
+
+        session.memory_model = Some(String::new());
+        assert_eq!(
+            Sidecar::for_session(&session).model_name(),
+            "override-memory-model"
+        );
+
+        session.memory_model = None;
+        assert_eq!(
+            Sidecar::for_session(&session).model_name(),
+            "override-memory-model"
+        );
+    }
     /// With NO OpenAI/Claude credentials, the sidecar must select the live
     /// agent provider (the universal path) instead of failing. This is the core
     /// guarantee that memory features work on every provider, not just two.
@@ -1596,7 +1919,7 @@ mod tests {
             reply: "[2,1]".to_string(),
         }));
 
-        let sidecar = Sidecar::with_configured_model(None);
+        let sidecar = Sidecar::with_configured_model(None, None);
         assert_eq!(
             sidecar.backend_name(),
             "provider",
@@ -1612,7 +1935,6 @@ mod tests {
             .expect("provider-backed completion should succeed");
         assert_eq!(out, "[2,1]", "sidecar must return the provider's text");
     }
-
     #[test]
     fn provider_sidecar_keeps_the_route_selected_at_construction() {
         let _guard = crate::storage::lock_test_env();
@@ -1624,7 +1946,7 @@ mod tests {
             name: "configured-profile",
             reply: "configured-profile-response".to_string(),
         }));
-        let sidecar = Sidecar::with_configured_model(None);
+        let sidecar = Sidecar::with_configured_model(None, None);
 
         // Model switches and catalog refreshes can replace the process-global
         // provider while a background memory request is queued. Dispatch must
@@ -1645,7 +1967,6 @@ mod tests {
         assert_eq!(sidecar.model_name(), "configured-profile-model");
         assert_eq!(out, "configured-profile-response");
     }
-
     /// Every provider jcode supports should drive the sidecar end-to-end via the
     /// universal `complete_simple` path. We iterate over each provider label to
     /// make the "works for ALL providers" guarantee explicit and regression-proof.
@@ -1675,7 +1996,7 @@ mod tests {
                 name: provider,
                 reply: "[1]".to_string(),
             }));
-            let sidecar = Sidecar::with_configured_model(None);
+            let sidecar = Sidecar::with_configured_model(None, None);
             assert_eq!(
                 sidecar.backend_name(),
                 "provider",
@@ -1686,6 +2007,128 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{provider}: provider-backed completion failed: {e}"));
             assert_eq!(out, "[1]", "{provider}: sidecar must echo provider output");
         }
+    }
+    #[test]
+    fn llm_backend_available_fallback_none_with_nothing_marked_is_false() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+        let _model = EnvVarGuard::unset("JCODE_MEMORY_MODEL");
+        let _backend = EnvVarGuard::unset("JCODE_MEMORY_SIDECAR_BACKEND");
+        let _fallback = EnvVarGuard::set("JCODE_MEMORY_SIDECAR_FALLBACK", "none");
+
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "configured-profile",
+            reply: "reply".to_string(),
+        }));
+        crate::config::invalidate_config_cache();
+        clear_llm_backend_available_cache_for_tests();
+
+        assert!(
+            !Sidecar::llm_backend_available(),
+            "fallback=none with no model/backend/marker marked must report unavailable"
+        );
+    }
+
+    #[test]
+    fn llm_backend_available_fallback_none_with_explicit_backend_is_true() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+        let _model = EnvVarGuard::unset("JCODE_MEMORY_MODEL");
+        let _backend = EnvVarGuard::set("JCODE_MEMORY_SIDECAR_BACKEND", "provider");
+        let _fallback = EnvVarGuard::set("JCODE_MEMORY_SIDECAR_FALLBACK", "none");
+
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "configured-profile",
+            reply: "reply".to_string(),
+        }));
+        crate::config::invalidate_config_cache();
+        clear_llm_backend_available_cache_for_tests();
+
+        assert!(
+            Sidecar::llm_backend_available(),
+            "explicit memory_sidecar_backend=provider must win over fallback=none"
+        );
+    }
+
+    #[test]
+    fn llm_backend_available_fallback_none_with_configured_model_is_true() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+        let _model = EnvVarGuard::set("JCODE_MEMORY_MODEL", "claude-sonnet-4-5");
+        let _backend = EnvVarGuard::unset("JCODE_MEMORY_SIDECAR_BACKEND");
+        let _fallback = EnvVarGuard::set("JCODE_MEMORY_SIDECAR_FALLBACK", "none");
+
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "configured-profile",
+            reply: "reply".to_string(),
+        }));
+        crate::config::invalidate_config_cache();
+        clear_llm_backend_available_cache_for_tests();
+
+        assert!(
+            Sidecar::llm_backend_available(),
+            "a marked memory_model must keep the sidecar available even with fallback=none"
+        );
+    }
+
+    #[test]
+    fn llm_backend_available_fallback_none_with_persisted_marker_is_true() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+        let _model = EnvVarGuard::unset("JCODE_MEMORY_MODEL");
+        let _backend = EnvVarGuard::unset("JCODE_MEMORY_SIDECAR_BACKEND");
+        let _fallback = EnvVarGuard::set("JCODE_MEMORY_SIDECAR_FALLBACK", "none");
+
+        // Persist the TUI Alt+M marker in the temp JCODE_HOME.
+        let mut store = crate::memory::MemoryModelStore::default();
+        store.set_model(Some("gpt-5.5".to_string()));
+        crate::memory::save_memory_model_store(&store);
+
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "configured-profile",
+            reply: "reply".to_string(),
+        }));
+        crate::config::invalidate_config_cache();
+        clear_llm_backend_available_cache_for_tests();
+
+        assert!(
+            Sidecar::llm_backend_available(),
+            "the persisted TUI memory-model marker must keep the sidecar available even with fallback=none"
+        );
+    }
+
+    #[test]
+    fn dormant_sidecar_is_explicit_not_model_string_sentinel() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+        let _model = EnvVarGuard::unset("JCODE_MEMORY_MODEL");
+        let _backend = EnvVarGuard::unset("JCODE_MEMORY_SIDECAR_BACKEND");
+        let _fallback = EnvVarGuard::set("JCODE_MEMORY_SIDECAR_FALLBACK", "none");
+        crate::config::invalidate_config_cache();
+
+        let sidecar = Sidecar::with_session_memory_model(None, None, None);
+        assert!(sidecar.is_dormant());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt.block_on(sidecar.complete("sys", "user"));
+        assert!(out.is_err(), "dormant sidecar must refuse completion");
+
+        // An empty session model string is NOT dormancy: it must fall through
+        // to config/persisted resolution, never encode a sentinel state.
+        let selection = Sidecar::resolve_memory_sidecar_selection(None, None, Some(String::new()));
+        assert!(matches!(selection, MemorySidecarSelection::Dormant));
     }
 
     #[test]
@@ -1709,7 +2152,6 @@ mod tests {
             "Claude API error (403 Forbidden): {{\"error\":{{\"type\":\"permission_error\"}}}}"
         )));
     }
-
     #[test]
     fn test_build_claude_api_key_system_param_omits_identity_spoof() {
         // API-key path must NOT impersonate the official Claude Code CLI.
@@ -1729,7 +2171,6 @@ mod tests {
             "oauth path keeps the identity block"
         );
     }
-
     #[test]
     fn test_anthropic_sidecar_prefers_api_key_respects_pinned_mode() {
         // Pinning the runtime to API-key mode must make the sidecar prefer the key.
@@ -1745,6 +2186,297 @@ mod tests {
         assert!(
             !anthropic_sidecar_prefers_api_key(),
             "claude (oauth) runtime => do not force API key"
+        );
+    }
+    /// Explicit `openai` backend must select OpenAI even when no Codex
+    /// credentials exist (the backend is forced, not auto-selected).
+    #[test]
+    fn test_explicit_openai_backend_selects_openai() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        // No credentials at all, but "openai" is forced.
+        let sidecar = Sidecar::with_configured_model(None, Some("openai".to_string()));
+        assert_eq!(sidecar.backend, SidecarBackend::OpenAI);
+        assert_eq!(sidecar.model, SIDECAR_OPENAI_MODEL);
+    }
+    /// Explicit `openai` backend with a custom `memory_model` uses that model.
+    #[test]
+    fn test_explicit_openai_backend_uses_configured_model() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let sidecar =
+            Sidecar::with_configured_model(Some("gpt-4o".to_string()), Some("openai".to_string()));
+        assert_eq!(sidecar.backend, SidecarBackend::OpenAI);
+        assert_eq!(sidecar.model, "gpt-4o");
+    }
+    /// Explicit `claude` backend must select Claude.
+    #[test]
+    fn test_explicit_claude_backend_selects_claude() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let sidecar = Sidecar::with_configured_model(None, Some("claude".to_string()));
+        assert_eq!(sidecar.backend, SidecarBackend::Claude);
+        assert_eq!(sidecar.model, SIDECAR_CLAUDE_MODEL);
+    }
+    /// Explicit `claude` backend with a custom `memory_model` uses that model.
+    #[test]
+    fn test_explicit_claude_backend_uses_configured_model() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let sidecar = Sidecar::with_configured_model(
+            Some("claude-sonnet-4-5".to_string()),
+            Some("claude".to_string()),
+        );
+        assert_eq!(sidecar.backend, SidecarBackend::Claude);
+        assert_eq!(sidecar.model, "claude-sonnet-4-5");
+    }
+    /// Explicit `provider` backend selects the active provider and stores the
+    /// `memory_model` override so it is actually passed via `set_model`.
+    #[test]
+    fn test_explicit_provider_backend_selects_provider() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "gemini",
+            reply: "ok".to_string(),
+        }));
+
+        let sidecar = Sidecar::with_configured_model(None, Some("provider".to_string()));
+        assert_eq!(sidecar.backend, SidecarBackend::Provider);
+        assert_eq!(sidecar.provider_model_override, None);
+        assert_eq!(sidecar.model, "gemini-model");
+    }
+    /// `provider` backend with an explicit `memory_model` stores it as the
+    /// override so `complete_via_provider` applies it via `set_model`.
+    #[test]
+    fn test_provider_backend_stores_memory_model_override() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "openrouter",
+            reply: "ok".to_string(),
+        }));
+
+        let sidecar = Sidecar::with_configured_model(
+            Some("my-custom-model".to_string()),
+            Some("provider".to_string()),
+        );
+        assert_eq!(sidecar.backend, SidecarBackend::Provider);
+        assert_eq!(
+            sidecar.provider_model_override.as_deref(),
+            Some("my-custom-model"),
+            "memory_model must be stored as override for the provider backend"
+        );
+        assert_eq!(sidecar.model, "my-custom-model");
+    }
+    /// `auto` with no credentials and no provider falls back to Claude
+    /// placeholder (which gives an actionable error on use).
+    #[test]
+    fn test_auto_backend_falls_back_to_claude_placeholder() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        // Tests share a global active provider, so we cannot guarantee "no provider"
+        // is set here. With no OAuth credentials, auto-select picks the active
+        // provider if one is registered, or falls back to Claude as placeholder.
+        // Both are valid outcomes for this isolated test environment.
+        let sidecar = Sidecar::with_configured_model(None, None);
+        assert!(
+            matches!(
+                sidecar.backend,
+                SidecarBackend::Claude | SidecarBackend::Provider
+            ),
+            "auto-select with no OAuth creds should pick Claude or the active provider"
+        );
+    }
+    /// `auto` with only Claude credentials selects Claude.
+    #[test]
+    fn test_auto_backend_prefers_claude_without_openai() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            label: "claude-1".to_string(),
+            access: "claude-access".to_string(),
+            refresh: "claude-refresh".to_string(),
+            expires: 4_102_444_800_000,
+            email: None,
+            scopes: Vec::new(),
+            subscription_type: None,
+        })
+        .expect("write Claude test auth");
+
+        let sidecar = Sidecar::with_configured_model(None, None);
+        assert_eq!(sidecar.backend, SidecarBackend::Claude);
+        assert_eq!(sidecar.model, SIDECAR_CLAUDE_MODEL);
+        crate::auth::claude::set_active_account_override(None);
+    }
+    /// Whitespace in `memory_sidecar_backend` is trimmed so `" provider "` is
+    /// treated the same as `"provider"`.
+    #[test]
+    fn test_backend_selection_trims_whitespace() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "gemini",
+            reply: "ok".to_string(),
+        }));
+
+        let sidecar = Sidecar::with_configured_model(None, Some("  provider  ".to_string()));
+        assert_eq!(
+            sidecar.backend,
+            SidecarBackend::Provider,
+            "backend value must be trimmed before matching"
+        );
+    }
+    /// Provider stub that records the model passed to `set_model` so tests can
+    /// verify the sidecar's `memory_model` override reaches the provider. Uses a
+    /// shared `Arc<Mutex<...>>` so the recording survives across `fork()`.
+    struct SetModelRecordingProvider {
+        name: &'static str,
+        reply: String,
+        set_model_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for SetModelRecordingProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            let reply = self.reply.clone();
+            let stream = futures::stream::once(async move {
+                Ok(jcode_message_types::StreamEvent::TextDelta(reply))
+            });
+            Ok(Box::pin(stream))
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn model(&self) -> String {
+            format!("{}-model", self.name)
+        }
+
+        fn set_model(&self, model: &str) -> Result<()> {
+            self.set_model_calls.lock().unwrap().push(model.to_string());
+            Ok(())
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(SetModelRecordingProvider {
+                name: self.name,
+                reply: self.reply.clone(),
+                set_model_calls: self.set_model_calls.clone(),
+            })
+        }
+    }
+
+    /// The `provider` backend must call `set_model` on the forked provider when
+    /// `memory_model` is explicitly configured, so the configured model is
+    /// actually used instead of the provider's default.
+    #[test]
+    fn sidecar_provider_backend_applies_memory_model_via_set_model() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let recorder = std::sync::Arc::new(SetModelRecordingProvider {
+            name: "gemini",
+            reply: "ok".to_string(),
+            set_model_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        crate::provider::set_active_provider(recorder.clone());
+
+        let sidecar = Sidecar::with_configured_model(
+            Some("my-pinned-model".to_string()),
+            Some("provider".to_string()),
+        );
+        assert_eq!(sidecar.backend, SidecarBackend::Provider);
+        assert_eq!(
+            sidecar.provider_model_override.as_deref(),
+            Some("my-pinned-model")
+        );
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = rt
+            .block_on(sidecar.complete("sys", "user"))
+            .expect("provider-backed completion should succeed");
+
+        // The forked provider must have received set_model("my-pinned-model").
+        let calls = recorder.set_model_calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|m| m == "my-pinned-model"),
+            "set_model must be called with the configured memory_model; got: {:?}",
+            *calls
+        );
+    }
+    /// When `memory_model` is NOT set, the `provider` backend must NOT call
+    /// `set_model` at all (the provider keeps its own default model).
+    #[test]
+    fn sidecar_provider_backend_skips_set_model_without_memory_model() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let recorder = std::sync::Arc::new(SetModelRecordingProvider {
+            name: "gemini",
+            reply: "ok".to_string(),
+            set_model_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        crate::provider::set_active_provider(recorder.clone());
+
+        let sidecar = Sidecar::with_configured_model(None, Some("provider".to_string()));
+        assert_eq!(sidecar.backend, SidecarBackend::Provider);
+        assert_eq!(sidecar.provider_model_override, None);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = rt
+            .block_on(sidecar.complete("sys", "user"))
+            .expect("provider-backed completion should succeed");
+
+        let calls = recorder.set_model_calls.lock().unwrap();
+        assert!(
+            calls.is_empty(),
+            "set_model must NOT be called when memory_model is unset; got: {:?}",
+            *calls
         );
     }
 }

@@ -677,15 +677,6 @@ pub struct SwarmMemberRuntime {
     /// tell a working agent from one that has gone quiet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_age_secs: Option<u64>,
-    /// Tokens in the worker's context window as of its latest response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_tokens: Option<u64>,
-    /// Context window size for the worker's model, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_limit: Option<u64>,
-    /// Cumulative output tokens produced by the worker.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
 }
 
 impl SwarmMemberRuntime {
@@ -697,9 +688,6 @@ impl SwarmMemberRuntime {
             && self.effort.is_none()
             && self.elapsed_secs.is_none()
             && self.activity_age_secs.is_none()
-            && self.context_tokens.is_none()
-            && self.context_limit.is_none()
-            && self.output_tokens.is_none()
     }
 }
 
