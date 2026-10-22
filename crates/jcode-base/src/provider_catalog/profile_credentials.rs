@@ -1,5 +1,31 @@
 use super::*;
 
+/// Load a transport credential. Native Muse keys resolve only from their own
+/// opt-in JSON store bound to the official endpoint, never from a plain env,
+/// env-file, or named-profile secret.
+pub fn load_api_key_from_env_or_config(env_key: &str, file_name: &str) -> Option<String> {
+    let muse_key = crate::auth::muse::API_KEY_ENV;
+    let muse_file = crate::auth::muse::ENV_FILE;
+    if env_key != muse_key && file_name != muse_file {
+        return jcode_provider_env::load_api_key_from_env_or_config(env_key, file_name);
+    }
+    if env_key != muse_key
+        || file_name != muse_file
+        || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some()
+        || std::env::var("JCODE_OPENROUTER_API_KEY_NAME").is_ok_and(|value| value != muse_key)
+        || std::env::var("JCODE_OPENROUTER_ENV_FILE").is_ok_and(|value| value != muse_file)
+        || std::env::var("JCODE_OPENROUTER_API_BASE").is_ok_and(|value| {
+            normalize_api_base(&value).as_deref() != Some(crate::auth::muse::EXPECTED_API_BASE_URL)
+        })
+    {
+        return None;
+    }
+    load_openai_compatible_profile_api_key(&resolve_openai_compatible_profile_endpoint(
+        MUSE_SUBSCRIPTION_PROFILE,
+        None,
+    ))
+}
+
 /// Resolve built-in profile credentials without mixing Muse subscription login
 /// with user-created, pay-as-you-go Meta keys. Named profiles continue to use
 /// the ordinary env/config resolver and never receive this stored credential.
