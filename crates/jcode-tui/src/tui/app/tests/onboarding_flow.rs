@@ -1609,18 +1609,26 @@ fn starting_recent_project_review_queues_remote_turn_without_stuck_sending() {
 
 #[test]
 fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
-    let mut app = onboarding_test_app();
-    app.is_remote = true;
-    app.session.working_dir = dirs::home_dir().map(|path| path.to_string_lossy().into_owned());
+    // The fallback path lands on `onboarding_show_suggestions`, which pings
+    // the default model via `tokio::spawn` whenever ambient auth looks
+    // available. On a test thread there is no Tokio runtime, so that spawn
+    // panics. A private temp home (and the auth-cache invalidation it does
+    // on entry) keeps `has_any_available` false, the same state the test
+    // was written against.
+    with_temp_jcode_home(|| {
+        let mut app = onboarding_test_app();
+        app.is_remote = true;
+        app.session.working_dir = dirs::home_dir().map(|path| path.to_string_lossy().into_owned());
 
-    app.onboarding_start_recent_project_review();
+        app.onboarding_start_recent_project_review();
 
-    assert!(!app.pending_turn);
-    assert!(app.queued_messages.is_empty());
-    assert!(!app.onboarding_flow_active());
-    assert!(app.status_notice.as_ref().is_some_and(|(notice, _)| {
-        notice.contains("No active Git repository found")
-    }));
+        assert!(!app.pending_turn);
+        assert!(app.queued_messages.is_empty());
+        assert!(!app.onboarding_flow_active());
+        assert!(app.status_notice.as_ref().is_some_and(|(notice, _)| {
+            notice.contains("No active Git repository found")
+        }));
+    });
 }
 
 include!("onboarding_flow_telemetry.rs");

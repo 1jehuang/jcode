@@ -54,7 +54,7 @@ pub use models::{
 };
 pub use reasoning::{
     DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS, OPENROUTER_SELECTABLE_EFFORTS,
-    canonical_reasoning_effort, inferred_reasoning_efforts,
+    SWARM_EFFORTS, canonical_reasoning_effort, inferred_reasoning_efforts,
 };
 pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,
@@ -338,6 +338,20 @@ pub trait Provider: Send + Sync {
     /// Get the reasoning effort level (if applicable).
     fn reasoning_effort(&self) -> Option<String> {
         None
+    }
+
+    /// The reasoning effort to display for this provider (info widget,
+    /// /context, remote metadata). Same as [`Provider::reasoning_effort`]
+    /// unless the provider injects an effort into request bodies outside the
+    /// switchable `/effort` state (e.g. OpenAI-compatible `extra_body`).
+    /// When both exist, the switchable `/effort` value wins here by design;
+    /// note `extra_body` is still merged last into requests, so a config that
+    /// sets both is ambiguous and should be avoided.
+    ///
+    /// Must not drive `/effort` switching, session restore, or prompt directives:
+    /// those keep using [`Provider::reasoning_effort`] / [`Provider::set_reasoning_effort`].
+    fn effective_reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort()
     }
 
     /// Set the reasoning effort level (if applicable).
@@ -1522,6 +1536,8 @@ pub struct RouteCheapnessEstimate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_price_per_mtok_micros: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_price_per_mtok_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub included_requests_per_month: Option<u64>,
     pub reference_input_tokens: u64,
     pub reference_output_tokens: u64,
@@ -1548,6 +1564,7 @@ impl RouteCheapnessEstimate {
             input_price_per_mtok_micros: Some(input_price_per_mtok_micros),
             output_price_per_mtok_micros: Some(output_price_per_mtok_micros),
             cache_read_price_per_mtok_micros,
+            cache_write_price_per_mtok_micros: None,
             included_requests_per_month: None,
             reference_input_tokens: CHEAPNESS_REFERENCE_INPUT_TOKENS,
             reference_output_tokens: CHEAPNESS_REFERENCE_OUTPUT_TOKENS,
@@ -1574,6 +1591,7 @@ impl RouteCheapnessEstimate {
             input_price_per_mtok_micros: None,
             output_price_per_mtok_micros: None,
             cache_read_price_per_mtok_micros: None,
+            cache_write_price_per_mtok_micros: None,
             included_requests_per_month,
             reference_input_tokens: CHEAPNESS_REFERENCE_INPUT_TOKENS,
             reference_output_tokens: CHEAPNESS_REFERENCE_OUTPUT_TOKENS,
@@ -1599,12 +1617,18 @@ impl RouteCheapnessEstimate {
             input_price_per_mtok_micros: None,
             output_price_per_mtok_micros: None,
             cache_read_price_per_mtok_micros: None,
+            cache_write_price_per_mtok_micros: None,
             included_requests_per_month,
             reference_input_tokens: CHEAPNESS_REFERENCE_INPUT_TOKENS,
             reference_output_tokens: CHEAPNESS_REFERENCE_OUTPUT_TOKENS,
             estimated_reference_cost_micros,
             note: note.into(),
         }
+    }
+
+    pub fn with_cache_write_price_per_mtok_micros(mut self, value: Option<u64>) -> Self {
+        self.cache_write_price_per_mtok_micros = value;
+        self
     }
 }
 

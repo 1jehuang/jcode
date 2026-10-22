@@ -36,12 +36,29 @@ impl Server {
                     Err(error) => panic!("accept: {error}"),
                 };
                 socket
-                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();
                 let mut bytes = Vec::new();
+                // The listener is nonblocking and macOS hands that flag to
+                // accepted sockets, so reads return WouldBlock while the
+                // client is between connect and write. Retry instead of dying,
+                // or the client hangs until its retry budget runs out.
+                let read_deadline = Instant::now() + Duration::from_secs(30);
                 loop {
                     let mut buffer = [0; 4096];
-                    let count = socket.read(&mut buffer).unwrap();
+                    let count = loop {
+                        match socket.read(&mut buffer) {
+                            Ok(count) => break count,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(
+                                    Instant::now() < read_deadline,
+                                    "request body did not arrive"
+                                );
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(error) => panic!("local HTTP read failed: {error}"),
+                        }
+                    };
                     assert_ne!(count, 0, "request must have a body");
                     bytes.extend_from_slice(&buffer[..count]);
                     if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {

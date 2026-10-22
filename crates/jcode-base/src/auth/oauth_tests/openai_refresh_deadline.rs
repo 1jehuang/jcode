@@ -134,7 +134,10 @@ async fn refresh_deadline_bounds_withheld_headers() {
     let elapsed = started.elapsed();
     server.abort();
 
-    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    // Hang detector: a broken deadline would never return while the server
+    // stalls forever, so any bound far above the 300ms deadline still fails.
+    // 30s leaves room for a starved runner under the parallel suite.
+    assert!(elapsed < Duration::from_secs(30), "took {elapsed:?}");
     let message = format!("{err:#}");
     assert!(message.contains("timed out"), "{message}");
     assert!(message.contains("response headers"), "{message}");
@@ -162,13 +165,21 @@ async fn refresh_deadline_bounds_incomplete_body() {
         drop(stream);
     });
 
+    // 2s instead of 300ms: the phase ("response body") only holds if the
+    // server task got scheduled to write the partial response within the
+    // deadline. 2s is still two orders of magnitude below the product's 30s
+    // refresh bound, so an unbounded body read still fails the hang detector
+    // below, but a starved runner no longer flips the phase to "response
+    // headers".
     let started = Instant::now();
-    let err = refresh_openai_tokens_at(&url, Duration::from_millis(300), "rt_dummy", None)
+    let err = refresh_openai_tokens_at(&url, Duration::from_secs(2), "rt_dummy", None)
         .await
         .expect_err("an incomplete body must fail");
     server.abort();
 
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // Same hang detector as the withheld-headers case; the deadline above is
+    // what is under test, this just proves the call returned at all.
+    assert!(started.elapsed() < Duration::from_secs(30));
     let message = format!("{err:#}");
     assert!(message.contains("response body"), "{message}");
     assert!(!message.contains("at_partial"), "{message}");
@@ -178,25 +189,37 @@ async fn refresh_deadline_bounds_incomplete_body() {
 async fn refresh_deadline_failure_leaves_stored_token_and_releases_lock() {
     let _sandbox = sandbox();
     let label = seed_account("rt_seed");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = token_url(&listener);
-    let server = tokio::spawn(async move {
-        // First exchange stalls. The second succeeds, proving the per-account
-        // refresh lock was released by the timed-out transaction.
-        let (mut stalled, _) = listener.accept().await.unwrap();
+    // One listener per exchange. A shared listener pairs connections by
+    // arrival order, and under load the first exchange can miss its 200ms
+    // deadline before its socket is ever accepted, so the second exchange's
+    // request would pair with the stall branch and hang to its own deadline.
+    // Separate ports make the pairing explicit.
+    let stall_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ok_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stall_url = token_url(&stall_listener);
+    let ok_url = token_url(&ok_listener);
+    let stalling = tokio::spawn(async move {
+        // First exchange: read the request, then hold the socket open well
+        // past the 200ms deadline without responding, then close.
+        let (mut stalled, _) = stall_listener.accept().await.unwrap();
         read_request(&mut stalled).await;
-        let (mut stream, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        drop(stalled);
+    });
+    let serving = tokio::spawn(async move {
+        // Second exchange succeeds, proving the per-account refresh lock was
+        // released by the timed-out transaction.
+        let (mut stream, _) = ok_listener.accept().await.unwrap();
         let body = read_request(&mut stream).await;
         assert!(body.contains("refresh_token=rt_seed"), "{body}");
         stream
             .write_all(http_response(200, &success_body("at_new", "rt_new")).as_bytes())
             .await
             .unwrap();
-        drop(stalled);
     });
 
     let err = refresh_openai_tokens_at(
-        &url,
+        &stall_url,
         Duration::from_millis(200),
         "rt_seed",
         Some(label.clone()),
@@ -207,16 +230,30 @@ async fn refresh_deadline_failure_leaves_stored_token_and_releases_lock() {
     // Uncertain outcome: never reset or rewrite the stored credential.
     assert_eq!(stored_refresh_token(&label).as_deref(), Some("rt_seed"));
 
+    // Hang detector for a leaked refresh lock: the waiter would block on the
+    // single-flight lock forever, so a generous bound still catches it while
+    // tolerating a starved runner (first refresh teardown + round trip).
+    // A leaked lock surfaces as the inner deadline firing first.
     let tokens = tokio::time::timeout(
-        Duration::from_secs(5),
-        refresh_openai_tokens_at(&url, Duration::from_secs(5), "rt_seed", Some(label.clone())),
+        Duration::from_secs(30),
+        refresh_openai_tokens_at(
+            &ok_url,
+            Duration::from_secs(15),
+            "rt_seed",
+            Some(label.clone()),
+        ),
     )
     .await
     .expect("lock must be released after a timed-out refresh")
     .unwrap();
     assert_eq!(tokens.refresh_token, "rt_new");
     assert_eq!(stored_refresh_token(&label).as_deref(), Some("rt_new"));
-    server.await.unwrap();
+    // Abort rather than await: if the first exchange timed out before its
+    // socket was ever accepted (starved runner), `stalling` is still parked in
+    // `accept()` and awaiting it would hang the test forever. All observable
+    // effects were asserted above.
+    stalling.abort();
+    serving.abort();
 }
 
 #[tokio::test]

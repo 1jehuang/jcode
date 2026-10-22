@@ -562,6 +562,37 @@ pub(super) fn inferred_reasoning_efforts(
     jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
 }
 
+/// Effort ladder for a remote session, honoring a configured per-model
+/// `reasoning_map` on a named provider profile.
+///
+/// Remote sessions only know the provider display name and model id, so the
+/// built-in family inference cannot see the map and would show a wrong (often
+/// empty) ladder for named OpenAI-compatible profiles. The client reads the
+/// same `config.toml` the server does, so when the identity resolves to a
+/// mapped model the map's enabled rungs (plus swarm sentinels) win; otherwise
+/// this falls back to the static family inference.
+pub(super) fn remote_reasoning_efforts(
+    provider_name: Option<&str>,
+    model_name: Option<&str>,
+) -> Vec<String> {
+    if crate::tui::is_ssh_remote() {
+        // SSH clients must not trust the local config: the server may run on a
+        // different machine with a different config.toml.
+        return jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
+            .into_iter()
+            .map(ToString::to_string)
+            .collect();
+    }
+    if let Some(efforts) = crate::provider::configured_reasoning_efforts(provider_name, model_name)
+    {
+        return efforts;
+    }
+    jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
+        .into_iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
 pub(super) fn effort_bar(index: usize, total: usize) -> String {
     let mut bar = String::new();
     for i in 0..total {
