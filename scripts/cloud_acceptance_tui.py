@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -40,6 +41,11 @@ class CloudTUI:
         self.binary = str(Path(binary).resolve())
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True)
+        # Unix sockets have a 108-byte path limit. Keep ephemeral sockets out of
+        # arbitrarily deep artifact paths, while retaining all logs in root.
+        self.runtime = tempfile.TemporaryDirectory(prefix="jca-", dir="/tmp")
+        for side in ("local", "cloud"):
+            (Path(self.runtime.name) / side).mkdir()
         self.children = []
         self.files = []
         self.env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "TERM": "xterm-256color",
@@ -49,10 +55,10 @@ class CloudTUI:
         self.repo = self.root / "local-repo"
         self.cloud_repo = self.root / "cloud-repo"
         self.control = self.root / "control"
-        self.sock = str(self.root / "tmux.sock")
+        self.sock = str(Path(self.runtime.name) / "tmux.sock")
         self.sid = None
-        for name in ("local-repo", "cloud-repo", "local-home", "cloud-home", "local-run",
-                     "cloud-run", "control", "ssh", "bin"):
+        for name in ("local-repo", "cloud-repo", "local-home", "cloud-home",
+                     "control", "ssh", "bin"):
             (self.root / name).mkdir()
 
     def checkpoint(self, message):
@@ -159,7 +165,7 @@ class CloudTUI:
         (self.root / "ssh/known_hosts").write_text(f"[127.0.0.1]:{ssh_port} {host_key}\n")
         cloud_env = dict(self.env, **model_env, HOME=str(self.root / "cloud-home"),
                          JCODE_HOME=str(self.root / "cloud-home"),
-                         JCODE_RUNTIME_DIR=str(self.root / "cloud-run"),
+                         JCODE_RUNTIME_DIR=str(Path(self.runtime.name) / "cloud"),
                          JCODE_CLOUD_HOST_LABEL="cloud-acceptance")
         # Same absolute workspace path on separate disks. This is a real SSH
         # command, not the JCODE_CLOUD_TRANSPORT override used by CLI tests.
@@ -214,7 +220,7 @@ LogLevel VERBOSE
         self.local_env = dict(self.env, **model_env, HOME=str(self.root / "local-home"),
                               PATH=f"{self.root}/bin:/usr/bin:/bin",
                               JCODE_HOME=str(self.root / "local-home"),
-                              JCODE_RUNTIME_DIR=str(self.root / "local-run"),
+                              JCODE_RUNTIME_DIR=str(Path(self.runtime.name) / "local"),
                               JCODE_CLOUD_HOST="cloud-acceptance", JCODE_CLOUD_HOST_LABEL="laptop-acceptance",
                               JCODE_CLOUD_REMOTE_BINARY=str(remote_binary),
                               JCODE_DEBUG_CMD_PATH=str(self.control / "debug.cmd"),
@@ -230,7 +236,12 @@ LogLevel VERBOSE
         command += '; result=$?; printf "\\nJCODE_ACCEPTANCE_EXIT=%s\\n" "$result"; sleep 600'
         self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "acceptance", "-x", "160", "-y", "48",
                   shlex.join(["/bin/bash", "-c", command]))
-        wait_for(lambda: "Welcome to jcode" in self.frame() or "Ready to use" in self.frame(), "TUI startup")
+        def ready():
+            frame = self.frame()
+            if "JCODE_ACCEPTANCE_EXIT=" in frame:
+                raise AssertionError("TUI exited during startup; see frame.txt")
+            return "Welcome to jcode" in frame or "Ready to use" in frame
+        wait_for(ready, "TUI startup")
         if "Welcome to jcode" in self.frame():
             self.tmux("send-keys", "-t", "acceptance", "Right", "Enter")
         self.wait_text("Ready to use")
@@ -323,7 +334,7 @@ LogLevel VERBOSE
         for side in ("local", "cloud"):
             env = dict(self.env, HOME=str(self.root / f"{side}-home"),
                        JCODE_HOME=str(self.root / f"{side}-home"),
-                       JCODE_RUNTIME_DIR=str(self.root / f"{side}-run"))
+                       JCODE_RUNTIME_DIR=str(Path(self.runtime.name) / side))
             try:
                 subprocess.run([self.binary, "--no-update", "server", "stop"], env=env,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
@@ -367,6 +378,7 @@ LogLevel VERBOSE
             raise AssertionError(f"Fixture processes survived cleanup: {remaining}")
         for handle in self.files:
             handle.close()
+        self.runtime.cleanup()
 
 
 def idle_round_trip(t):

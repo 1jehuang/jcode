@@ -61,7 +61,10 @@ Do not copy that system-wide policy change onto a shared workstation or producti
 host. Use a disposable Linux VM with suitable namespace policy instead.
 
 Fixtures allowlist process environments, generate their own SSH keys, use only
-synthetic credentials and keep separate runtime/home directories. They are not
+synthetic credentials and keep separate runtime/home directories. Ephemeral Unix
+sockets use short private directories under `/tmp` to avoid Linux socket path
+limits even when artifact directories are deeply nested. Those socket directories
+are removed after their fixture processes stop. Fixtures are not
 intended to access your real accounts, shared daemon or managed VM. Never add
 production tokens, account files or SSH keys to the fixtures or workflow.
 
@@ -74,7 +77,7 @@ python3 tests/test_cloud_acceptance_harness.py
 ```
 
 These fast contracts check failure propagation, timeouts, report generation,
-provider gates, and fixture-only process cleanup. They are not a substitute for
+provider gates, short socket paths, and fixture-only process cleanup. They are not a substitute for
 running the actual acceptance matrix below.
 
 Use an already-built executable, with an absolute path recommended:

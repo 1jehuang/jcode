@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -119,6 +120,14 @@ class Provider(unittest.TestCase):
 
 
 class Isolation(unittest.TestCase):
+    def test_long_artifact_paths_do_not_lengthen_runtime_sockets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = acceptance.CloudTUI("/bin/true", Path(temp) / ("long-artifacts-" * 12))
+            self.addCleanup(fixture.close)
+            self.assertLess(len(os.fsencode(fixture.sock)), 100)
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.bind(fixture.sock)
+
     def test_cleanup_reaps_only_exact_workspace_marker(self):
         with tempfile.TemporaryDirectory() as temp:
             fixture = acceptance.CloudTUI("/bin/true", Path(temp) / "fixture")
@@ -137,6 +146,7 @@ class Isolation(unittest.TestCase):
     def test_only_agent_requests_count_as_continuation_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             fixture = acceptance.CloudTUI("/bin/true", Path(temp) / "fixture")
+            self.addCleanup(fixture.close)
             (fixture.root / "model.jsonl").write_text(
                 json.dumps({"agent": False, "messages": [{"content": "old cloud notice"}]}) + "\n" +
                 json.dumps({"agent": True, "messages": [{"content": "fresh agent turn"}]}) + "\n" +
