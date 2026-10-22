@@ -107,9 +107,13 @@ class CloudTUI:
             return []
 
     def wait_request(self, needle, start=0):
-        return wait_for(lambda: next((r for r in self.records()[start:]
-                                     if needle in json.dumps(r["messages"])), None),
-                        f"provider context containing {needle!r}")
+        def requested():
+            for record in self.records()[start:]:
+                last_user = next((message for message in reversed(record["messages"])
+                                  if message.get("role") == "user"), {})
+                if needle in json.dumps(last_user.get("content", "")):
+                    return record
+        return wait_for(requested, f"fresh provider prompt containing {needle!r}")
 
     def lease(self):
         if self.sid is None:

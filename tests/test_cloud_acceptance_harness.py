@@ -143,6 +143,24 @@ class Isolation(unittest.TestCase):
                         process.terminate()
                     process.wait(timeout=5)
 
+    def test_historical_prompt_does_not_count_as_fresh_turn(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = acceptance.CloudTUI("/bin/true", Path(temp) / "fixture")
+            self.addCleanup(fixture.close)
+            historical = {"agent": True, "messages": [
+                {"role": "user", "content": "acceptance back on laptop"},
+                {"role": "user", "content": "new cloud continuation"},
+            ]}
+            log = fixture.root / "model.jsonl"
+            log.write_text(json.dumps(historical) + "\n")
+            with patch("cloud_acceptance_tui.wait_for", side_effect=lambda predicate, _: predicate()):
+                self.assertIsNone(fixture.wait_request("acceptance back on laptop"))
+                with log.open("a") as output:
+                    output.write(json.dumps({"agent": True, "messages": [
+                        {"role": "user", "content": "acceptance back on laptop"}
+                    ]}) + "\n")
+                self.assertIsNotNone(fixture.wait_request("acceptance back on laptop"))
+
     def test_only_agent_requests_count_as_continuation_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             fixture = acceptance.CloudTUI("/bin/true", Path(temp) / "fixture")
