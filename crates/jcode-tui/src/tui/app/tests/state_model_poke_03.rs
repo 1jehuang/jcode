@@ -523,65 +523,70 @@ impl Provider for CountingModelRoutesProvider {
 
 #[test]
 fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // Enter confirms a SubagentModelChoice, which persists the session under
+    // JCODE_HOME; keep that write inside a private home.
+    with_temp_jcode_home(|| {
+        // The helper clears env + persisted UI state but not the render-state
+        // layout snapshots this test reads through the picker rendering path;
+        // reset them so a sibling's leaked scroll/layout globals cannot skew
+        // the cached-picker assertions below.
+        crate::tui::ui::clear_test_render_state_for_tests();
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
+            calls: StdArc::clone(&calls),
+            route_count: 400,
+            delay: Duration::from_millis(25),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
 
-    let calls = StdArc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
-        calls: StdArc::clone(&calls),
-        route_count: 400,
-        delay: Duration::from_millis(25),
-    });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+        for c in "/subagent-model".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        wait_for_model_picker_load(&mut app);
 
-    for c in "/subagent-model".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("subagent model picker should be open");
+        assert!(picker.preview);
+        assert_eq!(picker.entries.len(), 401, "400 models plus inherit");
+        assert!(matches!(
+            picker.entries[0].action,
+            crate::tui::PickerAction::SubagentModelChoice { inherit: true }
+        ));
+        let calls_after_load = calls.load(Ordering::SeqCst);
+
+        for _ in 0..10 {
+            app.handle_key(KeyCode::Down, KeyModifiers::empty())
+                .unwrap();
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            calls_after_load,
+            "navigation must not rebuild or re-query the model catalog"
+        );
+
+        app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
             .unwrap();
-    }
-    wait_for_model_picker_load(&mut app);
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        assert!(
+            !picker.filtered.is_empty(),
+            "typed input should filter models"
+        );
+        assert!(picker.filtered.len() < picker.entries.len());
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("subagent model picker should be open");
-    assert!(picker.preview);
-    assert_eq!(picker.entries.len(), 401, "400 models plus inherit");
-    assert!(matches!(
-        picker.entries[0].action,
-        crate::tui::PickerAction::SubagentModelChoice { inherit: true }
-    ));
-    let calls_after_load = calls.load(Ordering::SeqCst);
-
-    for _ in 0..10 {
-        app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
             .unwrap();
-    }
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        calls_after_load,
-        "navigation must not rebuild or re-query the model catalog"
-    );
-
-    app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
-        .unwrap();
-    let picker = app.inline_interactive_state.as_ref().unwrap();
-    assert!(
-        !picker.filtered.is_empty(),
-        "typed input should filter models"
-    );
-    assert!(picker.filtered.len() < picker.entries.len());
-
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-    assert!(app.session.subagent_model.is_some());
-    assert_eq!(app.provider.model(), "counting-a");
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        assert!(app.session.subagent_model.is_some());
+        assert_eq!(app.provider.model(), "counting-a");
+    })
 }
 
 #[test]
@@ -1858,36 +1863,40 @@ fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_pref
 
 #[test]
 fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_prefix() {
-    let (mut app, _set_model_calls) = create_openrouter_spec_capture_test_app();
+    // Enter confirms an AgentModelChoice in session scope, which persists the
+    // session under JCODE_HOME; keep that write inside a private home.
+    with_temp_jcode_home(|| {
+        let (mut app, _set_model_calls) = create_openrouter_spec_capture_test_app();
 
-    app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("agent model picker should be open");
-    let model_idx = picker
-        .entries
-        .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
-    let filtered_pos = picker
-        .filtered
-        .iter()
-        .position(|&i| i == model_idx)
-        .expect("entry should be in filtered list");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("agent model picker should be open");
+        let model_idx = picker
+            .entries
+            .iter()
+            .position(|entry| entry.name == "gpt-5.4 (high)")
+            .expect("openrouter-backed OpenAI effort entry should be in picker");
+        let filtered_pos = picker
+            .filtered
+            .iter()
+            .position(|&i| i == model_idx)
+            .expect("entry should be in filtered list");
 
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .expect("agent model picker selection should succeed");
+        app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .expect("agent model picker selection should succeed");
 
-    let last = app.display_messages.last().expect("display message");
-    assert_eq!(last.role, "system");
-    assert!(
-        last.content.contains("openai/gpt-5.4@OpenAI"),
-        "message should show normalized saved spec, got: {}",
-        last.content
-    );
+        let last = app.display_messages.last().expect("display message");
+        assert_eq!(last.role, "system");
+        assert!(
+            last.content.contains("openai/gpt-5.4@OpenAI"),
+            "message should show normalized saved spec, got: {}",
+            last.content
+        );
+    })
 }
 
 #[test]
