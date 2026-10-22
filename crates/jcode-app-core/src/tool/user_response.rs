@@ -67,6 +67,11 @@ mod tests {
 
     #[tokio::test]
     async fn user_response_preserves_markdown_and_optional_title() {
+        // Assert exact tool output, so take the shared env lock: sibling
+        // hook tests set JCODE_HOOK_POST_TOOL_FEEDBACK process-wide while
+        // holding it, and a concurrent run here would append the
+        // [post_tool_feedback] block to this tool's output.
+        let _env_lock = crate::storage::lock_test_env();
         for title in [None, Some("Summary")] {
             let content = "# Answer\n\n**Markdown** with Unicode: 日本語\n";
             let result = UserResponseTool
@@ -107,6 +112,9 @@ mod tests {
 
     #[tokio::test]
     async fn user_response_desktop_registration_is_reversible_and_isolated() {
+        // Same as above: exact-output assertions must not race the sibling
+        // post_tool_feedback hook test's process-global env var.
+        let _env_lock = crate::storage::lock_test_env();
         let desktop = crate::tool::Registry::empty();
         let tui = crate::tool::Registry::empty();
         assert!(!crate::tool::Registry::base_tools(&tui.skills).contains_key("user_response"));

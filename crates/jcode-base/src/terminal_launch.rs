@@ -94,7 +94,11 @@ pub fn try_spawn_via_configured_hook(command: &TerminalCommand, cwd: &Path) -> b
 fn spawn_via_hook(hook: &str, command: &TerminalCommand, cwd: &Path) -> Result<()> {
     let mut cmd = build_hook_spawn_command(hook, command, cwd)?;
     let mut child = cmd.spawn()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    // How long to wait for the hook to either exit or prove it is alive.
+    // Long-running hooks are reaped asynchronously after the window closes;
+    // the window must tolerate the *caller* being descheduled, or a
+    // fast-failing hook gets misread as long-running and its error swallowed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         if let Some(status) = child.try_wait()? {
             if !status.success() {

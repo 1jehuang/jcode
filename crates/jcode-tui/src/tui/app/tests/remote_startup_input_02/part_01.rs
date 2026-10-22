@@ -1,46 +1,61 @@
 #[test]
 fn test_model_picker_copilot_selection_prefixes_model() {
-    let mut app = create_test_app();
-    configure_test_remote_models_with_copilot(&mut app);
+    // Temp home: route building consults configured OpenAI-compatible
+    // profiles (key env vars and env files under the shared test home), so
+    // without isolation the firmware static model list can claim
+    // grok-code-fast-1 and the copilot route disappears. The env guard scrubs
+    // named-profile runtime vars, which make every built-in profile look
+    // configured when a `--provider-profile` session env leaks in. App
+    // construction can re-apply the config's default provider profile, so
+    // scrub again right before opening the picker. Clearing the envs without
+    // the env lock races concurrent guard drops, and the mutex is not
+    // reentrant, so hold the lock for the whole body via
+    // `with_temp_jcode_home` and use no outer lock.
+    let _named_profile_guard = NamedProfileEnvGuard::new();
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let _inner_scrub = NamedProfileEnvGuard::new();
+        configure_test_remote_models_with_copilot(&mut app);
 
-    app.open_model_picker();
+        app.open_model_picker();
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should be open");
 
-    // Find grok-code-fast-1 (which should only be a copilot route)
-    let grok_idx = picker
-        .entries
-        .iter()
-        .position(|m| m.name == "grok-code-fast-1")
-        .expect("grok-code-fast-1 should be in picker");
+        // Find grok-code-fast-1 (which should only be a copilot route)
+        let grok_idx = picker
+            .entries
+            .iter()
+            .position(|m| m.name == "grok-code-fast-1")
+            .expect("grok-code-fast-1 should be in picker");
 
-    // Navigate to it and select
-    let filtered_pos = picker
-        .filtered
-        .iter()
-        .position(|&i| i == grok_idx)
-        .expect("grok-code-fast-1 should be in filtered list");
+        // Navigate to it and select
+        let filtered_pos = picker
+            .filtered
+            .iter()
+            .position(|&i| i == grok_idx)
+            .expect("grok-code-fast-1 should be in filtered list");
 
-    // Set the selected position to grok's position
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+        // Set the selected position to grok's position
+        app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
 
-    // Press Enter to select
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
+        // Press Enter to select
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
 
-    // In remote mode, selection should produce a pending_model_switch with copilot: prefix
-    if let Some(ref spec) = app.pending_model_switch {
-        assert!(
-            spec.starts_with("copilot:"),
-            "copilot model should be prefixed with 'copilot:', got: {}",
-            spec
-        );
-    }
-    // Picker should be closed
-    assert!(app.inline_interactive_state.is_none());
+        // In remote mode, selection should produce a pending_model_switch with copilot: prefix
+        if let Some(ref spec) = app.pending_model_switch {
+            assert!(
+                spec.starts_with("copilot:"),
+                "copilot model should be prefixed with 'copilot:', got: {}",
+                spec
+            );
+        }
+        // Picker should be closed
+        assert!(app.inline_interactive_state.is_none());
+    });
 }
 
 #[test]

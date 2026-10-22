@@ -37,7 +37,7 @@ fn pin_full_tier() {
 /// guard *before* any render-state lock, matching the env-then-render order
 /// the app tests use.
 struct IdleAnimationEnvGuard {
-    _env: std::sync::MutexGuard<'static, ()>,
+    _env: crate::storage::TestEnvGuard,
 }
 
 impl IdleAnimationEnvGuard {
@@ -77,6 +77,7 @@ fn render_full(state: &TestState, width: u16, height: u16) -> Terminal<TestBacke
 
 #[test]
 fn draw_publishes_the_animated_rows_only_when_the_animation_rendered() {
+    pin_full_tier();
     let _idle_animation = IdleAnimationEnvGuard::enable();
     let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
@@ -109,6 +110,7 @@ fn draw_publishes_the_animated_rows_only_when_the_animation_rendered() {
 
 #[test]
 fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
+    pin_full_tier();
     let _idle_animation = IdleAnimationEnvGuard::enable();
     let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
@@ -154,6 +156,7 @@ fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
 
 #[test]
 fn advancing_the_animation_actually_changes_the_animated_rows() {
+    pin_full_tier();
     let _idle_animation = IdleAnimationEnvGuard::enable();
     // Guards against the partial-repaint test passing vacuously: if the
     // animation were static, "matches a full frame" would be trivially true and
@@ -225,6 +228,7 @@ fn idle_animation_is_excluded_from_the_full_frame_redraw_signal() {
 
 #[test]
 fn partial_repaint_does_no_layout_or_transcript_work() {
+    pin_full_tier();
     let _idle_animation = IdleAnimationEnvGuard::enable();
     // The savings come entirely from skipping the frame pipeline, so assert that
     // structurally rather than by timing (which varies by build profile): a full
@@ -463,6 +467,7 @@ fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
     use ratatui::layout::Rect;
 
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     for (width, height) in [(160u16, 48u16), (100, 40), (80, 24)] {

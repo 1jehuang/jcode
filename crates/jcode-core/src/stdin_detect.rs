@@ -251,13 +251,42 @@ mod macos {
         pth_name: [u8; 64],
     }
 
-    // Take this from `libc` rather than hand-rolling it. It was previously
-    // defined locally as 2, which is `TH_STATE_STOPPED`, so a thread blocked on
-    // `read(0)` never registered and macOS stdin forwarding never fired
-    // (issue #651). Apple's `mach/thread_info.h` has RUNNING=1, STOPPED=2,
-    // WAITING=3, and `libc` already exposes it, so sourcing it removes the
-    // opportunity for this constant to drift again.
-    use libc::TH_STATE_WAITING;
+    // Take these from `libc` rather than hand-rolling them. `TH_STATE_WAITING`
+    // was previously defined locally as 2, which is `TH_STATE_STOPPED`, so a
+    // thread blocked on `read(0)` never registered and macOS stdin forwarding
+    // never fired (issue #651). Apple's `mach/thread_info.h` has RUNNING=1,
+    // STOPPED=2, WAITING=3, and `libc` already exposes it, so sourcing it
+    // removes the opportunity for this constant to drift again.
+    use libc::{TH_FLAGS_SWAPPED, TH_STATE_WAITING};
+
+    /// Whether one sampled thread is blocked on `read(0)`.
+    ///
+    /// `TH_STATE_WAITING` means "blocked", not "blocked on stdin": macOS
+    /// reports it for threads parked on a condition variable or in a timed
+    /// sleep too, so the run state alone made every process with an idle
+    /// thread look like it was waiting for terminal input (issue #1146).
+    ///
+    /// `TH_FLAGS_SWAPPED` tracks kernel-stack reclamation: the kernel sets it
+    /// whenever `thread->kernel_stack` is null (`osfmk/kern/thread.c`). A
+    /// thread that parks hands its stack off within milliseconds, while a
+    /// thread blocked in `read(2)` on a tty or a pipe keeps it. Measured on
+    /// macOS aarch64 (2026-10-11) by sampling
+    /// `proc_pidinfo(PROC_PIDTHREADINFO)`: `cat` blocked on a pty slave and on
+    /// a pipe both report `WAITING` with flags `0x0` for as long as they stay
+    /// blocked (10s), whereas `sleep`, a shell waiting on a child, and threads
+    /// parked on condition variables report `WAITING` with flags `0x1` within
+    /// ~55ms of parking. Requiring the flag to be clear therefore keeps real
+    /// stdin waits and drops parked ones.
+    ///
+    /// The asymmetry is deliberate: a swapped-out thread that really is in
+    /// `read(2)` is missed (no "waiting for stdin" hint), whereas counting
+    /// parked threads reports every sleeping command as waiting for input. The
+    /// residual false positive is a thread sampled inside that ~55ms parking
+    /// window; the bash tool waits `STDIN_INITIAL_DELAY_MS` (300ms) before its
+    /// first poll, so a command that parks at startup is swapped out by then.
+    pub(super) fn thread_is_reading_stdin(run_state: i32, flags: i32) -> bool {
+        run_state == TH_STATE_WAITING && flags & TH_FLAGS_SWAPPED == 0
+    }
 
     pub fn check(pid: u32) -> StdinState {
         // Check if fd 0 (stdin) is a pipe or pty
@@ -342,7 +371,7 @@ mod macos {
                 )
             };
 
-            if ret > 0 && tinfo.pth_run_state == TH_STATE_WAITING {
+            if ret > 0 && thread_is_reading_stdin(tinfo.pth_run_state, tinfo.pth_flags) {
                 return true;
             }
         }

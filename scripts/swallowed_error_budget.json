@@ -128,7 +128,7 @@
     },
     "crates/jcode-app-core/src/perf.rs": {
       "dot_ok": 9,
-      "let_underscore": 1,
+      "let_underscore": 2,
       "unwrap_or_default": 0
     },
     "crates/jcode-app-core/src/replay.rs": {

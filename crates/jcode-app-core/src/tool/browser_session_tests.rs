@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 struct BrowserFixture {
-    _env_guard: std::sync::MutexGuard<'static, ()>,
+    _env_guard: crate::storage::TestEnvGuard,
     temp: tempfile::TempDir,
     previous_home: Option<std::ffi::OsString>,
     previous_session: Option<std::ffi::OsString>,
@@ -117,9 +117,18 @@ impl Drop for BrowserFixture {
 async fn browser_session_reuses_daemon_across_five_tool_calls() {
     let fixture = BrowserFixture::new();
     let ctx = fixture.context("reuse");
+    // The first call pays daemon startup (a scripted 0.2s sleep plus Python
+    // interpreter spawn, which parallel test load can stretch well past a
+    // second). The reuse property is about the warm calls after it: they must
+    // stay cheap socket round trips, not new daemon starts. starts().len()
+    // below catches a restart deterministically; the clock bounds a hang.
+    let mut responses = vec![
+        firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &ctx)
+            .await
+            .unwrap(),
+    ];
     let started = Instant::now();
-    let mut responses = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..4 {
         responses.push(
             firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &ctx)
                 .await
@@ -131,7 +140,16 @@ async fn browser_session_reuses_daemon_across_five_tool_calls() {
         "all calls must reach the same daemon"
     );
     assert_eq!(fixture.starts().len(), 1);
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // The reuse guarantee above is structural (one daemon start). The clock
+    // only bounds a hang: four warm socket round trips can each pay ~1s of
+    // process-spawn jitter in a full-suite run, so a tight bound turns load
+    // into false failures. 20s still fails long before the test runner's own
+    // timeout if a call genuinely deadlocks.
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "reused-daemon calls took {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -176,7 +194,6 @@ async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_respons
         let _ = release_rx.recv_timeout(Duration::from_secs(3));
         std::fs::write(release_path, "ready").unwrap();
     });
-    let started = Instant::now();
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(5));
     let mut browser_calls = Vec::new();
     let mut bash_calls = Vec::new();
@@ -197,14 +214,20 @@ async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_respons
         }));
     }
     barrier.wait().await;
+    let poll_started = Instant::now();
     while !fixture
         .starts()
         .iter()
         .any(|(name, _)| name.contains("blocked"))
-        && started.elapsed() < Duration::from_secs(2)
+        && poll_started.elapsed() < Duration::from_secs(2)
     {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    // Measure only the window the assertion is about: while two sessions sit
+    // blocked at daemon startup, a healthy call and an unrelated task must
+    // still make progress. Daemon-start observation time above is scheduling
+    // noise under parallel load, not a stall, so it stays outside the window.
+    let started = Instant::now();
     let healthy = tokio::spawn(async move {
         firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &healthy_ctx).await
     });
@@ -223,8 +246,12 @@ async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_respons
         call.await.unwrap().unwrap();
     }
     healthy_result.unwrap();
+    // The bound must stay below the 3s watchdog release: a healthy call
+    // actually blocked behind the stalled daemon startups waits for that
+    // release, while a warm call under parallel load only pays process-spawn
+    // jitter (observed at ~1.1s in a full-suite run).
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < Duration::from_millis(2500),
         "healthy calls and unrelated tasks stalled for {elapsed:?}"
     );
     assert_eq!(fixture.starts().len(), 3, "one daemon per session/browser");
