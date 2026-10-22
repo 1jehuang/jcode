@@ -1,5 +1,5 @@
 {
-  "total": 174,
+  "total": 176,
   "tracked_files": {
     "crates/jcode-app-core/build.rs": 4,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
@@ -51,9 +51,11 @@
     "crates/jcode-tui/src/tui/app/auth_remote/onboarding.rs": 1,
     "crates/jcode-tui/src/tui/app/auth_remote/picker.rs": 1,
     "crates/jcode-tui/src/tui/app/commands_cloud.rs": 2,
+    "crates/jcode-tui/src/tui/app/state_ui_input_helpers.rs": 1,
     "crates/jcode-tui/src/tui/app/usage_reset.rs": 1,
     "crates/jcode-tui/src/tui/session_picker.rs": 2,
     "crates/jcode-tui/src/tui/ui_inline_interactive.rs": 1,
+    "crates/jcode-tui/src/tui/ui_input.rs": 1,
     "src/bin/memory_recall_bench.rs": 14,
     "src/cli/acp.rs": 2,
     "src/cli/cloud_managed.rs": 1,

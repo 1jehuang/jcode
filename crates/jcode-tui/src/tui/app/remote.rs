@@ -2221,9 +2221,17 @@ fn handle_disconnected_key_internal(
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
                 let prev = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
-                app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                if let Some((drain_start, drain_end)) =
+                    input::file_chip_backspace_span(&app.input, app.cursor_pos, &app.file_chips)
+                {
+                    app.remember_input_undo_state();
+                    app.input.drain(drain_start..drain_end);
+                    app.cursor_pos = drain_start;
+                } else {
+                    app.remember_input_undo_state();
+                    app.input.drain(prev..app.cursor_pos);
+                    app.cursor_pos = prev;
+                }
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2231,8 +2239,11 @@ fn handle_disconnected_key_internal(
         KeyCode::Delete => {
             if app.cursor_pos < app.input.len() {
                 let next = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
+                let drain_end =
+                    input::file_chip_delete_end(&app.input, app.cursor_pos, &app.file_chips)
+                        .unwrap_or(next);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.input.drain(app.cursor_pos..drain_end);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }

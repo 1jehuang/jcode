@@ -5,9 +5,9 @@ mod shell_commands;
 use shell_commands::*;
 
 use super::{
-    App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
-    ctrl_bracket_fallback_to_esc, is_context_limit_error, is_request_payload_too_large_error,
-    remote,
+    App, ContentBlock, DisplayMessage, InputUndoEntry, Message, ProcessingStatus, Role, SendAction,
+    commands, ctrl_bracket_fallback_to_esc, is_context_limit_error,
+    is_request_payload_too_large_error, remote,
 };
 use crate::bus::{
     Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
@@ -18,7 +18,7 @@ use anyhow::Result;
 use base64::Engine;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::DefaultTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -96,6 +96,34 @@ pub(super) struct PreparedInput {
     pub raw_input: String,
     pub expanded: String,
     pub images: Vec<(String, String)>,
+    /// File chips consumed from the composer. Kept so failure-restore paths
+    /// (new-session launch, split request) can put them back alongside the
+    /// raw input instead of silently dropping the attachment.
+    pub file_chips: Vec<PathBuf>,
+}
+
+/// Expand @file references: read file contents into the prompt. Takes the
+/// composer's chips (caller stores or drops them) and resolves relative
+/// paths against the workspace root so file reads work regardless of the
+/// process current directory.
+pub(super) fn expand_file_chips(app: &App, input: String, file_chips: &[PathBuf]) -> String {
+    if file_chips.is_empty() {
+        return input;
+    }
+    // Over SSH remotes the chips would expand from the client's local
+    // filesystem while the prompt goes to the server; leave the input as
+    // typed text instead (greptile A2). The accept paths are gated too, so
+    // this only catches chips that predate an SSH reconnect.
+    if crate::tui::is_ssh_remote() {
+        return input;
+    }
+    let cwd: PathBuf = app
+        .session
+        .working_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    crate::tui::app::file_mention::build_prompt_with_files(&input, file_chips, &cwd)
 }
 
 // Roughly 500k English words at ~6 bytes/word including spaces. This is still
@@ -1167,8 +1195,17 @@ pub(super) fn handle_prompt_history_navigation(
                     .last()
                     .map(|prompt| {
                         app.remember_input_undo_state();
-                        app.history_draft =
-                            Some((app.input.clone(), app.cursor_pos.min(app.input.len())));
+                        // The replaced draft rides with its chips so walking
+                        // back down restores the attachments (greptile A3).
+                        // Read the cursor before the mem::take: the saved
+                        // input is drained first, so clamping after would
+                        // always yield 0.
+                        let draft_cursor = app.cursor_pos.min(app.input.len());
+                        app.history_draft = Some(InputUndoEntry {
+                            input: std::mem::take(&mut app.input),
+                            cursor_pos: draft_cursor,
+                            file_chips: std::mem::take(&mut app.file_chips),
+                        });
                         app.input = prompt.clone();
                         app.cursor_pos = app.input.len();
                         app.reset_tab_completion();
@@ -1182,9 +1219,13 @@ pub(super) fn handle_prompt_history_navigation(
             KeyCode::Up => Some(current_index.saturating_sub(1)),
             KeyCode::Down if current_index + 1 < history.len() => Some(current_index + 1),
             KeyCode::Down => {
-                if let Some((draft, cursor_pos)) = app.history_draft.take() {
-                    app.input = draft;
-                    app.cursor_pos = cursor_pos;
+                if let Some(draft) = app.history_draft.take() {
+                    app.input = draft.input;
+                    app.cursor_pos = draft.cursor_pos;
+                    // Prune against the restored text first, then re-attach
+                    // the draft's chips (voice-stash ordering, greptile A3).
+                    app.reset_tab_completion();
+                    app.file_chips = draft.file_chips;
                 } else {
                     app.input.clear();
                     app.cursor_pos = 0;
@@ -2021,12 +2062,14 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
     let prepared = take_prepared_input(app);
     let restored_raw = prepared.raw_input.clone();
     let restored_images = prepared.images.clone();
+    let restored_chips = prepared.file_chips.clone();
     match commands::launch_prompt_in_new_session_local(app, prepared.expanded, prepared.images) {
         Ok(_) => true,
         Err(error) => {
             app.input = restored_raw;
             app.cursor_pos = app.input.len();
             app.pending_images = restored_images;
+            app.file_chips = restored_chips;
             app.set_status_notice("Prompt launch failed");
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to launch prompt in a new session: {}",
@@ -2898,15 +2941,117 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
     true
 }
 
+// ── File-chip aware deletion ───────────────────────────────────────
+
+/// Return the byte range `[start, end)` of every file chip path found in `input`.
+///
+/// Matching is path-separator aware: a chip only matches when it lands on a
+/// full path-segment boundary. That is, the character before the match (if
+/// any) must be a `/`, `\`, or whitespace, and the character after the match
+/// (if any) must be a `/`, `\`, or whitespace. This prevents a shorter chip
+/// like `main.rs` from matching inside a longer path like `src/main.rs`.
+fn file_chip_spans(input: &str, chips: &[PathBuf]) -> Vec<(usize, usize)> {
+    fn is_path_boundary(ch: char) -> bool {
+        // Opening brackets count as a left boundary because accept_completion
+        // can leave a chip directly after one: typing "(@main" and accepting
+        // yields "(main.rs". Closing brackets do not, so a chip in prose like
+        // "(see main.rs)" still never matches (greptile A10).
+        ch == '/' || ch == '\\' || ch.is_whitespace() || matches!(ch, '(' | '[' | '{')
+    }
+    let mut spans = Vec::new();
+    for chip in chips {
+        let path = chip.to_string_lossy();
+        let mut search_from = 0usize;
+        while let Some(pos) = input[search_from..].find(path.as_ref()) {
+            let start = search_from + pos;
+            let end = start + path.len();
+            // Verify path-segment boundaries on both sides so a chip path only
+            // matches a complete path token, not a substring of a longer one.
+            let left_ok = start == 0
+                || input[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_path_boundary);
+            let right_ok =
+                end == input.len() || input[end..].chars().next().is_some_and(is_path_boundary);
+            if left_ok && right_ok {
+                spans.push((start, end));
+            }
+            search_from = if end > search_from {
+                end
+            } else {
+                search_from + 1
+            };
+        }
+    }
+    spans.sort_by_key(|(s, _)| *s);
+    spans
+}
+
+/// True when `chip` appears in `input` as a complete path token (the same
+/// path-boundary rule `file_chip_spans` uses for deletion and highlighting).
+/// This is the single chip-presence matcher: every consumer that decides
+/// whether a chip is still "attached" to the composer text (pruning, undo
+/// restore, rendering) must go through it so a chip like `bag` never matches
+/// mid-token inside `char_bag.rs`.
+pub(in crate::tui::app) fn file_chip_matches_input(input: &str, chip: &Path) -> bool {
+    let chip = chip.to_path_buf();
+    !file_chip_spans(input, std::slice::from_ref(&chip)).is_empty()
+}
+
+/// If `cursor` sits at or past the end of a file chip, return the byte span
+/// of the chip so a single Backspace deletes the entire path. Also handles
+/// cursor sitting *inside* a chip (treated as atomic unit): the caller must
+/// drain the full `[start, end)` span, not just `start..cursor`, or the tail
+/// of the path would survive as plain text (greptile A11).
+pub(super) fn file_chip_backspace_span(
+    input: &str,
+    cursor: usize,
+    chips: &[PathBuf],
+) -> Option<(usize, usize)> {
+    let spans = file_chip_spans(input, chips);
+    // Priority 1: cursor inside a chip → delete entire chip.
+    for (start, end) in &spans {
+        if cursor > *start && cursor <= *end {
+            return Some((*start, *end));
+        }
+    }
+    // Priority 2: cursor exactly at chip end → delete entire chip.
+    spans
+        .iter()
+        .filter(|(_, end)| *end == cursor)
+        .map(|(start, end)| (*start, *end))
+        .max_by_key(|(start, _)| cursor - start)
+}
+
+/// If `cursor` sits at or before the start of a file chip, return the byte
+/// offset of the chip's end so a single Delete removes the entire path.
+pub(super) fn file_chip_delete_end(input: &str, cursor: usize, chips: &[PathBuf]) -> Option<usize> {
+    let spans = file_chip_spans(input, chips);
+    spans
+        .iter()
+        .filter(|(start, _)| *start == cursor)
+        .map(|(_, end)| *end)
+        .max_by_key(|end| end - cursor) // longest match wins
+}
+
 pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         KeyCode::Char(c) => handle_text_input(app, &c.to_string()),
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
                 let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
-                app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                if let Some((drain_start, drain_end)) =
+                    file_chip_backspace_span(&app.input, app.cursor_pos, &app.file_chips)
+                {
+                    app.remember_input_undo_state();
+                    app.input.drain(drain_start..drain_end);
+                    app.cursor_pos = drain_start;
+                } else {
+                    app.remember_input_undo_state();
+                    app.input.drain(prev..app.cursor_pos);
+                    app.cursor_pos = prev;
+                }
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2915,8 +3060,10 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Delete => {
             if app.cursor_pos < app.input.len() {
                 let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
+                let drain_end = file_chip_delete_end(&app.input, app.cursor_pos, &app.file_chips)
+                    .unwrap_or(next);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.input.drain(app.cursor_pos..drain_end);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -3034,6 +3181,13 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
     app.pasted_contents.clear();
+    // Expand @file references on EVERY preparation path (direct submit,
+    // queue-for-reconnect, startup auto-submit, new-session routing), not
+    // just the local submit path: a queued message must carry the file
+    // contents it was composed with, and the chips must be consumed so a
+    // stale chip cannot leak into a later prompt.
+    let file_chips = std::mem::take(&mut app.file_chips);
+    let expanded = expand_file_chips(app, expanded, &file_chips);
     let images = std::mem::take(&mut app.pending_images);
     app.cursor_pos = 0;
     app.clear_input_undo_history();
@@ -3041,6 +3195,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
         raw_input,
         expanded,
         images,
+        file_chips,
     }
 }
 
@@ -3945,6 +4100,11 @@ impl App {
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.clear_input_undo_history();
+
+        // Expand @file references: read file contents into the prompt.
+        let file_chips = std::mem::take(&mut self.file_chips);
+        input = expand_file_chips(self, input, &file_chips);
+
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
         // If the previous assistant turn still has visible streamed text that has not yet been
@@ -4320,5 +4480,7 @@ impl App {
     }
 }
 
+#[cfg(test)]
+mod chip_deletion_tests;
 #[cfg(test)]
 mod terminal_control_sequence_tests;
