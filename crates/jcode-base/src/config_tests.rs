@@ -435,6 +435,39 @@ fn swarm_effort_parses_from_toml_and_env_override() {
 }
 
 #[test]
+fn memory_effort_parses_from_toml_and_env_override() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_EFFORT");
+    restore_env_var("JCODE_MEMORY_EFFORT", None);
+
+    // Public config-file interface, mirroring swarm_effort.
+    let cfg: Config =
+        toml::from_str("[agents]\nmemory_model = \"gpt-5.6-luna\"\nmemory_effort = \"none\"\n")
+            .expect("config with memory_effort parses");
+    assert_eq!(cfg.agents.memory_effort.as_deref(), Some("none"));
+    assert_eq!(Config::default().agents.memory_effort, None);
+
+    // Older config files without the key still parse (backward compat).
+    let cfg: Config = toml::from_str("[agents]\nmemory_model = \"gpt-5.6-luna\"\n")
+        .expect("config without memory_effort parses");
+    assert_eq!(cfg.agents.memory_effort, None);
+
+    crate::env::set_var("JCODE_MEMORY_EFFORT", "low");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_effort.as_deref(), Some("low"));
+
+    // A blank env value clears a preset (unset semantics, like swarm_effort).
+    crate::env::set_var("JCODE_MEMORY_EFFORT", " ");
+    let mut cfg = Config::default();
+    cfg.agents.memory_effort = Some("preset".to_string());
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_effort, None);
+
+    restore_env_var("JCODE_MEMORY_EFFORT", prev);
+}
+
+#[test]
 fn wake_mode_defaults_parses_and_env_overrides() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_WAKE_MODE");
@@ -622,17 +655,21 @@ fn test_memory_sidecar_enabled_defaults_true() {
 fn test_env_override_memory_sidecar() {
     let _guard = crate::storage::lock_test_env();
     let prev_model = std::env::var_os("JCODE_MEMORY_MODEL");
+    let prev_effort = std::env::var_os("JCODE_MEMORY_EFFORT");
     let prev_enabled = std::env::var_os("JCODE_MEMORY_SIDECAR_ENABLED");
     crate::env::set_var("JCODE_MEMORY_MODEL", "claude-haiku-4");
+    crate::env::set_var("JCODE_MEMORY_EFFORT", "low");
     crate::env::set_var("JCODE_MEMORY_SIDECAR_ENABLED", "true");
 
     let mut cfg = Config::default();
     cfg.apply_env_overrides();
 
     assert_eq!(cfg.agents.memory_model.as_deref(), Some("claude-haiku-4"));
+    assert_eq!(cfg.agents.memory_effort.as_deref(), Some("low"));
     assert!(cfg.agents.memory_sidecar_enabled);
 
     restore_env_var("JCODE_MEMORY_MODEL", prev_model);
+    restore_env_var("JCODE_MEMORY_EFFORT", prev_effort);
     restore_env_var("JCODE_MEMORY_SIDECAR_ENABLED", prev_enabled);
 }
 
@@ -881,6 +918,10 @@ fn test_generated_default_config_has_expected_user_defaults() {
         parsed.display.reasoning_display(),
         jcode_config_types::ReasoningDisplayMode::Full,
         "freshly created user config should show the full reasoning trace"
+    );
+    assert!(
+        parsed.display.single_overview,
+        "freshly created user config should use the consolidated overview"
     );
 
     if let Some(prev) = prev_home {
@@ -1792,4 +1833,46 @@ fn removed_overscroll_status_key_still_loads_config() {
     .expect("legacy key must not break config");
     assert!(config.display.centered);
     assert_eq!(config.display.usage_display, "used");
+}
+
+/// `display.single_overview = false` must reach the live config cache, and
+/// `JCODE_SINGLE_OVERVIEW=0` must override the file value. The TUI's Overview
+/// placement gates on this flag, so a stale value would resurrect the
+/// consolidated panel after the user opted out.
+#[test]
+fn single_overview_setting_and_env_override_load() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_env = std::env::var_os("JCODE_SINGLE_OVERVIEW");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::remove_var("JCODE_SINGLE_OVERVIEW");
+    Config::invalidate_cache();
+
+    let path = Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("create config parent");
+    std::fs::write(&path, "[display]\nsingle_overview = false\n").expect("write config");
+
+    assert!(
+        !crate::config::config().display.single_overview,
+        "config file value false must disable the consolidated overview"
+    );
+
+    crate::env::set_var("JCODE_SINGLE_OVERVIEW", "1");
+    Config::invalidate_cache();
+    assert!(
+        crate::config::config().display.single_overview,
+        "JCODE_SINGLE_OVERVIEW=1 must override the file value"
+    );
+
+    crate::env::set_var("JCODE_SINGLE_OVERVIEW", "0");
+    Config::invalidate_cache();
+    assert!(
+        !crate::config::config().display.single_overview,
+        "JCODE_SINGLE_OVERVIEW=0 must override the file value"
+    );
+
+    restore_env_var("JCODE_SINGLE_OVERVIEW", prev_env);
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
 }

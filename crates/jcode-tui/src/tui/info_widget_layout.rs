@@ -3,6 +3,7 @@ use super::info_widget::{
     is_overview_mergeable,
 };
 use ratatui::layout::Rect;
+use std::cell::Cell;
 use std::collections::HashSet;
 
 /// Minimum width needed to show the widget.
@@ -123,6 +124,59 @@ fn dock_widths_with_fallback(reliable: &[u16], instant: &[u16]) -> Vec<u16> {
 /// it, and only re-homing via Phase 2 after the slot has been unusable for
 /// [`MAX_HIDDEN_FRAMES`]. This is what stops widgets from jumping while scrolling.
 pub(crate) fn calculate_placements_anchored(
+    messages_area: Rect,
+    margins: &Margins,
+    data: &InfoWidgetData,
+    enabled: bool,
+    prev_anchors: &[WidgetAnchor],
+) -> PlacementOutcome {
+    let outcome =
+        calculate_placements_anchored_inner(messages_area, margins, data, enabled, prev_anchors);
+    // Overview reclaim: if the Overview is available but could not place
+    // while an anchored *mergeable* widget holds a slot, that widget was
+    // anchored before the Overview had data and its content now folds into
+    // the Overview. Re-run once without those anchors so the higher-priority
+    // Overview can take the pocket. The retry is only adopted when the
+    // Overview actually places, so a frame that cannot host the Overview
+    // anyway keeps the original outcome (and its anchors) unchanged.
+    if data.available_widgets().contains(&WidgetKind::Overview)
+        && !outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::Overview)
+    {
+        let mergeable_only: Vec<WidgetAnchor> = prev_anchors
+            .iter()
+            .filter(|a| {
+                a.placement.kind != WidgetKind::Overview && is_overview_mergeable(a.placement.kind)
+            })
+            .cloned()
+            .collect();
+        if !mergeable_only.is_empty() {
+            let non_mergeable: Vec<WidgetAnchor> = prev_anchors
+                .iter()
+                .filter(|a| {
+                    a.placement.kind == WidgetKind::Overview
+                        || !is_overview_mergeable(a.placement.kind)
+                })
+                .cloned()
+                .collect();
+            let retry = calculate_placements_anchored_inner(
+                messages_area,
+                margins,
+                data,
+                enabled,
+                &non_mergeable,
+            );
+            if retry.visible.iter().any(|p| p.kind == WidgetKind::Overview) {
+                return retry;
+            }
+        }
+    }
+    outcome
+}
+
+fn calculate_placements_anchored_inner(
     messages_area: Rect,
     margins: &Margins,
     data: &InfoWidgetData,
@@ -421,15 +475,44 @@ pub(crate) fn calculate_placements_anchored(
     // Phase 2: greedily place remaining widgets.
     //
     // `overview_active` already covers the case where Overview is shown OR only
-    // hidden-in-place; in both cases its mergeable widgets (model/context/...) are
-    // suppressed so they don't pop in at a *different* location while Overview is
-    // momentarily covered. `overview_placed` additionally covers a brand-new
+    // hidden-in-place; in both cases its mergeable widgets (model/context/...)
+    // are suppressed so they don't pop in at a *different* location while Overview
+    // is momentarily covered. `overview_placed` additionally covers a brand-new
     // Overview placed within this very Phase 2 pass.
+    //
+    // A shown Overview only owns the sections its rect can actually render.
+    // The compact page truncates at its inner height, so a small pocket whose
+    // rows the front sections fill truncates the tail (Changes/Commits/Swarm)
+    // away; the standalone fallbacks for those sections must stay placeable
+    // or their content surfaces nowhere (greptile: a 10-row pocket hid the
+    // Commits and SwarmStatus widgets while the Overview truncated both
+    // sections, losing worker status and the fresh unpushed commit).
+    //
+    // Hidden-in-place Overview (`overview_active` set by the Phase 1 branch)
+    // suppresses everything: it pops back into its slot, and a fallback
+    // planted elsewhere for a few frames is exactly the churn the anchors
+    // exist to prevent. Only a *shown* Overview gets section-checked. The
+    // rect lives in a Cell: Phase 1 seeds it from the kept placement, and
+    // Phase 2 refreshes it the moment a fresh Overview places, so even the
+    // very first frame after a re-home checks the actual placed rect instead
+    // of suppressing every mergeable widget for one blind frame.
+    let overview_rect = Cell::new(
+        placements
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .map(|p| p.rect),
+    );
+    let overview_shows_section = |kind: WidgetKind| -> bool {
+        let Some(rect) = overview_rect.get() else {
+            return true;
+        };
+        super::info_widget::overview_shows_section_of(kind, data, rect)
+    };
     let mut overview_placed = overview_active;
     for kind in available {
         if kept.contains(&kind)
             || anchored.contains(&kind)
-            || (overview_placed && is_overview_mergeable(kind))
+            || (overview_placed && is_overview_mergeable(kind) && overview_shows_section(kind))
         {
             continue;
         }
@@ -475,6 +558,10 @@ pub(crate) fn calculate_placements_anchored(
             rect: Rect::new(x, messages_area.y + placed_top, width, widget_height),
             side,
         };
+        if kind == WidgetKind::Overview {
+            overview_placed = true;
+            overview_rect.set(Some(placement.rect));
+        }
         placements.push(placement.clone());
         next_anchors.push(WidgetAnchor {
             placement,
@@ -483,9 +570,6 @@ pub(crate) fn calculate_placements_anchored(
             // row, so the moment the user keeps scrolling it rides with the content.
             content_top: margins.scroll_top + placed_top as usize,
         });
-        if kind == WidgetKind::Overview {
-            overview_placed = true;
-        }
 
         let remaining_height = height.saturating_sub(widget_height);
         if remaining_height < MIN_WIDGET_HEIGHT {
@@ -524,9 +608,14 @@ pub(crate) fn calculate_placements_anchored(
     // from an existing anchor or earlier in Phase 2 (notably usage >= 80%).
     // Once Overview has a home, retire those standalone cards and their anchors
     // so the same information is not rendered twice on this or the next frame.
+    // A section the Overview's rect cannot render (folded or truncated tail)
+    // keeps its standalone card: retiring it would hide that content
+    // everywhere, the exact loss the Phase 2 section check above prevents.
     if overview_placed {
-        placements.retain(|p| !is_overview_mergeable(p.kind));
-        next_anchors.retain(|a| !is_overview_mergeable(a.placement.kind));
+        placements.retain(|p| !is_overview_mergeable(p.kind) || !overview_shows_section(p.kind));
+        next_anchors.retain(|a| {
+            !is_overview_mergeable(a.placement.kind) || !overview_shows_section(a.placement.kind)
+        });
     }
 
     PlacementOutcome {

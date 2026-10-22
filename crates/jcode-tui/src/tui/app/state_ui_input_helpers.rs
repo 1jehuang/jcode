@@ -116,6 +116,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Show/toggle full agentgrep search output inline in chat",
     ),
     RegisteredCommand::public(
+        "/overview",
+        "Toggle the consolidated info panel vs separate widgets",
+    ),
+    RegisteredCommand::public(
         "/tool-call-details",
         "Show/toggle dimmed technical details on tool rows with an intent",
     ),
@@ -1175,6 +1179,26 @@ impl App {
                     (
                         "/show-agentgrep-output off".into(),
                         "Show only the one-line agentgrep summary",
+                    ),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/overview ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/overview status".into(),
+                        "Show the current info panel style",
+                    ),
+                    (
+                        "/overview on".into(),
+                        "One consolidated Overview panel in the margins",
+                    ),
+                    (
+                        "/overview off".into(),
+                        "Separate widgets each dock on their own",
                     ),
                 ],
             );
