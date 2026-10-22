@@ -1372,3 +1372,23 @@ fn test_prepare_messages_keeps_multiline_error_rows() {
     assert!(first < error && error < cause, "rows collapsed: {all}");
     assert!(!rendered[first].contains("Error:"), "rows collapsed: {all}");
 }
+
+#[test]
+fn cloud_failure_reason_is_visible_in_rendered_chat() {
+    for width in [40, 100] {
+        let state = TestState {
+            display_messages: vec![DisplayMessage::error(
+                "/cloud failed. Reason: Unreturned cloud changes would be overwritten. Recover the earlier session first.\n\nError: remote receive failed",
+            )],
+            ..Default::default()
+        };
+        let rendered = prepare::prepare_messages(&state, width, 40)
+            .materialize_all_lines()
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Reason:"), "{rendered}");
+        assert!(rendered.contains("session first."), "{rendered}");
+    }
+}

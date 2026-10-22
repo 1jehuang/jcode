@@ -148,9 +148,13 @@ fn start_cloud_command(
             if matches!(command, CloudCommand::Prepare { .. }) {
                 app.pending_cloud_handoff = None;
             }
-            app.push_display_message(DisplayMessage::error(format!(
-                "Cannot locate the jcode binary: {error}"
-            )));
+            show_cloud_failure(
+                app,
+                trimmed,
+                session_id,
+                None,
+                &format!("Cannot locate the jcode binary: {error}"),
+            );
             return true;
         }
     };
@@ -192,9 +196,13 @@ fn start_cloud_command(
             if matches!(command, CloudCommand::Prepare { .. }) {
                 app.pending_cloud_handoff = None;
             }
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to run jcode cloud: {error}"
-            )));
+            show_cloud_failure(
+                app,
+                trimmed,
+                session_id,
+                None,
+                &format!("Failed to run jcode cloud: {error}"),
+            );
             return true;
         }
     };
@@ -435,9 +443,13 @@ impl App {
                 if job.preparation_for.as_ref() == self.pending_cloud_handoff.as_ref() {
                     self.pending_cloud_handoff = None;
                 }
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to run jcode cloud: {error}"
-                )));
+                show_cloud_failure(
+                    self,
+                    &job.trimmed,
+                    &job.session_id,
+                    None,
+                    &format!("Failed to run jcode cloud: {error}\n{}", job.stderr),
+                );
             }
         }
         true
@@ -475,8 +487,8 @@ fn render_cloud_steps(steps: &[String], frame: usize, finished: Option<bool>) ->
 }
 
 /// Keep remote diagnostics literal so Markdown cannot fold their newlines.
-fn format_cloud_failure(command: &str, stderr: &str) -> String {
-    let details = stderr
+fn cloud_failure_details(stderr: &str) -> String {
+    stderr
         .lines()
         .filter(|line| {
             let line = line.trim();
@@ -491,9 +503,63 @@ fn format_cloud_failure(command: &str, stderr: &str) -> String {
                     && line.contains("openssh.com/pq.html"))
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+fn cloud_failure_reason(details: &str) -> &str {
+    // Remote commands often wrap the useful cause in another Error line.
+    details
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("Error: "))
+        .or_else(|| details.lines().map(str::trim).find(|line| !line.is_empty()))
+        .unwrap_or("No error details were returned by the cloud command.")
+}
+
+fn show_cloud_failure(
+    app: &mut App,
+    command: &str,
+    session: &str,
+    exit: Option<i32>,
+    details: &str,
+) {
+    record_cloud_problem(command, session, exit, details);
+    app.push_display_message(DisplayMessage::error(format_cloud_failure(
+        command, details,
+    )));
+    app.set_status_notice(&format!(
+        "Cloud failed: {}",
+        cloud_failure_reason(&cloud_failure_details(details))
+    ));
+}
+
+fn cloud_output_failure(job: &CloudJob, output: &std::process::Output) -> String {
+    let stderr = format!(
+        "{}\n{}",
+        job.stderr,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !cloud_failure_details(&stderr).trim().is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !cloud_failure_details(&stdout).trim().is_empty() {
+        return stdout.into_owned();
+    }
+    format!(
+        "Cloud command exited with {} without error details.",
+        output.status
+    )
+}
+
+/// Put the reason first while keeping complete, literal diagnostics below.
+fn format_cloud_failure(command: &str, stderr: &str) -> String {
+    let details = cloud_failure_details(stderr);
     let details = details.trim();
-    let mut message = format!("{command} failed. Nothing moved, the session is still here.");
+    let mut message = format!(
+        "{command} failed. Reason: {}\nCheck /cloud status before retrying if the session location is uncertain.",
+        cloud_failure_reason(details)
+    );
     if details.is_empty() {
         message.push_str("\n\nNo error details were returned by the cloud command.");
         return message;
@@ -574,37 +640,71 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
             }
         } else {
             app.pending_cloud_handoff = None;
-            record_cloud_problem(
-                "prepare",
+            app.replace_display_message_content(
+                job.progress_message,
+                render_cloud_steps(&job.steps, 0, Some(false)),
+            );
+            let details = if output.status.success() {
+                "Cloud host preparation returned an invalid response: missing non-empty host."
+                    .to_string()
+            } else {
+                cloud_output_failure(&job, &output)
+            };
+            show_cloud_failure(
+                app,
+                "Cloud host preparation",
                 &job.session_id,
                 output.status.code(),
-                &job.stderr,
+                &details,
             );
-            app.push_display_message(DisplayMessage::error(format_cloud_failure(
-                "Cloud host preparation",
-                &job.stderr,
-            )));
         }
         return;
     }
+    if !output.status.success() {
+        let details = cloud_output_failure(&job, &output);
+        show_cloud_failure(
+            app,
+            &job.trimmed,
+            &job.session_id,
+            output.status.code(),
+            &details,
+        );
+        return;
+    }
+    if matches!(
+        job.command,
+        CloudCommand::Move { .. } | CloudCommand::Return
+    ) {
+        let report = serde_json::from_slice::<serde_json::Value>(&output.stdout);
+        let valid = report.as_ref().is_ok_and(|report| match job.command {
+            CloudCommand::Move { .. } => {
+                report["host"].as_str().is_some_and(|host| !host.is_empty())
+            }
+            CloudCommand::Return => report.is_object(),
+            _ => unreachable!(),
+        });
+        if !valid {
+            app.replace_display_message_content(
+                job.progress_message,
+                render_cloud_steps(&job.steps, 0, Some(false)),
+            );
+            show_cloud_failure(
+                app,
+                &job.trimmed,
+                &job.session_id,
+                output.status.code(),
+                "Cloud command returned an invalid response. Could not confirm the handoff result. Run /cloud status to check the session location before retrying.",
+            );
+            return;
+        }
+    }
     let CloudJob {
         command,
-        trimmed,
         session_id,
-        stderr,
         ..
     } = job;
     let session_id = session_id.as_str();
-    let trimmed = trimmed.as_str();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    if !output.status.success() {
-        record_cloud_problem(trimmed, session_id, output.status.code(), &stderr);
-        app.push_display_message(DisplayMessage::error(format_cloud_failure(
-            trimmed, &stderr,
-        )));
-        app.set_status_notice("Cloud move failed");
-        return;
-    }
     match command {
         CloudCommand::Cancel | CloudCommand::Prepare { .. } => {
             unreachable!("handled before transfer completion")
@@ -1284,6 +1384,68 @@ mod tests {
         let message = format_cloud_failure("/cloud", "Error:\r\n```shell\r\nfailed\r\n```\r\n");
         assert!(message.ends_with("\n\nError:\n```shell\nfailed\n```"));
         assert!(!message.contains('\r'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_cloud_completion_failure_shows_a_reason() {
+        for command in [
+            CloudCommand::Move { host: None },
+            CloudCommand::Return,
+            CloudCommand::Where,
+            CloudCommand::Prepare { host: None },
+        ] {
+            for source in ["stream", "stderr", "stdout", "empty", "wait", "invalid"] {
+                let mut app = crate::tui::app::tests::create_test_app();
+                app.is_processing = true;
+                if matches!(command, CloudCommand::Prepare { .. }) {
+                    app.pending_cloud_handoff = Some(pending(
+                        CloudCommand::Move { host: None },
+                        "original-session",
+                    ));
+                }
+                if source == "invalid" && matches!(command, CloudCommand::Where) {
+                    continue;
+                }
+                let tx = fake_job(&mut app, command.clone());
+                let cause = "cloud checkout contains unreturned work; refusing to overwrite";
+                let mut result = output(
+                    source == "invalid",
+                    if source == "stdout" { cause } else { "" },
+                );
+                if source == "stream" {
+                    tx.send(CloudEvent::Stderr(format!(
+                        "Error: remote failed\nError: {cause}"
+                    )))
+                    .unwrap();
+                } else if source == "stderr" {
+                    result.stderr = cause.as_bytes().to_vec();
+                }
+                tx.send(CloudEvent::Done(if source == "wait" {
+                    Err("could not wait for child".into())
+                } else {
+                    Ok(result)
+                }))
+                .unwrap();
+                assert!(app.poll_cloud_job());
+                let message = &app.display_messages.last().unwrap().content;
+                let notice = &app.status_notice.as_ref().expect("failure notice").0;
+                let expected = match source {
+                    "empty" => "without error details",
+                    "invalid" => "invalid response",
+                    "wait" => "could not wait for child",
+                    _ => cause,
+                };
+                assert!(
+                    message.lines().next().unwrap().contains(expected),
+                    "{source}: {message}"
+                );
+                assert!(notice.contains(expected), "{source}: {notice}");
+                assert!(!app.should_quit);
+                assert!(app.cloud_handoff_requested.is_none());
+                assert!(app.pending_cloud_handoff.is_none());
+            }
+        }
     }
 
     #[test]
