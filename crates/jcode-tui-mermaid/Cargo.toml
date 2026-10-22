@@ -29,3 +29,4 @@ usvg = "0.46"
 
 [dev-dependencies]
 jcode-plan = { path = "../jcode-plan" }
+libc = "0.2"

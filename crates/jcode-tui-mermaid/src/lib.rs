@@ -259,9 +259,10 @@ pub use kitty_classic::{
 pub use runtime::force_test_kitty_picker;
 pub use runtime::{
     error_lines_for, get_cached_png, get_font_size, image_protocol_available, init_picker,
-    is_video_export_mode, native_image_protocol_available, protocol_type,
-    rediscover_external_image, register_external_image, register_inline_image,
-    set_video_export_mode, uses_text_image_fallback, with_image_protocol_override,
+    is_video_export_mode, mermaid_text_render_available, native_image_protocol_available,
+    protocol_type, rediscover_external_image, register_external_image, register_inline_image,
+    set_video_export_mode, uses_text_image_fallback, with_herdr_webui_override,
+    with_image_protocol_override,
 };
 pub use viewport_render::{
     InlineFitReadiness, inline_fit_readiness, invalidate_render_state, prewarm_inline_fit_state,
