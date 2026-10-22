@@ -327,10 +327,10 @@ update_channel = "stable"
 # key. Providers without native search use the local engines below.
 # Anthropic API keys are billed about $10 per 1,000 searches.
 prefer_native = true
-# Local websearch engine: "duckduckgo", "bing", "searxng", "custom", or "native"
+# Local websearch engine: "duckduckgo", "bing", "kagi", "searxng", "custom", or "native"
 # ("native" forces prefer_native on and otherwise runs fallback_engines).
 engine = "duckduckgo"
-# Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
+# Local engines to try on errors or empty results. Default falls back to keyless Bing HTML.
 fallback_engines = ["bing"]
 # Bring your own Bing Search API key for primary Bing searches. Prefer using an env var.
 # Fallback Bing searches intentionally use keyless HTML search.
@@ -338,6 +338,11 @@ fallback_engines = ["bing"]
 # bing_api_key = ""
 # Bing market/region, for example "en-US" or "zh-CN".
 bing_market = "en-US"
+# Kagi Search API v1: set engine = "kagi" and prefer_native = false above.
+# Export the API key in this variable. Kagi searches incur API charges.
+# kagi_api_key_env = "KAGI_API_KEY"
+# Set fallback_engines = [] above to keep queries from reaching other backends.
+# Setup and API behavior: docs/kagi-web-search.md
 # SearXNG instance for the "searxng" engine. On some hosts (commonly Linux),
 # DuckDuckGo and Bing block scraped requests via TLS fingerprinting / IP
 # reputation and return an anti-bot page with no results. Pointing at a SearXNG
@@ -390,7 +395,7 @@ disable_base_tools = false
 # MCP tool exposure. "auto" never changes the cached tool list when MCP
 # servers connect, reconnect, or register late, so the provider prompt cache
 # survives: Claude and OpenAI (gpt-5.4+) load MCP tools natively as deferred
-# definitions; other providers use fixed mcp_search/mcp_call tools and learn
+# definitions; other providers use mcp action=search/call and learn
 # new tools' schemas from the transcript. "deferred" behaves like "auto".
 # "eager" sends every server tool definition in the tool list; adding a
 # server mid-session then invalidates the whole prompt cache.
@@ -504,11 +509,10 @@ wake_mode = "internal"
 # Env override: JCODE_SWARM_MODEL
 # swarm_model = "inherit"
 #
-# Default reasoning effort for spawned swarm workers when the spawn call does
-# not pass an explicit `effort` ("low", "medium", "high", ...). Leave unset so
-# workers inherit the provider-wide reasoning effort.
+# Reasoning effort for spawned swarm workers ("low", "medium", "high", ...).
+# Agents cannot choose worker effort through the swarm tool. Unset = "low".
 # Env override: JCODE_SWARM_EFFORT
-# swarm_effort = "medium"
+# swarm_effort = "low"
 #
 # Root model reasoning while /effort swarm is selected. Independent of worker
 # swarm_effort. Supported levels: none|minimal|low|medium|high|xhigh|max.
@@ -553,10 +557,18 @@ swarm_stall_after_secs = 600
 # swarm_strip_layout = "vertical"
 #
 # Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
-# Provider values: auto, jcode, openrouter, typesafe, aimlapi.
+# Provider values: auto, jcode, openrouter, typesafe, laya, aimlapi.
 # auto prefers Jcode, then OpenRouter, TypeSafe, AI/ML API credentials.
+# laya uses a local/self-hosted laya-serve (/v1/systemone, default http://127.0.0.1:8080,
+# override via JCODE_LAYA_BASE_URL or LAYA_BASE_URL, optional LAYA_API_KEY in laya.env).
 # Env override: JCODE_MEMORY_JEV_PROVIDER
 # memory_jev_provider = "auto"
+# Optional per-purpose Jev Decisions model overrides. Unset preserves the
+# selected provider's existing model. Environment overrides take precedence.
+# Env overrides: JCODE_MEMORY_JEV_MODEL, JCODE_BROWSER_JEV_MODEL, JCODE_VOICE_JEV_MODEL
+# memory_jev_model = "typesafe/jev-1.14"
+# browser_jev_model = "typesafe/jev-1.14"
+# voice_jev_model = "typesafe/jev-1.14"
 # Minimum relevance probability (0.8..=1.0). Invalid values fail closed.
 # memory_jev_threshold = 0.8
 # BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, or AIMLAPI_API_KEY.

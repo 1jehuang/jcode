@@ -25,11 +25,13 @@ fn test_remote_fast_status_tracks_history_tier_including_explicit_off() {
             .expect("history fixture");
             app.handle_server_event(history, &mut remote);
             assert_eq!(app.remote_service_tier.as_deref(), tier);
+            // Until the provider reports the applied tier, the widget is honest
+            // that the requested tier is unconfirmed.
             assert_eq!(
                 crate::tui::TuiState::info_widget_data(&app)
                     .service_tier
                     .as_deref(),
-                tier
+                tier.map(|_| "Fast requested (unconfirmed)")
             );
 
             app.input = "/fast status".to_string();

@@ -195,9 +195,20 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
     // Background awaits auto-resume on the new server and report via
     // notify/wake, so they need no agent action. Only blocking awaits, whose
     // socket waiter dies with the old process, must be rerun by the agent.
+    // Awaits whose members have all finished (session closed, crashed, or
+    // gone) have nothing left to wait for, so they are not re-announced.
+    let member_finished = |session_id: &str| -> bool {
+        crate::session::Session::load(session_id)
+            .map(|session| session_status_is_finished(&session.status))
+            .unwrap_or(true)
+    };
     let pending_awaits: Vec<_> = crate::server::pending_await_members_for_session(session_id)
         .into_iter()
         .filter(|state| !state.background)
+        .filter(|state| {
+            state.requested_ids.is_empty()
+                || !state.requested_ids.iter().all(|id| member_finished(id))
+        })
         .collect();
     if !pending_awaits.is_empty() {
         let await_list = pending_awaits
@@ -226,6 +237,18 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
     }
 
     notes
+}
+
+/// A session that can no longer reach `ready`/`completed` on its own, so an
+/// await on it has nothing left to wait for.
+fn session_status_is_finished(status: &crate::session::SessionStatus) -> bool {
+    !matches!(
+        status,
+        crate::session::SessionStatus::Active
+            | crate::session::SessionStatus::Reloaded
+            | crate::session::SessionStatus::Compacted
+            | crate::session::SessionStatus::RateLimited
+    )
 }
 
 pub(super) fn resolve_selfdev_reload_repo_dir(
@@ -432,6 +455,104 @@ impl SelfDevTool {
                     ack.hash
                 )))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod finished_member_tests {
+    use super::{persisted_background_tasks_note, session_status_is_finished};
+    use crate::session::{Session, SessionStatus};
+
+    #[test]
+    fn reload_note_skips_awaits_whose_members_all_finished() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let previous_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        crate::env::set_var("JCODE_HOME", dir.path());
+        crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+
+        let boss = "session_boss_1700000000_aa";
+        let save_member = |id: &str, closed: bool| {
+            let mut session = Session::create_with_id(id.to_string(), None, None);
+            if closed {
+                session.mark_closed();
+            }
+            session.save_prepared().unwrap();
+        };
+        save_member("session_done_1700000000_bb", true);
+        save_member("session_live_1700000000_cc", false);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let await_on = |key: &str, ids: &[&str]| {
+            crate::server::save_await_state_for_tests(&crate::server::PersistedAwaitMembersState {
+                key: key.to_string(),
+                session_id: boss.to_string(),
+                swarm_id: "swarm".to_string(),
+                target_status: vec!["completed".to_string()],
+                requested_ids: ids.iter().map(|s| s.to_string()).collect(),
+                mode: None,
+                created_at_unix_ms: now,
+                deadline_unix_ms: now + 600_000,
+                background: false,
+                notify: true,
+                wake: true,
+                final_response: None,
+            });
+        };
+        await_on("await_done_only", &["session_done_1700000000_bb"]);
+        await_on(
+            "await_gone_member",
+            &["session_never_existed_1700000000_dd"],
+        );
+        await_on("await_live", &["session_live_1700000000_cc"]);
+
+        let note = persisted_background_tasks_note(boss);
+        assert!(
+            note.contains("session_live_1700000000_cc"),
+            "live await kept: {note}"
+        );
+        assert!(
+            !note.contains("session_done_1700000000_bb"),
+            "closed member dropped: {note}"
+        );
+        assert!(
+            !note.contains("session_never_existed"),
+            "missing member dropped: {note}"
+        );
+
+        for (key, value) in [
+            ("JCODE_HOME", previous_home),
+            ("JCODE_RUNTIME_DIR", previous_runtime),
+        ] {
+            match value {
+                Some(value) => crate::env::set_var(key, value),
+                None => crate::env::remove_var(key),
+            }
+        }
+    }
+
+    #[test]
+    fn closed_crashed_and_errored_members_are_finished() {
+        assert!(session_status_is_finished(&SessionStatus::Closed));
+        assert!(session_status_is_finished(&SessionStatus::Crashed {
+            message: None
+        }));
+        assert!(session_status_is_finished(&SessionStatus::Error {
+            message: "x".into()
+        }));
+        for live in [
+            SessionStatus::Active,
+            SessionStatus::Reloaded,
+            SessionStatus::Compacted,
+            SessionStatus::RateLimited,
+        ] {
+            assert!(!session_status_is_finished(&live), "{live:?}");
         }
     }
 }

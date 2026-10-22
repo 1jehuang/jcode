@@ -626,6 +626,50 @@ impl Provider for NativeCompactionStreamProvider {
     }
 }
 
+#[tokio::test]
+async fn context_limit_recovery_announces_measured_token_counts() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeCompactionStreamProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    for idx in 0..40 {
+        agent.add_message(
+            if idx % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            vec![ContentBlock::Text {
+                text: format!("message {idx} {}", "x".repeat(4_000)),
+                cache_control: None,
+            }],
+        );
+    }
+
+    assert!(agent.try_auto_compact_after_context_limit("maximum context length exceeded"));
+    match agent.take_recovery_compaction_event() {
+        ServerEvent::Compaction {
+            trigger,
+            pre_tokens,
+            post_tokens,
+            tokens_saved,
+            messages_dropped,
+            ..
+        } => {
+            assert_eq!(trigger, "auto_recovery");
+            let pre = pre_tokens.expect("recovery must report a pre-compaction count");
+            let post = post_tokens.expect("recovery must report a post-compaction count");
+            assert!(
+                post < pre,
+                "recovery should shrink the context ({pre} -> {post})"
+            );
+            assert_eq!(tokens_saved, Some(pre - post));
+            assert!(messages_dropped.is_some_and(|count| count > 0));
+        }
+        other => panic!("expected compaction event, got {other:?}"),
+    }
+}
+
 #[test]
 fn tool_output_to_content_blocks_preserves_labeled_images() {
     let output = ToolOutput::new("Image ready").with_labeled_image(
@@ -837,6 +881,8 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
         if let ServerEvent::Compaction {
             trigger,
             pre_tokens,
+            post_tokens,
+            tokens_saved,
             messages_compacted,
             ..
         } = event
@@ -847,6 +893,12 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
                 Some(80_000),
                 "remote compaction must forward the provider's pre-compaction count"
             );
+            let post = post_tokens.expect("native compaction must report an estimated post count");
+            assert!(
+                post < 80_000,
+                "post count should reflect the compacted context"
+            );
+            assert_eq!(tokens_saved, Some(80_000 - post));
             assert!(
                 messages_compacted.is_some_and(|count| count > 0),
                 "native compaction should report a non-empty compacted prefix"
@@ -1467,7 +1519,6 @@ fn seed_transient_session_state(agent: &mut Agent) {
     agent.tool_output_scan_index = 7;
     agent.last_upstream_provider = Some("upstream_old".to_string());
     agent.last_connection_type = Some("websocket".to_string());
-    agent.current_turn_system_reminder = Some("reminder".to_string());
     agent.last_usage = TokenUsage {
         input_tokens: 11,
         output_tokens: 17,
@@ -1505,7 +1556,6 @@ async fn clear_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.tool_output_scan_index, 0);
     assert!(agent.last_upstream_provider.is_none());
     assert!(agent.last_connection_type.is_none());
-    assert!(agent.current_turn_system_reminder.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
@@ -1547,7 +1597,6 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.tool_output_scan_index, 0);
     assert!(agent.last_upstream_provider.is_none());
     assert!(agent.last_connection_type.is_none());
-    assert!(agent.current_turn_system_reminder.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
@@ -1915,16 +1964,33 @@ impl crate::tool::Tool for VerboseFakeMcpTool {
 }
 
 async fn register_fake_deferred_mcp_surface(registry: &Registry) {
-    for name in ["mcp_search", "mcp_call"] {
-        registry
-            .register(
-                name.to_string(),
-                Arc::new(FakeMcpTool {
-                    name: name.to_string(),
-                }) as Arc<dyn crate::tool::Tool>,
-            )
-            .await;
-    }
+    let manager = Arc::new(tokio::sync::RwLock::new(
+        crate::mcp::McpManager::with_config(Default::default()),
+    ));
+    registry
+        .register(
+            "mcp".into(),
+            Arc::new(
+                crate::tool::mcp::McpManagementTool::new(manager.clone())
+                    .with_registry(registry.clone()),
+            ),
+        )
+        .await;
+    registry
+        .register(
+            "mcp_search".into(),
+            Arc::new(
+                crate::tool::mcp::McpSearchTool::new(manager.clone())
+                    .with_registry(registry.clone()),
+            ),
+        )
+        .await;
+    registry
+        .register(
+            "mcp_call".into(),
+            Arc::new(crate::tool::mcp::McpCallTool::new(manager).with_registry(registry.clone())),
+        )
+        .await;
 }
 
 async fn agent_with_fake_mcp_surface(
@@ -1972,8 +2038,12 @@ async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
         .map(|tool| tool.name)
         .collect();
     assert!(!deferred_names.iter().any(|name| name.starts_with("mcp__")));
-    assert!(deferred_names.iter().any(|name| name == "mcp_search"));
-    assert!(deferred_names.iter().any(|name| name == "mcp_call"));
+    assert!(deferred_names.iter().any(|name| name == "mcp"));
+    assert!(
+        !deferred_names
+            .iter()
+            .any(|name| name == "mcp_search" || name == "mcp_call")
+    );
 
     // `auto` never exposes per-server definitions on providers without
     // native deferred loading, even for a tiny catalog: any later change to
@@ -1991,8 +2061,7 @@ async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
             .iter()
             .any(|name| name.starts_with("mcp__"))
     );
-    assert!(auto_small_names.iter().any(|name| name == "mcp_search"));
-    assert!(auto_small_names.iter().any(|name| name == "mcp_call"));
+    assert!(auto_small_names.iter().any(|name| name == "mcp"));
 
     let mut auto_deferred = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, 1).await;
     let auto_deferred_names: Vec<String> = auto_deferred
@@ -2006,8 +2075,7 @@ async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
             .iter()
             .any(|name| name.starts_with("mcp__"))
     );
-    assert!(auto_deferred_names.iter().any(|name| name == "mcp_search"));
-    assert!(auto_deferred_names.iter().any(|name| name == "mcp_call"));
+    assert!(auto_deferred_names.iter().any(|name| name == "mcp"));
     let stable_auto_names: Vec<String> = auto_deferred
         .tool_definitions()
         .await
@@ -2067,8 +2135,7 @@ async fn auto_mode_never_changes_the_tool_list_for_late_mcp_tools() {
     agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
 
     let before = agent.tool_definitions().await;
-    assert!(before.iter().any(|tool| tool.name == "mcp_search"));
-    assert!(before.iter().any(|tool| tool.name == "mcp_call"));
+    assert!(before.iter().any(|tool| tool.name == "mcp"));
     agent
         .registry
         .register(
@@ -2635,6 +2702,98 @@ async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
         text.contains("all done"),
         "the recovered turn must deliver the model's real completion, got {text:?}"
     );
+}
+
+#[derive(Clone, Default)]
+struct SystemPromptCaptureProvider {
+    requests: Arc<std::sync::Mutex<Vec<(String, Vec<Message>)>>>,
+}
+
+#[async_trait]
+impl Provider for SystemPromptCaptureProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push((system.to_string(), messages.to_vec()));
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(StreamEvent::TextDelta("ok".to_string()))).await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+/// A swarm DM wakes the recipient with a per-turn system reminder. Putting it
+/// in the system prompt changed the prefix of every cached message, so each DM
+/// cost a full KV cache miss, and the next turn missed again when it vanished.
+/// The reminder must ride in the transcript and leave the system prompt alone.
+#[tokio::test]
+async fn turn_system_reminder_does_not_change_the_system_prompt() {
+    let _guard = crate::storage::lock_test_env();
+    let capture = SystemPromptCaptureProvider::default();
+    let requests = capture.requests.clone();
+    let provider: Arc<dyn Provider> = Arc::new(capture);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("first", Vec::new(), None, tx.clone())
+        .await
+        .expect("plain turn");
+    agent
+        .run_once_streaming_mpsc(
+            "DM from fox: hello",
+            Vec::new(),
+            Some("You just received a direct swarm message from fox.".to_string()),
+            tx.clone(),
+        )
+        .await
+        .expect("reminder turn");
+    agent
+        .run_once_streaming_mpsc("third", Vec::new(), None, tx)
+        .await
+        .expect("follow-up turn");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests.iter().all(|(system, _)| system == &requests[0].0),
+        "the system prompt must be identical across reminder and plain turns"
+    );
+    assert!(!requests[1].0.contains("direct swarm message"));
+
+    let reminder_turn = &requests[1].1;
+    let last = reminder_turn.last().map(message_text).unwrap_or_default();
+    assert!(last.starts_with("<system-reminder>"), "got {last:?}");
+    assert!(last.contains("direct swarm message from fox"));
+
+    // The follow-up turn replays the reminder turn unchanged as its prefix.
+    let follow_up = &requests[2].1;
+    assert!(follow_up.len() > reminder_turn.len());
+    for (before, after) in reminder_turn.iter().zip(follow_up.iter()) {
+        assert_eq!(message_text(before), message_text(after));
+    }
 }
 
 #[derive(Clone, Default)]

@@ -10,6 +10,11 @@ pub const OPENAI_COMPAT_LOCAL_ENABLED_ENV: &str = "JCODE_OPENAI_COMPAT_LOCAL_ENA
 pub const MINIMAX_CHINA_API_BASE: &str = "https://api.minimaxi.com/v1";
 pub const MINIMAX_CHINA_SETUP_URL: &str = "https://platform.minimaxi.com/docs/llms.txt";
 
+mod profile_credentials;
+pub use profile_credentials::{
+    load_openai_compatible_profile_api_key, openai_compatible_profile_is_configured,
+};
+
 pub fn api_base_uses_localhost(raw: &str) -> bool {
     let Ok(parsed) = url::Url::parse(raw) else {
         return false;
@@ -35,7 +40,10 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     api_key_hint: Option<&str>,
 ) -> ResolvedOpenAiCompatibleProfile {
     let mut resolved = resolve_openai_compatible_profile_endpoint(profile, api_key_hint);
+    // Never silently promote a native subscription login into a Contributor
+    // model, which has different content-use implications.
     if profile.id != OPENAI_COMPAT_PROFILE.id
+        && profile.id != "muse-subscription"
         && let Some(newest_model) =
             newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
     {
@@ -754,6 +762,7 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
     let model = model.trim().to_ascii_lowercase();
 
     match profile_id.as_str() {
+        "muse-subscription" if model == "muse-wonder-1.0" => Some(1_048_576),
         "conifer" => conifer_context_limit(&model)
             .or_else(|| jcode_provider_core::models::open_weight_family_context_limit(&model)),
         // The selected upstream model may vary. Use Jcode's conservative
@@ -1218,34 +1227,6 @@ fn parse_bool_like(value: &str) -> bool {
     )
 }
 
-pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile) -> bool {
-    // When a named config profile (`[providers.<name>]`, selected via
-    // `--provider-profile`) is active, its credentials live under the runtime
-    // env vars set by `apply_named_provider_profile_env`, not the built-in
-    // `openai-compatible.env`. Honor those first so auth-test does not report a
-    // false `not_configured` for a correctly-configured named profile (#402).
-    if let Some(configured) = active_named_provider_profile_is_configured() {
-        return configured;
-    }
-
-    let resolved = resolve_openai_compatible_profile_endpoint(profile, None);
-    if load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file).is_some() {
-        return true;
-    }
-
-    if resolved.requires_api_key {
-        return false;
-    }
-
-    if profile.id == OPENAI_COMPAT_PROFILE.id && api_base_uses_localhost(&resolved.api_base) {
-        return true;
-    }
-
-    load_env_value_from_env_or_config(OPENAI_COMPAT_LOCAL_ENABLED_ENV, &resolved.env_file)
-        .map(|value| parse_bool_like(&value))
-        .unwrap_or(false)
-}
-
 /// Resolve the active named provider profile's credential env var + env file,
 /// as set by [`apply_named_provider_profile_env`], if one is active.
 ///
@@ -1351,3 +1332,7 @@ fn dedup_sources(sources: Vec<(String, String)>) -> Vec<(String, String)> {
 #[cfg(test)]
 #[path = "provider_catalog_tests.rs"]
 mod provider_catalog_tests;
+
+#[cfg(test)]
+#[path = "provider_catalog_muse_tests.rs"]
+mod provider_catalog_muse_tests;

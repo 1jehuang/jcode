@@ -96,6 +96,9 @@ pub(super) const AGENT_DOT_COLOR: (u8, u8, u8) = (186, 139, 255);
 /// Border legend explaining the agent marker, shown only when at least one
 /// visible row carries it so it never labels something absent.
 pub(super) fn changes_legend(data: &InfoWidgetData, inner_height: u16) -> Option<Line<'static>> {
+    if data.dual_git_info.is_some() {
+        return None;
+    }
     let info = data.git_info.as_ref()?;
     let rows = (inner_height as usize).min(CHANGES_MAX_FILES);
     let root = info.repo_root.as_deref();
@@ -141,6 +144,9 @@ pub(super) fn changes_height(info: &GitInfo) -> u16 {
 /// bottom-right. Every body row is a file. The dirty-file count stays on the
 /// status line.
 pub(super) fn render_changes_framed(data: &InfoWidgetData, inner: Rect) -> Framed {
+    if data.dual_git_info.is_some() {
+        return Framed::body(render_git_widget(data, inner)).title(frame::label("Repositories"));
+    }
     let Some(info) = &data.git_info else {
         return Framed::default();
     };
@@ -200,6 +206,9 @@ fn changes_file_lines(
 /// Overview section rows (no border of its own): files plus an inline
 /// `+N more` row carrying the all-file totals.
 pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    if let Some(dual) = &data.dual_git_info {
+        return render_dual_git(data, dual, inner);
+    }
     let Some(info) = &data.git_info else {
         return Vec::new();
     };
@@ -240,6 +249,133 @@ pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
         }
         lines.push(Line::from(spans));
     }
+    lines
+}
+
+fn truncate_cells(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut used = 0;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let cells = ch.width().unwrap_or(0);
+        if used + cells > width - 1 {
+            break;
+        }
+        out.push(ch);
+        used += cells;
+    }
+    out.push('…');
+    out
+}
+
+fn repo_rows(state: &super::super::cloud_git::RepoState) -> u16 {
+    match state {
+        super::super::cloud_git::RepoState::Ready(info) => 1 + changes_height(info),
+        _ => 1,
+    }
+}
+
+pub(super) fn dual_git_height(dual: &super::super::cloud_git::DualGitInfo) -> u16 {
+    repo_rows(&dual.cloud) + repo_rows(&dual.local)
+}
+
+fn render_dual_git(
+    data: &InfoWidgetData,
+    dual: &super::super::cloud_git::DualGitInfo,
+    inner: Rect,
+) -> Vec<Line<'static>> {
+    use super::super::cloud_git::RepoState;
+    // Reserve a heading for each machine before allocating file rows. A busy
+    // VM must never push the local state out of the widget (or vice versa).
+    let budget = inner.height.saturating_sub(2) as usize;
+    let cloud_wanted = repo_rows(&dual.cloud).saturating_sub(1) as usize;
+    let local_wanted = repo_rows(&dual.local).saturating_sub(1) as usize;
+    let cloud_budget = cloud_wanted.min(budget.saturating_sub(local_wanted.min(budget / 2)));
+    let local_budget = local_wanted.min(budget.saturating_sub(cloud_budget));
+    let width = inner.width as usize;
+    let safe = |text: &str| -> String {
+        let text: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        truncate_cells(&text, width)
+    };
+    let mut lines = Vec::new();
+    for (label, state, row_budget, cloud) in [
+        ("Cloud VM", &dual.cloud, cloud_budget, true),
+        (
+            if dual.local_is_source {
+                "Local"
+            } else {
+                "Local (launch dir)"
+            },
+            &dual.local,
+            local_budget,
+            false,
+        ),
+    ] {
+        let summary = match state {
+            RepoState::Loading => "loading…".to_string(),
+            RepoState::Unavailable => "unavailable".to_string(),
+            RepoState::NoRepository => "no repository".to_string(),
+            RepoState::Ready(info) => {
+                let counts = if info.dirty_total == 0 {
+                    "clean".into()
+                } else {
+                    format!("~{} +{} ?{}", info.modified, info.staged, info.untracked)
+                };
+                if info.ahead > 0 || info.behind > 0 {
+                    format!("{} {counts} ↑{} ↓{}", info.branch, info.ahead, info.behind)
+                } else {
+                    format!("{} {counts}", info.branch)
+                }
+            }
+        };
+        lines.push(Line::from(Span::styled(
+            safe(&format!("{label}: {summary}")),
+            Style::default().fg(rgb(140, 180, 255)),
+        )));
+        if let RepoState::Ready(info) = state {
+            let overflow = info.dirty_total > row_budget;
+            let shown = if overflow {
+                row_budget.saturating_sub(1)
+            } else {
+                row_budget
+            };
+            for file in info.dirty_files.iter().take(shown) {
+                let agent = cloud
+                    && is_agent_edited(info.repo_root.as_deref(), &file.path, &data.agent_edited);
+                let mut file = file.clone();
+                file.path = file
+                    .path
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                // Existing file rows have a three-cell prefix. Bound even
+                // widths smaller than that prefix without wrapping chrome.
+                file.path =
+                    truncate_cells(&changes_display_path(&file.path), width.saturating_sub(3));
+                if width < 3 {
+                    lines.push(Line::from(safe(&file.status.to_string())));
+                } else {
+                    lines.push(changes_file_line(&file, agent, 0, width));
+                }
+            }
+            if overflow && row_budget > 0 {
+                lines.push(Line::from(safe(&format!(
+                    "  +{} more",
+                    info.dirty_total.saturating_sub(shown)
+                ))));
+            }
+        }
+    }
+    lines.truncate(inner.height as usize);
     lines
 }
 
@@ -413,6 +549,84 @@ mod tests {
         assert_eq!(changes_display_path("src/foo.rs"), "foo.rs");
         assert_eq!(changes_display_path("old.rs -> new/place.rs"), "place.rs");
         assert_eq!(changes_display_path("scratch/"), "scratch/");
+    }
+
+    #[test]
+    fn dual_git_states_are_labeled_width_safe_and_mark_only_cloud_edits() {
+        use crate::tui::cloud_git::{DualGitInfo, RepoState};
+        let repo = GitInfo {
+            branch: "main界".into(),
+            dirty_total: 1,
+            dirty_files: vec![DirtyFile::new('M', "shared\n界name.rs")],
+            repo_root: Some("/same".into()),
+            modified: 1,
+            ..Default::default()
+        };
+        let data = InfoWidgetData {
+            dual_git_info: Some(DualGitInfo {
+                local_is_source: true,
+                local: RepoState::Ready(repo.clone()),
+                cloud: RepoState::Ready(repo),
+            }),
+            agent_edited: std::sync::Arc::new(
+                [std::path::PathBuf::from("/same/shared\n界name.rs")]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        assert!(data.has_data_for(super::super::WidgetKind::GitStatus));
+        let rows: Vec<String> = render_git_widget(&data, Rect::new(0, 0, 50, 10))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(rows[0].starts_with("Cloud VM: main界"));
+        assert!(rows[1].contains('●'));
+        assert!(rows[2].starts_with("Local: main界"));
+        assert!(!rows[3].contains('●'));
+        for width in 0..=50 {
+            let lines = render_git_widget(&data, Rect::new(0, 0, width, 10));
+            for line in lines {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(text.as_str()) <= width as usize,
+                    "{width}: {text:?}"
+                );
+                assert!(!text.chars().any(char::is_control));
+            }
+        }
+    }
+
+    #[test]
+    fn dual_git_keeps_clean_missing_and_unavailable_repositories_visible() {
+        use crate::tui::cloud_git::{DualGitInfo, RepoState};
+        for cloud in [
+            RepoState::Loading,
+            RepoState::Unavailable,
+            RepoState::NoRepository,
+            RepoState::Ready(GitInfo {
+                branch: "clean-branch".into(),
+                ..Default::default()
+            }),
+        ] {
+            let data = InfoWidgetData {
+                dual_git_info: Some(DualGitInfo {
+                    local_is_source: true,
+                    cloud,
+                    local: RepoState::Unavailable,
+                }),
+                ..Default::default()
+            };
+            assert_eq!(super::super::changes_section_height(&data), 2);
+            let rows = render_git_widget(&data, Rect::new(0, 0, 70, 2));
+            assert_eq!(rows.len(), 2);
+            let text: String = rows
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+                .collect();
+            assert!(text.contains("Cloud VM:"));
+            assert!(text.contains("Local: unavailable"));
+        }
     }
 
     #[test]

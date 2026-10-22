@@ -301,6 +301,41 @@ fn vertical_strip_falls_back_to_name_without_icon() {
     assert!(plain_line(&lines[0]).contains("zeta"));
 }
 
+fn todo(content: &str, status: &str) -> GalleryTodo {
+    GalleryTodo {
+        content: content.to_string(),
+        status: status.to_string(),
+        tool_intents: Vec::new(),
+    }
+}
+
+#[test]
+fn vertical_strip_prefers_active_todo_over_spawn_prompt() {
+    let mut working = member("zeta", "running", None, &[]);
+    working.task = Some("the original spawn prompt".to_string());
+    working.todo = Some((1, 3));
+    working.todo_items = vec![
+        todo("read the code", "completed"),
+        todo("wire the renderer", "in_progress"),
+        todo("write tests", "pending"),
+    ];
+    let lines = render_swarm_strip_vertical(&[working.clone()], 0, false, &[], None, 0, 80, 4, 12);
+    let row = plain_line(&lines[0]);
+    assert!(row.contains("wire the renderer"), "active todo: {row:?}");
+    assert!(!row.contains("spawn prompt"), "prompt hidden: {row:?}");
+
+    // Finished agents fall back to what they were spawned for.
+    working.status = "completed".to_string();
+    let lines = render_swarm_strip_vertical(&[working.clone()], 0, false, &[], None, 0, 80, 4, 12);
+    assert!(plain_line(&lines[0]).contains("the original spawn prompt"));
+
+    // Agents without a todo list keep showing the spawn label.
+    working.status = "running".to_string();
+    working.todo_items.clear();
+    let lines = render_swarm_strip_vertical(&[working], 0, false, &[], None, 0, 80, 4, 12);
+    assert!(plain_line(&lines[0]).contains("the original spawn prompt"));
+}
+
 #[test]
 fn vertical_strip_caps_rows_and_reports_overflow() {
     let members: Vec<GalleryMember> = (0..7)
@@ -531,9 +566,15 @@ fn vertical_strip_unfocused_keeps_live_card_details_in_chat() {
         !all.contains("reviewer"),
         "compact strip should not repeat the animal name: {all}"
     );
+    // The compact row names the active step in place of the spawn prompt,
+    // but stays a single row: the full todo card is chat/focus-only.
     assert!(
-        !all.contains("test token refresh flow"),
-        "details leaked: {all}"
+        all.contains("test token refresh flow"),
+        "active step: {all}"
+    );
+    assert!(
+        !all.contains("review authentication changes"),
+        "spawn prompt should yield to the active todo: {all}"
     );
 }
 

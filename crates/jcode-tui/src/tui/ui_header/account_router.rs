@@ -113,6 +113,60 @@ pub(super) fn lines(
     )
 }
 
+/// Rows for a remote (SSH) daemon, built only from its credential-free
+/// `AccountUsage` report. `None` until the daemon has answered.
+pub(super) fn remote_lines(
+    provider_name: &str,
+    selected_label: Option<&str>,
+) -> Option<Vec<Line<'static>>> {
+    let (anthropic, openai) = crate::usage::remote_account_list()?;
+    Some(remote_inventory_lines(
+        &anthropic,
+        &openai,
+        provider_name,
+        selected_label,
+    ))
+}
+
+fn remote_inventory_lines(
+    anthropic: &[crate::usage::AccountUsageSnapshot],
+    openai: &[crate::usage::AccountUsageSnapshot],
+    provider_name: &str,
+    selected_label: Option<&str>,
+) -> Vec<Line<'static>> {
+    use jcode_provider_core::ActiveProvider;
+    let current_provider = jcode_provider_core::parse_provider_hint(provider_name);
+    let display_used = crate::config::config().display.usage_display_used();
+    let mut lines = Vec::new();
+    for (name, provider, accounts) in [
+        ("openai", ActiveProvider::OpenAI, openai),
+        ("anthropic", ActiveProvider::Claude, anthropic),
+    ] {
+        for usage in accounts {
+            let account = usage;
+            let is_current = current_provider == Some(provider)
+                && selected_label.is_some_and(|label| label == account.label);
+            let mut row = detail(
+                oauth_credential_status(false, Some(usage)),
+                format!("{name:<9} {}", masked_identity(account.email.as_deref())),
+                is_current,
+            );
+            row.spans
+                .push(Span::styled(" · ", Style::default().fg(dim_color())));
+            if let Some(quota) = remaining_bar(usage, display_used) {
+                row.spans.extend(quota.spans);
+            } else {
+                row.spans.push(Span::styled(
+                    usage_status_label(Some(usage)),
+                    Style::default().fg(dim_color()),
+                ));
+            }
+            lines.push(row);
+        }
+    }
+    lines
+}
+
 fn inventory_lines(
     auth: &AuthStatus,
     active: ActiveCredentialOverrides,
@@ -412,6 +466,31 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn remote_rows_mask_email_and_show_quota() {
+        let account = crate::usage::AccountUsageSnapshot {
+            label: "work".into(),
+            email: Some("jeremy@example.com".into()),
+            exhausted: false,
+            primary_label: Some("5-hour".into()),
+            five_hour_ratio: Some(0.15),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        let out = text(remote_inventory_lines(
+            &[],
+            &[account],
+            "openai",
+            Some("work"),
+        ));
+        assert!(out.contains("openai"), "{out}");
+        assert!(out.contains("j***y@example.com"), "{out}");
+        assert!(!out.contains("jeremy@"), "{out}");
+        assert!(out.contains("85%"), "{out}");
     }
 
     fn auth() -> AuthStatus {

@@ -387,7 +387,6 @@ impl App {
             queued_messages: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
-            current_turn_system_reminder: None,
             upstream_provider: None,
             connection_type: None,
             status_detail: None,
@@ -461,6 +460,8 @@ impl App {
             restart_requested: None,
             hibernate_exit_requested: None,
             cloud_handoff_requested: None,
+            cloud_job: None,
+            pending_cloud_handoff: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
@@ -870,7 +871,6 @@ impl App {
             queued_messages: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
-            current_turn_system_reminder: None,
             upstream_provider: None,
             connection_type: None,
             status_detail: None,
@@ -944,6 +944,8 @@ impl App {
             restart_requested: None,
             hibernate_exit_requested: None,
             cloud_handoff_requested: None,
+            cloud_job: None,
+            pending_cloud_handoff: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
@@ -1492,7 +1494,18 @@ impl App {
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
         app.remote_startup_phase_started = Some(Instant::now());
 
+        let handoff_preview_session = std::env::var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION").ok();
+        crate::env::remove_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION");
         if let Some(host) = crate::tui::ssh_remote_host() {
+            // An explicit /cloud handoff has a known local source transcript.
+            // Render it before the first paint, while still waiting for authoritative
+            // server History. Never infer this from a remote session ID alone.
+            if let Some(session_id) = resume_session.as_deref()
+                && handoff_preview_session.as_deref() == Some(session_id)
+            {
+                app.restore_remote_startup_history(session_id);
+                app.remote_provider_model = app.session.model.clone();
+            }
             // The server supplies history, credentials, models and project state.
             // Local reload files can belong to an unrelated session with the same id.
             app.onboarding_startup_checked = true;

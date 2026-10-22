@@ -96,11 +96,173 @@ fn test_parameters_schema() {
     assert!(schema["properties"]["action"].is_object());
     assert!(schema["properties"]["server"].is_object());
     assert!(schema["properties"]["command"].is_object());
+    assert_eq!(schema["required"], json!(["action"]));
+    assert!(
+        schema["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("search"))
+    );
+    assert!(
+        schema["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("call"))
+    );
+    assert_eq!(
+        schema["properties"]["arguments"]["additionalProperties"],
+        true
+    );
+}
+
+async fn unified_registry() -> crate::tool::Registry {
+    let registry = crate::tool::Registry::empty();
+    let manager = Arc::clone(create_test_tool().manager());
+    registry
+        .register(
+            "mcp".into(),
+            Arc::new(McpManagementTool::new(manager.clone()).with_registry(registry.clone())),
+        )
+        .await;
+    registry
+        .register(
+            "mcp_search".into(),
+            Arc::new(McpSearchTool::new(manager.clone()).with_registry(registry.clone())),
+        )
+        .await;
+    registry
+        .register(
+            "mcp_call".into(),
+            Arc::new(McpCallTool::new(manager).with_registry(registry.clone())),
+        )
+        .await;
+    registry
+}
+
+#[tokio::test]
+async fn unified_mcp_hides_alias_schemas_but_preserves_execution() {
+    let registry = unified_registry().await;
+    let definitions = registry.definitions(None).await;
+    assert_eq!(
+        definitions
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mcp"]
+    );
+    let ctx = create_test_context();
+    let unified = registry
+        .execute("mcp", json!({"action":"search"}), ctx.clone())
+        .await
+        .unwrap();
+    let legacy = registry
+        .execute("mcp_search", json!({}), ctx.clone())
+        .await
+        .unwrap();
+    assert_eq!(unified.output, "[]");
+    assert_eq!(unified.output, legacy.output);
+    assert_eq!(unified.metadata, legacy.metadata);
+    for (name, input) in [("mcp", json!({"action":"call"})), ("mcp_call", json!({}))] {
+        let error = registry
+            .execute(name, input, ctx.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("missing field `server`"),
+            "{error}"
+        );
+    }
+    let script_defs = registry.definitions_for_session(&ctx.session_id).await;
+    assert_eq!(
+        script_defs
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mcp"]
+    );
+}
+
+#[tokio::test]
+async fn unified_mcp_respects_legacy_surface_and_management_policies() {
+    use std::collections::HashSet;
+    let registry = unified_registry().await;
+    let mut ctx = create_test_context();
+    ctx.session_id = "unified-mcp-action-policy".into();
+    let _policy = crate::tool::register_session_tool_policy(
+        &ctx.session_id,
+        Some(HashSet::from(["mcp_search".into()])),
+        HashSet::new(),
+    );
+    assert_eq!(
+        registry
+            .definitions(Some(&HashSet::from(["mcp_search".into()])))
+            .await
+            .len(),
+        1
+    );
+    assert!(
+        registry
+            .execute("mcp", json!({"action":"search"}), ctx.clone())
+            .await
+            .is_ok()
+    );
+    for action in [
+        "call",
+        "list",
+        "connect",
+        "disconnect",
+        "reload",
+        "status",
+        "logout",
+    ] {
+        let error = registry
+            .execute("mcp", json!({"action":action}), ctx.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not allowed"),
+            "{action}: {error}"
+        );
+    }
+    let _policy = crate::tool::register_session_tool_policy(
+        &ctx.session_id,
+        Some(HashSet::from(["mcp".into()])),
+        HashSet::from(["mcp_call".into()]),
+    );
+    let error = registry
+        .execute(
+            "mcp",
+            json!({"action":"call", "server":"x", "tool":"y"}),
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("disabled"), "{error}");
+    assert!(
+        registry
+            .execute("mcp", json!({"action":"search"}), ctx.clone())
+            .await
+            .is_ok()
+    );
+    let _policy = crate::tool::register_session_tool_policy(
+        &ctx.session_id,
+        Some(HashSet::from(["mcp__x__y".into()])),
+        HashSet::from(["mcp__x__y".into()]),
+    );
+    let error = registry
+        .execute(
+            "mcp",
+            json!({"action":"call", "server":"x", "tool":"y"}),
+            ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not allowed"), "{error}");
 }
 
 #[test]
 fn mcp_call_allows_dynamic_argument_keys_in_provider_schemas() {
-    let tool = McpCallTool::new(Arc::clone(create_test_tool().manager()));
+    let tool = create_test_tool();
     let schema = tool.parameters_schema();
     assert_eq!(
         schema["properties"]["arguments"]["additionalProperties"],
@@ -126,7 +288,7 @@ fn mcp_call_allows_dynamic_argument_keys_in_provider_schemas() {
 
 #[test]
 fn mcp_call_dynamic_arguments_remain_ineligible_for_openai_strict_mode() {
-    let tool = McpCallTool::new(Arc::clone(create_test_tool().manager()));
+    let tool = create_test_tool();
     let compatible =
         jcode_provider_core::openai_schema::openai_compatible_schema(&tool.parameters_schema());
     assert!(!jcode_provider_core::openai_schema::schema_supports_strict(

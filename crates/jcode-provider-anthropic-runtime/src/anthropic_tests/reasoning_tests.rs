@@ -137,6 +137,37 @@ fn test_anthropic_explicit_none_effort_disables_thinking_even_with_show_thinking
 }
 
 #[test]
+fn test_anthropic_opus_5_5_defaults_to_low_effort() {
+    let provider = AnthropicProvider::new();
+    *provider.reasoning_effort.write().unwrap() = None;
+    *provider.model.write().unwrap() = "claude-opus-5-5".to_string();
+
+    for model in ["claude-opus-5-5", "claude-opus-5.5"] {
+        assert_eq!(
+            AnthropicProvider::default_reasoning_effort_for_model(model).as_deref(),
+            Some("low"),
+        );
+        let (thinking, output_config, _) =
+            provider.build_reasoning_request_parts_inner(model, true, false);
+        assert_eq!(
+            output_config
+                .expect("default effort must reach the wire")
+                .effort,
+            "low"
+        );
+        assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
+    }
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+
+    // Explicit choices must still take precedence over the new default.
+    provider.set_reasoning_effort("high").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+    let (_, output_config, _) =
+        provider.build_reasoning_request_parts_inner("claude-opus-5-5", true, false);
+    assert_eq!(output_config.unwrap().effort, "high");
+}
+
+#[test]
 fn test_anthropic_fable_defaults_to_high_effort() {
     // Fable 5 defaults to `high` reasoning when no explicit user effort is
     // configured. An explicit override still wins.

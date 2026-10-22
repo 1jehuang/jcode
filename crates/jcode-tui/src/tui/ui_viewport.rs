@@ -1269,7 +1269,42 @@ pub(super) fn draw_messages(
         frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
     }
 
-    if crate::config::config().display.prompt_preview && scroll > 0 {
+    if crate::config::config().display.prompt_preview && scroll > 0 && prompt_history_expanded() {
+        let items = expanded_prompt_preview_items(
+            wrapped_user_prompt_starts,
+            user_prompt_texts,
+            scroll,
+            preview_start + app.compacted_hidden_user_prompts(),
+        );
+        if !items.is_empty() {
+            let dim_style = Style::default().dim();
+            let width = content_area.width.saturating_sub(1) as usize;
+            let lines: Vec<Line<'static>> = items
+                .into_iter()
+                .map(|(num, text)| {
+                    let mut line = Line::from(vec![
+                        Span::styled(num, dim_style.fg(dim_color()).bg(user_bg())),
+                        Span::styled("› ", dim_style.fg(user_color()).bg(user_bg())),
+                        Span::styled(text, dim_style.fg(user_text()).bg(user_bg())),
+                    ]);
+                    if line.width() > width {
+                        truncate_line_in_place_to_width(&mut line, width.saturating_sub(1));
+                        line.spans
+                            .push(Span::styled("…", dim_style.fg(dim_color()).bg(user_bg())));
+                    }
+                    line
+                })
+                .collect();
+            let preview_area = Rect {
+                x: content_area.x,
+                y: render_area.y,
+                width: content_area.width.saturating_sub(1),
+                height: lines.len() as u16,
+            };
+            clear_area(frame, preview_area);
+            frame.render_widget(Paragraph::new(lines), preview_area);
+        }
+    } else if crate::config::config().display.prompt_preview && scroll > 0 {
         let last_offscreen_prompt_idx =
             lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
 
@@ -1418,12 +1453,30 @@ pub(crate) fn pinned_todo_band_lines(
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
+    pinned_todo_band_lines_for_payload(
+        app.pinned_todos_payload(),
+        app.pinned_todos_expanded(),
+        app.diff_mode(),
+        width,
+        viewport_height,
+    )
+}
+
+/// Pinned todo band for an arbitrary todo payload. Shared by the live chat
+/// viewport and the `/resume` preview so both render the band identically.
+pub(crate) fn pinned_todo_band_lines_for_payload(
+    payload: Option<&str>,
+    expanded: bool,
+    diff_mode: crate::config::DiffDisplayMode,
+    width: u16,
+    viewport_height: u16,
+) -> (Vec<Line<'static>>, Option<usize>) {
     if width < 16 || viewport_height < 3 {
         return (Vec::new(), None);
     }
 
     let card_lines = if crate::config::config().display.pin_todos {
-        app.pinned_todos_payload()
+        payload
             .map(|payload| {
                 // Distinct title keeps the line cache from sharing entries with
                 // the width-capped inline transcript card.
@@ -1432,7 +1485,7 @@ pub(crate) fn pinned_todo_band_lines(
                 super::messages::get_cached_message_lines(
                     &msg,
                     width,
-                    app.diff_mode(),
+                    diff_mode,
                     super::messages::render_pinned_todos_message,
                 )
             })
@@ -1443,12 +1496,14 @@ pub(crate) fn pinned_todo_band_lines(
     if card_lines.is_empty() {
         return (Vec::new(), None);
     }
+    let mut card_lines = card_lines;
+    super::messages::animate_lane_spinners(&mut card_lines);
 
     // Band budget: about a third of the viewport.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
     let content_budget = budget.max(2);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let has_more = card_lines.len() > content_budget && !app.pinned_todos_expanded();
+    let has_more = card_lines.len() > content_budget && !expanded;
     let mut more_line = None;
     if has_more {
         let shown = content_budget.saturating_sub(1);
@@ -1460,7 +1515,7 @@ pub(crate) fn pinned_todo_band_lines(
             Style::default().fg(dim_color()),
         )));
     } else {
-        if app.pinned_todos_expanded() {
+        if expanded {
             more_line = Some(lines.len());
             lines.push(Line::from(Span::styled(
                 "  ▴ Collapse todos",
@@ -1496,6 +1551,15 @@ fn compute_prompt_preview_line_count(
     area_width: u16,
     prompt_number_offset: usize,
 ) -> u16 {
+    if prompt_history_expanded() {
+        return expanded_prompt_preview_items(
+            wrapped_user_prompt_starts,
+            user_prompt_texts,
+            scroll,
+            prompt_number_offset,
+        )
+        .len() as u16;
+    }
     let last_offscreen = lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
     let Some(prompt_order) = last_offscreen else {
         return 0;
@@ -1513,6 +1577,46 @@ fn compute_prompt_preview_line_count(
     let text_flat = prompt_text.replace('\n', " ");
     let display_width = UnicodeWidthStr::width(text_flat.as_str());
     if display_width > content_width { 2 } else { 1 }
+}
+
+/// Number of previous prompts shown when the expanded prompt history (Alt+E) is on.
+const EXPANDED_PROMPT_PREVIEW_COUNT: usize = 6;
+
+static PROMPT_HISTORY_EXPANDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn prompt_history_expanded() -> bool {
+    PROMPT_HISTORY_EXPANDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Toggle the expanded previous-prompt band. Returns the new state.
+pub(crate) fn toggle_prompt_history_expanded() -> bool {
+    !PROMPT_HISTORY_EXPANDED.fetch_xor(true, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Last few offscreen prompts, oldest first, as `(number, flattened text)`.
+fn expanded_prompt_preview_items(
+    wrapped_user_prompt_starts: &[usize],
+    user_prompt_texts: &[String],
+    scroll: usize,
+    prompt_number_offset: usize,
+) -> Vec<(String, String)> {
+    let offscreen = lower_bound(wrapped_user_prompt_starts, scroll).min(user_prompt_texts.len());
+    let mut items: Vec<(String, String)> = (0..offscreen)
+        .rev()
+        .filter_map(|idx| {
+            let text = user_prompt_texts[idx].trim();
+            (!text.is_empty()).then(|| {
+                (
+                    format!("{}", prompt_number_offset + idx + 1),
+                    text.split_whitespace().collect::<Vec<_>>().join(" "),
+                )
+            })
+        })
+        .take(EXPANDED_PROMPT_PREVIEW_COUNT)
+        .collect();
+    items.reverse();
+    items
 }
 
 fn compute_max_scroll_with_prompt_preview(

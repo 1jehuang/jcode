@@ -1,3 +1,45 @@
+#[test]
+fn kagi_engine_order_is_explicit_and_deduplicated() {
+    assert_eq!(
+        local_engine_order(WebSearchEngine::Kagi, &[]),
+        vec![WebSearchEngine::Kagi]
+    );
+    assert_eq!(
+        local_engine_order(
+            WebSearchEngine::Kagi,
+            &[WebSearchEngine::Bing, WebSearchEngine::Kagi]
+        ),
+        vec![WebSearchEngine::Kagi, WebSearchEngine::Bing]
+    );
+    assert_eq!(
+        local_engine_order(WebSearchEngine::Duckduckgo, &[WebSearchEngine::Bing]),
+        vec![WebSearchEngine::Duckduckgo, WebSearchEngine::Bing]
+    );
+}
+
+#[test]
+fn websearch_schema_exposes_only_search_controls() {
+    let schema = WebSearchTool::new().parameters_schema();
+    let properties = schema["properties"].as_object().unwrap();
+    let mut keys: Vec<_> = properties.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["intent", "num_results", "query"]);
+    assert_eq!(schema["required"], json!(["query"]));
+}
+
+#[test]
+fn websearch_ignores_legacy_provider_overrides() {
+    let input: WebSearchInput = serde_json::from_value(json!({
+        "query": "rust",
+        "num_results": 3,
+        "engine": "not-an-engine",
+        "bing_market": "en-US"
+    }))
+    .unwrap();
+    assert_eq!(input.query, "rust");
+    assert_eq!(input.num_results, Some(3));
+}
+
 fn custom_config() -> CustomWebSearchConfig {
     CustomWebSearchConfig {
         endpoint: "https://example.test/search?keep=yes&q=old".into(),

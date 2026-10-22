@@ -541,6 +541,15 @@ select_build_jobs() {
 # reintroduce per-build churn; the publish guard validates dirty builds via the
 # source fingerprint / mtime path instead of the embedded flag.
 export_git_build_metadata() {
+  # Hosted source snapshots do not include .git. Forward the history alongside
+  # the identity metadata so /changelog is populated in hosted self-dev builds.
+  # Preserve explicit caller overrides, including an intentionally empty one.
+  if [[ -z "${JCODE_BUILD_CHANGELOG_RAW+x}" ]] && command -v git >/dev/null 2>&1; then
+    local changelog
+    if changelog="$(git -C "$repo_root" log -700 --format='%h|%ct|%D|%s' 2>/dev/null)"; then
+      export JCODE_BUILD_CHANGELOG_RAW="$changelog"
+    fi
+  fi
   # Respect any value the caller already set (e.g. release/CI pipelines).
   if [[ -n "${JCODE_BUILD_GIT_HASH:-}" ]]; then
     git_meta_status="external:${JCODE_BUILD_GIT_HASH}"

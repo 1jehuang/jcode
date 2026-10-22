@@ -435,6 +435,12 @@ pub enum Request {
         label: Option<String>,
     },
 
+    /// Write the active session to disk now, even before its first message.
+    /// Out-of-process tools such as `jcode cloud move` read the session file,
+    /// so a fresh session must exist on disk with its model and account.
+    #[serde(rename = "persist_session")]
+    PersistSession { id: u64 },
+
     /// Split the current session — clone conversation into a new session
     #[serde(rename = "split")]
     Split { id: u64 },
@@ -589,6 +595,11 @@ pub enum Request {
         /// `to_session` is omitted. Channels and broadcasts never cross swarms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_swarm: Option<String>,
+        /// Refuse an untargeted send (no `to_session`, `channel`, or
+        /// `to_swarm`) unless the sender is the swarm coordinator, so a worker
+        /// that forgets `to_session` gets an error instead of broadcasting.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        require_target: bool,
     },
 
     /// List every live swarm (id, label, coordinator, member count) so agents

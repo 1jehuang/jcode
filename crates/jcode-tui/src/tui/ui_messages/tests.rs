@@ -954,6 +954,8 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
+            stage: None,
+            details: None,
         }
     }
 
@@ -1022,6 +1024,8 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
 #[test]
 fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
     let todos = vec![crate::todo::TodoItem {
+        stage: None,
+        details: None,
         id: "1".to_string(),
         content: "Render the card".to_string(),
         status: "in_progress".to_string(),
@@ -1090,6 +1094,8 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
+        stage: None,
+        details: None,
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some(long_text.to_string()),
@@ -1171,6 +1177,8 @@ fn render_todos_message_uses_readable_semantic_colors() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
+        stage: None,
+        details: None,
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
@@ -1265,6 +1273,8 @@ fn render_todos_message_collapses_passing_quality_gates() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
+        stage: None,
+        details: None,
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("quality".to_string()),
@@ -1313,6 +1323,8 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
+        stage: None,
+        details: None,
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
@@ -1352,6 +1364,8 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
+        stage: None,
+        details: None,
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
@@ -1407,6 +1421,8 @@ fn render_todos_message_bad_payload_falls_back_to_system() {
 #[test]
 fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     let todos = vec![crate::todo::TodoItem {
+        stage: None,
+        details: None,
         id: "render".to_string(),
         content: "Render the todo result".to_string(),
         status: "in_progress".to_string(),

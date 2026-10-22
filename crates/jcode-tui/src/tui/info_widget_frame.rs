@@ -133,10 +133,15 @@ fn place<'a>(
     let left_w = left.as_ref().map_or(0, Line::width);
     // Keep at least one border cell between the two slots.
     let gap = usize::from(left_w > 0);
-    let right = right
-        .as_ref()
-        .map(padded)
-        .filter(|line| left_w + gap + line.width() <= avail);
+    // A right slot sharing the border with a left slot is secondary and is
+    // dropped before it collides. Alone, it truncates like the left slot.
+    let right = right.as_ref().map(padded).and_then(|line| {
+        if left_w == 0 {
+            fit(&line, avail)
+        } else {
+            Some(line).filter(|line| left_w + gap + line.width() <= avail)
+        }
+    });
 
     let mut block = block;
     for (line, alignment) in [(left, Alignment::Left), (right, Alignment::Right)] {
@@ -251,6 +256,15 @@ mod tests {
         let rows = render(&f, 30);
         assert!(rows[2].starts_with("╰ +3 more "), "{}", rows[2]);
         assert!(rows[2].ends_with(" ● edited ╯"), "{}", rows[2]);
+    }
+
+    #[test]
+    fn lone_right_footer_truncates_with_ellipsis() {
+        let f = Framed::body(vec![Line::from("x")]).footer_right("abcdefghijklmnopqrstuvwxyz");
+        let rows = render(&f, 12);
+        assert!(rows[2].contains('…'), "{}", rows[2]);
+        assert_eq!(rows[2].chars().count(), 12);
+        assert!(rows[2].ends_with('╯'), "{}", rows[2]);
     }
 
     #[test]

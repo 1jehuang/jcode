@@ -239,17 +239,30 @@ impl Agent {
             // `ModelChanged` and resync the UI/context-limit.
             let model_at_request_start = provider.model().to_string();
             let credential_at_request_start = provider.active_resolved_credential();
-            let oauth_account_label_at_request_start = provider.oauth_account_label();
+            let oauth_account_label_at_request_start = provider.serving_oauth_account_label();
             let oauth_email_at_request_start =
                 crate::server::provider_oauth_email(provider.as_ref());
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
+            // Hash the whole system prompt, not only the static block.
+            // Providers place the dynamic block ahead of the transcript (in
+            // the system param or right after the latest user prompt), so a
+            // change there is a harness-caused miss and must be attributed.
+            let system_signature_text = if split_prompt.dynamic_part.is_empty() {
+                std::borrow::Cow::Borrowed(split_prompt.static_part.as_str())
+            } else {
+                std::borrow::Cow::Owned(format!(
+                    "{}\n\n{}",
+                    split_prompt.static_part, split_prompt.dynamic_part
+                ))
+            };
             let kv_request = kv_cache_request_event(
                 &cache_signature_messages,
                 &tools,
-                &split_prompt.static_part,
+                &system_signature_text,
                 &ephemeral_signature_messages,
             );
+            drop(system_signature_text);
             self.begin_kv_cache_monitor_request(&kv_request, &model_at_request_start);
             let _ = event_tx.send(kv_request);
             // These vectors are only needed to build the cache telemetry event.
@@ -300,17 +313,7 @@ impl Agent {
                                                 Self::MAX_CONTEXT_LIMIT_RETRIES
                                             ));
                                         }
-                                        let _ = event_tx.send(ServerEvent::Compaction {
-                                            trigger: "auto_recovery".to_string(),
-                                            pre_tokens: None,
-                                            post_tokens: None,
-                                            tokens_saved: None,
-                                            duration_ms: None,
-                                            messages_dropped: None,
-                                            messages_compacted: None,
-                                            summary_chars: None,
-                                            active_messages: None,
-                                        });
+                                        let _ = event_tx.send(self.take_recovery_compaction_event());
                                         continue;
                                     }
                                     return Err(e);
@@ -486,17 +489,7 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
-                            let _ = event_tx.send(ServerEvent::Compaction {
-                                trigger: "auto_recovery".to_string(),
-                                pre_tokens: None,
-                                post_tokens: None,
-                                tokens_saved: None,
-                                duration_ms: None,
-                                messages_dropped: None,
-                                messages_compacted: None,
-                                summary_chars: None,
-                                active_messages: None,
-                            });
+                            let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
                         log_agent_provider_stream_lifecycle(
@@ -1094,17 +1087,7 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
-                            let _ = event_tx.send(ServerEvent::Compaction {
-                                trigger: "auto_recovery".to_string(),
-                                pre_tokens: None,
-                                post_tokens: None,
-                                tokens_saved: None,
-                                duration_ms: None,
-                                messages_dropped: None,
-                                messages_compacted: None,
-                                summary_chars: None,
-                                active_messages: None,
-                            });
+                            let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
                         log_agent_provider_stream_lifecycle(
@@ -1254,7 +1237,7 @@ impl Agent {
             let oauth_email_after_stream =
                 crate::server::provider_oauth_email(self.provider.as_ref());
             let credential_after_stream = self.provider.active_resolved_credential();
-            let oauth_account_label_after_stream = self.provider.oauth_account_label();
+            let oauth_account_label_after_stream = self.provider.serving_oauth_account_label();
             if model_after_stream != model_at_request_start
                 || credential_after_stream != credential_at_request_start
                 || oauth_email_after_stream != oauth_email_at_request_start
@@ -1352,7 +1335,8 @@ impl Agent {
             if let Some((encrypted_content, compacted_count, native_pre_tokens, native_trigger)) =
                 openai_native_compaction.take()
             {
-                self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
+                let (estimated_pre_tokens, estimated_post_tokens) =
+                    self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
                 // Native OpenAI compaction is applied after the provider stream,
                 // so `messages_for_provider()` did not have an event to emit at
                 // the top of this iteration. Notify clients now, before any
@@ -1360,14 +1344,18 @@ impl Agent {
                 // The FIFO event ordering lets the TUI invalidate its old
                 // append-only baseline before seeing the compacted signature.
                 //
-                // Only a provider-supplied pre-compaction count is trustworthy
-                // here. The response's own input usage is not the pre-compaction
-                // context size, so omit the value rather than mislabel it (#1178).
+                // Prefer a provider-supplied pre-compaction count. Otherwise use
+                // jcode's own context estimate, never the response's input usage,
+                // which is not the pre-compaction context size (#1178).
+                let pre_tokens = native_pre_tokens.or(estimated_pre_tokens);
+                let post_tokens = estimated_post_tokens;
                 let _ = event_tx.send(ServerEvent::Compaction {
                     trigger: native_trigger,
-                    pre_tokens: native_pre_tokens,
-                    post_tokens: None,
-                    tokens_saved: None,
+                    pre_tokens,
+                    post_tokens,
+                    tokens_saved: pre_tokens
+                        .zip(post_tokens)
+                        .map(|(pre, post)| pre.saturating_sub(post)),
                     duration_ms: None,
                     messages_dropped: None,
                     messages_compacted: Some(compacted_count),

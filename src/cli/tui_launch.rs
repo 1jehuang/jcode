@@ -200,7 +200,10 @@ pub async fn run_tui_client(
         return Ok(());
     }
 
-    tui_runtime.finish_for_run_result(&run_result, run_result.cloud_handoff.is_some());
+    // A cloud handoff execs a fresh client that does not adopt the inherited
+    // terminal (no JCODE_RESUMING) and prints SSH progress first. Restore fully
+    // so it starts on a clean screen instead of drawing over the stale frame.
+    tui_runtime.finish_for_run_result(&run_result, false);
 
     if let Some(code) = run_result.exit_code {
         std::process::exit(code);

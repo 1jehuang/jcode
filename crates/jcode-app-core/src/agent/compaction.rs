@@ -162,6 +162,9 @@ impl Agent {
                     let all_messages = self.session.provider_messages();
                     manager.update_observed_input_tokens(context_limit);
                     let usage_pct = manager.context_usage_with(all_messages) * 100.0;
+                    // The provider rejected the request, so the context was at
+                    // least the limit even if the local estimate is lower.
+                    let pre_tokens = manager.effective_token_count_with(all_messages) as u64;
                     let dropped = match manager.hard_compact_with(all_messages) {
                         Ok(dropped) => dropped,
                         Err(reason) => {
@@ -172,6 +175,8 @@ impl Agent {
                             return false;
                         }
                     };
+                    let post_tokens = manager.token_estimate_with(all_messages) as u64;
+                    self.last_recovery_compaction = Some((pre_tokens, post_tokens, dropped));
                     (dropped, usage_pct)
                 };
                 self.sync_session_compaction_state_from_manager(&manager);
@@ -206,6 +211,23 @@ impl Agent {
         );
 
         true
+    }
+
+    /// Client notice for the context-limit auto-recovery that just ran,
+    /// carrying its measured before/after token counts.
+    pub(super) fn take_recovery_compaction_event(&mut self) -> crate::protocol::ServerEvent {
+        let stats = self.last_recovery_compaction.take();
+        crate::protocol::ServerEvent::Compaction {
+            trigger: "auto_recovery".to_string(),
+            pre_tokens: stats.map(|(pre, _, _)| pre),
+            post_tokens: stats.map(|(_, post, _)| post),
+            tokens_saved: stats.map(|(pre, post, _)| pre.saturating_sub(post)),
+            duration_ms: None,
+            messages_dropped: stats.map(|(_, _, dropped)| dropped),
+            messages_compacted: None,
+            summary_chars: None,
+            active_messages: None,
+        }
     }
 
     /// Best-effort recovery after a provider HTTP 413 "request too large" error.

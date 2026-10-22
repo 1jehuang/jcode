@@ -355,21 +355,22 @@ fn dock_is_attention(status: &str) -> bool {
     dock_status_rank(status) == 0
 }
 
-/// The todo step the agent is currently on, if it keeps a todo list.
-fn dock_current_todo(member: &SwarmMemberStatus) -> Option<String> {
-    member
-        .todo_items
-        .iter()
-        .find(|item| item.status == "in_progress")
-        .map(|item| item.content.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// What the agent is doing, in the fewest words available: the error or
-/// blocker when it needs attention, otherwise the todo step it is on, the
-/// latest status detail, the last line it streamed, or the task it was
-/// spawned for.
+/// The dock owns lifecycle health and alerts. Task titles and ordinary live
+/// activity belong to the todo lanes, so do not echo them here.
 fn dock_activity(member: &SwarmMemberStatus) -> String {
+    let detail = member.detail.as_deref().unwrap_or_default().trim();
+    let is_message = detail.starts_with("DM from ") || detail.starts_with("Cross-swarm DM from ");
+    if !dock_is_attention(&member.status) && !is_message {
+        if jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+            && let Some(age) = member.runtime.activity_age_secs.filter(|age| *age >= 120)
+        {
+            return format!(
+                "quiet {}",
+                jcode_tui_render::swarm_gallery::humanize_age(age)
+            );
+        }
+        return member.status.replace('_', " ");
+    }
     let nonempty = |s: &Option<String>| {
         s.as_deref()
             .map(str::trim)
@@ -383,13 +384,12 @@ fn dock_activity(member: &SwarmMemberStatus) -> String {
         .map(str::to_string);
     let detail = nonempty(&member.detail);
     let task = nonempty(&member.task_label);
-    let todo = dock_current_todo(member);
     let picked = if dock_is_finished(&member.status) {
         task.or(detail)
     } else if dock_is_attention(&member.status) {
-        detail.or(todo).or(task).or(tail)
+        detail.or(task).or(tail)
     } else {
-        todo.or(detail).or(tail).or(task)
+        detail.or(tail).or(task)
     };
     picked
         .unwrap_or_else(|| member.status.clone())
@@ -398,19 +398,8 @@ fn dock_activity(member: &SwarmMemberStatus) -> String {
         .join(" ")
 }
 
-/// Swarm dock. Border layout: `🐝 2/4 active` top-left, attention count
-/// top-right, overflow bottom-left, task-graph meter bottom-right. Body: one
-/// row per agent, attention first, then working, idle, and finished. Working
-/// agents with a todo list show the step they are on.
-///
-/// ```text
-/// ╭ 🐝 2/4 active ────────────────── ⚠ 1 ╮
-/// │✗ reviewer  cargo test failed: 3 …    │
-/// │⠋ builder   wiring commits widget  2/5│
-/// │⠋ ★ lead    waiting on reviewer    1/3│
-/// │✓ research  map the swarm code      5m│
-/// ╰ +2 more ──────────── nodes 4/9 ▰▰▰▱▱ ╯
-/// ```
+/// Swarm dock with agent lifecycle status, activity, and status age.
+/// Planning details remain in the transcript rather than the info area.
 fn dock_member_label(member: &SwarmMemberStatus) -> String {
     super::swarm_gallery::member_icon(member).unwrap_or_else(|| swarm_member_label(member))
 }
@@ -469,16 +458,11 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
         let glyph = status_glyph(&member.status, info.spinner_frame);
         let finished = dock_is_finished(&member.status);
 
-        // Working agents show todo progress; finished or idle ones show how
-        // long ago they last changed.
-        let right = match member.todo_progress {
-            Some((done, total)) if total > 0 && !finished => format!("{done}/{total}"),
-            _ => member
-                .status_age_secs
-                .map(humanize_age)
-                .filter(|a| a != "now")
-                .unwrap_or_default(),
-        };
+        let right = member
+            .status_age_secs
+            .map(humanize_age)
+            .filter(|age| age != "now")
+            .unwrap_or_default();
 
         let star = member.role.as_deref() == Some("coordinator");
         let label_budget = name_w.saturating_sub(if star { 2 } else { 0 });
@@ -561,37 +545,5 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
         framed = framed.footer(frame::more(hidden));
     }
 
-    if let Some((done, running, total)) = info.plan_progress
-        && total > 0
-    {
-        framed = framed.footer_right(plan_meter(done, running, total));
-    }
     framed
-}
-
-/// `nodes 4/9 ▰▰▰▰▱▱▱▱` with green done, amber running, dim remainder.
-fn plan_meter(done: u32, running: u32, total: u32) -> Line<'static> {
-    const CELLS: u32 = 8;
-    let done = done.min(total);
-    let running = running.min(total - done);
-    let done_c = (done * CELLS / total).max(u32::from(done > 0));
-    let run_c = (((done + running) * CELLS / total).saturating_sub(done_c))
-        .max(u32::from(running > 0))
-        .min(CELLS - done_c);
-    let rest = CELLS - done_c - run_c;
-    Line::from(vec![
-        frame::dim(format!("nodes {done}/{total} ")),
-        Span::styled(
-            "▰".repeat(done_c as usize),
-            Style::default().fg(rgb(100, 200, 100)),
-        ),
-        Span::styled(
-            "▰".repeat(run_c as usize),
-            Style::default().fg(rgb(255, 200, 100)),
-        ),
-        Span::styled(
-            "▱".repeat(rest as usize),
-            Style::default().fg(rgb(80, 80, 90)),
-        ),
-    ])
 }

@@ -49,6 +49,14 @@ pub struct TodoEvent {
     pub todos: Vec<TodoItem>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LaneEdited {
+    pub coordinator: String,
+    pub worker: String,
+    pub lane: String,
+    pub summary: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolSummaryState {
     pub status: String,
@@ -406,6 +414,9 @@ pub enum SessionUpdateStatus {
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
+    /// The coordinator changed a lane a worker owns; the worker's todo list
+    /// was rewritten to match and the worker should be told.
+    LaneEdited(LaneEdited),
     SubagentStatus(SubagentStatus),
     ManualToolCompleted(ManualToolCompleted),
     BatchProgress(BatchProgress),

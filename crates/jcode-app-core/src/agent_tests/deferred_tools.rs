@@ -60,16 +60,14 @@ async fn native_deferred_mcp_late_registration_keeps_eager_prefix() {
         let before = agent.tool_definitions().await;
         assert!(agent.native_deferred_mcp());
         assert!(
-            before
-                .iter()
-                .any(|t| t.name == "mcp_search" && !t.defer_loading),
-            "mcp_search stays eager for discovery"
+            before.iter().any(|t| t.name == "mcp" && !t.defer_loading),
+            "mcp stays eager for discovery"
         );
         assert!(
             before
                 .iter()
-                .any(|t| t.name == "mcp_call" && t.defer_loading),
-            "mcp_call is a stable deferred placeholder"
+                .all(|t| t.name != "mcp_call" && t.name != "mcp_search"),
+            "legacy aliases never expose schemas"
         );
 
         agent
@@ -151,22 +149,20 @@ async fn switching_away_from_native_deferred_restores_mcp_fallback_surface() {
     assert!(
         on_native
             .iter()
-            .any(|t| t.name == "mcp_call" && t.defer_loading)
+            .any(|t| t.name == "mcp" && !t.defer_loading)
     );
 
     native.store(false, std::sync::atomic::Ordering::SeqCst);
     let fallback = agent.tool_definitions().await;
     assert!(
-        fallback
-            .iter()
-            .any(|t| t.name == "mcp_call" && !t.defer_loading),
-        "non-native provider must get an eager mcp_call"
+        fallback.iter().any(|t| t.name == "mcp" && !t.defer_loading),
+        "non-native provider must get an eager mcp"
     );
     assert!(fallback.iter().all(|t| !t.defer_loading));
 
     native.store(true, std::sync::atomic::Ordering::SeqCst);
     let back = agent.tool_definitions().await;
-    assert!(back.iter().any(|t| t.name == "mcp_call" && t.defer_loading));
+    assert!(back.iter().any(|t| t.name == "mcp" && !t.defer_loading));
 }
 
 /// On providers without native deferred loading, MCP tools that register
@@ -207,7 +203,7 @@ async fn late_mcp_tools_are_announced_once_in_the_transcript() {
         text.contains("input_schema: {"),
         "schema must be included: {text}"
     );
-    assert!(text.contains("mcp_call"));
+    assert!(text.contains("mcp action=call"));
 
     // Second pass: nothing new, no second announcement, and the cached
     // tool list is unchanged.

@@ -238,14 +238,8 @@ async fn handle_remote_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
-    if app.pending_provider_failover.is_some() && !app.is_processing {
-        if code == KeyCode::Esc {
-            app.cancel_pending_provider_failover("Provider auto-switch canceled");
-            return Ok(());
-        }
-        if !input::is_scroll_only_key(app, code, modifiers) {
-            app.cancel_pending_provider_failover("Provider auto-switch canceled");
-        }
+    if app.handle_key_during_provider_failover(code) {
+        return Ok(());
     }
 
     if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
@@ -646,6 +640,10 @@ async fn handle_remote_key_internal(
             }
             KeyCode::Char('v') => {
                 app.paste_from_clipboard();
+                return Ok(());
+            }
+            KeyCode::Char('e') => {
+                input::handle_alt_key(app, KeyCode::Char('e'));
                 return Ok(());
             }
             _ => {}
@@ -1072,6 +1070,20 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
         return Ok(());
     }
     if !app.input.is_empty() {
+        let command = input::expand_paste_placeholders(app, &app.input)
+            .trim()
+            .to_string();
+        if !app_mod::commands_cloud::check_cloud_handoff_input(app, &command) {
+            return Ok(());
+        }
+        if app.cloud_handoff_blocks_work()
+            && app_mod::commands_cloud::parse_cloud_command(app.input.trim()).is_none()
+        {
+            app.set_status_notice(
+                "Cloud handoff pending. Use /cloud cancel before submitting more work.",
+            );
+            return Ok(());
+        }
         let prepared = input::take_prepared_input(app);
         let trimmed = prepared.expanded.trim();
 
@@ -1089,6 +1101,20 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                             "This session already runs on a remote host. Use /local to bring it back first.".to_string(),
                         ));
                 return Ok(());
+            }
+            if matches!(
+                app_mod::commands_cloud::parse_cloud_command(trimmed),
+                Some(app_mod::commands_cloud::CloudCommand::Move { .. })
+            ) {
+                // A fresh session is not on disk until its first message, and
+                // `jcode cloud move` loads it from disk. The daemon holds the
+                // model, effort and account, so ask it to write the file now.
+                if let Err(error) = remote.persist_session().await {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Could not save this session before moving it: {error}. Nothing moved."
+                    )));
+                    return Ok(());
+                }
             }
             app_mod::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
             return Ok(());

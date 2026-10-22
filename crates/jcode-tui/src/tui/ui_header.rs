@@ -331,6 +331,7 @@ fn auth_dot_color(state: AuthState) -> Color {
     }
 }
 
+#[cfg(test)]
 fn auth_dot_char(state: AuthState) -> &'static str {
     match state {
         AuthState::Available => "●",
@@ -814,7 +815,17 @@ fn build_header_lines_with_auth(
         // The native protocol reports the active route, not a complete remote
         // credential inventory. Do not render the laptop's (or an empty)
         // inventory as if it described providers configured on the server.
-        (format!("/login to authenticate on {host}"), Vec::new())
+        // Only the daemon's credential-free OAuth account report is shown.
+        match account_router::remote_lines(
+            &app.provider_name(),
+            app.startup_oauth_account_label().as_deref(),
+        ) {
+            Some(lines) if !lines.is_empty() => (
+                format!("Account router on {host} · /account to manage · /login to add"),
+                lines,
+            ),
+            _ => (format!("/login to authenticate on {host}"), Vec::new()),
+        }
     } else {
         (
             "Account router · /account to manage · /login to add credential".to_string(),

@@ -51,6 +51,12 @@ pub(super) async fn process_turn_with_input(
         }
     }
 
+    if app.cloud_handoff_blocks_work() {
+        finish_turn(app);
+        app.poll_cloud_job();
+        return;
+    }
+
     if app.pending_queued_dispatch {
         finish_turn(app);
         return;
@@ -73,7 +79,7 @@ pub(super) async fn process_turn_with_input(
 }
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
-    let reset_redraw = app.poll_usage_reset();
+    let reset_redraw = app.poll_usage_reset() | app.poll_cloud_job();
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
@@ -104,12 +110,16 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.reconcile_history_anchor();
     // Same for a resize: adopt the resolved row once the rewrap has rendered.
     needs_redraw |= app.reconcile_resize_anchor();
-    if app.submit_input_on_startup && !app.is_processing {
+    if app.submit_input_on_startup && !app.is_processing && !app.cloud_handoff_blocks_work() {
         app.submit_input_on_startup = false;
         app.submit_input();
         needs_redraw = true;
     }
-    if !app.is_processing && !app.pending_queued_dispatch && !app.queued_commands.is_empty() {
+    if !app.is_processing
+        && !app.pending_queued_dispatch
+        && !app.queued_commands.is_empty()
+        && !app.cloud_handoff_blocks_work()
+    {
         super::input::run_queued_commands_local(app);
         needs_redraw = true;
     }
@@ -136,11 +146,12 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.check_stable_version();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
     needs_redraw |= app.maybe_finish_background_client_reload();
-    if app.pending_migration.is_some() && !app.is_processing {
+    if app.pending_migration.is_some() && !app.is_processing && !app.cloud_handoff_blocks_work() {
         app.execute_migration();
         needs_redraw = true;
     }
     if let Some(reset_time) = app.rate_limit_reset
+        && !app.cloud_handoff_blocks_work()
         && std::time::Instant::now() >= reset_time
     {
         app.rate_limit_reset = None;
@@ -504,7 +515,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
         );
         let _ = app.session.save();
 
-        if task.wake {
+        if task.wake && !app.cloud_handoff_blocks_work() {
             app.pending_turn = true;
             app.is_processing = true;
             app.status = ProcessingStatus::Sending;
@@ -564,7 +575,7 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
         );
         let _ = app.session.save();
 
-        if task.wake {
+        if task.wake && !app.cloud_handoff_blocks_work() {
             app.pending_turn = true;
             app.is_processing = true;
             app.status = ProcessingStatus::Sending;

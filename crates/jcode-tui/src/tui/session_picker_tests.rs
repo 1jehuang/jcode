@@ -1261,6 +1261,20 @@ fn onboarding_banner_is_action_only() {
 }
 
 #[test]
+fn onboarding_banner_space_submits_like_enter() {
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.activate_onboarding_banner(vec![Line::from("welcome")]);
+    let action = picker
+        .handle_overlay_key(KeyCode::Char(' '), KeyModifiers::empty())
+        .expect("space");
+    assert!(matches!(
+        action,
+        OverlayAction::Selected(PickerResult::ReviewRecentProject)
+    ));
+    assert!(picker.onboarding_review_recent_project_highlighted());
+}
+
+#[test]
 fn onboarding_banner_offers_review_then_new_session() {
     let mut picker = SessionPicker::new(Vec::new());
     picker.activate_onboarding_banner(vec![Line::from("welcome")]);
@@ -1852,6 +1866,18 @@ fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
 
 #[test]
 fn test_preview_structured_messages_stay_left_aligned() {
+    // The todo tool card is only shown inline when todos are not pinned.
+    let _env_lock = crate::storage::lock_test_env();
+    crate::env::set_var("JCODE_PIN_TODOS", "0");
+    crate::config::invalidate_config_cache();
+    struct RestorePin;
+    impl Drop for RestorePin {
+        fn drop(&mut self) {
+            crate::env::remove_var("JCODE_PIN_TODOS");
+            crate::config::invalidate_config_cache();
+        }
+    }
+    let _restore = RestorePin;
     let todos = serde_json::json!([{
         "id": "alignment", "content": "Verify structured preview alignment",
         "status": "completed", "priority": "high", "confidence": "verified"
@@ -1904,7 +1930,8 @@ fn test_preview_structured_messages_stay_left_aligned() {
                 "Verify structured preview alignment",
                 "Reviewing the weak points",
                 "Check structured preview alignment",
-                "All alignment checks passed",
+                // Successful background notices render as one compact line.
+                "Background task alignment-task",
             ] {
                 let line = cache
                     .wrapped_lines
@@ -2018,7 +2045,7 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
     // Simulate an in-flight background load for the selected session: empty
     // preview + a pending load whose id matches. Keep the sender alive so the
     // receiver reports `Empty` (still loading) rather than `Disconnected`.
-    let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<PreviewMessage>>>();
+    let (tx, rx) = std::sync::mpsc::channel::<Option<LoadedSessionPreview>>();
     picker.pending_preview_load = Some(PendingSessionPreviewLoad {
         session_id: "async_sticky".to_string(),
         receiver: rx,
@@ -2712,4 +2739,68 @@ fn test_resume_project_scope_is_off_by_default() {
         assert_eq!(picker.filter_mode, SessionFilterMode::All);
         assert_eq!(picker.visible_sessions.len(), 2);
     }
+}
+
+#[test]
+fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards() {
+    let _env_lock = crate::storage::lock_test_env();
+    crate::env::set_var("JCODE_PIN_TODOS", "1");
+    crate::config::invalidate_config_cache();
+
+    let mut session = make_session_with_many_turns("pinned_preview", 60);
+    session.messages_preview.push(PreviewMessage {
+        role: "tool".to_string(),
+        content: "DUPLICATE_TODO_TOOL_CARD".to_string(),
+        tool_calls: Vec::new(),
+        tool_data: Some(crate::message::ToolCall {
+            id: "todo-tool".to_string(),
+            name: "todo".to_string(),
+            input: serde_json::json!({"todos": []}),
+            intent: None,
+            thought_signature: None,
+        }),
+        timestamp: None,
+    });
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.preview_extras.insert(
+        "pinned_preview".to_string(),
+        PreviewExtras {
+            hidden_prompts: 100,
+            todos_payload: Some(
+                serde_json::json!({
+                    "todos": [{
+                        "id": "1",
+                        "content": "PINNED_PREVIEW_TASK",
+                        "status": "in_progress",
+                        "priority": "high"
+                    }]
+                })
+                .to_string(),
+            ),
+        },
+    );
+
+    let text = buffer_text(&mut picker, 120, 30);
+    crate::env::remove_var("JCODE_PIN_TODOS");
+    crate::config::invalidate_config_cache();
+
+    assert!(text.contains("PINNED_PREVIEW_TASK"), "{text}");
+    assert!(!text.contains("DUPLICATE_TODO_TOOL_CARD"), "{text}");
+    // 60 visible prompts after 100 hidden ones: the last is numbered 160.
+    assert!(text.contains("160›"), "{text}");
+    // Pinned todos sit at the top of the preview content, under the sticky prompt.
+    let rows: Vec<String> = text
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(120)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+    let todo_row = rows
+        .iter()
+        .position(|row| row.contains("PINNED_PREVIEW_TASK"))
+        .expect("todo row");
+    assert!(
+        todo_row <= 4,
+        "todo band should be pinned at top, row {todo_row}:\n{text}"
+    );
 }

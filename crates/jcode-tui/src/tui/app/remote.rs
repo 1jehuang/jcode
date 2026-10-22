@@ -2,8 +2,9 @@
 
 use super::{
     App, DisplayMessage, MAX_TURN_HOLD_SECS, PendingReloadReconnectStatus, ProcessingStatus,
-    RemoteResumeActivity, SendAction, ctrl_bracket_fallback_to_esc, input, parse_rate_limit_error,
-    remote_notifications::present_swarm_notification, spawn_in_new_terminal,
+    RemoteResumeActivity, SendAction, auth::auth_muse_helpers, ctrl_bracket_fallback_to_esc, input,
+    parse_rate_limit_error, remote_notifications::present_swarm_notification,
+    spawn_in_new_terminal,
 };
 use crate::bus::BusEvent;
 use crate::message::ToolCall;
@@ -115,6 +116,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     }
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.poll_usage_reset();
+    needs_redraw |= app.poll_cloud_job();
     if let Some((provider, account)) = app.usage_reset.invalidate_account.take() {
         let sent = match provider {
             super::usage_reset::Provider::OpenAi => remote.invalidate_openai_usage(account).await,
@@ -239,6 +241,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     }
 
     if app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some() {
+        return needs_redraw;
+    }
+
+    if app.cloud_handoff_blocks_work() {
         return needs_redraw;
     }
 
@@ -579,10 +585,12 @@ async fn apply_terminal_event<B: Backend>(
                                             app.provider.context_window(),
                                         );
                                         let _ = remote.switch_anthropic_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(format!(
-                                            "Switched to Anthropic account `{}`.",
-                                            label
-                                        )));
+                                        app.push_display_message(DisplayMessage::system(
+                                            crate::tui::app::helpers::account_switch_notice(
+                                                "Anthropic",
+                                                &label,
+                                            ),
+                                        ));
                                         app.set_status_notice(format!(
                                             "Account: switched to {}",
                                             label
@@ -601,10 +609,11 @@ async fn apply_terminal_event<B: Backend>(
                                             app.provider.context_window(),
                                         );
                                         let _ = remote.switch_openai_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(format!(
-                                            "Switched to OpenAI account `{}`.",
-                                            label
-                                        )));
+                                        app.push_display_message(DisplayMessage::system(
+                                            crate::tui::app::helpers::account_switch_notice(
+                                                "OpenAI", &label,
+                                            ),
+                                        ));
                                         app.set_status_notice(format!(
                                             "OpenAI account: switched to {}",
                                             label
@@ -732,7 +741,7 @@ pub(super) async fn handle_bus_event(
                 app.set_status_notice("Local login does not change SSH server credentials");
                 return true;
             }
-            let success = login.success && login.provider != "copilot_code";
+            let success = login.success && auth_muse_helpers::is_completed_login(&login);
             let provider_hint = auth_provider_hint_for_login_provider(&login.provider);
             let auth = auth_changed_event_for_login_provider(&login.provider);
             let prefer_strongest = success && app.onboarding_should_prefer_strongest_model();
@@ -1346,6 +1355,9 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 }
 
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
+    if app.cloud_handoff_blocks_work() {
+        return;
+    }
     if app.pending_provider_failover.is_some()
         || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
     {

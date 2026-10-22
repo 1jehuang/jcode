@@ -1,6 +1,11 @@
 #[path = "ui_messages/gmail_drafts.rs"]
 mod gmail_drafts;
 use gmail_drafts::*;
+#[path = "ui_todo_stages.rs"]
+mod todo_stages;
+pub(crate) use todo_stages::TodoCardAgent;
+pub(crate) use todo_stages::animate_lane_spinners;
+use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
 
 use super::*;
 #[path = "ui_messages_cache.rs"]
@@ -66,8 +71,10 @@ fn render_single_line_system_notice(
     // Ordinary notices are always compact, not just plain one-line strings.
     // Keep deliberately requested reports, command output and login prompts
     // readable. Markdown or a newline alone is not a reason to expand a notice.
-    if matches!(msg.title.as_deref(), Some("Skills" | "Context" | "Support"))
-        || msg.content.starts_with("Shell command · ")
+    if matches!(
+        msg.title.as_deref(),
+        Some("Skills" | "Context" | "Support" | "Cloud transfer")
+    ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
     {
@@ -1106,6 +1113,9 @@ enum TodoCardPayload {
         plan: crate::todo::TodoPlan,
         #[serde(default)]
         goals: Vec<crate::todo::TodoGoal>,
+        /// Swarm workers referenced by `TodoItem::assigned_to`.
+        #[serde(default)]
+        agents: Vec<TodoCardAgent>,
     },
     Legacy(Vec<crate::todo::TodoItem>),
 }
@@ -1149,10 +1159,21 @@ impl TodoCardPayload {
         Vec<crate::todo::TodoItem>,
         crate::todo::TodoPlan,
         Vec<crate::todo::TodoGoal>,
+        Vec<TodoCardAgent>,
     ) {
         match self {
-            Self::Current { todos, plan, goals } => (todos, plan, goals),
-            Self::Legacy(todos) => (todos, crate::todo::TodoPlan::default(), Vec::new()),
+            Self::Current {
+                todos,
+                plan,
+                goals,
+                agents,
+            } => (todos, plan, goals, agents),
+            Self::Legacy(todos) => (
+                todos,
+                crate::todo::TodoPlan::default(),
+                Vec::new(),
+                Vec::new(),
+            ),
         }
     }
 }
@@ -1308,7 +1329,7 @@ fn render_todos_message_with_cap(
     let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
     };
-    let (todos, plan, goals) = payload.into_parts();
+    let (todos, plan, goals, agents) = payload.into_parts();
 
     let centered = markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
@@ -1348,9 +1369,23 @@ fn render_todos_message_with_cap(
                 .map(str::to_string)
         };
         let has_groups = todos.iter().any(|t| group_of(t).is_some());
-        if has_groups {
-            lines.push(render_todo_status_header(
-                todos.iter(),
+        let all_refs: Vec<&crate::todo::TodoItem> = todos.iter().collect();
+        if crate::todo::stages::has_stages(todos.iter()) {
+            // Stage grid: groups become lanes inside each stage, so they are
+            // drawn as column headers instead of goal sections.
+            lines.push(render_todo_stage_status_header(
+                &all_refs,
+                &agents,
+                base_indent,
+                inner_width,
+            ));
+            let goal = todo_card_goal_for_group(&goals, None);
+            push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
+            push_stage_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
+        } else if has_groups {
+            lines.push(render_todo_stage_status_header(
+                &all_refs,
+                &agents,
                 base_indent,
                 inner_width,
             ));
@@ -1367,30 +1402,28 @@ fn render_todos_message_with_cap(
             for (group, items) in &groups {
                 let label = group.as_deref().unwrap_or("other");
                 let goal = todo_card_goal_for_group(&goals, group.as_deref());
-                lines.push(render_todo_goal_header(
+                lines.push(todo_stages::render_group_header(
                     label,
                     items,
+                    &agents,
                     base_indent,
                     inner_width,
                 ));
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-                for todo in items {
-                    lines.push(render_todo_card_item_line(todo, base_indent, inner_width));
-                }
+                push_todo_item_lines(&mut lines, items, &agents, base_indent, inner_width);
             }
         } else {
             let goal = todo_card_goal_for_group(&goals, None);
-            lines.push(render_todo_status_header(
-                todos.iter(),
+            lines.push(render_todo_stage_status_header(
+                &all_refs,
+                &agents,
                 base_indent,
                 inner_width,
             ));
             if goal.is_some() {
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
             }
-            for todo in &todos {
-                lines.push(render_todo_card_item_line(todo, base_indent, inner_width));
-            }
+            push_todo_item_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
         }
     }
 
@@ -1574,34 +1607,43 @@ fn push_todo_status_pips<'a>(
     }
 }
 
-fn render_todo_status_header<'a>(
-    todos: impl IntoIterator<Item = &'a crate::todo::TodoItem>,
+/// Overall card header: progress pips (numbered per stage) plus the roster
+/// of swarm agent emoji working on this list.
+fn render_todo_stage_status_header(
+    todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
     let mut spans = Vec::new();
-    push_todo_status_pips(&mut spans, todos, inner_width);
+    let roster = agent_roster_spans(todos, agents);
+    let blocked = todo_stages::blocked_phase_spans(todos, agents);
+    let side: usize = roster
+        .iter()
+        .chain(blocked.iter())
+        .map(|span| span.content.width())
+        .sum();
+    push_stage_pips(&mut spans, todos, inner_width.saturating_sub(side));
+    spans.extend(blocked);
+    spans.extend(roster);
     todo_card_line(spans, base_indent, inner_width)
 }
 
-fn render_todo_goal_header(
-    label: &str,
+fn push_todo_item_lines(
+    lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
     base_indent: &str,
     inner_width: usize,
-) -> Line<'static> {
-    let label_width = label.width();
-    let mut spans = vec![Span::styled(
-        label.to_string(),
-        Style::default().fg(todo_group_color()).bold(),
-    )];
-    spans.push(Span::raw("  "));
-    push_todo_status_pips(
-        &mut spans,
-        todos.iter().copied(),
-        inner_width.saturating_sub(label_width + 2),
-    );
-    todo_card_line(spans, base_indent, inner_width)
+) {
+    for todo in todos {
+        lines.push(render_todo_item_line(
+            todo,
+            agents,
+            base_indent,
+            inner_width,
+        ));
+    }
 }
 
 fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
@@ -2130,6 +2172,12 @@ fn render_todo_card_item_line(
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
+    todo_card_line(todo_card_item_spans(todo, true), base_indent, inner_width)
+}
+
+/// Spans for one todo row: two-cell gutter, status glyph, content, and
+/// (optionally) the confidence suffix. Callers own indent and truncation.
+fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> Vec<Span<'static>> {
     let blocked = !todo.blocked_by.is_empty() && todo.status != "completed";
     let (glyph, glyph_color) = if blocked {
         ("⊳", rgb(225, 165, 90))
@@ -2152,13 +2200,13 @@ fn render_todo_card_item_line(
         Span::styled(format!("{} ", glyph), Style::default().fg(glyph_color)),
         Span::styled(todo.content.clone(), Style::default().fg(text_color)),
     ];
-    if let Some(label) = todo_card_confidence_label(todo) {
+    if with_confidence && let Some(label) = todo_card_confidence_label(todo) {
         spans.push(Span::styled(
             format!(" · {}", label),
             Style::default().fg(todo_confidence_color()),
         ));
     }
-    todo_card_line(spans, base_indent, inner_width)
+    spans
 }
 
 fn compact_run_id(run_id: &str) -> String {

@@ -190,6 +190,52 @@ impl App {
         self.set_status_notice(notice);
     }
 
+    /// Key handling while an automatic account switch counts down. Returns
+    /// true when the key was fully consumed.
+    ///
+    /// Only Esc cancels. Typing the next prompt must not silently abort the
+    /// switch and leave the session on the exhausted account. Enter on a plain
+    /// prompt queues it to run after the switch and the held resend. Slash and
+    /// shell commands (for example a manual `/model`) cancel and run as usual.
+    pub(super) fn handle_key_during_provider_failover(
+        &mut self,
+        code: crossterm::event::KeyCode,
+    ) -> bool {
+        use crossterm::event::KeyCode;
+        if self.pending_provider_failover.is_none() || self.is_processing {
+            return false;
+        }
+        match code {
+            KeyCode::Esc => {
+                self.cancel_pending_provider_failover("Provider auto-switch canceled");
+                true
+            }
+            KeyCode::Enter => {
+                let trimmed = self.input.trim();
+                if trimmed.is_empty() {
+                    return true;
+                }
+                if trimmed.starts_with('/')
+                    || trimmed.starts_with('!')
+                    || !self.pending_images.is_empty()
+                {
+                    self.cancel_pending_provider_failover("Provider auto-switch canceled");
+                    return false;
+                }
+                let prepared = super::input::take_prepared_input(self);
+                self.queued_messages.push(prepared.expanded);
+                let to_label = self
+                    .pending_provider_failover
+                    .as_ref()
+                    .map(|pending| pending.prompt.to_label.clone())
+                    .unwrap_or_default();
+                self.set_status_notice(format!("Queued. Sends after switching → {to_label}"));
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn failover_countdown_message(to_label: &str) -> String {
         format!("↪ Switching to {to_label} in 3s. Esc to cancel.")
     }

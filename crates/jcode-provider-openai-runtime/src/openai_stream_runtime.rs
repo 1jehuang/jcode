@@ -4,6 +4,38 @@ use super::openai_stream_diagnostics::{
 };
 use super::*;
 
+/// Usage of the account these credentials authenticate as, plus its label for
+/// logs. Unbound sessions keep the credentials they loaded, so the global
+/// active login can be a different account with different quota.
+pub(super) fn serving_account_usage(
+    credentials: &CodexCredentials,
+) -> (Option<String>, jcode_base::usage::OpenAIUsageData) {
+    let label = jcode_base::auth::codex::list_accounts()
+        .ok()
+        .and_then(|accounts| {
+            jcode_base::auth::codex::account_label_for_credentials(&accounts, credentials)
+        });
+    let usage = match label.as_deref() {
+        Some(label) => jcode_base::usage::get_openai_usage_for_label_sync(label),
+        // Not a saved login (legacy single-account file): the active usage is it.
+        None => jcode_base::usage::get_openai_usage_sync(),
+    };
+    (label, usage)
+}
+
+/// `account=<label> <usage fields>` for limit diagnostics.
+pub(super) fn serving_account_diag(credentials: &CodexCredentials) -> (String, bool) {
+    let (label, usage) = serving_account_usage(credentials);
+    (
+        format!(
+            "account={} {}",
+            label.as_deref().unwrap_or("unknown"),
+            usage.diagnostic_fields()
+        ),
+        usage.exhausted(),
+    )
+}
+
 // Bind metadata to the immutable request, not the provider's concurrently mutable
 // preference. Both primary parser events and its pending queue pass here.
 fn bind_requested_service_tier(event: &mut StreamEvent, request_tier: &Option<String>) {
@@ -57,6 +89,18 @@ pub(super) async fn openai_access_token(
     account_label: Option<String>,
     credentials: &Arc<RwLock<CodexCredentials>>,
 ) -> anyhow::Result<String> {
+    if let Some(label) = account_label.as_deref() {
+        let is_oauth = {
+            let tokens = credentials.read().await;
+            !tokens.refresh_token.is_empty() || tokens.id_token.is_some()
+        };
+        if is_oauth {
+            // Cloud handoff/login can replace the file while this daemon keeps
+            // its provider alive. Never send or refresh the old cached copy.
+            let mut tokens = credentials.write().await;
+            *tokens = jcode_base::auth::codex::load_credentials_for_account(label)?;
+        }
+    }
     let (access_token, refresh_token, needs_refresh, is_oauth) = {
         let tokens = credentials.read().await;
         if tokens.access_token.is_empty() {
@@ -171,6 +215,7 @@ fn ws_stall_diagnostics(
 }
 
 /// Stream the response from OpenAI API
+#[allow(clippy::too_many_arguments)]
 fn response_http_request(
     client: &Client,
     url: &str,
@@ -251,10 +296,9 @@ pub(super) async fn stream_response(
             ("transport", "https".to_string()),
         ],
     );
-    let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
+    let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
     jcode_base::logging::info(&format!(
-        "OpenAI limit diag: starting fresh HTTPS request usage=({})",
-        usage_snapshot.diagnostic_fields()
+        "OpenAI limit diag: starting fresh HTTPS request usage=({usage_diag})"
     ));
     emit_status_detail(&tx, initial_status_detail).await;
     emit_connection_phase(&tx, ConnectionPhase::Authenticating).await;
@@ -335,10 +379,9 @@ pub(super) async fn stream_response(
         "https_connected",
         connected_fields,
     );
-    if response.status().is_success() && usage_snapshot.exhausted() {
+    if response.status().is_success() && usage_exhausted {
         jcode_base::logging::warn(&format!(
-            "OpenAI limit diag: fresh HTTPS request accepted while local usage indicates exhausted usage=({})",
-            usage_snapshot.diagnostic_fields()
+            "OpenAI limit diag: fresh HTTPS request accepted while the serving account's usage indicates exhausted usage=({usage_diag})"
         ));
     }
 
@@ -881,11 +924,11 @@ async fn continue_persistent_ws_locked(
     let request_prompt_cache_key_hash = request
         .get("prompt_cache_key")
         .map(jcode_provider_core::fingerprint::stable_hash_json);
-    let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
+    let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
     jcode_base::logging::info(&format!(
         "OpenAI limit diag: attempting persistent WS reuse previous_response_id_present={} usage=({}) state=({})",
         !previous_response_id.is_empty(),
-        usage_snapshot.diagnostic_fields(),
+        usage_diag,
         state.diag_snapshot().log_fields()
     ));
     jcode_base::logging::info(&format!(
@@ -1237,11 +1280,10 @@ async fn continue_persistent_ws_locked(
                         id,
                         incremental_stats.log_fields(),
                     ));
-                    let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
-                    if usage_snapshot.exhausted() {
+                    if usage_exhausted {
                         jcode_base::logging::warn(&format!(
-                            "OpenAI limit diag: persistent WS reuse accepted request while local usage indicates exhausted usage=({}) state=({})",
-                            usage_snapshot.diagnostic_fields(),
+                            "OpenAI limit diag: persistent WS reuse accepted request while the serving account's usage indicates exhausted usage=({}) state=({})",
+                            usage_diag,
                             state.diag_snapshot().log_fields()
                         ));
                     }
@@ -1485,10 +1527,9 @@ async fn stream_response_websocket_authenticated(
         ],
     );
 
-    let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
+    let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
     jcode_base::logging::info(&format!(
-        "OpenAI limit diag: opening fresh persistent WS request usage=({})",
-        usage_snapshot.diagnostic_fields()
+        "OpenAI limit diag: opening fresh persistent WS request usage=({usage_diag})"
     ));
     emit_status_detail(&tx, "opening websocket").await;
     let creds = credentials.read().await;
@@ -1743,10 +1784,9 @@ async fn stream_response_websocket_authenticated(
                             id,
                             request_input_stats.log_fields(),
                         ));
-                        if usage_snapshot.exhausted() {
+                        if usage_exhausted {
                             jcode_base::logging::warn(&format!(
-                                "OpenAI limit diag: fresh WS request accepted while local usage indicates exhausted usage=({})",
-                                usage_snapshot.diagnostic_fields()
+                                "OpenAI limit diag: fresh WS request accepted while the serving account's usage indicates exhausted usage=({usage_diag})"
                             ));
                         }
                     }

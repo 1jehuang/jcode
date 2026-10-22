@@ -8,6 +8,8 @@ pub use oauth_account::{
     OAUTH_ACCOUNT_NOTICE_TEXT, OAuthAccountNotice, acknowledge_oauth_account_notice_displayed,
     enqueue_oauth_account, pending_oauth_account_notice,
 };
+mod categories;
+pub use categories::{TelemetryCategory, category_settings, set_category_settings};
 mod lifecycle;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
 pub mod onboarding_trace;
@@ -1448,6 +1450,9 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
 
 #[cfg(not(test))]
 fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
+    if !categories::payload_allowed(&payload) {
+        return false;
+    }
     concurrency::mark_legacy_concurrency_unavailable(&mut payload);
     // Usage events bypass the volatile activity queue. A process exit, queue
     // overflow, or retry exhaustion must not discard the authoritative spend.

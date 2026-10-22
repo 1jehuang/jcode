@@ -18,6 +18,9 @@ pub enum TodoFile {
     Plan,
     GateObservations,
     ReviewState,
+    /// Swarm lane links: which coordinator lane this worker session owns, or
+    /// which workers own this coordinator's lanes.
+    LaneLinks,
 }
 
 impl TodoFile {
@@ -28,6 +31,7 @@ impl TodoFile {
             Self::Plan => "-plan",
             Self::GateObservations => "-gate-observations",
             Self::ReviewState => "-review-state",
+            Self::LaneLinks => "-lane-links",
         }
     }
 }

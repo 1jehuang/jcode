@@ -58,9 +58,11 @@ mod swarm_channels;
 mod swarm_labels;
 mod swarm_mutation_state;
 mod swarm_persistence;
+pub(crate) mod swarm_todo_link;
 mod swarm_watchdog;
 mod turn_failover;
 mod util;
+mod worker_revive;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
 use self::background_tasks::{
@@ -614,6 +616,10 @@ use self::state::{
 pub use crate::plan::{SwarmTaskProgress, VersionedPlan};
 
 pub use self::await_members_state::pending_await_members_for_session;
+#[cfg(test)]
+pub(crate) use self::await_members_state::{
+    PersistedAwaitMembersState, save_state as save_await_state_for_tests,
+};
 #[cfg(test)]
 pub(crate) use self::reload_state::subscribe_reload_signal_for_tests;
 pub use self::reload_state::{
@@ -1180,7 +1186,7 @@ impl Server {
                     session_id.clone(),
                     Arc::clone(&recover_swarm_members),
                 );
-                let result = self::client_lifecycle::process_message_streaming_mpsc(
+                let result = self::turn_failover::process_server_initiated_message(
                     Arc::clone(&agent),
                     "",
                     vec![],
@@ -1278,6 +1284,13 @@ impl Server {
         tokio::task::JoinHandle<()>,
     ) {
         self.spawn_registry_prewarm();
+        worker_revive::register_context(worker_revive::WorkerReviveContext {
+            provider: Arc::clone(&self.provider),
+            sessions: Arc::clone(&self.sessions),
+            mcp_pool: Arc::clone(&self.mcp_pool),
+            shutdown_signals: Arc::clone(&self.shutdown_signals),
+            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+        });
         // Every resume History asks whether the session has persisted
         // background tasks. The first ask after a reload scans the whole task
         // directory (~250ms) while clients are reconnecting; build the index
@@ -2054,8 +2067,8 @@ impl Server {
         file_touch: FileTouchService,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
         swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-        _swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
-        _swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
+        swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
+        swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
         _shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
         sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
         soft_interrupt_queues: SessionInterruptQueues,
@@ -2303,6 +2316,29 @@ impl Server {
                         }
                     }
                 }
+                BusEvent::LaneEdited(edit) => {
+                    // The coordinator steers a worker by editing its lane; the
+                    // worker's todo list already matches, so just tell it.
+                    let message = format!(
+                        "[lane updated by coordinator] Your todo list (lane {}) changed: {}. Re-read it with the todo tool and continue from it.",
+                        edit.lane, edit.summary
+                    );
+                    if !queue_soft_interrupt_for_session(
+                        &edit.worker,
+                        message,
+                        false,
+                        SoftInterruptSource::System,
+                        &soft_interrupt_queues,
+                        &sessions,
+                    )
+                    .await
+                    {
+                        crate::logging::warn(&format!(
+                            "Failed to notify {} of lane edit {}",
+                            edit.worker, edit.lane
+                        ));
+                    }
+                }
                 BusEvent::BackgroundTaskCompleted(task) => {
                     dispatch_background_task_completion(
                         &task,
@@ -2362,6 +2398,27 @@ impl Server {
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
+                    // A coordinator's todo list is its lane plan: keep a
+                    // running plan mirroring every save, so new or reshaped
+                    // lanes are picked up without relaunching.
+                    if let Some(swarm_id) = self::swarm_todo_link::resync_plan_after_todo_save(
+                        &event.session_id,
+                        &event.todos,
+                        &swarm_members,
+                        &swarm_plans,
+                        &swarm_coordinators,
+                    )
+                    .await
+                    {
+                        self::swarm::broadcast_swarm_plan(
+                            &swarm_id,
+                            Some("todos_changed".to_string()),
+                            &swarm_plans,
+                            &swarm_members,
+                            &swarms_by_id,
+                        )
+                        .await;
+                    }
                 }
                 BusEvent::SwarmOutputTail(tail) => {
                     dispatch_swarm_output_tail(&tail, &swarm_members, &swarms_by_id).await;

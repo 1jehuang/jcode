@@ -141,9 +141,10 @@ use memory_ui::{group_into_tiles, render_memory_tiles, split_by_display_width};
 use messages::get_cached_message_lines;
 #[cfg_attr(test, allow(unused_imports))]
 pub(crate) use messages::{
-    SWARM_AGENT_SNAPSHOT_TITLE, compact_swarm_await_summary, encode_swarm_agent_snapshot,
-    render_assistant_message, render_background_task_message, render_reasoning_message,
-    render_swarm_message, render_system_message, render_tool_message, render_usage_message,
+    SWARM_AGENT_SNAPSHOT_TITLE, TodoCardAgent, compact_swarm_await_summary,
+    encode_swarm_agent_snapshot, render_assistant_message, render_background_task_message,
+    render_reasoning_message, render_swarm_message, render_system_message, render_tool_message,
+    render_usage_message,
 };
 pub(crate) use output_style::adapt_buffer_for_emoji_preference;
 pub use pinned_ui::{
@@ -954,6 +955,7 @@ struct BodyCacheKey {
     /// Live swarm-member data renders beneath the tool call that spawned each
     /// member, so status/todo/tool-intent updates must invalidate the body.
     swarm_members_signature: u64,
+    latex_rendering: crate::config::LatexRenderingMode,
 }
 
 #[derive(Clone)]
@@ -1036,6 +1038,7 @@ impl BodyCacheState {
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
+                    && entry.key.latex_rendering == key.latex_rendering
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -1057,6 +1060,7 @@ impl BodyCacheState {
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
+                    && entry.key.latex_rendering == key.latex_rendering
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -1097,6 +1101,7 @@ impl BodyCacheState {
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
+                    && entry.key.latex_rendering == key.latex_rendering
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (false, idx, entry.msg_count));
@@ -1119,6 +1124,7 @@ impl BodyCacheState {
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
+                    && entry.key.latex_rendering == key.latex_rendering
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (true, idx, entry.msg_count));
@@ -1226,6 +1232,7 @@ struct FullPrepCacheKey {
     expanded_images_version: u64,
     /// Signature of live swarm member cards embedded beneath spawn tool calls.
     swarm_members_signature: u64,
+    latex_rendering: crate::config::LatexRenderingMode,
 }
 
 #[derive(Clone)]
@@ -2618,6 +2625,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // Suggestions are read many times while composing one frame. Bump the
     // epoch here so the memo is scoped to exactly this frame.
     app.advance_command_suggestions_epoch();
+    crate::tui::mermaid::begin_terminal_image_frame();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
@@ -2630,10 +2638,10 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // can make distinct muted source grays converge to the same rendered ink.
     jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
     adapt_buffer_for_emoji_preference(frame.buffer_mut());
-    // Cache eviction/clearing can outlive the last visible image. Carry Kitty
-    // deletion commands on any completed frame so terminal-side pixel storage
-    // is reclaimed even when no image widget renders again.
-    crate::tui::mermaid::render_pending_terminal_image_cleanup(frame.buffer_mut());
+    // Classic Kitty placements must follow all text writes. Unlike Unicode
+    // placeholders they survive scrolling, so finalize even an image-free frame.
+    // This also drains deferred cache-eviction deletions when no image remains.
+    crate::tui::mermaid::finish_terminal_image_frame(frame.buffer_mut());
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     panel_image_preview::clear_regions();

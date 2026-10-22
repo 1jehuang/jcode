@@ -3548,3 +3548,21 @@ fn named_openai_compatible_provider_keeps_stable_name_and_profile_display_name()
 
 #[path = "openrouter_wire_tests.rs"]
 mod wire_tests;
+
+#[test]
+fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
+    let body = OpenRouterProvider::with_profile_default_extra_body(Some("venice"), None).unwrap();
+    assert_eq!(
+        body["venice_parameters"]["include_venice_system_prompt"],
+        serde_json::json!(false)
+    );
+    let user = serde_json::json!({"venice_parameters": {"include_venice_system_prompt": true}})
+        .as_object()
+        .cloned();
+    let body = OpenRouterProvider::with_profile_default_extra_body(Some("venice"), user).unwrap();
+    assert_eq!(
+        body["venice_parameters"]["include_venice_system_prompt"],
+        serde_json::json!(true)
+    );
+    assert!(OpenRouterProvider::with_profile_default_extra_body(Some("cerebras"), None).is_none());
+}

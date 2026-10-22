@@ -204,6 +204,13 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Saved OAuth account this runtime's cached credential actually belongs
+    /// to, bound or not. For display and usage attribution only; an unbound
+    /// session keeps the login it loaded even after the global account moves.
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        self.oauth_account_label()
+    }
+
     /// Email belonging to this runtime's actual cached OAuth credential.
     /// Return `None` for API keys, unknown credentials, or unknown identity.
     /// Implementations must not fall back to the globally active saved account.

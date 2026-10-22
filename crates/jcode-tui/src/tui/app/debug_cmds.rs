@@ -532,6 +532,7 @@ impl App {
                             auth_method: Some("OAuth".into()),
                             effort: Some("high".into()),
                             elapsed_secs: Some(18),
+                            activity_age_secs: None,
                         },
                     })
                     .collect();

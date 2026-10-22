@@ -321,6 +321,8 @@ impl Drop for Lease {
     }
 }
 
+type PendingLease = std::sync::Mutex<std::sync::mpsc::Receiver<Option<(Lease, Option<Counts>)>>>;
+
 /// One live runtime Agent incarnation. Hold this on the Agent, not its viewers
 /// or the process-global activity accumulator. Call `finish` when a retained
 /// Agent closes/crashes, and create a new guard when it starts a new session.
@@ -332,7 +334,7 @@ pub struct ConcurrencySession {
     /// Lease registration runs on a background thread: it takes a global file
     /// lock and scans every live lease, which serialized dozens of resumes
     /// behind each other when all clients reconnected after a reload.
-    pending: Option<std::sync::Mutex<std::sync::mpsc::Receiver<Option<(Lease, Option<Counts>)>>>>,
+    pending: Option<PendingLease>,
     lease: Option<Lease>,
     at_start: Counts,
     active: bool,

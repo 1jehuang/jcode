@@ -411,14 +411,9 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        for (key, target) in [(
-            "JCODE_SWARM_ROOT_EFFORT",
-            &mut self.agents.swarm_root_effort,
-        )] {
-            if let Ok(value) = std::env::var(key) {
-                let value = value.trim();
-                *target = (!value.is_empty()).then(|| value.to_string());
-            }
+        if let Ok(value) = std::env::var("JCODE_SWARM_ROOT_EFFORT") {
+            let value = value.trim();
+            self.agents.swarm_root_effort = (!value.is_empty()).then(|| value.to_string());
         }
         if let Ok(v) = std::env::var("JCODE_SWARM_SPAWN_MODE") {
             if let Some(parsed) = SwarmSpawnMode::parse(&v) {
@@ -449,6 +444,19 @@ impl Config {
         }
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
+        }
+        for (key, target) in [
+            ("JCODE_MEMORY_JEV_MODEL", &mut self.agents.memory_jev_model),
+            (
+                "JCODE_BROWSER_JEV_MODEL",
+                &mut self.agents.browser_jev_model,
+            ),
+            ("JCODE_VOICE_JEV_MODEL", &mut self.agents.voice_jev_model),
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                *target = (!value.is_empty()).then(|| value.to_string());
+            }
         }
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();

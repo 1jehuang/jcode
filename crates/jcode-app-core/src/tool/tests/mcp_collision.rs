@@ -237,12 +237,23 @@ fn mcp_collision_manual_lifecycle_real_stdio() {
             }
             assert!(!registry.tool_names().await.contains(&legacy));
             let listed = management.execute(serde_json::json!({"action":"list"}), ctx.clone()).await.unwrap();
+            let discovered = management.execute(serde_json::json!({"action":"search"}), ctx.clone()).await.unwrap();
+            let discovered: Value = serde_json::from_str(&discovered.output).unwrap();
+            assert_eq!(discovered.as_array().unwrap().len(), 2);
             for (index, alias) in aliases.iter().enumerate() {
                 assert!(listed.output.contains(alias));
                 let output = registry.execute(alias, serde_json::json!({"token":"marker"}), ctx.clone()).await.unwrap();
                 let value: Value = serde_json::from_str(&output.output).unwrap();
                 assert_eq!(value["server"], catalog[index].0);
                 assert_eq!(value["tool"], catalog[index].1.name);
+                let unified = management.execute(serde_json::json!({
+                    "action":"call", "server":catalog[index].0,
+                    "tool":catalog[index].1.name, "arguments":{"token":"unified"}
+                }), ctx.clone()).await.unwrap();
+                let unified: Value = serde_json::from_str(&unified.output).unwrap();
+                assert_eq!(unified["server"], catalog[index].0);
+                assert_eq!(unified["tool"], catalog[index].1.name);
+                assert_eq!(unified["arguments"]["token"], "unified");
             }
             set_session_tool_policy(&ctx.session_id, None, HashSet::from([aliases[0].clone()]));
             let deferred = mcp::McpCallTool::new(Arc::clone(&manager)).with_registry(registry.clone());

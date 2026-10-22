@@ -1692,6 +1692,16 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if super::commands_cloud::parse_cloud_command(trimmed).is_some() {
         let session_id = active_session_id(app);
+        if matches!(
+            super::commands_cloud::parse_cloud_command(trimmed),
+            Some(super::commands_cloud::CloudCommand::Move { .. })
+        ) && let Err(error) = app.session.save_prepared()
+        {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Could not save this session before moving it: {error}. Nothing moved."
+            )));
+            return true;
+        }
         super::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
         return true;
     }
@@ -2528,6 +2538,14 @@ fn handle_selfdev_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+/// `/initiatives` is an explicit request to see the page, so it reopens a side
+/// panel the user closed. Agent-driven panel updates stay hidden.
+fn show_in_side_panel(app: &mut App, snapshot: crate::side_panel::SidePanelSnapshot) {
+    app.side_panel_user_hidden = false;
+    app.side_panel_explicit_hidden = false;
+    app.set_side_panel_snapshot(snapshot);
+}
+
 pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
     let Some(trimmed) = trimmed
         .strip_prefix("/initiatives")
@@ -2544,7 +2562,7 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
             true,
         ) {
             Ok(snapshot) => {
-                app.set_side_panel_snapshot(snapshot);
+                show_in_side_panel(app, snapshot);
                 let count = crate::goal::list_relevant_goals(active_working_dir(app).as_deref())
                     .map(|goals| goals.len())
                     .unwrap_or(0);
@@ -2570,7 +2588,7 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
             true,
         ) {
             Ok(Some(result)) => {
-                app.set_side_panel_snapshot(result.snapshot);
+                show_in_side_panel(app, result.snapshot);
                 let mut msg = format!("Resumed initiative {}.", result.goal.title);
                 if let Some(next_step) = result.goal.next_steps.first() {
                     msg.push_str(&format!(" Next step: {}", next_step));
@@ -2604,7 +2622,7 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
             true,
         ) {
             Ok(Some(result)) => {
-                app.set_side_panel_snapshot(result.snapshot);
+                show_in_side_panel(app, result.snapshot);
                 app.push_display_message(DisplayMessage::system(format!(
                     "Opened initiative {} in the side panel.",
                     result.goal.title
@@ -3020,6 +3038,59 @@ fn handle_show_agentgrep_output_command(app: &mut App, trimmed: &str) -> bool {
         ))),
     }
 
+    true
+}
+
+pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = slash_command_rest(trimmed, "/latex") else {
+        return false;
+    };
+    let arg = rest.trim();
+
+    let current = crate::config::config().display.latex_rendering;
+    if arg.is_empty() || arg.eq_ignore_ascii_case("status") {
+        app.push_display_message(DisplayMessage::system(format!(
+            "LaTeX rendering: {} (use /latex [on|off|none|unicode|image|status])\n\n  none    - keep raw $...$ source\n  unicode - terminal-friendly text math\n  image   - typeset PNG per formula (needs latex+dvipng or pdflatex+pdftocairo)",
+            current.as_str()
+        )));
+        return true;
+    }
+
+    let mode = match arg.to_ascii_lowercase().as_str() {
+        "on" => Some(crate::config::LatexRenderingMode::Image),
+        "off" => Some(crate::config::LatexRenderingMode::Unicode),
+        _ => crate::config::LatexRenderingMode::parse(arg),
+    };
+    let Some(mode) = mode else {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /latex [on|off|none|unicode|image|status]".to_string(),
+        ));
+        return true;
+    };
+
+    match crate::config::Config::set_latex_rendering(mode) {
+        Ok(()) => {
+            let effective = crate::config::config().display.latex_rendering;
+            app.set_status_notice(format!("LaTeX rendering: {}", effective.as_str()));
+            let override_note = if effective != mode {
+                " JCODE_LATEX_RENDERING overrides the saved mode."
+            } else {
+                ""
+            };
+            app.push_display_message(DisplayMessage::system(format!(
+                "Saved LaTeX rendering: {}. Effective mode: {}.{}",
+                mode.as_str(),
+                effective.as_str(),
+                override_note
+            )))
+        }
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Failed to set LaTeX rendering to {}: {}. Nothing changed; the session keeps {}.",
+            mode.as_str(),
+            error,
+            crate::config::config().display.latex_rendering.as_str()
+        ))),
+    }
     true
 }
 
@@ -3888,8 +3959,8 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-/// `/telemetry [everything|no-prompts|nothing]` - show or change the same
-/// three-way telemetry level offered by the onboarding "Telemetry settings"
+/// `/telemetry [all|none|<category> on|off]` - show or change the same
+/// per-category telemetry choices offered by the onboarding "Telemetry settings"
 /// page, so the promise made there ("change this later with /telemetry") holds.
 pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/telemetry") else {
@@ -3905,39 +3976,64 @@ pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
-    use crate::tui::app::onboarding_flow::TelemetryLevel;
-    let arg = rest.trim().to_ascii_lowercase();
-    let level = match arg.as_str() {
-        "" => {
-            let current = TelemetryLevel::current();
-            let detail = match current {
-                TelemetryLevel::Everything => {
-                    "Sending usage stats, provider account email, crash reports, prompts, and transcripts. Thank you."
-                }
-                TelemetryLevel::NoContent => {
-                    "Sending usage stats, provider account email, and crash reports. No prompts or transcripts."
-                }
-                TelemetryLevel::Nothing => "Sending nothing.",
-            };
-            app.push_display_message(DisplayMessage::system(format!(
-                "{detail}\nChange it with /telemetry everything | no-prompts | nothing."
-            )));
-            app.set_status_notice(current.status_label());
-            return true;
-        }
-        "everything" | "all" => TelemetryLevel::Everything,
-        "no-prompts" | "no-content" | "usage" => TelemetryLevel::NoContent,
-        "nothing" | "off" | "none" => TelemetryLevel::Nothing,
-        other => {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Unknown telemetry level \"{other}\". Use everything, no-prompts, or nothing."
-            )));
-            return true;
-        }
+    use crate::telemetry::TelemetryCategory;
+    use crate::tui::app::onboarding_flow::status_label_for;
+    let args: Vec<String> = rest
+        .split_whitespace()
+        .map(|a| a.to_ascii_lowercase())
+        .collect();
+    let mut checked = crate::telemetry::category_settings();
+    let parse_on = |v: &str| match v {
+        "on" | "yes" | "true" | "1" => Some(true),
+        "off" | "no" | "false" | "0" => Some(false),
+        _ => None,
     };
-    level.persist();
-    app.push_display_message(DisplayMessage::system(level.status_label().to_string()));
-    app.set_status_notice(level.status_label());
+    let usage = "Usage: /telemetry [all|none] or /telemetry <category> on|off. Categories: content, usage, crashes, features, cost, accounts.";
+    match args.as_slice() {
+        [] => {
+            let mut text = String::from("Telemetry settings:\n");
+            for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
+                text.push_str(&format!(
+                    "  [{}] {} ({}): {}\n",
+                    if checked[i] { "x" } else { " " },
+                    category.label(),
+                    category.key(),
+                    category.caption()
+                ));
+            }
+            if crate::telemetry::opt_out_forced_by_env() {
+                text.push_str("Your environment disables all telemetry (JCODE_NO_TELEMETRY / DO_NOT_TRACK).\n");
+            }
+            text.push_str(usage);
+            app.push_display_message(DisplayMessage::system(text));
+            app.set_status_notice(status_label_for(checked));
+            return true;
+        }
+        [all] if matches!(all.as_str(), "all" | "everything" | "on") => checked = [true; 6],
+        [none] if matches!(none.as_str(), "none" | "nothing" | "off") => checked = [false; 6],
+        [all, value] if all == "all" && parse_on(value).is_some() => {
+            checked = [parse_on(value).unwrap_or(false); 6]
+        }
+        [key, value] => match (TelemetryCategory::from_key(key), parse_on(value)) {
+            (Some(category), Some(on)) => {
+                if let Some(i) = TelemetryCategory::ALL.iter().position(|c| *c == category) {
+                    checked[i] = on;
+                }
+            }
+            _ => {
+                app.push_display_message(DisplayMessage::error(usage.to_string()));
+                return true;
+            }
+        },
+        _ => {
+            app.push_display_message(DisplayMessage::error(usage.to_string()));
+            return true;
+        }
+    }
+    crate::telemetry::set_category_settings(checked);
+    let label = status_label_for(checked);
+    app.push_display_message(DisplayMessage::system(label.clone()));
+    app.set_status_notice(label);
     true
 }
 

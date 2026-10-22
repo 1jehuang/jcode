@@ -8,6 +8,24 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::ffi::OsString;
 
+#[test]
+fn base_tools_do_not_expose_invalid_reporting_tool() {
+    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
+    let tools = Registry::base_tools(&skills);
+    assert!(!tools.contains_key("invalid"));
+    assert!(tools.contains_key("bash"));
+}
+
+#[test]
+fn base_tools_exclude_replace_and_keep_other_editing_tools() {
+    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
+    let tools = Registry::base_tools(&skills);
+    assert!(!tools.contains_key("replace"));
+    for name in ["edit", "write", "apply_patch"] {
+        assert!(tools.contains_key(name), "missing editing tool: {name}");
+    }
+}
+
 struct TestHomeGuard {
     previous: Option<OsString>,
 }
@@ -305,6 +323,19 @@ async fn test_discover_tools_not_registered_when_sponsors_disabled() {
             "integration_tools must not be registered when sponsors are disabled"
         );
     }
+}
+
+#[tokio::test]
+async fn directory_listings_use_bash_instead_of_a_dedicated_tool() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let names = registry.tool_names().await;
+
+    assert!(names.iter().any(|name| name == "bash"));
+    assert!(!names.iter().any(|name| name == "ls"));
+    let definitions = registry.definitions(None).await;
+    assert!(definitions.iter().any(|tool| tool.name == "bash"));
+    assert!(!definitions.iter().any(|tool| tool.name == "ls"));
 }
 
 #[tokio::test]
@@ -1844,8 +1875,9 @@ fn the_dialect_sweep_catches_the_issue_754_schema() {
 async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode() {
     /// Built-ins that legitimately cannot be strict. Verified against master
     /// before the #711/#713 eligibility changes, so this is pre-existing.
-    // applet's view is a recursive, open-ended node tree.
-    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["applet", "batch", "browser", "swarm"];
+    // applet and swarm used to be ineligible only because of a root combiner;
+    // root combiners are now flattened (OpenAI rejects them outright).
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;

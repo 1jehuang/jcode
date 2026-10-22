@@ -65,14 +65,16 @@ fn with_connection<R>(f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // JCODE_HOME can change (tests); reopen when the path moves.
-    if guard.as_ref().is_none_or(|shared| shared.path != path) {
-        *guard = Some(SharedConnection {
-            connection: open_at(&path)?,
-            path,
-        });
+    match guard.as_ref() {
+        Some(shared) if shared.path == path => f(&shared.connection),
+        _ => {
+            let shared = guard.insert(SharedConnection {
+                connection: open_at(&path)?,
+                path,
+            });
+            f(&shared.connection)
+        }
     }
-    let shared = guard.as_ref().expect("connection initialized above");
-    f(&shared.connection)
 }
 
 fn open_at(path: &std::path::Path) -> Result<Connection> {

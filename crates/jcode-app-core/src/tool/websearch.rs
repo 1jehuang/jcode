@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// Web search using DuckDuckGo or Bing (HTML scraping, with optional Bing API)
+#[path = "websearch_kagi.rs"]
+mod kagi;
+
+/// Web search using configured local HTTP backends.
 pub struct WebSearchTool {
     client: reqwest::Client,
 }
@@ -23,10 +26,6 @@ struct WebSearchInput {
     query: String,
     #[serde(default)]
     num_results: Option<usize>,
-    #[serde(default)]
-    engine: Option<WebSearchEngine>,
-    #[serde(default)]
-    bing_market: Option<String>,
 }
 
 #[derive(Debug)]
@@ -66,15 +65,6 @@ impl Tool for WebSearchTool {
                 "num_results": {
                     "type": "integer",
                     "description": "Max results."
-                },
-                "engine": {
-                    "type": "string",
-                    "enum": ["duckduckgo", "bing", "searxng", "custom"],
-                    "description": "Engine. Defaults to configured engine; custom uses websearch.custom."
-                },
-                "bing_market": {
-                    "type": "string",
-                    "description": "Optional Bing market, e.g. en-US or zh-CN. Defaults to JCODE_BING_MARKET or en-US."
                 }
             }
         })
@@ -85,15 +75,10 @@ impl Tool for WebSearchTool {
         let num_results = params.num_results.unwrap_or(8).min(20);
 
         let config = crate::config::config();
-        let engines = local_engine_order(
-            params.engine.unwrap_or(config.websearch.engine),
-            &config.websearch.fallback_engines,
-        );
+        let engines =
+            local_engine_order(config.websearch.engine, &config.websearch.fallback_engines);
 
-        let market = params
-            .bing_market
-            .as_deref()
-            .unwrap_or(&config.websearch.bing_market);
+        let market = &config.websearch.bing_market;
         let mut last_error = None;
         let mut results = Vec::new();
         for (index, engine) in engines.into_iter().enumerate() {
@@ -130,12 +115,7 @@ impl Tool for WebSearchTool {
 
         if results.is_empty() {
             return Ok(ToolOutput::new(format!(
-                "No results found for: {}\n\n\
-                 If results are consistently empty on this machine, the default \
-                 DuckDuckGo/Bing engines may be blocked here by TLS fingerprinting \
-                 or IP reputation (common on Linux/servers). Workaround:\n\
-                 - Point at a SearXNG instance: set `websearch.searxng_url` (or \
-                 JCODE_SEARXNG_URL) and use engine \"searxng\".",
+                "No results found for: {}",
                 params.query
             )));
         }
@@ -172,6 +152,10 @@ impl WebSearchTool {
                     .await
             }
             WebSearchEngine::Searxng => self.search_searxng(query, num_results).await,
+            WebSearchEngine::Kagi => {
+                let config = crate::config::config();
+                kagi::search(query, num_results, &config.websearch.kagi_api_key_env).await
+            }
             WebSearchEngine::Custom => {
                 let config = crate::config::config();
                 let custom = config.websearch.custom.as_ref().ok_or_else(|| {
