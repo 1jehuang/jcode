@@ -91,6 +91,8 @@ struct ProcessingMessage {
     server_failover: bool,
 }
 
+type ProcessingCompletion = (u64, Result<()>, Option<String>);
+
 struct ProcessingState<'a> {
     client_is_processing: &'a mut bool,
     message_id: &'a mut Option<u64>,
@@ -487,7 +489,7 @@ pub(super) async fn handle_client(
     // Per-client state
     let mut client_is_processing = false;
     let (processing_done_tx, mut processing_done_rx) =
-        mpsc::unbounded_channel::<(u64, Result<()>, Option<String>)>();
+        mpsc::unbounded_channel::<ProcessingCompletion>();
     let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut processing_message_id: Option<u64> = None;
     let mut processing_session_id: Option<String> = None;
@@ -770,33 +772,16 @@ pub(super) async fn handle_client(
                 }
             }
             done = processing_done_rx.recv() => {
-                if let Some((done_id, result, completion_report)) = done {
-                    if Some(done_id) != processing_message_id {
-                        crate::logging::warn(&format!(
-                            "Done event id={} doesn't match processing_message_id={:?}, dropping",
-                            done_id, processing_message_id
-                        ));
-                        continue;
-                    }
-                    crate::logging::info(&format!(
-                        "Processing done for message id={}, result={}",
-                        done_id,
-                        if result.is_ok() { "ok" } else { "err" }
-                    ));
-                    processing_message_id = None;
-                    processing_task = None;
-                    client_is_processing = false;
-                    {
-                        let mut connections = client_connections.write().await;
-                        if let Some(info) = connections.get_mut(&client_connection_id) {
-                            info.is_processing = false;
-                            info.current_tool_name = None;
-                        }
-                    }
-
-                    let done_session = processing_session_id.take();
-                    record_processing_completion(
-                        done_session.as_deref(), result, completion_report,
+                if let Some(done) = done {
+                    reconcile_processing_completions(
+                        Some(done), &mut processing_done_rx,
+                        &mut ProcessingState {
+                            client_is_processing: &mut client_is_processing,
+                            message_id: &mut processing_message_id,
+                            session_id: &mut processing_session_id,
+                            task: &mut processing_task,
+                        },
+                        &client_connection_id, &client_connections,
                         &SwarmStatusRefs {
                             members: &swarm_members,
                             swarms_by_id: &swarms_by_id,
@@ -923,6 +908,28 @@ pub(super) async fn handle_client(
             }
         };
         let request_decoded_at = Instant::now();
+        // Direct input wins the biased select above. A client may already have
+        // observed Done/Error while this actor still holds the finished turn's
+        // state. Completion is enqueued before the terminal event, so drain it
+        // before any request (especially Message/SoftInterrupt) inspects that
+        // state. Keep streaming terminal events on their ordered fanout channel.
+        reconcile_processing_completions(
+            None, &mut processing_done_rx,
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut processing_message_id,
+                session_id: &mut processing_session_id,
+                task: &mut processing_task,
+            },
+            &client_connection_id, &client_connections,
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+        ).await;
         // Reserve before Ack or any session mutation, not just when the turn
         // eventually polls. Upgrade requests themselves must not reserve work.
         let _request_activity = if matches!(&request, Request::UpgradeRuntime { .. }) {
@@ -3303,6 +3310,51 @@ pub(super) async fn handle_client(
     connection_result
 }
 
+/// Retire finished turns before interpreting a request against client-local state.
+/// The task publishes completion before its terminal event, and never waits on
+/// this actor. Joining it also closes the cross-thread gap between those sends:
+/// a new turn cannot start before the old terminal is on the ordered stream.
+async fn reconcile_processing_completions(
+    mut completion: Option<ProcessingCompletion>,
+    receiver: &mut mpsc::UnboundedReceiver<ProcessingCompletion>,
+    state: &mut ProcessingState<'_>,
+    connection_id: &str,
+    connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    swarm: &SwarmStatusRefs<'_>,
+) {
+    while let Some((done_id, result, completion_report)) =
+        completion.take().or_else(|| receiver.try_recv().ok())
+    {
+        if Some(done_id) != *state.message_id {
+            crate::logging::warn(&format!(
+                "Done event id={} doesn't match processing_message_id={:?}, dropping",
+                done_id, state.message_id
+            ));
+            continue;
+        }
+        if let Some(task) = state.task.take() {
+            let _ = task.await;
+        }
+        crate::logging::info(&format!(
+            "Processing done for message id={}, result={}",
+            done_id,
+            if result.is_ok() { "ok" } else { "err" }
+        ));
+        *state.message_id = None;
+        *state.client_is_processing = false;
+        {
+            let mut connections = connections.write().await;
+            if let Some(info) = connections.get_mut(connection_id) {
+                info.is_processing = false;
+                info.current_tool_name = None;
+            }
+        }
+        let done_session = state.session_id.take();
+        record_processing_completion(done_session.as_deref(), result, completion_report, swarm)
+            .await;
+    }
+}
+
 async fn record_processing_completion(
     done_session: Option<&str>,
     result: Result<()>,
@@ -3405,7 +3457,7 @@ async fn start_processing_message(
     state: &mut ProcessingState<'_>,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    processing_done_tx: &mpsc::UnboundedSender<(u64, Result<()>, Option<String>)>,
+    processing_done_tx: &mpsc::UnboundedSender<ProcessingCompletion>,
     client_terminal_env: Vec<(String, String)>,
     swarm: &SwarmStatusRefs<'_>,
 ) {
@@ -3572,8 +3624,12 @@ async fn start_processing_message(
         if pending > 0 {
             let _ = tx.send(ServerEvent::SoftInterruptQueue { pending });
         }
-        let _ = tx.send(terminal_event);
+        // Publish completion first: observing Done/Error must imply that the
+        // actor can reconcile this turn before dispatching the next request.
+        // These sends do not await, and the terminal stays behind MessageEnd on
+        // the same fanout channel (including for newly attached clients).
         let _ = done_tx.send((id, result, completion_report));
+        let _ = tx.send(terminal_event);
     });
 }
 
