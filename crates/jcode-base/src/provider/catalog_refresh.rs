@@ -151,8 +151,9 @@ impl MultiProvider {
             ));
         }
 
-        // Bedrock's built-in default is a 2024 model; once its catalog (live
-        // or cached) is known, land on the newest usable Claude flagship.
+        // Bedrock's built-in default is the shipped Claude flagship; once its
+        // catalog (live or cached) is known, land on a strictly newer usable
+        // release and never demote to an older one.
         if let Some(bedrock) = self.bedrock_provider() {
             promote_bedrock_placeholder_default(&bedrock);
         }
