@@ -15,8 +15,8 @@
 
 use crate::provider_catalog::{
     OPENAI_COMPAT_PROFILE, is_safe_env_file_name, is_safe_env_key_name,
-    load_api_key_from_env_or_config, normalize_api_base, openai_compatible_profiles,
-    resolve_openai_compatible_profile,
+    load_api_key_from_env_or_config, load_openai_compatible_profile_api_key, normalize_api_base,
+    openai_compatible_profiles, resolve_openai_compatible_profile,
 };
 pub use jcode_provider_openrouter::{
     EndpointInfo, ModelInfo, ModelPricing, ModelTimestampIndex, ProviderRouting,
@@ -81,7 +81,21 @@ pub fn has_openrouter_credentials() -> bool {
 pub fn get_api_key() -> Option<String> {
     let key_name = configured_api_key_name();
     let env_file = configured_env_file_name();
-    crate::provider_catalog::load_runtime_api_key(&key_name, &env_file)
+    // Profile-native credential stores first: the Muse subscription login
+    // persists to the jcode-managed JSON file, not the profile env file, so
+    // the env-only probe below reports it as missing and `--provider auto`
+    // bails with "no credentials" on a machine whose only login is Muse.
+    // The profile-aware loader resolves the same tuple the env probe uses.
+    for profile in openai_compatible_profiles() {
+        let resolved = resolve_openai_compatible_profile(*profile);
+        if resolved.api_key_env == key_name && resolved.env_file == env_file {
+            if let Some(key) = load_openai_compatible_profile_api_key(&resolved) {
+                return Some(key);
+            }
+            break;
+        }
+    }
+    load_api_key_from_env_or_config(&key_name, &env_file)
 }
 
 /// OpenRouter API base URL

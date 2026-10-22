@@ -107,10 +107,17 @@ pub(super) async fn lock_probe(key: &str) -> anyhow::Result<File> {
             .join("anthropic_usage_locks")
             .join(format!("{name}.lock")),
     )?;
+    // A stale holder (crashed probe, leaked test lock) must not hang the
+    // caller forever: after the probe budget expires, degrade to the
+    // failure-cache path instead of spinning.
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match lock.try_lock() {
             Ok(()) => return Ok(lock),
             Err(std::fs::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    anyhow::bail!("usage probe lock contention timed out");
+                }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),

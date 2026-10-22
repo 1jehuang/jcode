@@ -146,6 +146,7 @@ pub fn provider_key_from_hint(provider_hint: Option<&str>) -> Option<&'static st
         "antigravity" => Some("antigravity"),
         "gemini" | "google gemini" => Some("gemini"),
         "cursor" => Some("cursor"),
+        "cursor acp" | "cursor-acp" => Some("cursor-acp"),
         _ => None,
     }
 }

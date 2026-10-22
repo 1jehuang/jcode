@@ -368,6 +368,16 @@ pub fn fetch_usage_for_account_sync(
         anyhow::bail!("Anthropic usage refresh requires a Tokio runtime")
     }
 
+    // `block_in_place` + `block_on` deadlocks on a current-thread runtime
+    // (the driver parks while the caller waits on it). Sync probes only run
+    // on the multi-thread daemon runtime; anywhere else degrade to the
+    // failure-cache path instead of hanging.
+    if tokio::runtime::Handle::current().runtime_flavor()
+        == tokio::runtime::RuntimeFlavor::CurrentThread
+    {
+        anyhow::bail!("Anthropic usage refresh requires a multi-thread runtime")
+    }
+
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(fetch_usage_for_account(
             access_token.to_string(),
@@ -399,6 +409,13 @@ pub fn fetch_openai_usage_for_account_sync(
 
     if tokio::runtime::Handle::try_current().is_err() {
         anyhow::bail!("OpenAI usage refresh requires a Tokio runtime")
+    }
+
+    // Same deadlock guard as the Anthropic sync fetch above.
+    if tokio::runtime::Handle::current().runtime_flavor()
+        == tokio::runtime::RuntimeFlavor::CurrentThread
+    {
+        anyhow::bail!("OpenAI usage refresh requires a multi-thread runtime")
     }
 
     let generation = openai_usage_generation();

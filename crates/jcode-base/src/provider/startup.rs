@@ -1,4 +1,9 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// In-flight guard for Cursor ACP catalog refreshes. Prevents multiple
+/// concurrent prefetches from each dropping and re-spawning the ACP subprocess.
+static CURSOR_ACP_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Shared fresh-session route choice; see `select_fresh_session_pool_route`.
 #[derive(Clone)]
@@ -185,6 +190,25 @@ impl MultiProvider {
             None
         };
 
+        // Cursor ACP has no jcode-managed credentials (it uses the Cursor
+        // CLI's own device login), so we skip eager instantiation unless the
+        // user explicitly selected cursor-acp as their provider. The provider
+        // is created lazily via `ensure_cursor_acp_provider()` on first use.
+        // This avoids spawning the heavy `agent acp` subprocess at startup
+        // for users who never use Cursor ACP.
+        let cursor_acp_is_preferred =
+            provider_state.default_provider_key().is_some_and(|pref| {
+                pref.trim()
+                    .eq_ignore_ascii_case(external::CURSOR_ACP_RUNTIME)
+            }) || Self::initial_provider_from_env().is_some_and(|initial| {
+                Self::provider_key(initial).eq_ignore_ascii_case(external::CURSOR_ACP_RUNTIME)
+            });
+        let cursor_acp_provider = if cursor_acp_is_preferred {
+            external::instantiate_expected_external_provider(external::CURSOR_ACP_RUNTIME)
+        } else {
+            None
+        };
+
         let bedrock_provider = if has_bedrock_creds {
             Some(Arc::new(new_bedrock_provider()))
         } else {
@@ -306,12 +330,14 @@ impl MultiProvider {
             antigravity: RwLock::new(antigravity_provider),
             gemini: RwLock::new(gemini_provider),
             cursor: RwLock::new(cursor_provider),
+            cursor_acp: RwLock::new(cursor_acp_provider),
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             session_id: RwLock::new(None),
             active: RwLock::new(active),
+            active_external: RwLock::new(None),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider,
             catalog_scope: next_catalog_scope(),
@@ -347,8 +373,10 @@ impl MultiProvider {
         crate::logging::info(&format!(
             "[TIMING] provider_init parts: creds={creds_ms}ms, runtimes={runtimes_ms}ms, route={route_ms}ms"
         ));
+        result.spawn_cursor_acp_catalog_refresh_if_needed();
+        result.auto_select_active_multi_account();
         crate::logging::info(&format!(
-            "[TIMING] provider_init: anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, bedrock={}, openrouter={}, total={}ms",
+            "[TIMING] provider_init: anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, cursor_acp={}, bedrock={}, openrouter={}, total={}ms",
             result
                 .anthropic
                 .read()
@@ -376,6 +404,11 @@ impl MultiProvider {
                 .is_some(),
             result
                 .cursor
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some(),
+            result
+                .cursor_acp
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .is_some(),
@@ -594,6 +627,55 @@ impl MultiProvider {
                     "Failed to refresh Anthropic model catalogs: {err}"
                 ));
             }
+        });
+    }
+
+    /// Spawn a background Cursor ACP model-catalog prefetch so the `agent acp`
+    /// subprocess is launched eagerly and its discovered models appear in the
+    /// `/model` picker before the first user prompt. Without this, the picker
+    /// only shows Cursor ACP routes after the first prompt triggers lazy
+    /// discovery (or never, when the active provider already has cached
+    /// models and the attach-time prefetch is skipped).
+    ///
+    /// An in-flight guard prevents concurrent prefetches only: without it,
+    /// every call to `set_model`/`set_route_selection`/`complete` would spawn
+    /// an overlapping prefetch. It does not dedupe after completion — the
+    /// guard resets when the spawned task finishes, so the next trigger (the
+    /// next prompt's `complete`) drops the running ACP subprocess and re-runs
+    /// the full `initialize` + `session/new` handshake.
+    pub(super) fn spawn_cursor_acp_catalog_refresh_if_needed(&self) {
+        let Some(cursor_acp) = self.cursor_acp_provider() else {
+            return;
+        };
+
+        // In-flight guard: skip when a prefetch is already running so we do not
+        // drop and re-spawn the ACP subprocess on every model/selection change.
+        if CURSOR_ACP_REFRESH_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
+        tokio::spawn(async move {
+            match cursor_acp.prefetch_models().await {
+                Ok(()) => crate::logging::info(
+                    "Cursor ACP model catalog prefetched from provider bootstrap",
+                ),
+                Err(err) => crate::logging::warn(&format!(
+                    "Failed to refresh Cursor ACP model catalog from provider bootstrap: {err}"
+                )),
+            }
+            // Bump the process-wide catalog generation so every MultiProvider
+            // instance rebuilds its routes memo on the next model_routes()
+            // call. Without this the 3-second memo keeps serving the
+            // pre-prefetch snapshot that has no cursor-acp routes.
+            super::bump_catalog_generation();
+            // Notify all connected clients that the model catalog changed so
+            // the TUI picker rebuilds with the now-populated cursor-acp routes.
+            crate::bus::Bus::global().publish_models_updated();
+            // Release the in-flight guard so a subsequent refresh can proceed.
+            CURSOR_ACP_REFRESH_IN_FLIGHT.store(false, Ordering::SeqCst);
         });
     }
 

@@ -778,6 +778,12 @@ impl App {
             let provider_clone = Arc::clone(&provider);
             handle.spawn(async move {
                 let _ = provider_clone.prefetch_models().await;
+                // Standalone providers (e.g. Cursor ACP) discover their model
+                // catalog asynchronously via prefetch. The `/model` picker
+                // opened before prefetch completes shows a placeholder; publish
+                // ModelsUpdated so the picker cache invalidates and the next
+                // `/model` open reads the populated catalog.
+                crate::bus::Bus::global().publish_models_updated();
             });
         }
 
