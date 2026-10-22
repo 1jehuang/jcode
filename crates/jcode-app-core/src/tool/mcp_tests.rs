@@ -479,6 +479,54 @@ async fn test_unknown_action() {
 }
 
 #[tokio::test]
+async fn test_toggle_enable_missing_server() {
+    let tool = create_test_tool();
+    let ctx = create_test_context();
+    let input = json!({"action": "enable", "server": "nonexistent"});
+
+    let result = tool.execute(input, ctx).await;
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in MCP config")
+    );
+}
+
+#[tokio::test]
+async fn test_toggle_disable_missing_server() {
+    let tool = create_test_tool();
+    let ctx = create_test_context();
+    let input = json!({"action": "disable", "server": "nonexistent"});
+
+    let result = tool.execute(input, ctx).await;
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in MCP config")
+    );
+}
+
+#[tokio::test]
+async fn test_toggle_enable_missing_server_field() {
+    let tool = create_test_tool();
+    let ctx = create_test_context();
+    let input = json!({"action": "enable"});
+
+    let result = tool.execute(input, ctx).await;
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("'server' is required")
+    );
+}
+
+#[tokio::test]
 async fn test_reload_empty_config() {
     let _guard =
         LocalMcpConfigGuard::new("{\"servers\":{}}").expect("create temporary .jcode/mcp.json");
@@ -496,4 +544,395 @@ async fn test_reload_empty_config() {
             || result.output.contains("Connected servers: 0")
             || result.output.contains("Reloaded MCP config")
     );
+}
+
+// --- Happy-path tests for toggle_server and emit_mcp_status ---
+
+/// RAII guard that sets an env var for the duration of a test and restores
+/// the previous value (or removes it) on drop. Mirrors the helper used in
+/// `ambient/runner_tests.rs`; kept local so this module stays self-contained.
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            crate::env::set_var(self.key, prev);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
+/// Write a single-server MCP config to `<jcode_home>/mcp.json` (the global
+/// config file jcode reads via `jcode_dir()`). `disabled=true` starts the
+/// server disabled so an `enable` toggle has flags to flip; `disabled=false`
+/// starts it enabled for a `disable` toggle.
+///
+/// The command is a deliberately nonexistent binary so the post-save
+/// `connect` attempt in the enable path fails fast at `spawn()` (ENOENT)
+/// instead of hanging on the 30s JSON-RPC request timeout a process that
+/// exits without speaking MCP would trigger. The config save happens
+/// before that connect attempt, so persistence is testable either way.
+fn write_global_mcp_config(jcode_home: &std::path::Path, server_name: &str, disabled: bool) {
+    let config = json!({
+        "servers": {
+            server_name: {
+                "command": "jcode-mcp-test-nonexistent-server",
+                "args": [],
+                "env": {},
+                "shared": false,
+                "disabled": disabled,
+            }
+        }
+    });
+    fs::write(jcode_home.join("mcp.json"), config.to_string()).expect("write global mcp.json");
+}
+
+/// Read back the global `mcp.json` as a JSON value so tests can assert on
+/// the persisted enabled/disabled flags after a toggle.
+fn read_global_mcp_config(jcode_home: &std::path::Path) -> serde_json::Value {
+    let content =
+        fs::read_to_string(jcode_home.join("mcp.json")).expect("read global mcp.json after toggle");
+    serde_json::from_str(&content).expect("mcp.json is valid JSON")
+}
+
+/// Enable a configured-but-disabled server and verify the enabled/disabled
+/// flags are flipped and persisted to `~/.jcode/mcp.json` on disk. The
+/// post-save connect uses `true` (exits immediately, no MCP handshake) so it
+/// fails fast without hanging; the config save happens before that attempt.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_toggle_enable_persists_flags_to_disk() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let server_name = "toggle-enable-srv";
+    write_global_mcp_config(temp.path(), server_name, true);
+
+    let tool = create_test_tool();
+    let ctx = create_test_context();
+    let input = json!({"action": "enable", "server": server_name});
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), tool.execute(input, ctx))
+        .await
+        .expect("toggle enable must not hang")
+        .expect("toggle enable returns Ok even if the connect fails");
+
+    // Config persistence is the key behavior: flags flipped to enabled.
+    let saved = read_global_mcp_config(temp.path());
+    let saved_server = saved
+        .get("servers")
+        .and_then(|s| s.get(server_name))
+        .expect("server present after enable toggle");
+    assert_eq!(saved_server["enabled"], json!(true));
+    assert_eq!(saved_server["disabled"], json!(false));
+
+    assert!(
+        result.output.to_lowercase().contains("enabled"),
+        "enable toggle should report enabled: {}",
+        result.output
+    );
+}
+
+/// Disable a configured-and-enabled server and verify the flags are flipped
+/// and persisted to disk. The server is never connected, so the disable
+/// path skips the disconnect/subprocess entirely.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_toggle_disable_persists_flags_to_disk() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let server_name = "toggle-disable-srv";
+    write_global_mcp_config(temp.path(), server_name, false);
+
+    let tool = create_test_tool();
+    let ctx = create_test_context();
+    let input = json!({"action": "disable", "server": server_name});
+
+    let result = tool
+        .execute(input, ctx)
+        .await
+        .expect("toggle disable returns Ok");
+
+    let saved = read_global_mcp_config(temp.path());
+    let saved_server = saved
+        .get("servers")
+        .and_then(|s| s.get(server_name))
+        .expect("server present after disable toggle");
+    assert_eq!(saved_server["enabled"], json!(false));
+    assert_eq!(saved_server["disabled"], json!(true));
+
+    assert!(
+        result.output.contains("Disabled MCP server"),
+        "disable toggle should report disabled: {}",
+        result.output
+    );
+}
+
+/// A failed mcp.json save must stop the toggle: no (dis)connect, no registry
+/// change, and honest reporting instead of a "Disabled ... Config NOT saved"
+/// claim that `mcp_search`/`mcp_call` would immediately contradict by
+/// re-advertising the server. (Greptile 4307539754)
+///
+/// The save is forced to fail by making JCODE_HOME read-only: the lock file
+/// cannot be created, `persist_toggle` reports `save_ok=false`, and the tool
+/// must bail out before any state mutation. Permissions are restored before
+/// the asserts so the tempdir still cleans up on a panic.
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_toggle_disable_reports_failure_and_keeps_state_on_save_error() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let server_name = "toggle-save-fail-srv";
+    write_global_mcp_config(temp.path(), server_name, false);
+
+    // Drop write permission on the jcode home so the toggle cannot persist.
+    let mut perms = std::fs::metadata(temp.path())
+        .expect("stat jcode home")
+        .permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o555);
+    }
+    std::fs::set_permissions(temp.path(), perms).expect("chmod jcode home read-only");
+
+    let manager = Arc::new(RwLock::new(McpManager::with_config(
+        crate::mcp::McpConfig::default(),
+    )));
+    let tool = McpManagementTool::new(manager.clone());
+    let ctx = create_test_context();
+    let input = json!({"action": "disable", "server": server_name});
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), tool.execute(input, ctx))
+        .await
+        .expect("failed toggle must not hang")
+        .expect("save failure is reported in-band, not as an error");
+
+    // Restore write permission before asserting so the tempdir can be removed.
+    #[allow(clippy::permissions_set_readonly_false)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(temp.path())
+            .expect("stat jcode home")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(temp.path(), perms).expect("chmod jcode home writable");
+    }
+
+    assert!(
+        result.output.contains("Failed to disable MCP server"),
+        "save failure must be reported as a failed toggle: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("config not saved"),
+        "the user must learn why the toggle did not apply: {}",
+        result.output
+    );
+    assert!(
+        !result.output.contains("Disabled MCP server"),
+        "a failed save must not be reported as a successful disable: {}",
+        result.output
+    );
+
+    // On-disk state is untouched: the server stays enabled.
+    let saved = read_global_mcp_config(temp.path());
+    let saved_server = saved
+        .get("servers")
+        .and_then(|s| s.get(server_name))
+        .expect("server still present after failed toggle");
+    // The fixture writes only `disabled`; a failed toggle must leave it as-is.
+    assert_eq!(saved_server["disabled"], json!(false));
+    assert!(
+        saved_server.get("enabled").is_none() || saved_server["enabled"] == json!(true),
+        "a failed save must not flip the enabled flag on disk"
+    );
+
+    // The manager's in-memory config is never reloaded/mutated on failure.
+    let configured = manager
+        .read()
+        .await
+        .config()
+        .servers
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        !configured.contains(&server_name.to_string()),
+        "manager config must stay untouched when the save fails"
+    );
+}
+
+/// With no connected servers, `emit_mcp_status` still sends an
+/// `McpStatus` event with an empty list through the event channel.
+#[tokio::test]
+async fn test_emit_mcp_status_no_connected_servers() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool = create_test_tool().with_event_tx(Some(tx));
+
+    tool.emit_mcp_status().await;
+
+    let event = rx
+        .try_recv()
+        .expect("McpStatus event should be emitted on the channel");
+    match event {
+        crate::protocol::ServerEvent::McpStatus { servers } => {
+            assert!(
+                servers.is_empty(),
+                "no connected servers -> empty status, got {servers:?}"
+            );
+        }
+        other => panic!("expected McpStatus, got {other:?}"),
+    }
+}
+
+/// Write a minimal stdio MCP server (a shell script) that answers
+/// `initialize` and `tools/list` (exposing one tool) so a real connect via
+/// `McpManager` succeeds and `all_tools()` is non-empty.
+#[cfg(unix)]
+fn write_fake_mcp_server(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("jcode-fake-mcp-server.sh");
+    let script = r##"#!/bin/bash
+while IFS= read -r line; do
+  id=$(echo "$line" | grep -o '"id":[0-9]*' | grep -o '[0-9]*' | head -1)
+  case "$line" in
+*'"initialize"'*)
+  echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"jcode-test-fake","version":"0.0.1"}}}'
+  ;;
+*'"tools/list"'*)
+  echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"tools":[{"name":"fake_tool","description":"fake tool for emit test","inputSchema":{"type":"object"}}]}}'
+  ;;
+*'"shutdown"'*)
+  exit 0
+  ;;
+  esac
+done
+"##;
+    fs::write(&path, script).expect("write fake mcp server script");
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Happy path for `emit_mcp_status`: a connected server with tools is
+/// formatted as `"name:count"` in the `McpStatus` event payload.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_emit_mcp_status_formats_name_and_tool_count() {
+    let temp = tempfile::tempdir().expect("temp dir for fake mcp server");
+    let command = write_fake_mcp_server(temp.path());
+    let server_name = "jcode-test-fake".to_string();
+
+    let mut config = crate::mcp::McpConfig::default();
+    config.servers.insert(
+        server_name.clone(),
+        McpServerConfig {
+            command: command.to_string_lossy().to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            shared: false,
+            transport: None,
+            url: None,
+            headers: HashMap::new(),
+            enabled: None,
+            disabled: None,
+            timeout_secs: None,
+        },
+    );
+    let manager = Arc::new(RwLock::new(McpManager::with_config(config.clone())));
+    let server_config = config
+        .servers
+        .get(&server_name)
+        .cloned()
+        .expect("server config present");
+
+    // Connect the fake server through the real manager so
+    // connected_servers() and all_tools() report it.
+    manager
+        .read()
+        .await
+        .connect(&server_name, &server_config)
+        .await
+        .expect("fake MCP server must connect");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool = McpManagementTool::new(Arc::clone(&manager)).with_event_tx(Some(tx));
+    tool.emit_mcp_status().await;
+
+    let event = rx
+        .try_recv()
+        .expect("McpStatus event should be emitted after connect");
+    match event {
+        crate::protocol::ServerEvent::McpStatus { servers } => {
+            assert_eq!(
+                servers,
+                vec![format!("{}:1", server_name)],
+                "status should be 'name:count' for the single connected server, got {servers:?}"
+            );
+        }
+        other => panic!("expected McpStatus, got {other:?}"),
+    }
+
+    // Clean up the subprocess.
+    manager.read().await.disconnect_all().await;
+}
+
+/// `with_event_tx(Some(tx))` wires the event channel so
+/// `emit_mcp_status` emits an `McpStatus` event. With no servers connected
+/// the payload is an empty list, which still proves the channel was set.
+#[tokio::test]
+async fn test_with_event_tx_some_sets_event_channel() {
+    let manager = Arc::new(RwLock::new(McpManager::with_config(
+        crate::mcp::McpConfig::default(),
+    )));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool = McpManagementTool::new(Arc::clone(&manager)).with_event_tx(Some(tx));
+    tool.emit_mcp_status().await;
+    match rx
+        .try_recv()
+        .expect("McpStatus event should be emitted when event_tx is Some")
+    {
+        crate::protocol::ServerEvent::McpStatus { servers } => {
+            assert!(
+                servers.is_empty(),
+                "no servers connected, expected an empty status list"
+            );
+        }
+        other => panic!("expected McpStatus, got {other:?}"),
+    }
+}
+
+/// `with_event_tx(None)` leaves the tool with no channel, so
+/// `emit_mcp_status` returns early without emitting anything and without
+/// panicking.
+#[tokio::test]
+async fn test_with_event_tx_none_emits_nothing() {
+    let manager = Arc::new(RwLock::new(McpManager::with_config(
+        crate::mcp::McpConfig::default(),
+    )));
+    let tool = McpManagementTool::new(Arc::clone(&manager)).with_event_tx(None);
+    // With no event_tx the helper short-circuits; this must not panic and
+    // emits no event (there is no channel to observe, so no-panic + return
+    // is the contract).
+    tool.emit_mcp_status().await;
 }

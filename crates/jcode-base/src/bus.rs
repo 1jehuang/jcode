@@ -281,6 +281,18 @@ pub struct GitStatusCompleted {
     pub result: std::result::Result<String, String>,
 }
 
+/// A local `/mcp enable|disable` toggle finished its background connect or
+/// disconnect work. Carries the outcome so the UI can refresh its MCP state
+/// (equivalent of the remote path's `McpStatus` event) and surface any
+/// connection failure to the user.
+#[derive(Clone, Debug)]
+pub struct McpToggleCompleted {
+    pub server: String,
+    pub enable: bool,
+    /// Connection error when enabling but the server failed to connect.
+    pub connect_error: Option<String>,
+}
+
 /// A backgrounded `swarm await_members` watcher reached a terminal result
 /// (members satisfied the target status, or the wait timed out).
 ///
@@ -499,6 +511,8 @@ pub enum BusEvent {
     GitInfoRefreshed,
     /// Productivity report finished generating off the UI thread
     ProductivityReportReady(ProductivityReportReady),
+    /// A local `/mcp` toggle's background connect/disconnect work finished
+    McpToggleCompleted(McpToggleCompleted),
 }
 
 impl BusEvent {

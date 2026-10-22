@@ -268,6 +268,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::commands::handle_dictation_command(app, trimmed)
         || super::commands::handle_config_command(app, trimmed)
         || super::commands::handle_latex_command(app, trimmed)
+        || super::commands::handle_mcp_command(app, trimmed)
         || super::commands_colors::handle_colors_command(app, trimmed)
         || super::commands::handle_log_command(app, trimmed)
         || super::commands::handle_diff_command(app, trimmed)

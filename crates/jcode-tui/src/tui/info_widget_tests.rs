@@ -7,6 +7,7 @@ use super::{
     render_usage_compact, render_usage_widget, truncate_smart,
 };
 use crate::protocol::SwarmMemberStatus;
+use jcode_tui_style::color::rgb;
 use ratatui::layout::Rect;
 use std::time::{Duration, Instant};
 
@@ -765,6 +766,100 @@ fn overview_widget_is_placed_when_space_allows() {
         placements.iter().any(|p| p.kind == WidgetKind::Overview),
         "expected overview widget placement"
     );
+}
+
+#[test]
+fn overview_renders_enabled_mcp_servers_only_when_present() {
+    let data = InfoWidgetData {
+        model: Some("gpt-test".to_string()),
+        background_info: Some(BackgroundInfo {
+            running_count: 1,
+            running_tasks: vec!["bash".to_string()],
+            ..Default::default()
+        }),
+        mcp_servers: vec![("filesystem".to_string(), 5), ("github".to_string(), 2)],
+        ..Default::default()
+    };
+
+    assert!(data.has_data_for(WidgetKind::Overview));
+    let lines = super::render_page(
+        super::InfoPageKind::CompactOnly,
+        &data,
+        Rect::new(0, 0, 48, 10),
+    );
+    let text = lines_text(&lines);
+
+    assert!(text.contains("mcp: filesystem (5 tools), github (2 tools)"));
+    assert!(!text.contains("7 tools"));
+    let mcp_span = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref().starts_with("mcp:"))
+        .expect("missing MCP span");
+    assert_eq!(mcp_span.style.fg, Some(rgb(100, 180, 220)));
+}
+
+#[test]
+fn overview_skips_mcp_line_when_no_servers_are_enabled() {
+    let data = InfoWidgetData {
+        model: Some("gpt-test".to_string()),
+        context_info: Some(crate::prompt::ContextInfo {
+            total_chars: 100,
+            ..Default::default()
+        }),
+        mcp_servers: Vec::new(),
+        ..Default::default()
+    };
+
+    let lines = super::render_page(
+        super::InfoPageKind::CompactOnly,
+        &data,
+        Rect::new(0, 0, 48, 10),
+    );
+    let text = lines_text(&lines);
+
+    assert!(!text.contains("MCP:"));
+}
+
+#[test]
+fn mcp_row_width_checks_count_display_cells_not_chars() {
+    // Each CJK name renders in 2 cells per char, so "mcp: 项目项目(3)" is 4 +
+    // 8 + 3 = 15 cells but only 11 chars. At width 12 it must NOT take the
+    // single-line path even though the old chars().count() check passed it.
+    let lines =
+        super::render_mcp_servers_line(&[("\u{9879}\u{76ee}\u{9879}\u{76ee}".to_string(), 3)], 12);
+    let text = lines_text(&lines);
+    assert!(
+        !text.contains("mcp: 项目项目(3)"),
+        "wide names must not use the single-line path beyond the width"
+    );
+
+    // At a width the display cells actually fit, the single-line path returns
+    // exactly one line. "mcp: 项目项目(3)" is 5 + 8 + 3 = 16 cells.
+    let fits =
+        super::render_mcp_servers_line(&[("\u{9879}\u{76ee}\u{9879}\u{76ee}".to_string(), 3)], 16);
+    assert_eq!(fits.len(), 1);
+    assert!(lines_text(&fits).contains("mcp: 项目项目(3)"));
+
+    // The multiline header must be truncated to display cells too, so a very
+    // narrow widget never overflows its row.
+    let multiline = super::render_mcp_servers_line(
+        &[
+            ("\u{9879}\u{76ee}".to_string(), 0),
+            ("\u{6d4b}".to_string(), 0),
+        ],
+        6,
+    );
+    assert!(multiline.len() > 1);
+    for line in &multiline {
+        let cells =
+            unicode_width::UnicodeWidthStr::width(lines_text(std::slice::from_ref(line)).as_str());
+        assert!(
+            cells <= 6,
+            "line exceeds width: {}",
+            lines_text(std::slice::from_ref(line))
+        );
+    }
 }
 
 #[test]
