@@ -193,11 +193,10 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
         .expect("retry should surface a connection status message");
     assert_eq!(retry_notice.role, "system");
     assert!(retry_notice.content.contains("Connection lost - retrying"));
-    assert!(
-        retry_notice
-            .content
-            .contains(&format!("attempt 1/{}", App::AUTO_RETRY_MAX_ATTEMPTS))
-    );
+    assert!(retry_notice.content.contains(&format!(
+        "attempt 1/{}",
+        app.effective_auto_retry_max_attempts()
+    )));
     assert!(retry_notice.content.contains("Remote request failed"));
 }
 
@@ -309,6 +308,79 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
             .iter()
             .any(|m| m.role == "system" && m.content.contains("we stopped poking"))
     );
+}
+
+/// The auto-poke short-retry path requests a budget of 2, but a configured
+/// `auto_retry_max_attempts = 1` must cap it: the retry notice reports the
+/// real budget ("attempt 1/1"), and the second deterministic error stops
+/// auto-poke instead of sneaking in a second attempt (greptile 4307529100).
+#[test]
+fn test_remote_short_auto_poke_retry_is_capped_by_configured_max_attempts() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\nauto_retry_max_attempts = 1\n");
+        crate::config::invalidate_config_cache();
+
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        assert_eq!(app.effective_auto_retry_max_attempts(), 1);
+
+        app.auto_poke_incomplete_todos = true;
+        app.queued_messages
+            .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "You have 1 incomplete todo. Continue working, or update the todo tool."
+                .to_string(),
+            images: vec![],
+            is_system: true,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 21,
+                message: "OpenAI API error 400 Bad Request: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+
+        // The hard-coded short budget (2) must be capped to the configured
+        // maximum: one attempt, reported as 1/1.
+        assert!(app.auto_poke_incomplete_todos);
+        let pending = app
+            .rate_limit_pending_message
+            .as_ref()
+            .expect("capped short retry should still schedule the first attempt");
+        assert_eq!(pending.retry_attempts, 1);
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|m| m.role == "system" && m.content.contains("attempt 1/1")),
+            "the retry notice must report the capped budget, not 1/2"
+        );
+
+        // With the capped budget spent, the next deterministic error must
+        // stop auto-poke instead of granting a second attempt.
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 22,
+                message: "OpenAI API error 400 Bad Request: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(app.rate_limit_pending_message.is_none());
+    });
 }
 
 #[test]
@@ -526,7 +598,7 @@ fn test_schedule_pending_remote_retry_respects_retry_limit() {
         is_system: true,
         system_reminder: None,
         auto_retry: true,
-        retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
+        retry_attempts: app.effective_auto_retry_max_attempts(),
         retry_at: None,
     });
 

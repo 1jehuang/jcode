@@ -1431,7 +1431,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 && app
                     .rate_limit_pending_message
                     .as_ref()
-                    .is_some_and(|pending| pending.retry_attempts >= App::AUTO_RETRY_MAX_ATTEMPTS);
+                    .is_some_and(|pending| {
+                        pending.retry_attempts >= app.effective_auto_retry_max_attempts()
+                    });
             if let Some(reset_duration) = reset_duration
                 && !rate_limit_retry_exhausted
                 && let Some(is_system) = app.rate_limit_pending_message.as_mut().map(|pending| {
@@ -1532,7 +1534,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.pause_exhausted_auto_resume(
                     format!(
                         "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your message is back in the input box. Wait for the limit to reset, check the provider account, or switch with /model.",
-                        App::AUTO_RETRY_MAX_ATTEMPTS
+                        app.effective_auto_retry_max_attempts()
                     ),
                     "Paused: provider limit did not clear",
                 );
@@ -1574,7 +1576,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.pause_exhausted_auto_resume(
                     format!(
                         "Connection retry limit reached after {} automatic resumes. Your message is back in the input box. Check the provider endpoint or DNS, then re-send or switch with /model.",
-                        App::AUTO_RETRY_MAX_ATTEMPTS
+                        app.effective_auto_retry_max_attempts()
                     ),
                     "Paused: provider connection did not recover",
                 );

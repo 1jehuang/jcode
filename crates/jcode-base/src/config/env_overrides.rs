@@ -919,6 +919,25 @@ impl Config {
             self.provider.request_compression = v.trim().to_ascii_lowercase();
         }
 
+        if let Ok(v) = std::env::var("JCODE_AUTO_RETRY_BASE_DELAY_SECS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.provider.auto_retry_base_delay_secs =
+                    jcode_config_types::clamp_auto_retry_base_delay_secs(parsed);
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_AUTO_RETRY_ENABLED") {
+            if let Some(enabled) = parse_env_bool(&v) {
+                self.provider.auto_retry_enabled = enabled;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_AUTO_RETRY_MAX_ATTEMPTS") {
+            if let Ok(parsed) = v.trim().parse::<u8>() {
+                if parsed > 0 {
+                    self.provider.auto_retry_max_attempts = parsed;
+                }
+            }
+        }
+
         // Copilot premium mode: env var overrides config
         // If set in config but not in env, propagate config -> env
         if let Ok(v) = std::env::var("JCODE_COPILOT_PREMIUM") {

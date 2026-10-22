@@ -637,6 +637,40 @@ fn test_env_override_memory_sidecar() {
 }
 
 #[test]
+fn set_memory_model_persists_to_config_toml() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_model_env = std::env::var_os("JCODE_MEMORY_MODEL");
+    crate::env::remove_var("JCODE_MEMORY_MODEL");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    // Start from a clean slate: nothing persisted yet.
+    assert!(Config::load().agents.memory_model.is_none());
+
+    Config::set_memory_model("claude-haiku-4").expect("set_memory_model should succeed");
+
+    // The value must round-trip through config.toml on disk.
+    let reloaded = Config::load();
+    assert_eq!(
+        reloaded.agents.memory_model.as_deref(),
+        Some("claude-haiku-4"),
+        "set_memory_model should persist to config.toml and be readable on reload"
+    );
+
+    // And the serialized file on disk should contain the value verbatim.
+    let path = Config::path().expect("config path");
+    let content = std::fs::read_to_string(path).expect("read config file");
+    assert!(
+        content.contains("memory_model = \"claude-haiku-4\""),
+        "config.toml should contain the persisted memory_model: {content}"
+    );
+
+    restore_env_var("JCODE_HOME", prev_home);
+    restore_env_var("JCODE_MEMORY_MODEL", prev_model_env);
+}
+
+#[test]
 fn tool_config_defaults_to_full_toolset() {
     let config = ToolConfig::default();
     let selection = config.selection();

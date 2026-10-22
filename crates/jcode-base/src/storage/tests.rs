@@ -35,6 +35,38 @@ fn harden_secret_file_permissions_sets_owner_only_modes() {
 }
 
 #[test]
+fn lock_test_env_reentrant_on_same_thread_and_serialized_across_threads() {
+    // Same-thread nesting must no-op instead of self-deadlocking.
+    let outer = lock_test_env();
+    let nested = lock_test_env();
+    drop(nested);
+    drop(outer);
+
+    // Dropping the outer guard first must not release the lock while a
+    // nested guard on the same thread is still alive.
+    let outer_first = lock_test_env();
+    let inner = lock_test_env();
+    drop(outer_first);
+    let still_held = std::thread::spawn(|| test_env_lock().try_lock().is_err())
+        .join()
+        .expect("probe thread after outer drop");
+    assert!(
+        still_held,
+        "env lock must stay held while a nested guard is alive"
+    );
+    drop(inner);
+
+    // Cross-thread acquisition still serializes: a second thread must not
+    // observe the lock as free while this thread holds it.
+    let held = lock_test_env();
+    let second = std::thread::spawn(|| test_env_lock().try_lock().is_err())
+        .join()
+        .expect("probe thread");
+    assert!(second, "env lock must exclude other threads while held");
+    drop(held);
+}
+
+#[test]
 fn user_home_path_uses_external_dir_under_jcode_home() {
     let _guard = lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");

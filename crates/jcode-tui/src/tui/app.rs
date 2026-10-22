@@ -1120,6 +1120,16 @@ pub struct App {
     /// so blindly poking loops forever (observed live: one refused API call
     /// every ~7s until manually interrupted).
     consecutive_guardrail_stops: u8,
+    /// Base delay (seconds) for linear backoff between auto-retry attempts.
+    /// Configured via `[provider] auto_retry_base_delay_secs` or
+    /// `JCODE_AUTO_RETRY_BASE_DELAY_SECS`. Stored at App construction so the
+    /// retry path reads a live value without re-parsing config every attempt.
+    auto_retry_base_delay_secs: u64,
+    /// Whether automatic retry scheduling is enabled.
+    auto_retry_enabled: bool,
+    /// Maximum auto-retry attempts before giving up. Configured via
+    /// `[provider] auto_retry_max_attempts` or `JCODE_AUTO_RETRY_MAX_ATTEMPTS`.
+    auto_retry_max_attempts: u8,
     // When armed by /overnight, automatically continue guarded follow-up turns until wake/wrap.
     overnight_auto_poke: Option<OvernightAutoPokeState>,
     // Pending cross-provider resend after a failover warning/countdown.
@@ -1908,8 +1918,6 @@ impl Provider for InertRuntimeProvider {
 }
 
 impl App {
-    const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
-    const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
     /// Observed live: a session that stopped updating its todos was re-nudged
     /// with the same hidden continuation every ~5 seconds indefinitely, one
