@@ -48,6 +48,7 @@ fn chat_swarm_member(session_id: &str) -> crate::protocol::SwarmMemberStatus {
             effort: Some("high".to_string()),
             elapsed_secs: Some(18),
             activity_age_secs: None,
+            ..Default::default()
         },
     }
 }

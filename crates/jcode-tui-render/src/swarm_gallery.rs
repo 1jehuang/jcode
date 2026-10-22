@@ -141,9 +141,22 @@ fn format_model(model: &str) -> String {
 const STRIP_META_MIN_BODY: usize = 24;
 
 /// Right-side metadata for one vertical-strip row, most important first:
-/// model + effort, elapsed time, provider route.
+/// elapsed time, context usage, model + effort, output tokens, provider route.
 fn strip_meta_parts(m: &GalleryMember) -> Vec<String> {
     let mut parts = Vec::new();
+    if let Some(elapsed) = m.elapsed_secs {
+        parts.push(format_elapsed(elapsed));
+    }
+    match (m.context_tokens, m.context_limit) {
+        (Some(used), Some(limit)) if limit > 0 => parts.push(format!(
+            "{}/{} {}%",
+            format_tokens(used),
+            format_tokens(limit),
+            (used.saturating_mul(100) / limit).min(100)
+        )),
+        (Some(used), _) => parts.push(format!("{} ctx", format_tokens(used))),
+        _ => {}
+    }
     let model = m
         .model
         .as_deref()
@@ -156,13 +169,26 @@ fn strip_meta_parts(m: &GalleryMember) -> Vec<String> {
         (None, Some(effort)) => parts.push(effort.to_string()),
         (None, None) => {}
     }
-    if let Some(elapsed) = m.elapsed_secs {
-        parts.push(format_elapsed(elapsed));
+    if let Some(output) = m.output_tokens {
+        parts.push(format!("↓{}", format_tokens(output)));
     }
     if let Some(route) = format_route(m.provider.as_deref(), m.auth_method.as_deref()) {
         parts.push(route);
     }
     parts
+}
+
+/// Compact token count: 523, 12.4k, 355k, 1.0M.
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 100_000 {
+        format!("{}k", tokens / 1_000)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
 }
 
 /// Combine provider display name and credential route into one metadata piece,
@@ -259,6 +285,12 @@ pub struct GalleryMember {
     pub effort: Option<String>,
     /// Seconds since this member was spawned.
     pub elapsed_secs: Option<u64>,
+    /// Tokens currently in the member's context window.
+    pub context_tokens: Option<u64>,
+    /// Context window size for the member's model.
+    pub context_limit: Option<u64>,
+    /// Cumulative output tokens produced by the member.
+    pub output_tokens: Option<u64>,
 }
 
 /// One compact todo entry shown in the focused swarm detail view.

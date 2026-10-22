@@ -283,6 +283,7 @@ pub(super) async fn create_headless_session(
                     effort,
                     elapsed_secs: Some(0),
                     activity_age_secs: None,
+                    ..Default::default()
                 },
             },
         );
