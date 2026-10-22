@@ -1,7 +1,6 @@
 pub use jcode_provider_env::{
-    load_api_key_from_env_or_config, load_env_value_from_config_file,
-    load_env_value_from_env_or_config, register_api_key_fallback_resolver,
-    save_env_value_to_env_file, save_named_api_key,
+    load_env_value_from_config_file, load_env_value_from_env_or_config,
+    register_api_key_fallback_resolver, save_env_value_to_env_file, save_named_api_key,
 };
 pub use jcode_provider_metadata::*;
 use std::collections::{HashMap, HashSet};
@@ -11,9 +10,7 @@ pub const MINIMAX_CHINA_API_BASE: &str = "https://api.minimaxi.com/v1";
 pub const MINIMAX_CHINA_SETUP_URL: &str = "https://platform.minimaxi.com/docs/llms.txt";
 
 mod profile_credentials;
-pub use profile_credentials::{
-    load_openai_compatible_profile_api_key, openai_compatible_profile_is_configured,
-};
+pub use profile_credentials::*;
 
 pub fn api_base_uses_localhost(raw: &str) -> bool {
     let Ok(parsed) = url::Url::parse(raw) else {

@@ -620,7 +620,7 @@ fn request_body(
 ) -> Result<Vec<u8>> {
     request_body_for(JevPurpose::Memory, provider, state, questions)
 }
-
+#[cfg(test)]
 fn request_body_for(
     purpose: JevPurpose,
     provider: JevProvider,

@@ -183,7 +183,7 @@ pub enum PollOutcome {
     SlowDown { retry_after: u64 },
     /// Approved. The minted credentials are not persisted by polling, and the caller
     /// must call [`save_credentials`] explicitly after its own cancellation checks.
-    Approved(MuseCredentials),
+    Approved(Box<MuseCredentials>),
     /// The user denied the request.
     Denied,
     /// The device code expired before approval.
@@ -553,7 +553,7 @@ pub async fn poll_login_by_code(
     if status.is_success() {
         if let Some(token) = parsed.access_token.filter(|token| !token.trim().is_empty()) {
             let credentials = mint_credentials(client, &token).await?;
-            return Ok(PollOutcome::Approved(credentials));
+            return Ok(PollOutcome::Approved(Box::new(credentials)));
         }
         if parsed.error.as_deref().is_none() {
             anyhow::bail!("Muse sign-in response carried no usable token");

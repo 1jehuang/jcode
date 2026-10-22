@@ -83,6 +83,35 @@ fn native_muse_status_reports_local_presence_not_verified_billing() {
 }
 
 #[test]
+fn native_muse_transport_probe_uses_saved_login_and_fails_closed() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    crate::env::set_var(muse::EXPERIMENTAL_ENV_VAR, "1");
+    apply_openai_compatible_profile_env(Some(MUSE_SUBSCRIPTION_PROFILE));
+    // Env/config keys must never stand in for native subscription login.
+    crate::env::set_var(muse::API_KEY_ENV, "not-native");
+    sandbox
+        .write_env_file(muse::ENV_FILE, muse::API_KEY_ENV, "not-native")
+        .unwrap();
+    assert!(crate::provider::openrouter::get_api_key().is_none());
+    assert!(load_api_key_from_env_or_config("META_MUSE_API_KEY", muse::ENV_FILE).is_none());
+    assert!(load_api_key_from_env_or_config(muse::API_KEY_ENV, "meta-muse.env").is_none());
+    crate::env::set_var("JCODE_OPENROUTER_API_BASE", "https://example.com/v1");
+    assert!(crate::provider::openrouter::get_api_key().is_none());
+    crate::env::remove_var("JCODE_OPENROUTER_API_BASE");
+    muse::save_credentials(&native_credentials()).unwrap();
+    assert_eq!(
+        crate::provider::openrouter::get_api_key().as_deref(),
+        Some("native-test-key")
+    );
+    assert!(crate::provider::openrouter::has_credentials());
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "unrelated");
+    assert!(crate::provider::openrouter::get_api_key().is_none());
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var(muse::EXPERIMENTAL_ENV_VAR);
+    assert!(crate::provider::openrouter::get_api_key().is_none());
+}
+
+#[test]
 fn native_muse_default_is_standard_and_context_is_not_200k() {
     let _sandbox = AuthTestSandbox::new().unwrap();
     let resolved = resolve_openai_compatible_profile(MUSE_SUBSCRIPTION_PROFILE);

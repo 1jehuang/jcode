@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 pub const MAX_PLAN_ITEMS: usize = 1024;
 
 pub mod mermaid;
+pub mod refine;
 
 /// A swarm plan item.
 ///

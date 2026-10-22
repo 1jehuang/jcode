@@ -821,11 +821,27 @@ fn provider_matrix_env_credentials_activate_openrouter_runtime() -> Result<()> {
                 .as_deref(),
             Some("0")
         );
-        assert!(
-            jcode::provider::openrouter::has_credentials(),
-            "expected credentials for {}",
-            resolved.id
-        );
+        if resolved.id == "muse-subscription" {
+            // Native subscription login is fail-closed: a plain env key must not
+            // masquerade as the opt-in, official-endpoint credential store.
+            assert!(
+                !jcode::provider::openrouter::has_credentials(),
+                "generic env credentials must not activate native Muse"
+            );
+            jcode::env::remove_var(&resolved.api_key_env);
+            write_profile_login_material(&env, profile, "matrix-env")?;
+            assert!(
+                jcode::provider::openrouter::has_credentials(),
+                "expected native credentials for {}",
+                resolved.id
+            );
+        } else {
+            assert!(
+                jcode::provider::openrouter::has_credentials(),
+                "expected credentials for {}",
+                resolved.id
+            );
+        }
         OpenRouterProvider::new()?;
         assert_eq!(
             AuthStatus::check().openrouter,
@@ -834,6 +850,7 @@ fn provider_matrix_env_credentials_activate_openrouter_runtime() -> Result<()> {
         );
 
         jcode::env::remove_var(&resolved.api_key_env);
+        jcode::env::remove_var(muse::EXPERIMENTAL_ENV_VAR);
     }
 
     Ok(())
@@ -852,13 +869,31 @@ fn provider_matrix_file_credentials_activate_openrouter_runtime() -> Result<()> 
             &env_file,
             format!("{}=matrix-file-secret\n", resolved.api_key_env),
         )?;
+        let mut env_file_removed = false;
         AuthStatus::invalidate_cache();
 
-        assert!(
-            jcode::provider::openrouter::has_credentials(),
-            "expected file credentials for {}",
-            resolved.id
-        );
+        if resolved.id == "muse-subscription" {
+            // A profile env file must not substitute for native subscription
+            // login material either.
+            assert!(
+                !jcode::provider::openrouter::has_credentials(),
+                "env-file credentials must not activate native Muse"
+            );
+            std::fs::remove_file(&env_file)?;
+            env_file_removed = true;
+            write_profile_login_material(&env, profile, "matrix-file")?;
+            assert!(
+                jcode::provider::openrouter::has_credentials(),
+                "expected native file credentials for {}",
+                resolved.id
+            );
+        } else {
+            assert!(
+                jcode::provider::openrouter::has_credentials(),
+                "expected file credentials for {}",
+                resolved.id
+            );
+        }
         OpenRouterProvider::new()?;
         assert_eq!(
             AuthStatus::check().openrouter,
@@ -866,7 +901,10 @@ fn provider_matrix_file_credentials_activate_openrouter_runtime() -> Result<()> 
             "direct compatible runtime must not report native OpenRouter auth"
         );
 
-        std::fs::remove_file(env_file)?;
+        if !env_file_removed {
+            std::fs::remove_file(env_file)?;
+        }
+        jcode::env::remove_var(muse::EXPERIMENTAL_ENV_VAR);
     }
 
     Ok(())
