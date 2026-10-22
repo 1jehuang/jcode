@@ -1275,9 +1275,9 @@ pub(crate) fn prime_git_info(budget: Duration) {
     let _ = budget;
 }
 
-/// Fetch a session's todos plus its goal-level assessments through the same
-/// stale-while-revalidate cache for consumers that need goal metadata
-/// (closed feedback loop and objectives) without extra disk reads per frame.
+/// Fetch todos and goals through the shared stale-while-revalidate cache.
+/// Tests exercise invalidation even though production widgets no longer use it.
+#[cfg(test)]
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {

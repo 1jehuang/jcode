@@ -165,8 +165,7 @@ fn telemetry_settings_lines(
 ) -> Vec<Line<'static>> {
     use crate::telemetry::TelemetryCategory;
     let dim = Style::default().fg(dim_color());
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(
+    let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
             "Telemetry settings",
             Style::default()
@@ -174,10 +173,10 @@ fn telemetry_settings_lines(
                 .add_modifier(Modifier::BOLD),
         ))
         .alignment(align),
-    );
-    lines.push(Line::from(""));
-    lines.push(Line::from(lozenge_pill_spans("Continue", page.cursor == 0)).alignment(align));
-    lines.push(Line::from(""));
+        Line::from(""),
+        Line::from(lozenge_pill_spans("Continue", page.cursor == 0)).alignment(align),
+        Line::from(""),
+    ];
 
     // Same Yes/No two-column layout as the "Import less" page: a header row,
     // then one row per category with a filled dot under the chosen column and

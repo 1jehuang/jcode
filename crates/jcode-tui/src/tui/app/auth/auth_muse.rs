@@ -316,7 +316,7 @@ impl App {
                 .await
                 {
                     Ok(crate::auth::muse::PollOutcome::Approved(credentials)) => {
-                        break Ok(credentials);
+                        break Ok(*credentials);
                     }
                     Ok(crate::auth::muse::PollOutcome::Denied) => {
                         break Err(

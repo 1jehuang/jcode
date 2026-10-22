@@ -454,7 +454,8 @@ async fn complete_saved_muse_subscription_login_uses_code_only_path() {
                 is_subs_active: true,
                 minted_at_ms: 1000,
                 subs_usage: None,
-            },
+            }
+            .into(),
         ))
     });
 
@@ -522,7 +523,8 @@ async fn cancelling_muse_subscription_login_during_polling_prevents_credential_p
                 is_subs_active: true,
                 minted_at_ms: 1000,
                 subs_usage: None,
-            },
+            }
+            .into(),
         ))
     });
 
@@ -597,7 +599,8 @@ async fn replacing_muse_subscription_login_during_polling_prevents_credential_pe
                 is_subs_active: true,
                 minted_at_ms: 1000,
                 subs_usage: None,
-            },
+            }
+            .into(),
         ))
     });
 
@@ -689,7 +692,8 @@ async fn muse_device_login_slow_down_accumulates_delay_code_only() {
                     is_subs_active: true,
                     minted_at_ms: 1000,
                     subs_usage: None,
-                },
+                }
+                .into(),
             )),
             other => panic!("unexpected interval: {other}"),
         }
@@ -747,7 +751,8 @@ async fn muse_device_login_slow_down_accumulates_delay_challenge_loop() {
                     is_subs_active: true,
                     minted_at_ms: 1000,
                     subs_usage: None,
-                },
+                }
+                .into(),
             )),
             other => panic!("unexpected challenge interval: {other}"),
         }
