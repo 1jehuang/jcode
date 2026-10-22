@@ -80,6 +80,9 @@ type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
+#[path = "client_checkpoint.rs"]
+mod checkpoint;
+use checkpoint::send_agent_busy_error;
 
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;
@@ -157,33 +160,6 @@ fn reject_if_agent_busy_for_request(
         client_event_tx,
     );
     true
-}
-
-fn send_agent_busy_error(
-    request_id: u64,
-    request_kind: &'static str,
-    client_session_id: &str,
-    client_is_processing: bool,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    crate::logging::event_warn(
-        "SERVER_REQUEST_BUSY_AGENT_REJECTED",
-        vec![
-            ("request_id", request_id.to_string()),
-            ("request_kind", request_kind.to_string()),
-            ("session_id", client_session_id.to_string()),
-            ("client_processing", client_is_processing.to_string()),
-            ("reason", "agent_busy".to_string()),
-        ],
-    );
-    let _ = client_event_tx.send(ServerEvent::Error {
-        id: request_id,
-        message: format!(
-            "Cannot handle {request_kind} while the session is busy. Try again after the current turn finishes."
-        ),
-        retry_after_secs: Some(1),
-        server_resumes: false,
-    });
 }
 
 fn server_reload_starting() -> bool {
@@ -1329,6 +1305,41 @@ pub(super) async fn handle_client(
                     &soft_interrupt_queues,
                 )
                 .await;
+            }
+
+            Request::ListRewindCheckpoints { id } => {
+                checkpoint::list(
+                    id,
+                    &client_session_id,
+                    client_is_processing,
+                    &agent,
+                    &client_event_tx,
+                );
+            }
+            Request::RewindCheckpoint {
+                id,
+                checkpoint_id,
+                mode,
+            } => {
+                let context = checkpoint::RestoreContext {
+                    session_id: &client_session_id,
+                    processing: client_is_processing,
+                    agent: &agent,
+                    provider: &provider,
+                    sessions: &sessions,
+                    connections: &client_connections,
+                    client_count: &client_count,
+                    writer: &writer,
+                    server_name: &server_name,
+                    server_icon: &server_icon,
+                    pdf_panels: supports_pdf_panels,
+                    members: &swarm_members,
+                    plans: &swarm_plans,
+                    events: &client_event_tx,
+                };
+                if context.restore(id, &checkpoint_id, mode).await.is_err() {
+                    break;
+                }
             }
 
             Request::Rewind { id, message_index } => {

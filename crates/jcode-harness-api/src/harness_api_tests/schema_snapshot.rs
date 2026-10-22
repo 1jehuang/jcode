@@ -3,6 +3,51 @@
 use crate::*;
 
 #[test]
+fn rewind_checkpoint_frames_roundtrip() {
+    for request in [
+        ApiRequest::ListRewindCheckpoints {
+            session_id: "s1".into(),
+        },
+        ApiRequest::RewindCheckpoint {
+            session_id: "s1".into(),
+            checkpoint_id: "checkpoint-1".into(),
+            mode: RewindMode::ConversationAndFiles,
+        },
+    ] {
+        let frame = ClientFrame::new(17, request);
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(serde_json::from_value::<ClientFrame>(wire).unwrap(), frame);
+    }
+    for event in [
+        ApiEvent::RewindCheckpoints {
+            session_id: "s1".into(),
+            checkpoints: vec![RewindCheckpoint {
+                id: "checkpoint-1".into(),
+                message_index: 2,
+                prompt: "fix it".into(),
+                timestamp: None,
+                can_restore_files: true,
+                changed_file_count: 1,
+            }],
+        },
+        ApiEvent::RewindComplete {
+            session_id: "s1".into(),
+            result: RewindResult {
+                mode: RewindMode::FilesOnly,
+                prompt: "fix it".into(),
+                removed_messages: 0,
+                restored_files: 1,
+                skipped_files: vec!["changed.rs".into()],
+            },
+        },
+    ] {
+        let frame = ServerFrame::reply(17, event);
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(serde_json::from_value::<ServerFrame>(wire).unwrap(), frame);
+    }
+}
+
+#[test]
 fn create_session_system_prompt_roundtrip_and_legacy_default() {
     let legacy = serde_json::json!({"req": "create_session"});
     let decoded: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();

@@ -225,9 +225,13 @@ impl Tool for ReplaceTool {
         if !params.dry_run {
             let config_watch = super::config_edit_notice::ConfigEditWatch::begin();
             for change in &changes {
-                tokio::fs::write(&change.path, &change.after)
-                    .await
-                    .with_context(|| format!("writing {}", change.display))?;
+                crate::file_history::tracked_write(
+                    &ctx.session_id,
+                    &change.path,
+                    change.after.as_bytes(),
+                )
+                .await
+                .with_context(|| format!("writing {}", change.display))?;
                 super::edit_stats::record(&ctx, &change.before, &change.after, false).await;
                 Bus::global().publish(BusEvent::FileTouch(FileTouch {
                     session_id: ctx.session_id.clone(),

@@ -2,6 +2,7 @@
 //! internal protocol. Kept side-effect free so it is trivially unit-testable.
 
 mod credentials;
+mod rewind;
 
 use crate::background_progress::parse_background_notification;
 use jcode_harness_api::{
@@ -25,15 +26,10 @@ pub(crate) fn jcode_home_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Default number of messages a `peek_session` returns. A preview is a glance,
-/// so this is a tail rather than a transcript: enough to recognise which
-/// conversation it is, few enough that peeking a dozen sessions stays cheap.
+/// Default tail length for lightweight `peek_session` previews.
 const PEEK_LIMIT: u64 = 12;
 
-/// Requests the daemon only accepts on an attached (subscribed) connection.
-///
-/// `peek_session` and `list_sessions` are deliberately absent: they are served
-/// from stored records precisely so a client can look around before attaching.
+/// Requests requiring attachment; stored-record peek/list requests are exempt.
 const REQUIRES_ATTACH: &[&str] = &[
     "runtime_command",
     "detach_session",
@@ -48,6 +44,8 @@ const REQUIRES_ATTACH: &[&str] = &[
     "clear",
     "rewind",
     "rewind_undo",
+    "list_rewind_checkpoints",
+    "rewind_checkpoint",
     "get_history",
     "list_models",
     "set_model",
@@ -72,11 +70,7 @@ const MAX_WALK_FILES: usize = 20_000;
 const MAX_WALK_ENTRIES: usize = 50_000;
 const MAX_SEARCH_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Flatten a stored message's `content` to plain text.
-///
-/// The daemon writes content either as a bare string or as an array of typed
-/// blocks, so both shapes are accepted; anything without text (a tool call, an
-/// image) contributes nothing rather than a placeholder.
+/// Flatten bare-string or typed-block content, ignoring non-text blocks.
 fn flatten_content(content: &Value) -> String {
     if let Some(text) = content.as_str() {
         return text.to_string();
@@ -106,10 +100,7 @@ pub enum Outbound {
 type SessionFileStatus = (bool, String, Option<u64>, Option<u64>);
 type SessionFileStatusResult = Result<SessionFileStatus, (ErrorCode, String)>;
 
-// Legacy daemon replies are broadcast to every connected client. Request ids
-// must therefore be unique across bridge connections, not merely within one
-// `BridgeState`, or two panels issuing the same numbered request can each
-// mistake the other's reply for their own.
+// Broadcast daemon replies require globally unique ids across bridge connections.
 static NEXT_LEGACY_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_TEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -121,8 +112,7 @@ pub struct BridgeState {
     pub runtime_commands_supported: bool,
     /// Set only after a safe legacy ping capability probe succeeds.
     pub session_tools_supported: bool,
-    /// The daemon accepts soft interrupt ids and per-id cancellation, and
-    /// replies to `background_tool` with a result.
+    /// Daemon supports interrupt IDs, per-ID cancellation and background results.
     pub soft_interrupt_ids_supported: bool,
     /// Leftover queue size reported just before the current turn's `done`.
     pending_soft_interrupts_at_done: Option<u32>,
@@ -132,11 +122,9 @@ pub struct BridgeState {
     pub supports_user_response: bool,
     /// Session id assigned by the daemon for this connection.
     pub session_id: Option<String>,
-    /// Legacy id of the in-flight `message` request, so `done` maps to
-    /// `turn_done`.
+    /// In-flight legacy `message` id, correlating `done` with `turn_done`.
     pending_message_id: Option<u64>,
-    /// Current text message and all text in the current provider attempt.
-    /// Completed messages remain retractable until the response commits.
+    /// Current attempt's text; completed messages stay retractable until commit.
     text_message_id: Option<String>,
     // Tuple fields: correlation id, text, whether TextDone was emitted.
     text_attempt: Vec<(String, String, bool)>,
@@ -303,6 +291,8 @@ impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
 
 #[derive(Debug, Clone, PartialEq)]
 enum SimpleKind {
+    RewindCheckpoints,
+    RewindComplete,
     RuntimeCommand,
     Detach,
     Tools,
@@ -729,6 +719,9 @@ impl BridgeState {
                     "id": id,
                     "message_index": request["message_index"].as_u64().unwrap_or(1),
                 }))]
+            }
+            "list_rewind_checkpoints" | "rewind_checkpoint" => {
+                self.rewind_request(request, req, api_id)
             }
             "get_history" => {
                 let id = self.legacy_id();
@@ -2078,6 +2071,7 @@ impl BridgeState {
                 .take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::Ping)
                 .map(|api_id| vec![ServerFrame::reply(api_id, ApiEvent::Pong)])
                 .unwrap_or_default(),
+            "rewind_checkpoints" | "rewind_complete" => self.rewind_event(event),
             "history" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 // The daemon volunteers the full session set on `history`,
@@ -2134,9 +2128,11 @@ impl BridgeState {
                     self.note_models(event);
                     return vec![ServerFrame::reply(api_id, self.runtime_info())];
                 }
-                let Some(api_id) = self.take_simple(id, SimpleKind::History) else {
+                let rewind_history = self.rewind_history_pending(id);
+                let api_id = self.take_simple(id, SimpleKind::History);
+                if api_id.is_none() && !rewind_history {
                     return vec![];
-                };
+                }
                 let mut messages: Vec<HistoryMessage> = event["messages"]
                     .as_array()
                     .map(|messages| {
@@ -2160,14 +2156,15 @@ impl BridgeState {
                     }
                 }
                 let images = serde_json::from_value(event["images"].clone()).unwrap_or_default();
-                let mut frames = vec![ServerFrame::reply(
-                    api_id,
-                    ApiEvent::History {
-                        session_id: session(self),
-                        messages,
-                        images,
-                    },
-                )];
+                let history = ApiEvent::History {
+                    session_id: session(self),
+                    messages,
+                    images,
+                };
+                let mut frames = vec![match api_id {
+                    Some(api_id) => ServerFrame::reply(api_id, history),
+                    None => ServerFrame::event(history),
+                }];
                 // A snapshot requested before newer stream/terminal events must
                 // not resurrect a completed turn or stop a newly started one.
                 let fresh_activity =
@@ -3607,6 +3604,9 @@ impl BridgeState {
     }
 }
 
+#[cfg(test)]
+#[path = "translate_tests/rewind_tests.rs"]
+mod rewind_tests;
 #[cfg(test)]
 #[path = "translate_tests.rs"]
 mod tests;

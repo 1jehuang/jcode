@@ -361,6 +361,92 @@ fn test_rewind_undo_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn checkpoint_rewind_requests_roundtrip() -> Result<()> {
+    let list = parse_request_json(r#"{"type":"list_rewind_checkpoints","id":41}"#)?;
+    assert!(matches!(list, Request::ListRewindCheckpoints { id: 41 }));
+    assert_eq!(list.id(), 41);
+    for mode in [
+        RewindMode::ConversationAndFiles,
+        RewindMode::ConversationOnly,
+        RewindMode::FilesOnly,
+    ] {
+        let request = Request::RewindCheckpoint {
+            id: 42,
+            checkpoint_id: "checkpoint-stable-id".into(),
+            mode,
+        };
+        let encoded = serde_json::to_string(&request)?;
+        let decoded = parse_request_json(&encoded)?;
+        assert_eq!(decoded.id(), 42);
+        let Request::RewindCheckpoint {
+            checkpoint_id,
+            mode: decoded_mode,
+            ..
+        } = decoded
+        else {
+            return Err(anyhow!("wrong checkpoint request type"));
+        };
+        assert_eq!(checkpoint_id, "checkpoint-stable-id");
+        assert_eq!(decoded_mode, mode);
+    }
+    Ok(())
+}
+
+#[test]
+fn checkpoint_rewind_events_roundtrip() -> Result<()> {
+    let checkpoint = RewindCheckpoint {
+        id: "checkpoint-stable-id".into(),
+        message_index: 8,
+        prompt: "Try a different approach\nwith Unicode: 日本語".into(),
+        timestamp: Some("2026-10-22T17:16:53Z".into()),
+        can_restore_files: true,
+        changed_file_count: 2,
+    };
+    let event = ServerEvent::RewindCheckpoints {
+        id: 41,
+        session_id: "session-a".into(),
+        checkpoints: vec![checkpoint.clone()],
+    };
+    let decoded: ServerEvent = serde_json::from_str(&encode_event(&event))?;
+    let ServerEvent::RewindCheckpoints {
+        id,
+        session_id,
+        checkpoints,
+    } = decoded
+    else {
+        return Err(anyhow!("wrong checkpoint list event"));
+    };
+    assert_eq!(id, 41);
+    assert_eq!(session_id, "session-a");
+    assert_eq!(checkpoints, vec![checkpoint]);
+
+    let result = RewindResult {
+        mode: RewindMode::FilesOnly,
+        prompt: "original prompt".into(),
+        removed_messages: 0,
+        restored_files: 2,
+        skipped_files: Vec::new(),
+    };
+    let event = ServerEvent::RewindComplete {
+        id: 42,
+        session_id: "session-a".into(),
+        result: result.clone(),
+    };
+    let decoded: ServerEvent = serde_json::from_str(&encode_event(&event))?;
+    let ServerEvent::RewindComplete {
+        id,
+        result: decoded_result,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong checkpoint completion event"));
+    };
+    assert_eq!(id, 42);
+    assert_eq!(decoded_result, result);
+    Ok(())
+}
+
+#[test]
 fn test_rename_session_request_roundtrip() -> Result<()> {
     let req = Request::RenameSession {
         id: 10,

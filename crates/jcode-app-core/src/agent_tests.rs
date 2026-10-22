@@ -8,14 +8,14 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-#[path = "agent_tests/tool_streaming.rs"]
-mod tool_streaming;
-
 #[path = "agent_tests/concurrency.rs"]
 mod concurrency;
-
 #[path = "agent_tests/concurrency_construction.rs"]
 mod concurrency_construction;
+#[path = "agent_tests/rewind.rs"]
+mod rewind;
+#[path = "agent_tests/tool_streaming.rs"]
+mod tool_streaming;
 
 #[path = "agent_tests/desktop_selfdev.rs"]
 mod desktop_selfdev;

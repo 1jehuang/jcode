@@ -42,6 +42,21 @@ pub enum ServerEvent {
     #[serde(rename = "ack")]
     Ack { id: u64 },
 
+    #[serde(rename = "rewind_checkpoints")]
+    RewindCheckpoints {
+        id: u64,
+        session_id: String,
+        checkpoints: Vec<RewindCheckpoint>,
+    },
+
+    /// Sent after replacement History for modes that restore conversation.
+    #[serde(rename = "rewind_complete")]
+    RewindComplete {
+        id: u64,
+        session_id: String,
+        result: RewindResult,
+    },
+
     /// Authoritative worker routing after a successful session preference update.
     #[serde(rename = "agent_models_changed")]
     AgentModelsChanged {

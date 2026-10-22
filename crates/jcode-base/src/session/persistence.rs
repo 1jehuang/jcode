@@ -9,6 +9,48 @@ use super::storage_paths::{file_len_or_zero, session_journal_path_from_snapshot,
 use super::{MAX_SESSION_JOURNAL_BYTES, RemoteStartupSessionSnapshot, Session, SessionStartupStub};
 use crate::storage;
 
+static REWIND_PERSIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn rewind_pending_path(snapshot: &Path) -> PathBuf {
+    snapshot.with_extension("rewind-pending.json")
+}
+
+/// A rewind snapshot supersedes the entire old append journal. Its durable
+/// intent must survive the interval between replacing the snapshot and deleting
+/// that journal, otherwise replay would resurrect the removed future.
+fn finish_pending_rewind_unlocked(snapshot: &Path) -> Result<()> {
+    let pending = rewind_pending_path(snapshot);
+    let bytes = match std::fs::read(&pending) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let _: Session = serde_json::from_slice(&bytes)?;
+    storage::write_bytes(snapshot, &bytes)?;
+    match std::fs::remove_file(session_journal_path_from_snapshot(snapshot)) {
+        Ok(()) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(unix)]
+    if let Some(parent) = snapshot.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    std::fs::remove_file(pending)?;
+    #[cfg(unix)]
+    if let Some(parent) = snapshot.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn finish_pending_rewind(snapshot: &Path) -> Result<()> {
+    let _guard = REWIND_PERSIST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    finish_pending_rewind_unlocked(snapshot)
+}
+
 /// Outcome of replaying one session journal file.
 #[derive(Debug, Default)]
 struct JournalReplayStats {
@@ -357,6 +399,7 @@ impl Session {
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
+        finish_pending_rewind(path)?;
         let load_start = Instant::now();
         let snapshot_bytes = file_len_or_zero(path);
         let snapshot_start = Instant::now();
@@ -473,6 +516,7 @@ impl Session {
     /// session restore + history bootstrap.
     pub fn load_startup_stub(session_id: &str) -> Result<Self> {
         let path = session_path(session_id)?;
+        finish_pending_rewind(&path)?;
         // `from_slice` over the whole file is several times faster than
         // `from_reader` (which pulls bytes one at a time through io::Read) on
         // multi-MB sessions, and resume reads this on the first-frame path.
@@ -485,6 +529,7 @@ impl Session {
 
     pub fn load_for_remote_startup(session_id: &str) -> Result<Self> {
         let path = session_path(session_id)?;
+        finish_pending_rewind(&path)?;
         let load_start = Instant::now();
         let snapshot_bytes = file_len_or_zero(&path);
         let snapshot_start = Instant::now();
@@ -561,11 +606,50 @@ impl Session {
         self.save_inner(true)
     }
 
+    /// Explicit rewind is allowed to remove the first prompt, including leaving
+    /// an empty transcript. Ordinary saves retain their accidental-wipe guard.
+    pub(crate) fn save_rewind(&mut self) -> Result<()> {
+        let _save_guard = SAVES_IN_FLIGHT
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let _rewind_guard = REWIND_PERSIST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        anyhow::ensure!(
+            !self.persist_state.transcript_stripped,
+            "Cannot rewind a transcript-less remote session stub"
+        );
+        anyhow::ensure!(
+            self.migration_lease_block().is_none(),
+            "Session is owned by another machine"
+        );
+        self.updated_at = Utc::now();
+        let path = session_path(&self.id)?;
+        let journal_path = session_journal_path_from_snapshot(&path);
+        self.guard_snapshot_shrink(&path, &journal_path);
+        storage::write_json_secret(&rewind_pending_path(&path), self)?;
+        finish_pending_rewind_unlocked(&path)?;
+        self.reset_persist_state(true);
+        Ok(())
+    }
+
+    pub(crate) fn has_pending_rewind(&self) -> bool {
+        Self::pending_rewind_exists(&self.id)
+    }
+
+    pub(crate) fn pending_rewind_exists(session_id: &str) -> bool {
+        session_path(session_id).is_ok_and(|path| rewind_pending_path(&path).exists())
+    }
+
     fn save_inner(&mut self, force: bool) -> Result<()> {
         // Shutdown waits for this guard so it cannot exit mid-checkpoint.
         let _save_guard = SAVES_IN_FLIGHT
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _rewind_guard = REWIND_PERSIST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        finish_pending_rewind_unlocked(&session_path(&self.id)?)?;
         self.refresh_agent_model_overrides()?;
         // A session that migrated to another machine (or whose on-disk copy was
         // replaced by a newer returned transcript) must not be overwritten by

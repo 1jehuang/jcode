@@ -3,6 +3,8 @@ use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+mod rewind;
+pub use rewind::{RewindCheckpoint, RewindMode, RewindResult};
 mod title;
 mod transcription;
 pub use title::prompt_title;

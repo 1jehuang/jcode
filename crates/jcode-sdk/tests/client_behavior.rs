@@ -1,10 +1,4 @@
-//! Client behavior against a fake harness.
-//!
-//! The correlation logic is the part of an SDK that fails silently: a reply
-//! delivered to the wrong waiter, or a stream event swallowed by a request
-//! that happened to be in flight, produces a hang rather than an error. None
-//! of that is visible from a passing `cargo build`, so it is driven here
-//! against a scripted server on a real socket pair.
+//! Client correlation and streaming against a fake harness on real socket pairs.
 
 #![cfg(unix)]
 
@@ -21,6 +15,9 @@ use std::time::Duration;
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.
 struct PairTransport(UnixStream);
+
+#[path = "client_behavior/rewind_tests.rs"]
+mod rewind_tests;
 
 impl Transport for PairTransport {
     fn split(
