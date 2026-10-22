@@ -659,6 +659,9 @@ pub struct SwarmMemberStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberRuntime {
+    /// Full ordered todo statuses, independent of the capped detail snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todo_statuses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -687,7 +690,8 @@ pub struct SwarmMemberRuntime {
 
 impl SwarmMemberRuntime {
     fn is_empty(&self) -> bool {
-        self.model.is_none()
+        self.todo_statuses.is_empty()
+            && self.model.is_none()
             && self.provider.is_none()
             && self.auth_method.is_none()
             && self.effort.is_none()

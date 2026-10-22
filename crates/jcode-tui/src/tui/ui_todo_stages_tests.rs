@@ -43,6 +43,84 @@ fn agent(name: &str, status: &str, activity: Option<&str>, age: Option<u64>) -> 
         activity: activity.map(str::to_string),
         age_secs: age,
         activity_age_secs: age,
+        todo_statuses: Vec::new(),
+    }
+}
+
+#[test]
+fn lane_dots_use_worker_items_once_and_fall_back_without_items() {
+    let mut first = assigned(todo("1", "Parser task", "in_progress", Some(1)), "fox");
+    first.group = Some("Parser".into());
+    let mut second = assigned(todo("2", "Another task", "pending", Some(1)), "fox");
+    second.group = Some("Parser".into());
+    let mut worker = agent("fox", "running", None, None);
+    worker.todo_statuses = vec![
+        "completed".into(),
+        "in_progress".into(),
+        "pending".into(),
+        "pending".into(),
+    ];
+    let items = [&first, &second];
+    let agents = [worker];
+    let statuses = lane_item_statuses(&items, &agents);
+    assert_eq!(
+        statuses,
+        vec![
+            ("completed", true),
+            ("in_progress", true),
+            ("pending", true),
+            ("pending", true)
+        ]
+    );
+    let strip = lane_strip_spans(&statuses, 4);
+    assert_eq!(strip[0].content, "●");
+    assert_eq!(strip[1].content, LIVE_DOT_SENTINEL);
+    assert_eq!(strip[2].content, "○");
+    assert_eq!(strip[3].content, "○");
+    let rows = render(&[first.clone(), second.clone()], &agents, 120);
+    let row = rows
+        .iter()
+        .find(|row| row.contains("Parser") && row.contains('🦊'))
+        .unwrap();
+    assert!(row.contains("○○"), "{rows:?}");
+    assert_eq!(
+        lane_item_statuses(&items, &[]),
+        vec![("in_progress", false), ("pending", false)]
+    );
+}
+
+#[test]
+fn worker_dots_prefer_complete_status_snapshot() {
+    let mut member: crate::protocol::SwarmMemberStatus =
+        serde_json::from_value(serde_json::json!({
+            "session_id": "worker", "status": "running",
+            "todo_items": [{"content": "visible detail", "status": "in_progress"}],
+            "runtime": {"todo_statuses": ["completed", "completed", "in_progress", "pending"]}
+        }))
+        .unwrap();
+    let snapshot = TodoCardAgent::from_member(&member);
+    assert_eq!(
+        snapshot.todo_statuses,
+        ["completed", "completed", "in_progress", "pending"]
+    );
+    member.runtime.todo_statuses.clear();
+    assert_eq!(
+        TodoCardAgent::from_member(&member).todo_statuses,
+        ["in_progress"]
+    );
+    let old: TodoCardAgent = serde_json::from_value(serde_json::json!({
+        "session_id": "old-worker", "status": "ready"
+    }))
+    .unwrap();
+    assert!(old.todo_statuses.is_empty());
+}
+
+#[test]
+fn worker_dot_strip_fits_narrow_width() {
+    let statuses = vec![("pending", false); 100];
+    for width in 1..40 {
+        let strip = lane_strip_spans(&statuses, width);
+        assert!(width_of(&strip) <= width + 2);
     }
 }
 

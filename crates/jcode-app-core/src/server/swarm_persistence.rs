@@ -446,6 +446,7 @@ fn hydrate_member_todos(member: &mut SwarmMember) {
     let completed = todos.iter().filter(|t| t.status == "completed").count() as u32;
     member.todo_progress = Some((completed, todos.len() as u32));
     member.todo_items = super::background_tasks::compact_todo_items(&todos);
+    member.runtime.todo_statuses = todos.iter().map(|todo| todo.status.clone()).collect();
 }
 
 pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {

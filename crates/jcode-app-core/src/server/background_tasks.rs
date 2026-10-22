@@ -368,6 +368,7 @@ pub(super) async fn dispatch_swarm_todo_progress(
         Some((completed, total))
     };
     let mut items = compact_todo_items(&event.todos);
+    let statuses: Vec<String> = event.todos.iter().map(|todo| todo.status.clone()).collect();
 
     let swarm_id = {
         let mut members = swarm_members.write().await;
@@ -386,11 +387,15 @@ pub(super) async fn dispatch_swarm_todo_progress(
         {
             new.tool_intents = old.tool_intents.clone();
         }
-        if member.todo_progress == progress && member.todo_items == items {
+        if member.todo_progress == progress
+            && member.todo_items == items
+            && member.runtime.todo_statuses == statuses
+        {
             return; // no change, skip the broadcast
         }
         member.todo_progress = progress;
         member.todo_items = items;
+        member.runtime.todo_statuses = statuses;
         member.swarm_id.clone()
     };
     if let Some(swarm_id) = swarm_id {
@@ -624,6 +629,61 @@ pub(super) async fn dispatch_ui_activity(
 mod tests {
     use super::*;
     use crate::bus::{BatchProgress, ToolEvent, ToolStatus};
+
+    #[tokio::test]
+    async fn swarm_todo_statuses_include_items_outside_detail_window() {
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let member = SwarmMember {
+            session_id: "worker".into(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: true,
+            status: "running".into(),
+            detail: None,
+            task_label: None,
+            friendly_name: None,
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".into(),
+            joined_at: std::time::Instant::now(),
+            last_status_change: std::time::Instant::now(),
+            is_headless: true,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: Default::default(),
+        };
+        let members = Arc::new(RwLock::new(HashMap::from([("worker".into(), member)])));
+        let swarms = Arc::new(RwLock::new(HashMap::new()));
+        let mut event = crate::bus::TodoEvent {
+            session_id: "worker".into(),
+            todos: (0..20)
+                .map(|i| crate::todo::TodoItem {
+                    id: i.to_string(),
+                    content: format!("Step {i}"),
+                    status: "pending".into(),
+                    ..Default::default()
+                })
+                .collect(),
+        };
+        dispatch_swarm_todo_progress(&event, &members, &swarms).await;
+        {
+            let guard = members.read().await;
+            let worker = &guard["worker"];
+            assert_eq!(worker.todo_items.len(), SWARM_TODO_ITEMS_CAP);
+            assert_eq!(worker.runtime.todo_statuses.len(), 20);
+        }
+        // Same counts and same capped detail snapshot, but a different status
+        // outside the window must still reach clients.
+        event.todos[19].status = "in_progress".into();
+        dispatch_swarm_todo_progress(&event, &members, &swarms).await;
+        assert_eq!(
+            members.read().await["worker"].runtime.todo_statuses[19],
+            "in_progress"
+        );
+    }
 
     fn tool(id: &str, intent: &str, status: ToolStatus) -> ToolEvent {
         ToolEvent {
