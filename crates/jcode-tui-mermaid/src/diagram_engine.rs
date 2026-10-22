@@ -42,13 +42,14 @@ struct Settings {
 impl Settings {
     fn new(enabled: bool, mut options: D2Options) -> Self {
         let mut identity = std::collections::hash_map::DefaultHasher::new();
-        if enabled && cfg!(feature = "renderer") {
-            if let Ok(binary) = resolve_d2_binary(&options.binary) {
-                options.binary = binary;
-                if let Ok(metadata) = options.binary.metadata() {
-                    metadata.len().hash(&mut identity);
-                    metadata.modified().ok().hash(&mut identity);
-                }
+        if enabled
+            && cfg!(feature = "renderer")
+            && let Ok(binary) = resolve_d2_binary(&options.binary)
+        {
+            options.binary = binary;
+            if let Ok(metadata) = options.binary.metadata() {
+                metadata.len().hash(&mut identity);
+                metadata.modified().ok().hash(&mut identity);
             }
         }
         options.hash(&mut identity);
@@ -130,10 +131,11 @@ pub(crate) fn clear_d2_state() {
 }
 
 fn bounded_insert(map: &mut HashMap<u64, String>, key: u64, value: String) {
-    if !map.contains_key(&key) && map.len() >= MAX_SOURCE_RECORDS {
-        if let Some(oldest) = map.keys().next().copied() {
-            map.remove(&oldest);
-        }
+    if !map.contains_key(&key)
+        && map.len() >= MAX_SOURCE_RECORDS
+        && let Some(oldest) = map.keys().next().copied()
+    {
+        map.remove(&oldest);
     }
     map.insert(key, value);
 }
@@ -290,10 +292,10 @@ pub fn render_d2_deferred_with_registration(
                     if current {
                         pending.remove(&task.key);
                         if !task.cancel.load(Ordering::Acquire) {
-                            if let Err(error) = result {
-                                if let Ok(mut errors) = ERRORS.lock() {
-                                    bounded_insert(&mut errors, task.key.0, error);
-                                }
+                            if let Err(error) = result
+                                && let Ok(mut errors) = ERRORS.lock()
+                            {
+                                bounded_insert(&mut errors, task.key.0, error);
                             }
                             drop(pending);
                             super::notify_deferred_render_completed();
