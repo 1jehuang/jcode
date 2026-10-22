@@ -83,7 +83,9 @@ fn picker_entry_display_name(entry: &crate::tui::PickerEntry) -> String {
         .options
         .iter()
         .any(|option| option.detail.contains("recently added"));
-    let suffix = if is_new && !entry.is_current {
+    let suffix = if entry.is_memory_model {
+        format!(" 🧠{}", default_marker)
+    } else if is_new && !entry.is_current {
         format!(" new{}", default_marker)
     } else if entry.is_favorite {
         format!(" ♥{}", default_marker)
@@ -240,7 +242,7 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
             .any(|entry| matches!(entry.action, crate::tui::PickerAction::Model));
     if is_runtime_model_picker {
         Some(
-            " keys: Ctrl+O set default · Ctrl+N favorite · Shift+Tab switch active model to next favorite",
+            " keys: Ctrl+O set default · Ctrl+N favorite · Alt+M mark memory model · Shift+Tab switch active model to next favorite",
         )
     } else {
         None

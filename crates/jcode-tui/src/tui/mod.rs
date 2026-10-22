@@ -1968,6 +1968,7 @@ pub struct PickerEntry {
     pub is_current: bool,
     pub is_default: bool,
     pub is_favorite: bool,
+    pub is_memory_model: bool,
     pub recommended: bool,
     /// Model recommendation rank, or effective account priority in /account.
     /// usize::MAX means no ranked account metadata (e.g. management actions).

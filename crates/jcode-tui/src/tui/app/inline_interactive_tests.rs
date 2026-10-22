@@ -67,6 +67,7 @@ fn picker_entry(name: &str, provider: &str, usage_score: u32) -> PickerEntry {
         is_current: false,
         is_default: false,
         is_favorite: false,
+        is_memory_model: false,
         recommended: false,
         recommendation_rank: usize::MAX,
         usage_score,

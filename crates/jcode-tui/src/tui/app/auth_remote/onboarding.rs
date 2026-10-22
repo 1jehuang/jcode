@@ -136,6 +136,7 @@ impl App {
             is_current: false,
             is_default: false,
             is_favorite: false,
+            is_memory_model: false,
             recommended: false,
             recommendation_rank: usize::MAX,
             usage_score: 0,

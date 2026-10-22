@@ -487,6 +487,20 @@ impl Config {
                 self.agents.memory_sidecar_enabled = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_BACKEND") {
+            let trimmed = v.trim();
+            self.agents.memory_sidecar_backend = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_FALLBACK") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.agents.memory_sidecar_fallback = trimmed.to_string();
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_BACKEND") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {

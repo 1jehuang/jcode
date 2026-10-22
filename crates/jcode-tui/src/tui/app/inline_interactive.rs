@@ -80,6 +80,11 @@ struct ModelPickerFavoritesStore {
     favorites: HashSet<String>,
 }
 
+// The globally marked memory model (memory_model.json) is owned by
+// `jcode_base::memory` (single source of truth for the on-disk format);
+// this module reads and writes it through the public accessors there.
+use crate::memory::{MemoryModelStore, load_memory_model_store, save_memory_model_store};
+
 fn model_picker_usage_path() -> Option<std::path::PathBuf> {
     if crate::tui::is_ssh_remote() {
         return None;
@@ -96,6 +101,26 @@ fn model_picker_favorites_path() -> Option<std::path::PathBuf> {
     crate::storage::app_config_dir()
         .ok()
         .map(|dir| dir.join(MODEL_PICKER_FAVORITES_FILE))
+}
+
+/// Check whether a model entry matches the persisted memory model.
+/// The memory model is stored as a base model name (no effort suffix).
+fn model_is_memory_model(store: &MemoryModelStore, name: &str, effort: Option<&str>) -> bool {
+    let Some(memory_model) = store.model() else {
+        return false;
+    };
+    // The memory model is stored as a base name (e.g. "gpt-5.6-luna").
+    // For entries with an effort suffix, the display name is "model (effort)".
+    // We match on the base name only, so all effort variants of the same base
+    // model show the memory marker.
+    let base_name = name.trim();
+    if let Some(eff) = effort {
+        let display_with_effort = format!("{} ({})", base_name, eff);
+        // The memory model is a base name without effort, so match the base.
+        memory_model == base_name || memory_model == display_with_effort.as_str()
+    } else {
+        memory_model == base_name
+    }
 }
 
 #[path = "inline_interactive_placeholder_routes.rs"]
@@ -665,6 +690,7 @@ impl App {
                 is_current: configured.is_none(),
                 is_default: false,
                 is_favorite: false,
+                is_memory_model: false,
                 recommended: false,
                 recommendation_rank: usize::MAX,
                 usage_score: 0,
@@ -1435,6 +1461,7 @@ impl App {
                 is_current: true,
                 is_default: false,
                 is_favorite: false,
+                is_memory_model: false,
                 recommended: false,
                 recommendation_rank: usize::MAX,
                 usage_score: 0,
@@ -1849,6 +1876,7 @@ impl App {
         let entries_started = std::time::Instant::now();
         let usage_store = load_model_picker_usage_store();
         let favorites_store = load_model_picker_favorites_store();
+        let memory_store = load_memory_model_store();
         let mut entries: Vec<PickerEntry> = Vec::new();
         for name in &model_order {
             let mut entry_routes = model_options.remove(name).unwrap_or_default();
@@ -1960,6 +1988,11 @@ impl App {
                                 route,
                                 Some(effort),
                             ),
+                            is_memory_model: model_is_memory_model(
+                                &memory_store,
+                                name,
+                                Some(effort),
+                            ),
                         });
                     }
                 }
@@ -1992,6 +2025,7 @@ impl App {
                         effort: None,
                         is_default,
                         is_favorite: model_picker_is_favorite(&favorites_store, name, &route, None),
+                        is_memory_model: model_is_memory_model(&memory_store, name, None),
                     });
                 }
             }
@@ -2445,11 +2479,21 @@ impl App {
         // preview no longer steals Ctrl+B / Ctrl+F / Alt+F, which are the tmux
         // prefix and readline word-navigation keys users rely on while editing
         // the `/model` command line. Cycling favorites stays on Shift+Tab.
+        // Memory-model marking uses Alt+M: in legacy terminal encoding (without
+        // the kitty keyboard protocol) Ctrl+M sends the same byte as Enter (\r),
+        // so it can never be distinguished from a plain confirm press.
         let is_default =
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'o');
         let is_favorite =
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'n');
-        if is_default || is_favorite {
+        // macOS terminals with the default Option behavior insert Option+M as
+        // `µ` (no ALT modifier); map it back so the advertised Alt+M works the
+        // same way the global side-panel toggle does.
+        let is_memory = (modifiers.contains(KeyModifiers::ALT)
+            && key_char_eq_ignore_ascii_case(code, 'm'))
+            || crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers)
+                == Some('m');
+        if is_default || is_favorite || is_memory {
             self.handle_inline_interactive_key(code, modifiers)?;
             return Ok(true);
         }
@@ -3412,6 +3456,43 @@ impl App {
         self.set_status_notice(format!("{} {}", action, entry_name));
     }
 
+    fn toggle_selected_model_memory(&mut self) {
+        let Some((entry_name, is_memory_model, store)) = (|| {
+            let picker = self.inline_interactive_state.as_mut()?;
+            if !picker_is_runtime_model_picker(picker) || picker.filtered.is_empty() {
+                return None;
+            }
+            let idx = picker.filtered[picker.selected];
+            let entry = picker.entries.get_mut(idx)?;
+            if !matches!(entry.action, PickerAction::Model) {
+                return None;
+            }
+            let base_name = model_entry_base_name(entry);
+            let mut store = load_memory_model_store();
+            // Toggle: if this model is already the memory model, unmark it.
+            // Otherwise, set it as the memory model (replacing any previous).
+            let is_memory_model = if store.model() == Some(base_name.as_str()) {
+                store.set_model(None);
+                false
+            } else {
+                store.set_model(Some(base_name.clone()));
+                true
+            };
+            entry.is_memory_model = is_memory_model;
+            Some((entry.name.clone(), is_memory_model, store))
+        })() else {
+            return;
+        };
+        save_memory_model_store(&store);
+        self.invalidate_model_picker_cache();
+        let action = if is_memory_model {
+            "Marked as memory model"
+        } else {
+            "Unmarked memory model"
+        };
+        self.set_status_notice(format!("{}: {}", action, entry_name));
+    }
+
     fn cycle_selected_model_favorite(&mut self) {
         let selected_name = (|| {
             let picker = self.inline_interactive_state.as_mut()?;
@@ -3750,6 +3831,20 @@ impl App {
                 && key_char_eq_ignore_ascii_case(code, 'n') =>
             {
                 self.toggle_selected_model_favorite();
+            }
+            code if (modifiers.contains(KeyModifiers::ALT)
+                && key_char_eq_ignore_ascii_case(code, 'm'))
+                || crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers)
+                    == Some('m') =>
+            {
+                // Alt+M marks the highlighted model as the memory model.
+                // Not Ctrl+M: without the kitty keyboard protocol, terminals
+                // deliver Ctrl+M as Enter (\r), indistinguishable from confirm.
+                // Alt+M elsewhere toggles the side panel, but the picker
+                // dispatches before that global handler, so contexts never mix.
+                // macOS default Option behavior inserts `µ` (no ALT modifier);
+                // the fallback maps it back, matching the global toggle.
+                self.toggle_selected_model_memory();
             }
             KeyCode::Enter => {
                 let Some(ref mut picker) = self.inline_interactive_state else {
