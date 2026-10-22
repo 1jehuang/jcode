@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.99.1"
+version = "0.99.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -60,6 +60,7 @@ members = [
     "crates/jcode-provider-gemini",
     "crates/jcode-provider-gemini-runtime",
     "crates/jcode-provider-cursor-runtime",
+    "crates/jcode-provider-cursor-acp-runtime",
     "crates/jcode-provider-antigravity-runtime",
     "crates/jcode-provider-copilot-runtime",
     "crates/jcode-provider-openrouter-runtime",
@@ -207,6 +208,7 @@ jcode-provider-doctor = { path = "crates/jcode-provider-doctor" }
 # provider registry at startup (src/cli/startup.rs).
 jcode-provider-gemini-runtime = { path = "crates/jcode-provider-gemini-runtime" }
 jcode-provider-cursor-runtime = { path = "crates/jcode-provider-cursor-runtime" }
+jcode-provider-cursor-acp-runtime = { path = "crates/jcode-provider-cursor-acp-runtime" }
 jcode-provider-antigravity-runtime = { path = "crates/jcode-provider-antigravity-runtime" }
 jcode-provider-copilot-runtime = { path = "crates/jcode-provider-copilot-runtime" }
 jcode-provider-openrouter-runtime = { path = "crates/jcode-provider-openrouter-runtime" }
