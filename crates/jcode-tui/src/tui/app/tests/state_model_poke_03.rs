@@ -51,6 +51,55 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
 include!("model_picker_startup_tests.rs");
 
 #[test]
+fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
+    with_temp_jcode_home(|| {
+        for command in ["/cloud", "/local"] {
+            let mut app = create_test_app();
+            crate::todo::save_todos(
+                &app.session.id,
+                &[crate::todo::TodoItem {
+                    stage: None,
+                    details: None,
+                    group: None,
+                    id: "open".into(),
+                    content: "Continue on the destination".into(),
+                    status: "in_progress".into(),
+                    priority: "high".into(),
+                    blocked_by: Vec::new(),
+                    assigned_to: None,
+                    confidence: None,
+                    completion_confidence: None,
+                    confidence_history: Vec::new(),
+                }],
+            )
+            .unwrap();
+            app.auto_poke_default_on = true;
+            app.auto_poke_incomplete_todos = true;
+            app.is_processing = true;
+            let session = app.session.id.clone();
+            assert!(super::commands_cloud::handle_cloud_command(
+                &mut app, command, &session
+            ));
+
+            // The local completion path used to enqueue a poke here, which
+            // immediately made the pending transfer fail its safety check.
+            // Remote Done uses the same turn-end scheduling entry point.
+            super::local::finish_turn(&mut app);
+            assert!(app.pending_cloud_handoff.is_some());
+            assert!(app.queued_messages.is_empty());
+            assert!(!app.pending_queued_dispatch);
+            assert!(app.auto_poke_incomplete_todos);
+            assert!(app.last_auto_poke_fingerprint.is_none());
+
+            // Cancellation restores normal scheduling, not a disabled poke.
+            super::commands_cloud::handle_cloud_command(&mut app, "/cloud cancel", &session);
+            assert!(app.schedule_turn_end_followups());
+            assert!(!app.queued_messages.is_empty());
+        }
+    });
+}
+
+#[test]
 fn test_remote_model_command_opens_picker_without_catalog_request() {
     let mut app = create_test_app();
     configure_test_remote_models(&mut app);

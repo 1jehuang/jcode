@@ -1563,6 +1563,12 @@ impl App {
             self.stop_auto_continuation_after_guardrail();
             return false;
         }
+        // A handoff owns this idle boundary. Queuing a local continuation here
+        // makes its dispatch safety check see new unsent work and cancel the
+        // transfer, even though the user did not submit anything else.
+        if self.cloud_handoff_blocks_work() {
+            return false;
+        }
         // The user's own next prompt goes first. A poke queued now would be
         // merged into it (or sent ahead of it) after an Esc redirect.
         if self.has_pending_user_followup() {

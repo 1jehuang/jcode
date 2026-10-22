@@ -56,7 +56,7 @@ pub(super) fn check_cloud_handoff_input(app: &mut App, trimmed: &str) -> bool {
     }
     if app.has_unsent_handoff_work(Some(trimmed)) {
         app.push_display_message(DisplayMessage::error(
-            "Cloud handoff not queued: unsent messages, commands, draft text, or attachments would be lost. Send or save them, then retry /cloud or /local. Nothing was removed.".to_string(),
+            format!("Cloud handoff not queued: {} would be lost. Send or save that work, then retry /cloud or /local. Nothing was removed.", app.unsent_handoff_work(Some(trimmed)).join(", ")),
         ));
         return false;
     }
@@ -289,20 +289,48 @@ impl App {
     }
 
     fn has_unsent_handoff_work(&self, accepted_command: Option<&str>) -> bool {
+        !self.unsent_handoff_work(accepted_command).is_empty()
+    }
+
+    // Report categories, never private draft contents, so an empty-looking
+    // composer does not leave users guessing which queue blocked the move.
+    fn unsent_handoff_work(&self, accepted_command: Option<&str>) -> Vec<&'static str> {
         let draft = self.input.trim();
-        (!draft.is_empty() && accepted_command != Some(draft))
-            || !self.queued_messages.is_empty()
-            || !self.queued_commands.is_empty()
-            || !self.hidden_queued_system_messages.is_empty()
-            || !self.pending_images.is_empty()
-            || !self.pasted_contents.is_empty()
-            || self
-                .interleave_message
-                .as_ref()
-                .is_some_and(|text| !text.is_empty())
-            || !self.interleave_images.is_empty()
-            || !self.pending_soft_interrupts.is_empty()
-            || !self.pending_soft_interrupt_requests.is_empty()
+        [
+            (
+                !draft.is_empty() && accepted_command != Some(draft),
+                "composer draft",
+            ),
+            (!self.queued_messages.is_empty(), "queued messages"),
+            (!self.queued_commands.is_empty(), "queued commands"),
+            (
+                !self.hidden_queued_system_messages.is_empty(),
+                "queued system reminders",
+            ),
+            (!self.pending_images.is_empty(), "image attachments"),
+            (!self.pasted_contents.is_empty(), "pasted contents"),
+            (
+                self.interleave_message
+                    .as_ref()
+                    .is_some_and(|text| !text.is_empty()),
+                "pending interleave message",
+            ),
+            (
+                !self.interleave_images.is_empty(),
+                "pending interleave images",
+            ),
+            (
+                !self.pending_soft_interrupts.is_empty(),
+                "pending interrupts",
+            ),
+            (
+                !self.pending_soft_interrupt_requests.is_empty(),
+                "unacknowledged interrupts",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(present, label)| present.then_some(label))
+        .collect()
     }
 
     /// Shared by polling and deterministic dispatch tests. No process starts here.
@@ -318,9 +346,12 @@ impl App {
         if changed_session || self.has_unsent_handoff_work(None) {
             self.pending_cloud_handoff = None;
             let reason = if changed_session {
-                "the active session changed. Retry /cloud or /local from the session you want to move"
+                "the active session changed. Retry /cloud or /local from the session you want to move".to_string()
             } else {
-                "unsent messages, commands, draft text, or attachments would be lost. Send or save them, then retry /cloud or /local"
+                format!(
+                    "{} would be lost. Send or save that work, then retry /cloud or /local",
+                    self.unsent_handoff_work(None).join(", ")
+                )
             };
             self.push_display_message(DisplayMessage::error(format!(
                 "Pending cloud handoff canceled: {reason}. Nothing was removed."
@@ -726,6 +757,27 @@ mod tests {
                     .push((1, "interrupt".into()))
             }),
         ]
+    }
+
+    #[test]
+    fn handoff_error_identifies_blocking_queue_without_its_contents() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let session = super::super::commands::active_session_id(&app);
+        app.hidden_queued_system_messages
+            .push("private reminder".into());
+        handle_cloud_command(&mut app, "/cloud", &session);
+        let error = &app.display_messages.last().unwrap().content;
+        assert!(error.contains("queued system reminders would be lost"));
+        assert!(!error.contains("private reminder"));
+
+        app.hidden_queued_system_messages.clear();
+        app.pending_cloud_handoff = Some(pending(CloudCommand::Return, &session));
+        app.pending_soft_interrupt_requests
+            .push((1, "private interrupt".into()));
+        assert!(app.take_ready_cloud_handoff().is_none());
+        let error = &app.display_messages.last().unwrap().content;
+        assert!(error.contains("unacknowledged interrupts would be lost"));
+        assert!(!error.contains("private interrupt"));
     }
 
     #[test]
