@@ -1249,6 +1249,8 @@ pub struct ProviderConfig {
     pub default_model: Option<String>,
     /// Default provider to use (claude|openai|copilot|openrouter)
     pub default_provider: Option<String>,
+    /// Persist user-initiated model switches back to config.toml so new sessions use them.
+    pub persist_model_switch: bool,
     /// Reasoning effort for OpenAI Responses API (none|minimal|low|medium|high|xhigh|max)
     pub openai_reasoning_effort: Option<String>,
     /// Reasoning effort for Anthropic Messages API output_config (none|low|medium|high|xhigh; max aliases to strongest supported)
@@ -1313,6 +1315,7 @@ impl Default for ProviderConfig {
         Self {
             default_model: None,
             default_provider: None,
+            persist_model_switch: true,
             openai_reasoning_effort: Some("low".to_string()),
             anthropic_reasoning_effort: None,
             anthropic_cache_ttl_1h: true,

@@ -3703,6 +3703,11 @@ impl App {
                         provider_key.as_deref(),
                     ) {
                         Ok(()) => {
+                            // An explicit save is newer than any debounced
+                            // write from a recent switch; cancel it so the
+                            // flush cannot restore the older choice over
+                            // this one.
+                            self.pending_model_config_persist = None;
                             // Persist the effort variant the user picked, so an
                             // effort-qualified entry (e.g. "Claude Opus 5 (high)")
                             // survives restarts instead of silently dropping the
@@ -4013,6 +4018,11 @@ impl App {
                                 Some(route_selection.api_method.clone());
                             self.pending_route_selection = Some(route_selection);
                             self.pending_model_switch = Some(spec);
+                            // The server persists the confirmed switch as its
+                            // config default (persist_default=true on the
+                            // set_route/set_model request). No client-side
+                            // staging: over SSH the client's config is not the
+                            // file new sessions read.
                             // In remote mode `self.provider` is a local
                             // stand-in, so applying the picked effort variant
                             // to it does not reach the server. Stage it so the
@@ -4041,6 +4051,17 @@ impl App {
                                     self.session.route_api_method =
                                         Some(route_selection.api_method.clone());
                                     let _ = self.session.save();
+                                    // Persist the user's picker choice to
+                                    // config.toml so it survives relaunch /
+                                    // new sessions, just like cycle_model
+                                    // and /model <name> do. Pass the spec
+                                    // verbatim and the resolved provider_key
+                                    // (computed above from the route).
+                                    let persist_provider_key = self.session.provider_key.clone();
+                                    self.persist_model_switch_to_config(
+                                        &spec,
+                                        persist_provider_key.as_deref(),
+                                    );
                                     crate::logging::event_info(
                                         "model_picker_select_applied",
                                         vec![

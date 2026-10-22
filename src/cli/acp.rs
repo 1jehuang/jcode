@@ -669,6 +669,7 @@ impl AcpRuntime {
                     .send(&Request::SetModel {
                         id: request_id,
                         model: value.clone(),
+                        persist_default: true,
                     })
                     .await?;
                 wait_for_model_changed(&session, request_id).await
@@ -1180,6 +1181,7 @@ impl AcpRuntime {
                     .send(&Request::SetModel {
                         id,
                         model: model.clone(),
+                        persist_default: true,
                     })
                     .await?;
                 wait_for_model_changed(session, id).await?;

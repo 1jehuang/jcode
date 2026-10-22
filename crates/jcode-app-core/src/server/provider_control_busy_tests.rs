@@ -191,7 +191,7 @@ async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
     let lock = agent.lock().await;
     timeout(
         Duration::from_millis(100),
-        handle_set_route(29, selection, true, &agent, &tx),
+        handle_set_route(29, selection, true, false, &agent, &tx),
     )
     .await
     .expect("route request must not block on the agent lock");
@@ -276,7 +276,13 @@ async fn set_model_does_not_wait_for_busy_agent_lock() {
 
     timeout(
         Duration::from_millis(100),
-        handle_set_model(8, "test-model-b".to_string(), &agent, &client_event_tx),
+        handle_set_model(
+            8,
+            "test-model-b".to_string(),
+            false,
+            &agent,
+            &client_event_tx,
+        ),
     )
     .await
     .expect("model changes must not wait for a busy agent mutex");

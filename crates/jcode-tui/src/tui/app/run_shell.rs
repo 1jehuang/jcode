@@ -771,6 +771,9 @@ impl App {
         }
 
         self.extract_session_memories().await;
+        // A model switch made right before quitting would otherwise wait out
+        // the 500 ms debounce that never fires again after this loop exits.
+        self.force_flush_pending_model_config_persist();
 
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
@@ -1027,6 +1030,11 @@ impl App {
                 }
             }
         }
+
+        // Same orderly-shutdown flush as the local loop above: an SSH/remote
+        // client's own config default must not be lost to the debounce when
+        // the user switches and immediately quits.
+        self.force_flush_pending_model_config_persist();
 
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
