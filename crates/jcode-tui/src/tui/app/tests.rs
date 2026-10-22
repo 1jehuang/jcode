@@ -1322,6 +1322,8 @@ fn update_command_reloads_stale_remote_server_before_client_update_check() {
 
 #[test]
 fn stale_server_history_is_deferred_before_remote_state_is_applied() {
+    let _env_guard = crate::storage::lock_test_env();
+    let _restore = EnvRestoreGuard::capture(["JCODE_ALLOW_SERVER_VERSION_MISMATCH"]);
     crate::env::remove_var("JCODE_ALLOW_SERVER_VERSION_MISMATCH");
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

@@ -5,7 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+fn lock_env() -> storage::TestEnvGuard {
     storage::lock_test_env()
 }
 
@@ -44,7 +44,7 @@ fn set_socket_test_env(socket_path: &Path, runtime_dir: &Path) -> EnvVarGuard {
 }
 
 struct TestEnvGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: storage::TestEnvGuard,
     _env: EnvVarGuard,
     _temp_home: tempfile::TempDir,
 }
@@ -236,11 +236,7 @@ async fn test_wait_for_reloading_server_returns_true_for_live_listener() {
     assert!(wait_for_reloading_server().await);
 }
 
-fn isolated_launcher_env() -> (
-    std::sync::MutexGuard<'static, ()>,
-    EnvVarGuard,
-    tempfile::TempDir,
-) {
+fn isolated_launcher_env() -> (storage::TestEnvGuard, EnvVarGuard, tempfile::TempDir) {
     let lock = lock_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let env = EnvVarGuard::capture(&["JCODE_INSTALL_DIR", "JCODE_HOME", "HOME", "USERPROFILE"]);

@@ -1580,29 +1580,59 @@ pub(crate) fn last_chat_frame() -> Option<Arc<PreparedChatFrame>> {
 /// must acquire the environment lock first. App construction resets render
 /// state while an environment-scoping helper may already hold that lock.
 /// Taking environment after render would deadlock against that reset.
+///
+/// Reentrant per thread: a call from a thread that already holds the lock
+/// returns a no-op `Nested` guard instead of deadlocking, so production entry
+/// points like `ui::draw` (which now take this lock in test builds) can be
+/// invoked freely from inside a locked test.
 #[cfg(test)]
 pub(crate) fn render_state_test_lock() -> RenderStateTestGuard {
+    if render_state_lock_held() {
+        return RenderStateTestGuard::Nested;
+    }
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    // Global lock order is env lock -> render lock: rendering tests touch env
+    // (config, JCODE_HOME) while holding the render lock, and env-taking tests
+    // render. Acquiring env first removes the AB-BA cycle that hung ui::tests.
+    let env_guard = crate::storage::lock_test_env();
     let guard = LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     RENDER_STATE_LOCK_HELD.with(|held| held.set(true));
-    RenderStateTestGuard { _guard: guard }
+    RenderStateTestGuard::Outer {
+        _guard: guard,
+        _env_guard: env_guard,
+    }
 }
 
-/// Guard for [`render_state_test_lock`] that also records ownership on this
-/// thread, so a nested `clear_test_render_state_for_tests` can tell it is
-/// already inside the lock instead of deadlocking on it.
+/// Guard for [`render_state_test_lock`].
+///
+/// `Outer` owns the mutex and records ownership on this thread so a nested
+/// `clear_test_render_state_for_tests` can tell it is already inside the lock
+/// instead of deadlocking on it. `Nested` is returned to a caller that already
+/// holds the lock; dropping it must leave the flag set because the outer owner
+/// still holds it.
 #[cfg(test)]
-pub(crate) struct RenderStateTestGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
+pub(crate) enum RenderStateTestGuard {
+    Outer {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        // Held for the render guard's whole lifetime: releasing env earlier
+        // would let a sibling take env and wait on render while this thread
+        // still holds render, reopening the AB-BA window. Drops after
+        // `_guard` (fields drop in declaration order), so the LIFO
+        // env->render order holds on release too.
+        _env_guard: crate::storage::TestEnvGuard,
+    },
+    Nested,
 }
 
 #[cfg(test)]
 impl Drop for RenderStateTestGuard {
     fn drop(&mut self) {
-        RENDER_STATE_LOCK_HELD.with(|held| held.set(false));
+        if matches!(self, Self::Outer { .. }) {
+            RENDER_STATE_LOCK_HELD.with(|held| held.set(false));
+        }
     }
 }
 
@@ -2585,6 +2615,18 @@ fn transcript_definitely_overflows(messages: &[DisplayMessage], available_rows: 
 }
 
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
+    // In test builds every draw mutates the same process-global render state
+    // (LAST_MAX_SCROLL, layout snapshots, idle-animation area, flicker history)
+    // that other tests assert on. Tests that render are supposed to hold the
+    // shared render-state lock, but `ui::draw` is reachable from unlocked
+    // helpers too, and one unlocked draw interleaving with a locked test is
+    // exactly how the parallel suite produced load-dependent flakes: a wheel-up
+    // read a sibling's scroll extent, and a frame comparison picked up a
+    // sibling's flicker notice. Serialize here so no call site can forget.
+    // Reentrant per thread, so tests that already hold the lock pay nothing.
+    #[cfg(test)]
+    let _render_guard = render_state_test_lock();
+
     record_idle_animation_area(None);
     if let Some(frozen) = app.hibernation_frame()
         && frozen.area == frame.area()

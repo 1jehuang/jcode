@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceTier {
@@ -125,7 +125,19 @@ impl SystemProfile {
 
 static PROFILE: OnceLock<SystemProfile> = OnceLock::new();
 
+// The pin stores a `&'static` reference, so `profile()` can return it without
+// borrowing the mutex. The synthetic profile itself is built once and reused
+// for every pin call, so repeated pinning in a test suite does not leak.
+static PROFILE_OVERRIDE: Mutex<Option<&'static SystemProfile>> = Mutex::new(None);
+static FULL_TIER_PIN: OnceLock<SystemProfile> = OnceLock::new();
+
 pub fn profile() -> &'static SystemProfile {
+    let guard = PROFILE_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(pinned) = guard.as_ref() {
+        return pinned;
+    }
     PROFILE.get_or_init(detect)
 }
 
@@ -133,11 +145,16 @@ pub fn profile() -> &'static SystemProfile {
 ///
 /// Test harnesses call this so rendered output (perf badge, animation policy,
 /// idle status facts) does not depend on the host's load average or free
-/// memory at the moment the test process first touched `profile()`. First
-/// initialization wins: calling this after `profile()` has already run is a
-/// no-op, and production code paths never call it.
+/// memory at the moment the test process first touched `profile()`. The
+/// override wins even if `profile()` already ran and cached the real host
+/// detection, so a parallel test that poisoned the cache under build load
+/// cannot silently degrade another test to Reduced/Minimal. Production code
+/// paths never call it.
 pub fn pin_full_profile_for_tests() {
-    let _ = PROFILE.set(synthetic_profile(SyntheticSystemProfile::Native));
+    let pinned = FULL_TIER_PIN.get_or_init(|| synthetic_profile(SyntheticSystemProfile::Native));
+    *PROFILE_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pinned);
 }
 
 pub fn synthetic_profile(kind: SyntheticSystemProfile) -> SystemProfile {

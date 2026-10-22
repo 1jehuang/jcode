@@ -424,6 +424,19 @@ fn clear_persisted_test_ui_state() {
         let _ = std::fs::remove_file(ambient_dir.join("state.json"));
         let _ = std::fs::remove_file(ambient_dir.join("directives.json"));
         let _ = std::fs::remove_file(ambient_dir.join("visible_cycle.json"));
+        // A remote-mode test that handled AvailableModelsUpdated persisted
+        // its mock catalog (e.g. Copilot claude-opus-4.6) into the shared
+        // home. Any later test whose picker hydrates the cache (empty
+        // remote_model_options + is_remote) then preselects those ghost
+        // models instead of its own configured ones. The cache is ambient
+        // per-run state, so drop it alongside the other ambient files. No
+        // test hydrates across app instances from this home.
+        let _ = std::fs::remove_file(
+            shared_test_jcode_home()
+                .join("config")
+                .join("jcode")
+                .join("remote_model_catalog_cache.json"),
+        );
     }
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
     crate::auth::AuthStatus::invalidate_cache();
@@ -462,8 +475,45 @@ impl Drop for EnvRestoreGuard {
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
+    // The ambient named-profile / OpenRouter runtime env is process-global
+    // and other tests mutate it, so a verdict would depend on which tests ran
+    // before it and on the dev machine's shell. Guard and clear it here.
+    let _env_guard = EnvRestoreGuard::capture([
+        "JCODE_HOME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_PROVIDER",
+        "JCODE_OPENROUTER_NO_FALLBACK",
+        "JCODE_API_BASE",
+        "JCODE_API_KEY",
+    ]);
     crate::env::set_var("JCODE_HOME", temp.path());
+    for key in [
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_PROVIDER",
+        "JCODE_OPENROUTER_NO_FALLBACK",
+        "JCODE_API_BASE",
+        "JCODE_API_KEY",
+    ] {
+        crate::env::remove_var(key);
+    }
     // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
     // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
     // opt-out must keep blocking delivery for tests that exercise onboarding.
@@ -485,6 +535,60 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     // test, which is process-global state shared across this suite.
     crate::config::invalidate_config_cache();
     result
+}
+
+/// Removes the named-provider-profile runtime env vars for the duration of
+/// the guard and restores them on drop.
+///
+/// When a named `[providers.<name>]` profile is active
+/// (`JCODE_NAMED_PROVIDER_PROFILE` set, e.g. inherited by the test process from
+/// a session launched with `--provider-profile`),
+/// `openai_compatible_profile_is_configured` reports every built-in
+/// OpenAI-compatible profile as configured, so their static model lists claim
+/// models that should otherwise fall through to a Copilot route. Model-picker
+/// tests that assert Copilot fallback routing must scrub these vars.
+struct NamedProfileEnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl NamedProfileEnvGuard {
+    fn new() -> Self {
+        let keys = [
+            "JCODE_NAMED_PROVIDER_PROFILE",
+            "JCODE_PROVIDER_PROFILE_ACTIVE",
+            "JCODE_PROVIDER_PROFILE_NAME",
+            "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+            "JCODE_OPENROUTER_API_KEY_NAME",
+            "JCODE_OPENROUTER_ENV_FILE",
+            "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        ];
+        let saved = keys
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        for key in keys {
+            crate::env::remove_var(key);
+        }
+        // Auth and config caches may hold state computed while a named
+        // profile was active; drop them so the scrubbed env is observed.
+        crate::auth::AuthStatus::invalidate_cache();
+        crate::config::invalidate_config_cache();
+        Self { saved }
+    }
+}
+
+impl Drop for NamedProfileEnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+        crate::config::invalidate_config_cache();
+    }
 }
 
 /// Run `f` in a hermetic `JCODE_HOME` with reasoning display pinned to

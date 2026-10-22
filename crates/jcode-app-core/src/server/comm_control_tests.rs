@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 struct RuntimeEnvGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _guard: crate::storage::TestEnvGuard,
     prev_runtime: Option<std::ffi::OsString>,
 }
 

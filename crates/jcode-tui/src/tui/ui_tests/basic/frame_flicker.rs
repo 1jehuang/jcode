@@ -1,6 +1,9 @@
 #[test]
 fn test_reset_available_hint_renders_and_keeps_redrawing_at_deep_idle() {
     let _lock = viewport_snapshot_test_lock();
+    // Exact notification-line assertions: scrub any flicker notice a sibling
+    // test left in the shared history before asserting on row content.
+    crate::tui::ui::clear_test_render_state_for_tests();
     let mut state = TestState {
         display_messages: vec![DisplayMessage::system("seed")],
         time_since_activity: Some(crate::tui::REDRAW_DEEP_IDLE_AFTER + Duration::from_secs(1)),
@@ -1002,6 +1005,13 @@ fn test_flicker_frame_history_ignores_manual_scroll_feedback() {
 #[test]
 fn test_cache_retention_estimates_never_create_proactive_expiry_ui() {
     let _lock = viewport_snapshot_test_lock();
+    // `has_notification` and the notification spans consult the process-global
+    // flicker history; sibling flicker tests record events without clearing
+    // them at exit, and the max-age check is compiled out in test builds, so a
+    // leftover event adds a "⚠ flicker detected" notification and flips these
+    // assertions depending on scheduling order. Clear the shared render state
+    // (already under this lock) before asserting on notification-driven UI.
+    crate::tui::ui::clear_test_render_state_for_tests();
     for ttl_secs in [300, 1800, 86400] {
         for remaining_secs in [ttl_secs, 180, 30, 0] {
             let info = crate::tui::CacheTtlInfo {
@@ -1069,6 +1079,9 @@ fn test_cache_explicit_ttls_keep_expiry_notifications() {
 #[test]
 fn test_reset_expiry_notification_stays_on_one_row() {
     let _lock = viewport_snapshot_test_lock();
+    // The rendered text must equal the hint exactly; a leftover "⚠ flicker
+    // detected" notice from a sibling test would corrupt the comparison.
+    crate::tui::ui::clear_test_render_state_for_tests();
     let hint = "2 resets available · expires 2099-05-01 00:00 UTC, expires 2099-06-01 00:00 UTC · /reset usage limits openai";
     for width in [30, 47, 80, 160] {
         let state = TestState {

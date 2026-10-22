@@ -714,7 +714,24 @@ async fn test_background_command_progress_marker_updates_status_and_stays_out_of
         "expected progress to be recorded for {task_id}"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    // Wall-clock deadline for completion too: under parallel load the command
+    // can still be finishing after the fixed 250ms sleep used here before, so
+    // poll until the task reports a terminal status. The assertions stay exact.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let status = crate::background::global()
+            .status(&task_id)
+            .await
+            .expect("status should exist");
+        if status.status != BackgroundTaskStatus::Running {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background command should finish: {task_id}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let output = crate::background::global()
         .output(&task_id)
         .await
