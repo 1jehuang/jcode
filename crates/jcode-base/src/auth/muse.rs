@@ -176,6 +176,7 @@ impl std::fmt::Debug for DeviceChallenge {
 /// Single poll attempt outcome. [`poll_login`] performs exactly one token
 /// request and never sleeps; the caller loops honoring `interval`.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // One-shot poll result, never stored in bulk.
 pub enum PollOutcome {
     /// User has not approved yet; poll again after `interval` seconds.
     Pending,

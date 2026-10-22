@@ -1551,12 +1551,6 @@ impl crate::tui::TuiState for App {
     }
 
     fn info_widget_data(&self) -> crate::tui::info_widget::InfoWidgetData {
-        let session_id = if self.is_remote {
-            self.remote_session_id.as_deref()
-        } else {
-            Some(self.session.id.as_str())
-        };
-
         let context_snapshot = self.context_snapshot();
         let context_info = if let Some(context_info) = context_snapshot.info.clone() {
             (context_info.total_chars > 0).then_some(context_info)
