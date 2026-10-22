@@ -813,3 +813,107 @@ fn timer_target_revalidation_rejects_deleted_excluded_and_cooled_accounts() {
         ));
     });
 }
+
+#[derive(Clone)]
+struct RateLimitedClaudeAccountProvider {
+    model: String,
+}
+
+#[async_trait::async_trait]
+impl Provider for RateLimitedClaudeAccountProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow!("429 Too Many Requests"))
+    }
+    fn name(&self) -> &str {
+        "Claude"
+    }
+    fn model(&self) -> String {
+        self.model.clone()
+    }
+    fn credential_mode(&self) -> CredentialMode {
+        CredentialMode::OAuth
+    }
+    fn oauth_account_label(&self) -> Option<String> {
+        Some("claude-otter".into())
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn same_provider_account_failover_keeps_the_request_model() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            crate::env::set_var("JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER", "true");
+            let request_models = ["claude-sonnet-4-6", "claude-sonnet-5-5", "claude-haiku-5-5"];
+            for label in ["claude-otter", "claude-fox"] {
+                crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                    label: label.to_string(),
+                    access: format!("mock-access-{label}"),
+                    refresh: format!("mock-refresh-{label}"),
+                    expires: chrono::Utc::now().timestamp_millis() + 3_600_000,
+                    email: None,
+                    subscription_type: Some("max".to_string()),
+                    scopes: vec!["user:inference".to_string()],
+                })
+                .expect("save mock Claude account");
+                super::models::populate_anthropic_models_for_scope(
+                    &format!("oauth::{label}"),
+                    request_models
+                        .iter()
+                        .copied()
+                        .chain([jcode_provider_core::DEFAULT_CLAUDE_MODEL])
+                        .map(str::to_owned)
+                        .collect(),
+                );
+            }
+            let mut target_routes = Vec::new();
+            for model in request_models {
+                let runtime: Arc<dyn Provider> = Arc::new(RateLimitedClaudeAccountProvider {
+                    model: model.to_string(),
+                });
+                let provider = MultiProvider {
+                    anthropic: RwLock::new(Some(runtime)),
+                    openai: RwLock::new(None),
+                    copilot_api: RwLock::new(None),
+                    antigravity: RwLock::new(None),
+                    gemini: RwLock::new(None),
+                    cursor: RwLock::new(None),
+                    bedrock: RwLock::new(None),
+                    openrouter: RwLock::new(None),
+                    openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+                    active_openai_compatible_profile: RwLock::new(None),
+                    session_id: RwLock::new(None),
+                    active: RwLock::new(ActiveProvider::Claude),
+                    startup_notices: RwLock::new(Vec::new()),
+                    initial_provider: None,
+                    catalog_scope: next_catalog_scope(),
+                    routes_memo: std::sync::Mutex::new(None),
+                    post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                };
+                let error = provider
+                    .complete(&[], &[], "system", None)
+                    .await
+                    .err()
+                    .expect("return pre-switch prompt");
+                let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
+                target_routes.push(prompt.target_route);
+                super::models::clear_claude_provider_unavailability_for_account_label(Some(
+                    "claude-otter",
+                ));
+            }
+            assert_eq!(
+                target_routes,
+                request_models.map(|model| Some(format!("claude-oauth@claude-fox:{model}"))),
+                "request model must survive account failover"
+            );
+        });
+    });
+}
