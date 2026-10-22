@@ -50,7 +50,9 @@ async function q(db, sql, params = []) {
     if (json?.success) return json.result.at(-1).results ?? [];
     const msg = JSON.stringify(json?.errors ?? res.status);
     // Only overload/transient errors are worth retrying.
-    if (json?.errors?.some((e) => e.code === 7500)) throw new Error(msg);
+    // 7500 is usually a persistent statement problem, but D1 also returns it
+    // transiently under load, so give it a few backed-off retries first.
+    if (json?.errors?.some((e) => e.code === 7500) && attempt >= 5) throw new Error(msg);
     if (attempt >= 20) throw new Error(msg);
     await sleep(Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)));
   }
