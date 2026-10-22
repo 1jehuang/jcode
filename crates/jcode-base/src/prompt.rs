@@ -60,7 +60,7 @@ impl Default for PromptCapabilities {
 impl PromptCapabilities {
     fn current() -> Self {
         let config = crate::config::config();
-        Self::from_config(&config)
+        Self::from_config(config)
     }
 
     fn from_config(config: &crate::config::Config) -> Self {
