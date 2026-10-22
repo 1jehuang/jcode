@@ -197,30 +197,6 @@ fn partial_repaint_keeps_a_custom_light_theme_background_and_foreground() {
     let second = render_full(&idle_animation_state(1.5), 100, 40);
     let expected = second.backend().buffer();
 
-    // TEMP DIAGNOSTIC
-    eprintln!("DIAG area={area:?}");
-    let first_buf = first.backend().buffer();
-    for y in [18u16, 19, 20, 25, 26, 30, 39] {
-        for (label, b) in [("first", first_buf), ("patched", &patched), ("expected", expected)] {
-            let row: Vec<String> = (0..12u16)
-                .map(|x| {
-                    let c = &b[(x, y)];
-                    format!("{:?}|{:?}|{:?}", c.symbol(), c.fg, c.bg)
-                })
-                .collect();
-            eprintln!("DIAG y={y} {label}: {}", row.join(" "));
-        }
-    }
-    eprintln!(
-        "DIAG total-mismatch={}",
-        patched
-            .content
-            .iter()
-            .zip(expected.content.iter())
-            .filter(|(l, r)| l != r)
-            .count()
-    );
-
     let mismatches: Vec<_> = patched
         .content
         .iter()

@@ -344,15 +344,29 @@ pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
         return;
     };
     for cell in buf.content.iter_mut() {
-        if let Some(chosen) = configured_native_color(&palette, cell.fg) {
-            cell.fg = chosen;
-        }
-        if let Some(chosen) = configured_native_color(&palette, cell.bg) {
-            cell.bg = chosen;
-        }
-        if let Some(chosen) = configured_native_color(&palette, cell.underline_color) {
-            cell.underline_color = chosen;
-        }
+        adapt_one_cell_for_palette(&palette, cell);
+    }
+}
+
+/// Per-cell form of [`adapt_buffer_for_palette`] for partial repaints, which
+/// must apply the same policy to freshly written cells without re-running the
+/// non-idempotent passes over the reused buffer.
+pub fn adapt_cell_for_palette(cell: &mut ratatui::buffer::Cell) {
+    let Some(palette) = configured_palette() else {
+        return;
+    };
+    adapt_one_cell_for_palette(&palette, cell);
+}
+
+fn adapt_one_cell_for_palette(palette: &Palette, cell: &mut ratatui::buffer::Cell) {
+    if let Some(chosen) = configured_native_color(palette, cell.fg) {
+        cell.fg = chosen;
+    }
+    if let Some(chosen) = configured_native_color(palette, cell.bg) {
+        cell.bg = chosen;
+    }
+    if let Some(chosen) = configured_native_color(palette, cell.underline_color) {
+        cell.underline_color = chosen;
     }
 }
 
