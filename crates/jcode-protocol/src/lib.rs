@@ -351,7 +351,7 @@ impl AuthChanged {
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
-pub use wire::{AccountUsageSnapshot, Request, ServerEvent};
+pub use wire::{AccountUsageSnapshot, DecisionChoice, DecisionOption, Request, ServerEvent};
 pub use wire::{SessionToolConfig, SessionToolDefinition};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -854,6 +854,7 @@ impl Request {
             Request::InvalidateOpenAiUsage { id, .. } => *id,
             Request::InvalidateAnthropicUsage { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
+            Request::DecisionResponse { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,

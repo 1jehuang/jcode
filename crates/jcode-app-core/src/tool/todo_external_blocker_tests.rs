@@ -18,6 +18,7 @@ fn context() -> ToolContext {
         working_dir: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
+        decision_request_tx: None,
         execution_mode: super::super::ToolExecutionMode::Direct,
     }
 }

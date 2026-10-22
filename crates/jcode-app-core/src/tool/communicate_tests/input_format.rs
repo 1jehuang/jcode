@@ -204,6 +204,7 @@ fn format_members_includes_status_and_detail() {
         tool_call_id: "call-1".to_string(),
         working_dir: None,
         stdin_request_tx: None,
+            decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };

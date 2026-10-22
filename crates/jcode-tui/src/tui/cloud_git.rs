@@ -157,8 +157,9 @@ pub(crate) async fn bounded_output(
             }
         }
     }
-    let Ok(mut child) = command.spawn() else {
-        return None;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return None,
     };
     let stdout = child.stdout.take()?;
     let result = tokio::time::timeout(deadline, async {

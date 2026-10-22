@@ -1264,3 +1264,253 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
 include!("remote_tests/swarm_delivery.rs");
 
 include!("remote_tests/recall_cancellation.rs");
+
+#[test]
+fn ask_user_tool_done_drops_the_matching_dead_chooser() {
+    let mut app = create_test_app();
+    let mut decision = crate::tui::app::PendingDecision {
+        request_id: "decision-call-42".to_string(),
+        question: "Deploy now?".to_string(),
+        options: vec![("Yes".to_string(), None), ("No".to_string(), None)],
+        selected: 0,
+        answer_draft: String::new(),
+    };
+    decision.selected = 0;
+    app.pending_decision = Some(decision);
+
+    // Server-side timeout auto-picked option 1 and the ask_user tool call
+    // completed without any client answer; ToolDone must retire the card.
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+    super::server_event_handlers::handle_tool_done(
+        &mut app,
+        &mut remote,
+        "call-42".to_string(),
+        "ask_user".to_string(),
+        "Decision: ...\nNo answer within the configured timeout; auto-picked option 1.\n"
+            .to_string(),
+        None,
+    );
+
+    assert!(
+        app.pending_decision.is_none(),
+        "ToolDone for the ask_user call must drop its dead chooser"
+    );
+}
+
+#[test]
+fn unrelated_tool_done_keeps_the_pending_chooser() {
+    let mut app = create_test_app();
+    app.pending_decision = Some(crate::tui::app::PendingDecision {
+        request_id: "decision-call-7".to_string(),
+        question: "Deploy now?".to_string(),
+        options: vec![("Yes".to_string(), None), ("No".to_string(), None)],
+        selected: 0,
+        answer_draft: String::new(),
+    });
+
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+    super::server_event_handlers::handle_tool_done(
+        &mut app,
+        &mut remote,
+        "other-call".to_string(),
+        "bash".to_string(),
+        "done".to_string(),
+        None,
+    );
+
+    assert!(app.pending_decision.is_some());
+}
+
+#[test]
+fn ask_user_tool_done_for_a_different_call_keeps_the_chooser() {
+    let mut app = create_test_app();
+    app.pending_decision = Some(crate::tui::app::PendingDecision {
+        request_id: "decision-call-7".to_string(),
+        question: "Deploy now?".to_string(),
+        options: vec![("Yes".to_string(), None), ("No".to_string(), None)],
+        selected: 0,
+        answer_draft: String::new(),
+    });
+
+    // Two ask_user calls in one turn (batch/subagent): the ToolDone for
+    // the first must not retire the second's chooser.
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+    super::server_event_handlers::handle_tool_done(
+        &mut app,
+        &mut remote,
+        "call-99".to_string(),
+        "ask_user".to_string(),
+        "Decision: ...\nUser chose option 1: ok\n".to_string(),
+        None,
+    );
+
+    assert!(app.pending_decision.is_some());
+}
+
+fn decision_request_event() -> ServerEvent {
+    ServerEvent::DecisionRequest {
+        request_id: "decision-call-1".to_string(),
+        question: "Deploy now?".to_string(),
+        options: vec![
+            crate::protocol::DecisionOption {
+                label: "Yes".to_string(),
+                detail: None,
+            },
+            crate::protocol::DecisionOption {
+                label: "No".to_string(),
+                detail: None,
+            },
+        ],
+        tool_call_id: "call-1".to_string(),
+    }
+}
+
+#[test]
+fn decision_request_opens_the_chooser_while_the_turn_runs() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+
+    handle_server_event(&mut app, decision_request_event(), &mut remote);
+
+    assert!(
+        app.pending_decision.is_some(),
+        "a live turn's DecisionRequest must open the chooser"
+    );
+}
+
+#[test]
+fn decision_request_after_the_turn_stopped_is_ignored() {
+    let mut app = create_test_app();
+    app.is_processing = false;
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+
+    handle_server_event(&mut app, decision_request_event(), &mut remote);
+
+    assert!(
+        app.pending_decision.is_none(),
+        "a stale DecisionRequest must not open the chooser once the turn stopped"
+    );
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("Deploy now?"))
+    );
+}
+
+#[test]
+fn second_decision_request_queues_behind_the_open_chooser() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+
+    // Two ask_user calls in one batch arrive before either is answered.
+    handle_server_event(&mut app, decision_request_event(), &mut remote);
+    let mut second = decision_request_event();
+    if let ServerEvent::DecisionRequest {
+        request_id,
+        tool_call_id,
+        ..
+    } = &mut second
+    {
+        *request_id = "decision-call-2".to_string();
+        *tool_call_id = "call-2".to_string();
+    }
+    handle_server_event(&mut app, second, &mut remote);
+
+    let visible = app
+        .pending_decision
+        .as_ref()
+        .expect("the first question must stay visible");
+    assert_eq!(
+        visible.request_id, "decision-call-1",
+        "the second question must not replace the first chooser"
+    );
+    assert_eq!(
+        app.pending_decision_queue.len(),
+        1,
+        "the second question must queue instead of dropping the first reply channel"
+    );
+    assert_eq!(app.pending_decision_queue[0].request_id, "decision-call-2");
+}
+
+#[test]
+fn batch_progress_retires_a_finished_nested_ask_user_chooser() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+
+    // A timed-out ask_user inside a batch resolves server-side; its chooser
+    // is dead but the only completion signal the client sees is BatchProgress.
+    handle_server_event(&mut app, decision_request_event(), &mut remote);
+    assert!(app.pending_decision.is_some());
+
+    let progress = crate::bus::BatchProgress {
+        session_id: "ses_test".to_string(),
+        tool_call_id: "call-batch".to_string(),
+        total: 1,
+        completed: 1,
+        last_completed: Some("ask_user".to_string()),
+        running: vec![],
+        subcalls: vec![crate::bus::BatchSubcallProgress {
+            index: 0,
+            tool_call: crate::message::ToolCall {
+                id: "call-1".to_string(),
+                name: "ask_user".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            },
+            state: crate::bus::BatchSubcallState::Succeeded,
+        }],
+    };
+    handle_server_event(
+        &mut app,
+        ServerEvent::BatchProgress { progress },
+        &mut remote,
+    );
+
+    assert!(
+        app.pending_decision.is_none(),
+        "a finished batch ask_user subcall must retire its dead chooser"
+    );
+}
+
+#[test]
+fn batch_progress_keeps_the_chooser_for_a_running_ask_user_subcall() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+
+    handle_server_event(&mut app, decision_request_event(), &mut remote);
+
+    let progress = crate::bus::BatchProgress {
+        session_id: "ses_test".to_string(),
+        tool_call_id: "call-batch".to_string(),
+        total: 1,
+        completed: 0,
+        last_completed: None,
+        running: vec![],
+        subcalls: vec![crate::bus::BatchSubcallProgress {
+            index: 0,
+            tool_call: crate::message::ToolCall {
+                id: "call-1".to_string(),
+                name: "ask_user".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            },
+            state: crate::bus::BatchSubcallState::Running,
+        }],
+    };
+    handle_server_event(
+        &mut app,
+        ServerEvent::BatchProgress { progress },
+        &mut remote,
+    );
+
+    assert!(
+        app.pending_decision.is_some(),
+        "a still-running batch ask_user must keep its chooser open"
+    );
+}

@@ -92,6 +92,7 @@ async fn handoff_creates_and_binds_fresh_tab_in_one_call() {
         working_dir: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
+        decision_request_tx: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     };
     for (tab_id, new_tab, expected) in [
@@ -557,6 +558,7 @@ async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_pro
             tool_call_id: "t".into(),
             working_dir: None,
             stdin_request_tx: None,
+            decision_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: super::super::ToolExecutionMode::Direct,
         };

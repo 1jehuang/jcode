@@ -11,6 +11,7 @@ fn context(working_dir: Option<PathBuf>) -> ToolContext {
         tool_call_id: "test".into(),
         working_dir,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: super::super::ToolExecutionMode::AgentTurn,
     }
