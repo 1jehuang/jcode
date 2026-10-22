@@ -2941,7 +2941,16 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // the bottom chrome and shoves the transcript up: reacting to raw
     // frame-by-frame dock visibility made the strip pop in and out and the
     // whole screen bounce (flicker).
+    let pinned_width = chat_area.width.saturating_sub(u16::from(
+        app.chat_native_scrollbar() && last_chat_scrollbar_visible(),
+    ));
+    let pinned_width = pinned_width.saturating_sub(left_aligned_content_inset(
+        pinned_width,
+        app.centered_mode(),
+    ));
+    let swarm_beside_todos = viewport::swarm_beside_pinned_todos(app, pinned_width);
     let swarm_strip_lines: Vec<Line<'static>> = if !swarm_page_active
+        && !swarm_beside_todos
         && app.inline_swarm_gallery_active()
         && (app.swarm_panel_focused() || !super::info_widget::swarm_strip_stands_down_for_dock())
     {

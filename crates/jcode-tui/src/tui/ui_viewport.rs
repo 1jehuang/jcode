@@ -452,7 +452,11 @@ pub(super) fn draw_messages(
                 .y
                 .saturating_add(prompt_preview_lines)
                 .saturating_add(line as u16),
-            width: text_render_area.width,
+            width: if swarm_beside_pinned_todos(app, text_render_area.width) {
+                text_render_area.width / 2
+            } else {
+                text_render_area.width
+            },
             height: 1,
         }
     }));
@@ -1446,20 +1450,62 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
     out
 }
 
-/// Lines for the pinned todo band. Background tasks render in the
-/// `background` info widget, not here.
+/// Whether the pinned band has room for a separate swarm column.
+pub(crate) fn swarm_beside_pinned_todos(app: &dyn TuiState, width: u16) -> bool {
+    width >= 120
+        && crate::config::config().display.pin_todos
+        && app.pinned_todos_payload().is_some()
+        && app.inline_swarm_gallery_active()
+        && !app.inline_swarm_members().is_empty()
+        && !pinned_todo_band_lines_for_payload(
+            app.pinned_todos_payload(),
+            app.pinned_todos_expanded(),
+            app.diff_mode(),
+            width / 2,
+            3,
+        )
+        .0
+        .is_empty()
+}
+
 pub(crate) fn pinned_todo_band_lines(
     app: &dyn TuiState,
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    pinned_todo_band_lines_for_payload(
+    let beside = swarm_beside_pinned_todos(app, width);
+    let todo_width = if beside { width / 2 } else { width };
+    let (mut lines, more) = pinned_todo_band_lines_for_payload(
         app.pinned_todos_payload(),
         app.pinned_todos_expanded(),
         app.diff_mode(),
-        width,
+        todo_width,
         viewport_height,
-    )
+    );
+    if beside && !lines.is_empty() {
+        let right_width = width.saturating_sub(todo_width + 2) as usize;
+        let members = app.inline_swarm_members();
+        let swarm = super::info_widget::swarm_gallery::render_swarm_strip_lines(
+            &members,
+            app.swarm_panel_selected(),
+            app.swarm_panel_focused(),
+            &crate::tui::keybind::swarm_panel_focus_key_label(),
+            (app.animation_elapsed() * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS) as usize,
+            right_width,
+            ((viewport_height as usize) / 3).clamp(3, 16),
+        );
+        lines.resize_with(lines.len().max(swarm.len()), || Line::from(""));
+        for (index, line) in lines.iter_mut().enumerate() {
+            *line = super::truncate_line_with_ellipsis_to_width(line, todo_width as usize);
+            if let Some(right) = swarm.get(index) {
+                line.spans.push(Span::raw(
+                    " ".repeat((todo_width as usize).saturating_sub(line.width()) + 2),
+                ));
+                line.spans.extend(right.spans.clone());
+            }
+        }
+    }
+    (lines, more)
 }
 
 /// Pinned todo band for an arbitrary todo payload. Shared by the live chat
