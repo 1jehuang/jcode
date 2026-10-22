@@ -8,6 +8,7 @@ use crate::protocol::{
     ServerEvent,
 };
 use crate::provider::Provider;
+use crate::tui::TuiState;
 use crate::tui::info_widget::{MemoryState, StepStatus};
 use anyhow::Result;
 use std::sync::Arc;
@@ -1262,5 +1263,145 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
 }
 
 include!("remote_tests/swarm_delivery.rs");
+
+/// Remote effort cycling on a provider without switchable effort must show
+/// the fixed (extra_body-injected) effort read-only instead of claiming the
+/// provider does not support effort at all.
+#[test]
+fn remote_effort_cycle_shows_fixed_effort_when_switching_unavailable() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    // Bind effort cycling to Cmd+Right regardless of platform defaults so the
+    // test exercises the remote notice path, not the per-OS default chord.
+    app.effort_switch_keys = crate::tui::keybind::EffortSwitchKeys {
+        increase: crate::tui::keybind::KeyBinding {
+            code: crossterm::event::KeyCode::Right,
+            modifiers: crossterm::event::KeyModifiers::SUPER,
+        },
+        decrease: crate::tui::keybind::KeyBinding {
+            code: crossterm::event::KeyCode::Left,
+            modifiers: crossterm::event::KeyModifiers::SUPER,
+        },
+    };
+    // Server reported provider/model identity: a profile with no inferable
+    // efforts, plus the server-reported (extra_body) effort.
+    app.remote_provider_name = Some("llmg-coding".to_string());
+    app.remote_provider_model = Some("together_ai/revolut-ltd/glm-5-2-nvfp4".to_string());
+    app.remote_reasoning_effort = Some("high".to_string());
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let event = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Right,
+            crossterm::event::KeyModifiers::SUPER,
+        );
+        crate::tui::app::remote::key_handling::handle_remote_key_event(
+            &mut app,
+            event,
+            &mut remote,
+        )
+        .await
+        .expect("remote key event handled");
+    });
+
+    let notice = app.status_notice().expect("effort notice set");
+    assert!(
+        notice.contains("not switchable"),
+        "must explain switching is unavailable, got: {notice}"
+    );
+    assert!(
+        notice.contains("High"),
+        "must show the fixed effort from the server, got: {notice}"
+    );
+}
+
+/// Remote `/effort` listing on a provider without switchable effort must show
+/// the server-reported fixed effort read-only instead of "not available".
+#[test]
+fn remote_effort_command_lists_fixed_effort_when_switching_unavailable() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("llmg-coding".to_string());
+    app.remote_provider_model = Some("together_ai/revolut-ltd/glm-5-2-nvfp4".to_string());
+    app.remote_reasoning_effort = Some("high".to_string());
+    app.input = "/effort".to_string();
+    app.cursor_pos = app.input.len();
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let event = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::empty(),
+        );
+        crate::tui::app::remote::key_handling::handle_remote_key_event(
+            &mut app,
+            event,
+            &mut remote,
+        )
+        .await
+        .expect("remote key event handled");
+    });
+
+    let last = app
+        .display_messages()
+        .last()
+        .expect("/effort must respond remotely");
+    assert!(
+        last.content.contains("not switchable"),
+        "remote /effort must explain switching is unavailable, got: {}",
+        last.content
+    );
+    assert!(
+        last.content.contains("Effort: High"),
+        "remote /effort must show the fixed effort, got: {}",
+        last.content
+    );
+    assert!(
+        !last.content.contains("not available"),
+        "must not claim the effort is unknown when the server reported one, got: {}",
+        last.content
+    );
+}
+
+/// Remote `/effort` with neither switchable nor server-reported effort keeps
+/// the original "not available" message: no false fixed-effort claims.
+#[test]
+fn remote_effort_command_still_reports_not_available_without_any_effort() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    // Identity yields no inferable efforts and the server reported none.
+    app.remote_provider_name = Some("plain-compat".to_string());
+    app.remote_provider_model = Some("some-plain-model".to_string());
+    app.input = "/effort".to_string();
+    app.cursor_pos = app.input.len();
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let event = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::empty(),
+        );
+        crate::tui::app::remote::key_handling::handle_remote_key_event(
+            &mut app,
+            event,
+            &mut remote,
+        )
+        .await
+        .expect("remote key event handled");
+    });
+
+    let last = app
+        .display_messages()
+        .last()
+        .expect("/effort must respond remotely");
+    assert!(
+        last.content.contains("Reasoning effort not available"),
+        "without any effort the original message must stay, got: {}",
+        last.content
+    );
+}
 
 include!("remote_tests/recall_cancellation.rs");

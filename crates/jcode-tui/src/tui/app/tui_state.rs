@@ -1580,7 +1580,7 @@ impl crate::tui::TuiState for App {
         } else {
             (
                 Some(self.provider.model()),
-                self.provider.reasoning_effort(),
+                self.provider.effective_reasoning_effort(),
                 self.provider.service_tier(),
                 self.provider.native_compaction_mode(),
                 self.provider.native_compaction_threshold_tokens(),

@@ -384,7 +384,154 @@ pub enum NamedProviderAuth {
     None,
 }
 
+/// Per-model cost configuration for custom OpenAI-compatible providers.
+/// Prices are in USD per million tokens, matching the opencode `cost` object.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct ModelCostConfig {
+    /// USD per million input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<f64>,
+    /// USD per million output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<f64>,
+    /// USD per million cache-read tokens.
+    #[serde(default, alias = "cache-read", skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    /// USD per million cache-write tokens.
+    #[serde(
+        default,
+        alias = "cache-write",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_write: Option<f64>,
+}
+
+/// One rung of a per-model reasoning-effort map. A rung either forwards a
+/// concrete wire value (`reasoning_effort = "..."`) or is disabled so the
+/// effort picker hides it and `/effort` rejects it, mirroring opencode's
+/// per-effort `{ reasoningEffort }` / `{ disabled }` shapes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReasoningEffortRungConfig {
+    /// Wire value sent as the OpenAI-compatible `reasoning_effort` request
+    /// field when this rung is selected. When omitted, the rung's key is sent
+    /// as-is (identity mapping).
+    #[serde(
+        rename = "reasoningEffort",
+        alias = "reasoning_effort",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_effort: Option<String>,
+    /// Hide this rung from the effort picker and reject selecting it via
+    /// `/effort`, opencode-style.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+}
+
+/// User-facing effort rungs that a reasoning map may configure. The keys are
+/// the ladder shown in `/effort`; wire values can be any string the endpoint
+/// accepts.
+pub const REASONING_EFFORT_MAP_KEYS: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Per-model reasoning-effort map for custom OpenAI-compatible providers.
+/// Mirrors opencode's per-model reasoning effort mapping: each user-facing
+/// effort rung (`none`, `low`, `high`, `xhigh`, ...) can be mapped to the
+/// concrete wire value the endpoint expects, or disabled entirely.
+///
+/// Example (`config.toml`):
+/// ```toml
+/// [[providers.gateway.models]]
+/// id = "my-model"
+/// reasoning = true
+/// [providers.gateway.models.reasoning_map]
+/// xhigh = { reasoningEffort = "xhigh" }
+/// high   = { reasoningEffort = "high" }
+/// none   = { reasoningEffort = "none" }
+/// medium = { disabled = true }
+/// low    = { disabled = true }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReasoningEffortMapConfig {
+    pub none: Option<ReasoningEffortRungConfig>,
+    pub minimal: Option<ReasoningEffortRungConfig>,
+    pub low: Option<ReasoningEffortRungConfig>,
+    pub medium: Option<ReasoningEffortRungConfig>,
+    pub high: Option<ReasoningEffortRungConfig>,
+    pub xhigh: Option<ReasoningEffortRungConfig>,
+    pub max: Option<ReasoningEffortRungConfig>,
+}
+
+impl ReasoningEffortMapConfig {
+    /// Configured rungs in ladder order.
+    pub fn rungs(&self) -> impl Iterator<Item = (&'static str, &ReasoningEffortRungConfig)> {
+        let candidates: [(&'static str, &Option<ReasoningEffortRungConfig>); 7] = [
+            ("none", &self.none),
+            ("minimal", &self.minimal),
+            ("low", &self.low),
+            ("medium", &self.medium),
+            ("high", &self.high),
+            ("xhigh", &self.xhigh),
+            ("max", &self.max),
+        ];
+        candidates
+            .into_iter()
+            .filter_map(|(key, rung)| rung.as_ref().map(|rung| (key, rung)))
+    }
+
+    /// The configured rung entry for a user-facing rung key, if listed.
+    pub fn rung(&self, rung: &str) -> Option<&ReasoningEffortRungConfig> {
+        match rung {
+            "none" => self.none.as_ref(),
+            "minimal" => self.minimal.as_ref(),
+            "low" => self.low.as_ref(),
+            "medium" => self.medium.as_ref(),
+            "high" => self.high.as_ref(),
+            "xhigh" => self.xhigh.as_ref(),
+            "max" => self.max.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// True when the rung is explicitly configured as disabled.
+    pub fn is_disabled(&self, rung: &str) -> bool {
+        self.rung(rung).is_some_and(|config| config.disabled)
+    }
+
+    /// True when no rung is configured.
+    pub fn is_empty(&self) -> bool {
+        self.none.is_none()
+            && self.minimal.is_none()
+            && self.low.is_none()
+            && self.medium.is_none()
+            && self.high.is_none()
+            && self.xhigh.is_none()
+            && self.max.is_none()
+    }
+
+    /// Resolve a user-facing rung to its wire value, or `None` when the rung
+    /// is disabled or not listed in the map (callers decide the fallback for
+    /// unlisted rungs; the default is identity mapping).
+    pub fn resolve(&self, rung: &str) -> Option<String> {
+        let rung_config = self.rung(rung)?;
+        if rung_config.disabled {
+            return None;
+        }
+        Some(
+            rung_config
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(rung)
+                .to_string(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct NamedProviderModelConfig {
     pub id: String,
@@ -400,6 +547,10 @@ pub struct NamedProviderModelConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub reasoning_effort: Option<String>,
+    /// Human-friendly display name shown in the `/model` picker instead of the
+    /// raw model id. Mirrors opencode's per-model `name` field.
+    #[serde(default, alias = "name", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(
         default,
         alias = "context_limit",
@@ -409,8 +560,31 @@ pub struct NamedProviderModelConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub context_window: Option<usize>,
+    /// Maximum output tokens the model can generate. Mirrors opencode's
+    /// `limit.output`. When unset, jcode uses its default max-tokens behavior.
+    #[serde(
+        default,
+        alias = "output_limit",
+        alias = "max_output_tokens",
+        alias = "max-output-tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_output_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input: Vec<String>,
+    /// Per-model pricing in USD per million tokens. Overrides models.dev catalog
+    /// pricing for custom/gateway models. Mirrors opencode's per-model `cost`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ModelCostConfig>,
+    /// Per-model reasoning-effort mapping (opencode parity). Keys are the
+    /// user-facing effort rungs; values map them to concrete wire values or
+    /// disable them.
+    #[serde(
+        default,
+        alias = "reasoning-map",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_map: Option<ReasoningEffortMapConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -418,6 +592,11 @@ pub struct NamedProviderModelConfig {
 pub struct NamedProviderConfig {
     #[serde(rename = "type")]
     pub provider_type: NamedProviderType,
+    /// Human-friendly display name shown in the `/model` picker for this
+    /// provider profile. When unset, the profile key (the `[providers.<key>]`
+    /// section name) is used. Mirrors opencode's provider-level `name` field.
+    #[serde(default, alias = "name", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub base_url: String,
     pub api: Option<String>,
     pub auth: NamedProviderAuth,
@@ -467,6 +646,7 @@ impl Default for NamedProviderConfig {
     fn default() -> Self {
         Self {
             provider_type: NamedProviderType::OpenAiCompatible,
+            display_name: None,
             base_url: String::new(),
             api: None,
             auth: NamedProviderAuth::Bearer,
@@ -1620,5 +1800,83 @@ mod reasoning_display_defaults_tests {
         display.set_reasoning_display(ReasoningDisplayMode::Off);
         assert!(display.has_explicit_reasoning_display());
         assert!(!display.show_thinking);
+    }
+}
+
+#[cfg(test)]
+mod reasoning_map_tests {
+    use super::*;
+
+    fn parse(json: &str) -> ReasoningEffortMapConfig {
+        serde_json::from_str(json).expect("reasoning map should parse")
+    }
+
+    #[test]
+    fn reasoning_map_parses_opencode_style_levels() {
+        let map = parse(
+            r#"{
+            "xhigh": {"reasoningEffort": "xhigh"},
+            "high": {"reasoningEffort": "high"},
+            "none": {"reasoningEffort": "none"},
+            "medium": {"disabled": true},
+            "low": {"disabled": true}
+        }"#,
+        );
+
+        assert_eq!(map.resolve("xhigh").as_deref(), Some("xhigh"));
+        assert_eq!(map.resolve("high").as_deref(), Some("high"));
+        assert_eq!(map.resolve("none").as_deref(), Some("none"));
+        // Listed-but-disabled rungs are rejected by resolve.
+        assert_eq!(map.resolve("medium"), None);
+        assert_eq!(map.resolve("low"), None);
+        assert!(map.is_disabled("medium"));
+        assert!(map.is_disabled("low"));
+        assert!(!map.is_disabled("xhigh"));
+        // Unlisted rungs are neither disabled nor resolvable: callers fall
+        // back to their built-in ladder behavior for them.
+        assert!(!map.is_disabled("minimal"));
+        assert_eq!(map.resolve("minimal"), None);
+        assert!(!map.is_disabled("max"));
+        assert_eq!(map.resolve("max"), None);
+        assert!(!map.is_empty());
+        // rungs() lists all configured rungs in ladder order.
+        let rung_keys: Vec<&str> = map.rungs().map(|(key, _)| key).collect();
+        assert_eq!(rung_keys, vec!["none", "low", "medium", "high", "xhigh"]);
+    }
+
+    #[test]
+    fn reasoning_map_accepts_snake_case_alias_and_trims_wire_values() {
+        let map = parse(r#"{"max": {"reasoning_effort": "  turbo  "}}"#);
+        assert_eq!(map.resolve("max").as_deref(), Some("turbo"));
+    }
+
+    #[test]
+    fn reasoning_map_unknown_rung_key_is_rejected() {
+        let result = serde_json::from_str::<ReasoningEffortMapConfig>(
+            r#"{"turbo": {"reasoningEffort": "ultra"}}"#,
+        );
+        assert!(result.is_err(), "unknown rung key must fail parsing");
+    }
+
+    #[test]
+    fn reasoning_map_without_levels_is_empty() {
+        let map: ReasoningEffortMapConfig = ReasoningEffortMapConfig::default();
+        assert!(map.is_empty());
+        let map = parse("{}");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn reasoning_map_round_trips_through_serde() {
+        let map = parse(
+            r#"{
+            "xhigh": {"reasoningEffort": "xhigh"},
+            "medium": {"disabled": true}
+        }"#,
+        );
+        let serialized = serde_json::to_string(&map).expect("serialize");
+        let reparsed: ReasoningEffortMapConfig =
+            serde_json::from_str(&serialized).expect("reparse");
+        assert_eq!(reparsed, map);
     }
 }

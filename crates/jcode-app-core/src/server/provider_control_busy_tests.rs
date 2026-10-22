@@ -33,6 +33,45 @@ impl Drop for IsolatedRuntimeDir {
     }
 }
 
+// `derive_session_provider_key` folds ambient runtime env (JCODE_RUNTIME_PROVIDER,
+// JCODE_ACTIVE_PROVIDER, JCODE_OPENROUTER_CACHE_NAMESPACE) into a new session's
+// provider_key, and session-model restore then turns `test-model-a` into
+// `openai:test-model-a`. Tests asserting raw model strings must run without
+// whatever provider env the surrounding process happened to export.
+struct IsolatedProviderEnv {
+    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl IsolatedProviderEnv {
+    fn new() -> Self {
+        let prev = [
+            "JCODE_RUNTIME_PROVIDER",
+            "JCODE_ACTIVE_PROVIDER",
+            "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        ]
+        .iter()
+        .map(|&key| {
+            let prev = std::env::var_os(key);
+            if prev.is_some() {
+                crate::env::remove_var(key);
+            }
+            (key, prev)
+        })
+        .collect();
+        Self { prev }
+    }
+}
+
+impl Drop for IsolatedProviderEnv {
+    fn drop(&mut self) {
+        for (key, prev) in self.prev.drain(..) {
+            if let Some(prev) = prev {
+                crate::env::set_var(key, prev);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct TestEffortProvider {
     model: StdMutex<Option<String>>,
@@ -66,7 +105,17 @@ impl Provider for TestEffortProvider {
     }
 
     fn set_model(&self, model: &str) -> anyhow::Result<()> {
-        *self.model.lock().expect("model lock") = Some(model.to_string());
+        let mut model_slot = self.model.lock().expect("model lock");
+        // Mirror named OpenAI-compatible runtimes: switching models
+        // re-evaluates the effective reasoning effort. "test-model-b"
+        // stands in for a plain model that cannot reason, so the stored
+        // effort must clear; other models restore the cycled value.
+        if model == "test-model-b" {
+            *self.effort.lock().expect("effort lock") = None;
+        } else {
+            *self.effort.lock().expect("effort lock") = Some("high".to_string());
+        }
+        *model_slot = Some(model.to_string());
         Ok(())
     }
 
@@ -263,6 +312,7 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
 async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
     let _guard = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
+    let _provider_env = IsolatedProviderEnv::new();
     let (provider, agent, tx, mut rx) = test_agent("session_rejected_auto_route").await;
     let selection = crate::provider::RouteSelection {
         model: "gpt-6.1-sol".to_string(),
@@ -349,9 +399,153 @@ async fn automatic_failover_source_respects_current_api_pool_membership() {
 }
 
 #[tokio::test]
+async fn cycle_model_pushes_the_new_effective_reasoning_effort_to_clients() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (_provider, agent, client_event_tx, mut client_event_rx) =
+        test_agent("session_cycle_model_effort_push").await;
+
+    agent
+        .lock()
+        .await
+        .set_reasoning_effort("medium")
+        .expect("reasoning model accepts effort changes");
+
+    // Cycle forward: test-model-a -> test-model-b (the plain stand-in).
+    handle_cycle_model(21, 1, &agent, &client_event_tx).await;
+
+    let model_event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("model change event should arrive");
+    assert!(matches!(
+        model_event,
+        Some(ServerEvent::ModelChanged { id: 21, .. })
+    ));
+    let effort_event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("model cycling must push the new effective effort");
+    assert!(
+        matches!(
+            effort_event,
+            Some(ServerEvent::ReasoningEffortChanged {
+                id: 21,
+                effort: None,
+                error: None,
+            })
+        ),
+        "cycling to a plain model must broadcast effort: None, got {effort_event:?}"
+    );
+
+    // Cycle forward again wraps back to the reasoning model.
+    handle_cycle_model(22, 1, &agent, &client_event_tx).await;
+    let model_event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("model change event should arrive");
+    assert!(matches!(
+        model_event,
+        Some(ServerEvent::ModelChanged { id: 22, .. })
+    ));
+    let effort_event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("cycling back must push the restored effort");
+    assert!(
+        matches!(
+            effort_event,
+            Some(ServerEvent::ReasoningEffortChanged {
+                id: 22,
+                effort: Some(ref effort),
+                error: None,
+            }) if effort == "high"
+        ),
+        "cycling back to the reasoning model must broadcast its restored effort, got {effort_event:?}"
+    );
+}
+
+#[tokio::test]
+async fn set_model_pushes_the_new_effective_reasoning_effort_to_clients() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, client_event_tx, mut client_event_rx) =
+        test_agent("session_set_model_effort_push").await;
+
+    // Give the reasoning model a non-default effort so the later clear is
+    // observable on the wire events.
+    agent
+        .lock()
+        .await
+        .set_reasoning_effort("medium")
+        .expect("reasoning model accepts effort changes");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("medium"));
+
+    // Switch to the plain model: the provider clears the stored effort.
+    handle_set_model(11, "test-model-b".to_string(), &agent, &client_event_tx).await;
+
+    let model_event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("model change event should arrive");
+    assert!(matches!(
+        model_event,
+        Some(ServerEvent::ModelChanged { id: 11, .. })
+    ));
+    let effort_event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("model switch must push the new effective effort");
+    assert!(
+        matches!(
+            effort_event,
+            Some(ServerEvent::ReasoningEffortChanged {
+                id: 11,
+                effort: None,
+                error: None,
+            })
+        ),
+        "switching to a plain model must broadcast effort: None, got {effort_event:?}"
+    );
+
+    // The agent-side effort view must not keep the stale value either.
+    assert_eq!(
+        agent.lock().await.provider_reasoning_effort(),
+        None,
+        "agent effort view must clear after switching to a plain model"
+    );
+
+    // Switching back restores the reasoning model's effort and pushes it.
+    handle_set_model(12, "test-model-a".to_string(), &agent, &client_event_tx).await;
+    let model_event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("model change event should arrive");
+    assert!(matches!(
+        model_event,
+        Some(ServerEvent::ModelChanged { id: 12, .. })
+    ));
+    let effort_event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("switching back must push the restored effort");
+    assert!(
+        matches!(
+            effort_event,
+            Some(ServerEvent::ReasoningEffortChanged {
+                id: 12,
+                effort: Some(ref effort),
+                error: None,
+            }) if effort == "high"
+        ),
+        "switching back to the reasoning model must broadcast its restored effort, got {effort_event:?}"
+    );
+    assert_eq!(
+        agent.lock().await.provider_reasoning_effort().as_deref(),
+        Some("high"),
+        "agent effort view must follow the restored provider effort"
+    );
+}
+
+#[tokio::test]
 async fn set_model_does_not_wait_for_busy_agent_lock() {
     let _guard = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
+    let _provider_env = IsolatedProviderEnv::new();
 
     let (provider, agent, client_event_tx, mut client_event_rx) =
         test_agent("session_busy_set_model").await;

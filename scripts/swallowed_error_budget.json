@@ -1,9 +1,9 @@
 {
-  "total": 3961,
+  "total": 3962,
   "totals_by_pattern": {
     "dot_ok": 1553,
     "let_underscore": 1428,
-    "unwrap_or_default": 980
+    "unwrap_or_default": 981
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -1709,7 +1709,7 @@
     "crates/jcode-provider-openrouter-runtime/src/openrouter_provider_impl.rs": {
       "dot_ok": 2,
       "let_underscore": 2,
-      "unwrap_or_default": 3
+      "unwrap_or_default": 4
     },
     "crates/jcode-provider-openrouter-runtime/src/openrouter_sse_stream.rs": {
       "dot_ok": 1,

@@ -1111,3 +1111,340 @@ fn history_images_base_omits_only_matching_image_sets() {
     let (sent, unchanged) = super::apply_history_images_base(images, None);
     assert!(!unchanged && sent.len() == 2);
 }
+
+/// Mirrors an OpenAI-compatible provider where switching is off but
+/// `extra_body` injects a fixed effort: `reasoning_effort()` is None while
+/// `effective_reasoning_effort()` reports the injected value.
+struct ExtraBodyEffortMockProvider;
+
+#[async_trait]
+impl Provider for ExtraBodyEffortMockProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!("complete must not be called here"))
+    }
+
+    fn name(&self) -> &str {
+        "mock-extra-body"
+    }
+
+    fn display_name(&self) -> String {
+        "Mock Extra Body".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+
+    fn model(&self) -> String {
+        "glm-5-2-nvfp4".to_string()
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        None
+    }
+
+    fn effective_reasoning_effort(&self) -> Option<String> {
+        Some("high".to_string())
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test serializes storage environment across awaits"
+)]
+async fn history_and_model_catalog_surface_extra_body_effort() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let session_id = "session_extra_body_effort";
+    let mut session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("extra body effort".to_string()),
+    );
+    session.save().expect("save session");
+
+    let provider: Arc<dyn Provider> = Arc::new(ExtraBodyEffortMockProvider);
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session.clone(),
+        None,
+    )));
+
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+
+    handle_get_model_catalog(7, session_id, &agent, &provider, &writer)
+        .await
+        .expect("model catalog should write history event");
+
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    stream_b
+        .read_to_end(&mut bytes)
+        .await
+        .expect("read model catalog event bytes");
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut line = String::new();
+    cursor.read_line(&mut line).expect("read first line");
+    let event: crate::protocol::ServerEvent =
+        serde_json::from_str(line.trim()).expect("decode model catalog event");
+
+    match event {
+        crate::protocol::ServerEvent::History {
+            reasoning_effort, ..
+        } => {
+            // Remote clients must see the effort actually being sent, not
+            // the switchable-state None.
+            assert_eq!(
+                reasoning_effort.as_deref(),
+                Some("high"),
+                "History event must surface extra_body-injected effort"
+            );
+        }
+        other => panic!("expected history event, got {:?}", other),
+    }
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test serializes storage environment across awaits"
+)]
+async fn history_guarded_path_surfaces_extra_body_effort() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let session_id = "session_extra_body_effort_guarded";
+    let session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("extra body effort guarded".to_string()),
+    );
+
+    let provider: Arc<dyn Provider> = Arc::new(ExtraBodyEffortMockProvider);
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session.clone(),
+        None,
+    )));
+
+    let sessions = crate::server::SessionAgents::default();
+    sessions
+        .write()
+        .await
+        .insert(session_id.to_string(), agent.clone());
+    let client_count = Arc::new(RwLock::new(1usize));
+
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+
+    let agent_guard = agent.lock().await;
+    super::send_history_with_guard(
+        11,
+        session_id,
+        agent_guard,
+        &sessions,
+        &client_count,
+        &writer,
+        "server-name",
+        "🔥",
+        None,
+        None,
+        super::HistoryPayloadMode::Full,
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect("guarded history should write event");
+
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    stream_b
+        .read_to_end(&mut bytes)
+        .await
+        .expect("read history event bytes");
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut line = String::new();
+    cursor.read_line(&mut line).expect("read first line");
+    let event: crate::protocol::ServerEvent =
+        serde_json::from_str(line.trim()).expect("decode history event");
+    match event {
+        crate::protocol::ServerEvent::History {
+            reasoning_effort, ..
+        } => {
+            assert_eq!(
+                reasoning_effort.as_deref(),
+                Some("high"),
+                "guarded history path must surface the extra_body effort"
+            );
+        }
+        other => panic!("expected history event, got {:?}", other),
+    }
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test serializes storage environment across awaits"
+)]
+async fn history_persisted_path_prefers_session_effort_then_falls_back_to_extra_body() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    // Session has an explicitly persisted (switchable) effort: it wins.
+    let session_id = "session_persisted_effort_wins";
+    let mut session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("persisted effort wins".to_string()),
+    );
+    session.reasoning_effort = Some("low".to_string());
+    session.save().expect("save session");
+
+    let provider: Arc<dyn Provider> = Arc::new(ExtraBodyEffortMockProvider);
+    let sessions = crate::server::SessionAgents::default();
+    let client_count = Arc::new(RwLock::new(1usize));
+
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+
+    super::send_history_from_persisted_session(
+        12,
+        session_id,
+        &provider,
+        &sessions,
+        &client_count,
+        &writer,
+        "server-name",
+        "🔥",
+        None,
+        None,
+        false,
+        None,
+    )
+    .await
+    .expect("persisted history should write event");
+
+    // Drop the write half so read_to_end sees EOF.
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    stream_b
+        .read_to_end(&mut bytes)
+        .await
+        .expect("read history event bytes");
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut line = String::new();
+    cursor.read_line(&mut line).expect("read first line");
+    let event: crate::protocol::ServerEvent =
+        serde_json::from_str(line.trim()).expect("decode history event");
+    match event {
+        crate::protocol::ServerEvent::History {
+            reasoning_effort, ..
+        } => {
+            assert_eq!(
+                reasoning_effort.as_deref(),
+                Some("low"),
+                "persisted session effort must win over the provider fallback"
+            );
+        }
+        other => panic!("expected history event, got {:?}", other),
+    }
+
+    // No persisted effort: the extra_body fallback surfaces instead.
+    let session_id = "session_persisted_effort_falls_back";
+    let mut session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("persisted effort fallback".to_string()),
+    );
+    session.reasoning_effort = None;
+    session.save().expect("save session");
+
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+
+    super::send_history_from_persisted_session(
+        13,
+        session_id,
+        &provider,
+        &sessions,
+        &client_count,
+        &writer,
+        "server-name",
+        "🔥",
+        None,
+        None,
+        false,
+        None,
+    )
+    .await
+    .expect("persisted history should write event");
+
+    // Drop the write half so read_to_end sees EOF.
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    stream_b
+        .read_to_end(&mut bytes)
+        .await
+        .expect("read history event bytes");
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut line = String::new();
+    cursor.read_line(&mut line).expect("read first line");
+    let event: crate::protocol::ServerEvent =
+        serde_json::from_str(line.trim()).expect("decode history event");
+    match event {
+        crate::protocol::ServerEvent::History {
+            reasoning_effort, ..
+        } => {
+            assert_eq!(
+                reasoning_effort.as_deref(),
+                Some("high"),
+                "without a persisted effort the extra_body fallback must surface"
+            );
+        }
+        other => panic!("expected history event, got {:?}", other),
+    }
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}

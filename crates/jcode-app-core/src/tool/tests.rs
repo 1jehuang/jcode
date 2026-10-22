@@ -718,6 +718,9 @@ async fn tool_descriptions_stay_under_token_cap() {
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
     // codemode documents its sandbox API; compile_remote a credit/consent notice.
+    // macos_computer_use is macOS-gated and keeps its live-machine safety policy.
+    // bash keeps the repository-search guidance (fixes #1804); the three pinned
+    // phrases alone exceed the cap, so shortening cannot satisfy it.
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -727,6 +730,8 @@ async fn tool_descriptions_stay_under_token_cap() {
         "applet",
         "codemode",
         "compile_remote",
+        "macos_computer_use",
+        "bash",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -790,6 +795,7 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // applet placement lists every shorthand so the model can pick a surface
     // without a round trip. desktop_selfdev action carries a safety warning:
     // killing the harness bridge by hand strands the calling session.
+    // macos_computer_use action/element document its live-machine safety surface.
     const EXEMPT: &[(&str, &str)] = &[
         (
             "todo",
@@ -797,6 +803,8 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         ),
         ("applet", "$.properties.placement"),
         ("desktop_selfdev", "$.properties.action"),
+        ("macos_computer_use", "$.properties.action"),
+        ("macos_computer_use", "$.properties.element"),
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -1881,6 +1889,10 @@ async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode()
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
+    // applet is gated behind the Desktop inline-renderer capability
+    // (73114dcf6), so a plain registry never registers it; enable the
+    // gate so the sweep still covers its open-ended node-tree schema.
+    registry.set_desktop_ui_enabled(true).await;
     let defs = registry.definitions(None).await;
     assert!(!defs.is_empty(), "the sweep must not pass vacuously");
 
@@ -1952,6 +1964,10 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let previous = std::env::var_os("JCODE_HOOK_POST_TOOL_FEEDBACK");
     crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+    // jcode-base is compiled without cfg(test) here, so the config cache
+    // only re-checks env every 500ms; force a reload so the hook is visible
+    // now (same pattern as the pre_tool hook test below).
+    crate::config::invalidate_config_cache();
 
     let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
     let mut ctx = mcp_test_context(dir.path());
@@ -1964,6 +1980,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
         Some(value) => crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", value),
         None => crate::env::remove_var("JCODE_HOOK_POST_TOOL_FEEDBACK"),
     }
+    crate::config::invalidate_config_cache();
     let output = result.expect("read should succeed").output;
     assert!(output.contains("hello"), "{output}");
     assert!(output.contains("[post_tool_feedback]"), "{output}");

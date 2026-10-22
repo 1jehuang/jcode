@@ -2771,16 +2771,22 @@ pub(in crate::tui::app) fn handle_server_event(
                     err
                 )));
             } else {
+                let had_effort = app.remote_reasoning_effort.is_some();
                 app.remote_reasoning_effort = effort.clone();
-                let label = effort
-                    .as_deref()
-                    .map(app_mod::effort_display_label)
-                    .unwrap_or("default");
-                app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Reasoning effort → {}",
-                    label
-                )));
-                app.set_status_notice(format!("Effort: {}", label));
+                if had_effort || effort.is_some() {
+                    // A visible transition: announce it. The None -> None and
+                    // absent -> absent cases stay silent so startup snapshots
+                    // and effort pushes that confirm no change add no noise.
+                    let label = effort
+                        .as_deref()
+                        .map(app_mod::effort_display_label)
+                        .unwrap_or("default");
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "✓ Reasoning effort → {}",
+                        label
+                    )));
+                    app.set_status_notice(format!("Effort: {}", label));
+                }
             }
             false
         }
