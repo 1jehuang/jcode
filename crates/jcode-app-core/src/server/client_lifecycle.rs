@@ -1885,8 +1885,8 @@ pub(super) async fn handle_client(
                 .await;
             }
 
-            Request::CycleModel { id, direction } => {
-                handle_cycle_model(id, direction, &agent, &client_event_tx).await;
+            Request::CycleModel { id, direction, persist_default } => {
+                handle_cycle_model(id, direction, persist_default, &agent, &client_event_tx).await;
             }
 
             Request::RefreshModels { id } => {
@@ -1897,12 +1897,15 @@ pub(super) async fn handle_client(
                 handle_set_premium_mode(id, mode, &agent, &client_event_tx).await;
             }
 
-            Request::SetModel { id, model } => {
-                handle_set_model(id, model, &agent, &client_event_tx).await;
+            Request::SetModel { id, model, persist_default } => {
+                handle_set_model(id, model, persist_default, &agent, &client_event_tx).await;
             }
 
-            Request::SetRoute { id, selection, automatic_failover } => {
-                handle_set_route(id, selection, automatic_failover, &agent, &client_event_tx).await;
+            Request::SetRoute { id, selection, automatic_failover, persist_default } => {
+                handle_set_route(
+                    id, selection, automatic_failover, persist_default, &agent, &client_event_tx,
+                )
+                .await;
             }
 
             Request::SetAgentModel { id, target, model, global } => {

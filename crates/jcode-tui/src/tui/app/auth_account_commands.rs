@@ -656,6 +656,9 @@ fn save_default_provider_setting(app: &mut App, provider: Option<&str>) {
     };
     match crate::config::Config::set_default_provider(provider.as_deref()) {
         Ok(()) => {
+            // Explicit save wins over any debounced write in flight (same
+            // reasoning as save_default_model_setting).
+            app.pending_model_config_persist = None;
             let label = provider.as_deref().unwrap_or("auto");
             app.set_status_notice(format!("Default provider: {}", label));
             app.push_display_message(DisplayMessage::system(format!(
@@ -673,6 +676,10 @@ fn save_default_provider_setting(app: &mut App, provider: Option<&str>) {
 fn save_default_model_setting(app: &mut App, model: Option<&str>) {
     match crate::config::Config::set_default_model_only(model) {
         Ok(()) => {
+            // An explicit save is newer than any debounced write from a
+            // recent switch; cancel it so the flush cannot restore the older
+            // choice over this one.
+            app.pending_model_config_persist = None;
             let label = model.unwrap_or("(provider default)");
             app.set_status_notice(format!("Default model: {}", label));
             app.push_display_message(DisplayMessage::system(format!(

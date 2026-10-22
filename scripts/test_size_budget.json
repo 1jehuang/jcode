@@ -23,7 +23,7 @@
     "crates/jcode-sdk/tests/client_behavior.rs": 1432,
     "crates/jcode-telemetry-core/src/tests.rs": 1836,
     "crates/jcode-tui/src/tui/app/remote_tests.rs": 1441,
-    "crates/jcode-tui/src/tui/app/tests.rs": 2030,
+    "crates/jcode-tui/src/tui/app/tests.rs": 2031,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_01/part_01.rs": 1604,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_02/part_01.rs": 1326,
     "crates/jcode-tui/src/tui/app/tests/onboarding_eval.rs": 3305,

@@ -829,11 +829,14 @@ impl RemoteConnection {
         Ok(id)
     }
 
-    /// Cycle the active model on the server
-    pub async fn cycle_model(&mut self, direction: i8) -> Result<()> {
+    /// Cycle the active model on the server. `persist_default` asks the
+    /// server to also save the confirmed model as its config default
+    /// (user-initiated cycling only).
+    pub async fn cycle_model(&mut self, direction: i8, persist_default: bool) -> Result<()> {
         let request = Request::CycleModel {
             id: self.next_request_id,
             direction,
+            persist_default,
         };
         self.next_request_id += 1;
         self.send_request(request).await
@@ -848,12 +851,15 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    /// Set the active model on the server
-    pub async fn set_model(&mut self, model: &str) -> Result<u64> {
+    /// Set the active model on the server. `persist_default` asks the server
+    /// to also save the confirmed model as its config default (user-initiated
+    /// switches only; failover/auth switches pass false).
+    pub async fn set_model(&mut self, model: &str, persist_default: bool) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::SetModel {
             id,
             model: model.to_string(),
+            persist_default,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
@@ -863,12 +869,14 @@ impl RemoteConnection {
     pub async fn set_route_selection(
         &mut self,
         selection: crate::provider::RouteSelection,
+        persist_default: bool,
     ) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::SetRoute {
             id,
             selection,
             automatic_failover: false,
+            persist_default,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
@@ -876,6 +884,7 @@ impl RemoteConnection {
     }
 
     /// Apply an automatic target only if the daemon still approves its pool membership.
+    /// Never persists a default: the user did not choose this route.
     pub async fn set_route_selection_for_failover(
         &mut self,
         selection: crate::provider::RouteSelection,
@@ -886,6 +895,7 @@ impl RemoteConnection {
             id,
             selection,
             automatic_failover: true,
+            persist_default: false,
         })
         .await?;
         Ok(id)

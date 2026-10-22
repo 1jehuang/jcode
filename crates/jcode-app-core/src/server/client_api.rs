@@ -292,11 +292,15 @@ impl Client {
         Ok(id)
     }
 
-    pub async fn cycle_model(&mut self, direction: i8) -> Result<u64> {
+    pub async fn cycle_model(&mut self, direction: i8, persist_default: bool) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
 
-        let request = Request::CycleModel { id, direction };
+        let request = Request::CycleModel {
+            id,
+            direction,
+            persist_default,
+        };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
         Ok(id)
