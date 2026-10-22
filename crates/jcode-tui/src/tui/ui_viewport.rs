@@ -456,6 +456,13 @@ pub(super) fn draw_messages(
             height: 1,
         }
     }));
+    let pinned_todo_card_height = (pinned_todo_lines as u16).min(render_area.height);
+    set_pinned_todo_card_area((pinned_todo_card_height > 0).then_some(Rect {
+        x: text_render_area.x,
+        y: render_area.y.saturating_add(prompt_preview_lines),
+        width: text_render_area.width,
+        height: pinned_todo_card_height,
+    }));
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
     // preview first, then the todo band, then transcript content).
     let top_band_lines = pinned_todo_lines + prompt_preview_lines;
@@ -1515,6 +1522,7 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
             Style::default().fg(dim_color()),
         )));
     } else {
+        lines.extend(card_lines);
         if expanded {
             more_line = Some(lines.len());
             lines.push(Line::from(Span::styled(
@@ -1522,12 +1530,12 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
                 Style::default().fg(dim_color()),
             )));
         }
-        lines.extend(card_lines);
     }
     (lines, more_line)
 }
 
 static PINNED_TODO_MORE_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
+static PINNED_TODO_CARD_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
 
 fn set_pinned_todo_more_area(area: Option<Rect>) {
     if let Ok(mut current) = PINNED_TODO_MORE_AREA.lock() {
@@ -1542,6 +1550,21 @@ pub(crate) fn set_pinned_todo_more_area_for_test(area: Option<Rect>) {
 
 pub(crate) fn pinned_todo_more_area() -> Option<Rect> {
     PINNED_TODO_MORE_AREA.lock().ok().and_then(|area| *area)
+}
+
+fn set_pinned_todo_card_area(area: Option<Rect>) {
+    if let Ok(mut current) = PINNED_TODO_CARD_AREA.lock() {
+        *current = area;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_pinned_todo_card_area_for_test(area: Option<Rect>) {
+    set_pinned_todo_card_area(area);
+}
+
+pub(crate) fn pinned_todo_card_area() -> Option<Rect> {
+    PINNED_TODO_CARD_AREA.lock().ok().and_then(|area| *area)
 }
 
 fn compute_prompt_preview_line_count(
