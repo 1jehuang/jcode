@@ -65,6 +65,8 @@ pub(crate) mod inline_image_ui;
 mod inline_interactive_ui;
 #[path = "ui_inline.rs"]
 mod inline_ui;
+#[path = "ui_interactive_state.rs"]
+pub(crate) mod interactive_state;
 #[path = "ui_input.rs"]
 pub(crate) mod input_ui;
 #[path = "ui_memory_estimates.rs"]
@@ -283,11 +285,6 @@ fn last_chat_scrollbar_visible() -> bool {
     {
         LAST_CHAT_SCROLLBAR_VISIBLE.load(Ordering::Relaxed) != 0
     }
-}
-
-#[cfg(test)]
-pub(crate) fn chat_scrollbar_visible_for_tests() -> bool {
-    last_chat_scrollbar_visible()
 }
 
 /// Get the total line count from the pinned diff/content pane (set during render).
@@ -2974,16 +2971,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + overscroll_height
         + donut_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut
     let available_height = chat_area.height;
-    let stable_fixed_height = fixed_height;
     let overflows = |prepared: &PreparedChatFrame| {
-        let started = Instant::now();
-        // Transcript lengths are document coordinates, not terminal coordinates.
-        // Narrowing before adding chrome wraps at 65,536 lines (and can panic
-        // in debug builds), leaving the copy snapshots cleared mid-frame.
-        let result = prepared.total_wrapped_lines().max(1)
-            > usize::from(available_height.saturating_sub(stable_fixed_height));
-        note_prep_overflow(started.elapsed());
-        result
+        interactive_state::transcript_overflows(prepared, fixed_height, available_height)
     };
 
     // Resolving native-scrollbar overflow can require wrapping the transcript at

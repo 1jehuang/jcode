@@ -1652,8 +1652,9 @@ fn truncate_background_task_label(label: &str, max_width: usize) -> String {
 }
 
 static PINNED_TODO_MORE_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
+static PINNED_TODO_CARD_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
 
-fn set_pinned_todo_more_area(area: Option<Rect>) {
+pub(super) fn set_pinned_todo_more_area(area: Option<Rect>) {
     if let Ok(mut current) = PINNED_TODO_MORE_AREA.lock() {
         *current = area;
     }
@@ -1666,6 +1667,21 @@ pub(crate) fn set_pinned_todo_more_area_for_test(area: Option<Rect>) {
 
 pub(crate) fn pinned_todo_more_area() -> Option<Rect> {
     PINNED_TODO_MORE_AREA.lock().ok().and_then(|area| *area)
+}
+
+pub(super) fn set_pinned_todo_card_area(area: Option<Rect>) {
+    if let Ok(mut current) = PINNED_TODO_CARD_AREA.lock() {
+        *current = area;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_pinned_todo_card_area_for_test(area: Option<Rect>) {
+    set_pinned_todo_card_area(area);
+}
+
+pub(crate) fn pinned_todo_card_area() -> Option<Rect> {
+    PINNED_TODO_CARD_AREA.lock().ok().and_then(|area| *area)
 }
 
 /// Smallest chat viewport (rows) that still shows the "Jump to bottom" pill.

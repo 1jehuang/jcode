@@ -14,8 +14,8 @@ fn test_long_transcript_u16_boundaries_keep_repeated_copy_working() {
     app.diagram_pane_enabled = false;
     app.input = "composer still copies".to_string();
     app.cursor_pos = app.input.len();
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
-        .expect("test terminal");
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("test terminal");
 
     // Measure the frame's header/spacer overhead once so these are actual
     // wrapped-line boundaries, rather than approximately 65K source lines.
@@ -39,14 +39,21 @@ fn test_long_transcript_u16_boundaries_keep_repeated_copy_working() {
             app.chat_native_scrollbar = scrollbar;
             render_and_snap(&app, &mut terminal);
             assert_eq!(crate::tui::ui::copy_viewport_line_count(), Some(target));
-            assert_eq!(crate::tui::ui::chat_scrollbar_visible_for_tests(), scrollbar);
-            assert!(crate::tui::ui::copy_viewport_visible_range()
-                .is_some_and(|(start, end)| start < end && end <= target));
+            assert_eq!(
+                crate::tui::ui::interactive_state::chat_scrollbar_visible_for_tests(),
+                scrollbar
+            );
+            assert!(
+                crate::tui::ui::copy_viewport_visible_range()
+                    .is_some_and(|(start, end)| start < end && end <= target)
+            );
 
             for key in [KeyCode::Enter, KeyCode::Char('y')] {
                 app.enter_copy_selection_mode();
                 assert!(app.select_chat_viewport_context());
-                let expected = app.current_copy_selection_text().expect("visible selection");
+                let expected = app
+                    .current_copy_selection_text()
+                    .expect("visible selection");
                 assert!(expected.contains("copy boundary"));
                 assert!(app.handle_copy_selection_key(key, KeyModifiers::empty()));
                 assert_eq!(clipboard.text().as_deref(), Some(expected.as_str()));
@@ -75,6 +82,68 @@ fn test_long_transcript_u16_boundaries_keep_repeated_copy_working() {
     }
 }
 
+#[test]
+fn test_offscreen_benchmark_preserves_live_copy_geometry_without_redraw() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.input = "live composer".to_string();
+    app.cursor_pos = app.input.len();
+    app.display_messages = vec![DisplayMessage::assistant("live transcript\n".repeat(80))];
+    app.bump_display_messages_version();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let layout = format!("{:?}", crate::tui::ui::last_layout_snapshot());
+    let frame = crate::tui::ui::last_chat_frame().unwrap();
+    let lines = crate::tui::ui::copy_viewport_line_count();
+    let scroll = (
+        crate::tui::ui::last_max_scroll(),
+        crate::tui::ui::last_total_wrapped_lines(),
+    );
+    let points = input_pane_screen_points(80, 24);
+    let start = points.iter().find(|(_, _, p)| p.column == 0).unwrap();
+    let end = points.iter().max_by_key(|(_, _, p)| p.column).unwrap();
+
+    let result = app.handle_debug_command(
+        r#"side-panel-latency:{"iterations":8,"warmup_iterations":2,"include_samples":false}"#,
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&result).unwrap_or_else(|e| panic!("benchmark JSON: {e}: {result}"));
+    assert_eq!(value["ok"], true);
+    // No live draw here: queued input must still use the original terminal.
+    assert_eq!(
+        format!("{:?}", crate::tui::ui::last_layout_snapshot()),
+        layout
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &frame,
+        &crate::tui::ui::last_chat_frame().unwrap()
+    ));
+    assert_eq!(crate::tui::ui::copy_viewport_line_count(), lines);
+    assert_eq!(
+        (
+            crate::tui::ui::last_max_scroll(),
+            crate::tui::ui::last_total_wrapped_lines()
+        ),
+        scroll
+    );
+    assert_eq!(
+        drag_copy(&mut app, (start.0, start.1), (end.0, end.1)),
+        "live composer"
+    );
+
+    let recovered = std::panic::catch_unwind(|| {
+        let _saved = crate::tui::ui::interactive_state::preserve_interactive_render_state();
+        crate::tui::ui::clear_copy_viewport_snapshot();
+        panic!("offscreen diagnostic failed");
+    });
+    assert!(recovered.is_err());
+    assert_eq!(crate::tui::ui::copy_viewport_line_count(), lines);
+    assert_eq!(
+        crate::tui::ui::input_pane_line_text(0).as_deref(),
+        Some("live composer")
+    );
+}
+
 /// Scan the rendered frame for screen cells that hit-test into the composer
 /// (`Input`) pane, returning `(col, row, point)` triples.
 fn input_pane_screen_points(
@@ -94,11 +163,7 @@ fn input_pane_screen_points(
     points
 }
 
-fn drag_copy(
-    app: &mut App,
-    start: (u16, u16),
-    end: (u16, u16),
-) -> String {
+fn drag_copy(app: &mut App, start: (u16, u16), end: (u16, u16)) -> String {
     let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let copied_for_closure = copied.clone();
     app.handle_copy_selection_mouse_with(
@@ -131,7 +196,7 @@ fn drag_copy(
             true
         },
     );
-    
+
     copied.lock().unwrap().clone()
 }
 
@@ -172,7 +237,10 @@ fn test_input_composer_drag_selects_and_copies_typed_text() {
 
     let copied = drag_copy(&mut app, start, end);
     assert_eq!(copied, "select this draft");
-    assert_eq!(app.status_notice(), Some("Copied selection · highlight remains visible".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some("Copied selection · highlight remains visible".to_string())
+    );
     // The highlight stays visible after copying (c7afd6620), but the drag ends.
     assert!(!app.copy_selection_mode);
     assert!(!app.copy_selection_dragging);
