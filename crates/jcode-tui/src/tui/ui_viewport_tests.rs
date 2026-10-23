@@ -138,3 +138,39 @@ fn expanded_prompt_preview_lists_recent_offscreen_prompts_oldest_first() {
         &("8".to_string(), "prompt 7 line".to_string())
     );
 }
+#[test]
+fn expand_badge_uses_footer_for_inline_and_tool_row_for_hidden_diffs() {
+    let active = super::ActiveFileDiffContext {
+        edit_index: 1,
+        msg_index: 0,
+        file_path: "src/main.rs".into(),
+        start_line: 10,
+        end_line: 25,
+        expandable: true,
+    };
+    assert_eq!(super::expand_badge_target_line(&active, true), 24);
+    assert_eq!(super::expand_badge_target_line(&active, false), 10);
+    // The footer remains the target even when the tool row has scrolled away.
+    let scroll = 20;
+    assert!(super::expand_badge_target_line(&active, true) >= scroll);
+    assert!(super::expand_badge_target_line(&active, false) < scroll);
+}
+
+#[test]
+fn compact_expand_badge_reserves_exact_display_cells() {
+    use unicode_width::UnicodeWidthStr;
+    for suffix in [" expand", " ✓ Expanded"] {
+        let rendered = format!(" [{}⇧E]{suffix}", super::copy_badge_alt_label());
+        assert_eq!(super::expand_badge_reserved_width(suffix), rendered.width());
+        let previous = format!(" {} [⇧] [E]{suffix}", super::copy_badge_alt_badge());
+        assert!(rendered.width() < previous.width());
+    }
+}
+
+#[test]
+fn exact_width_expand_badge_leaves_no_content_or_ellipsis() {
+    let mut line = ratatui::text::Line::from("╰─ 28 hidden");
+    super::truncate_line_for_copy_badge(&mut line, 0);
+    assert_eq!(line.width(), 0);
+    assert!(line.spans.is_empty());
+}

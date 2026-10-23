@@ -51,11 +51,19 @@ fn copy_badge_shortcut_width(key_label: &str) -> usize {
     UnicodeWidthStr::width(format!(" {} [⇧] [{key_label}]", copy_badge_alt_badge()).as_str())
 }
 
-/// Display width reserved for the inline expand-edit badge (`[Alt] [⇧] [E] …`).
+/// Display width reserved for the compact inline expand-edit badge (`[Alt⇧E] …`).
 /// The badge text differs between the collapsed (` expand`) and just-activated
 /// (` ✓ Expanded`) states, so callers pass the suffix that will actually render.
 pub(crate) fn expand_badge_reserved_width(badge_text: &str) -> usize {
-    UnicodeWidthStr::width(format!(" {} [⇧] [E]{badge_text}", copy_badge_alt_badge()).as_str())
+    UnicodeWidthStr::width(format!(" [{}⇧E]{badge_text}", copy_badge_alt_label()).as_str())
+}
+
+fn expand_badge_target_line(active: &ActiveFileDiffContext, inline: bool) -> usize {
+    if inline {
+        active.end_line.saturating_sub(1).max(active.start_line)
+    } else {
+        active.start_line
+    }
 }
 
 fn lower_bound(values: &[usize], target: usize) -> usize {
@@ -174,6 +182,10 @@ pub(crate) fn trim_line_trailing_spaces(line: &mut Line<'static>) {
 /// must be cut, end it with a dim ellipsis so the truncation is visible
 /// instead of silently swallowing words.
 pub(crate) fn truncate_line_for_copy_badge(line: &mut Line<'static>, max_content_width: usize) {
+    if max_content_width == 0 {
+        line.spans.clear();
+        return;
+    }
     if line.width() <= max_content_width {
         trim_line_trailing_spaces(line);
         return;
@@ -751,54 +763,43 @@ pub(super) fn draw_messages(
         }
     }
 
-    let expand_edit_badge_visible = active_inline_edit_context.as_ref().is_some_and(|active| {
-        active.expandable
-            && (!app.diff_mode().is_full_inline() || expand_feedback_active)
-            && active.start_line >= scroll
-            && active.start_line < visible_end
-    });
-    let visible_expand_badge_line = expand_edit_badge_visible
-        .then(|| {
-            active_inline_edit_context
-                .as_ref()
-                .map(|active| active.start_line)
-        })
-        .flatten();
-    super::set_visible_expand_edit_badge(expand_edit_badge_visible, visible_expand_badge_line);
+    super::set_visible_expand_edit_badge(false, None);
     super::set_visible_expand_edit_badge_rect(None);
 
     let expand_badge_line = if expand_feedback_active {
-        copy_badge_ui.expand_feedback_line.or_else(|| {
-            active_inline_edit_context
-                .as_ref()
-                .map(|active| active.start_line)
-        })
+        active_inline_edit_context
+            .as_ref()
+            .map(|active| expand_badge_target_line(active, app.diff_mode().is_inline()))
+            .or(copy_badge_ui.expand_feedback_line)
     } else {
         active_inline_edit_context
             .as_ref()
             .filter(|active| active.expandable && !app.diff_mode().is_full_inline())
-            .map(|active| active.start_line)
+            .map(|active| expand_badge_target_line(active, app.diff_mode().is_inline()))
     };
 
-    if let Some(mut badge_line) = expand_badge_line {
+    let badge_text = if expand_feedback_active {
+        " ✓ Expanded"
+    } else {
+        " expand"
+    };
+    let reserved = expand_badge_reserved_width(badge_text);
+    // Never wrap shortcut chrome or expose an invisible click target.
+    if let Some(mut badge_line) =
+        expand_badge_line.filter(|_| reserved <= content_area.width as usize)
+    {
         if expand_feedback_active && visible_end > scroll {
             badge_line = badge_line.clamp(scroll, visible_end.saturating_sub(1));
         }
         if badge_line >= scroll && badge_line < visible_end {
             let rel_idx = badge_line - scroll;
             if let Some(line) = visible_lines.get_mut(rel_idx) {
-                let badge_text = if expand_feedback_active {
-                    " ✓ Expanded"
-                } else {
-                    " expand"
-                };
-                let reserved = expand_badge_reserved_width(badge_text);
                 let max_content_width = (content_area.width as usize).saturating_sub(reserved);
                 truncate_line_for_copy_badge(line, max_content_width);
 
                 // Reserve the badge's width in the info-widget margin profile so a
                 // floating widget (e.g. the KV cache panel) docks far enough left to
-                // clear the appended `[Alt] [⇧] [E] expand` block instead of being
+                // clear the appended `[Alt⇧E] expand` block instead of being
                 // squeezed into a too-narrow slot that wraps/collides with it. The
                 // margin row for `visible_lines[rel_idx]` is offset by the synthetic
                 // top band (pinned todos + prompt preview), matching the
@@ -826,12 +827,12 @@ pub(super) fn draw_messages(
 
                 let badge_start = line.width().saturating_add(1);
                 line.spans.push(Span::raw(" "));
+                line.spans.push(Span::raw("["));
                 line.spans
-                    .push(Span::styled(copy_badge_alt_badge(), alt_style));
-                line.spans.push(Span::raw(" "));
-                line.spans.push(Span::styled("[⇧]", shift_style));
-                line.spans.push(Span::raw(" "));
-                line.spans.push(Span::styled("[E]", key_style));
+                    .push(Span::styled(copy_badge_alt_label(), alt_style));
+                line.spans.push(Span::styled("⇧", shift_style));
+                line.spans.push(Span::styled("E", key_style));
+                line.spans.push(Span::raw("]"));
                 let badge_text_style = if expand_feedback_active {
                     Style::default().fg(ai_color()).bold()
                 } else {
@@ -855,6 +856,7 @@ pub(super) fn draw_messages(
                     width: final_width.saturating_sub(badge_start) as u16,
                     height: 1,
                 }));
+                super::set_visible_expand_edit_badge(true, Some(badge_line));
             }
         }
     }

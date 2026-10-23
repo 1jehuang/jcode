@@ -308,9 +308,12 @@ fn assert_rendered_expand_badge_shortcut_expands_to_full_diff(
         "expected collapsed diff:\n{rendered}"
     );
     assert!(
-        rendered.contains("[E] expand"),
+        rendered.contains("⇧E] expand"),
         "expected visible expand badge for collapsed edit diff:\n{rendered}"
     );
+    assert!(rendered.lines().any(|line| line.contains("╰─") && line.contains("⇧E] expand")),
+        "expand badge should be on the footer:\n{rendered}");
+    assert!(!rendered.lines().any(|line| line.contains("✓ edit") && line.contains("⇧E] expand")));
     assert!(
         crate::tui::ui::visible_expand_edit_badge_line().is_some(),
         "rendering a visible expand badge should register its line"
@@ -334,7 +337,7 @@ fn assert_rendered_expand_badge_shortcut_expands_to_full_diff(
         "expanded full inline diff should not be collapsed:\n{rendered}"
     );
     assert!(
-        rendered.contains("[E] ✓ Expanded"),
+        rendered.contains("⇧E] ✓ Expanded"),
         "expanded full inline diff should briefly show the activated expand badge like copy feedback:\n{rendered}"
     );
     assert!(
@@ -392,7 +395,7 @@ fn test_clicking_expand_edit_badge_expands_to_full_diff() {
         let line = (0..area.width)
             .map(|col| buf[(col, row)].symbol())
             .collect::<String>();
-        if let Some(byte) = line.find("[E] expand") {
+        if let Some(byte) = line.find("⇧E] expand") {
             badge = Some((line[..byte].chars().count() as u16, row));
             break 'rows;
         }
@@ -427,7 +430,7 @@ fn test_expand_badge_shortcut_works_while_diff_pane_focused() {
 
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
-        rendered.contains("[E] expand"),
+        rendered.contains("⇧E] expand"),
         "expected visible expand badge before shortcut:\n{rendered}"
     );
 
@@ -453,7 +456,7 @@ fn test_remote_expand_badge_rendered_shortcut_expands_with_alt_uppercase_event()
 
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
-        rendered.contains("[E] expand"),
+        rendered.contains("⇧E] expand"),
         "expected visible expand badge before remote key injection:\n{rendered}"
     );
 
@@ -479,7 +482,7 @@ fn test_remote_expand_badge_rendered_shortcut_expands_with_alt_lowercase_event()
 
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
-        rendered.contains("[E] expand"),
+        rendered.contains("⇧E] expand"),
         "expected visible expand badge before remote key injection:\n{rendered}"
     );
 
@@ -502,7 +505,7 @@ fn test_expand_badge_does_not_render_for_short_untruncated_edit_diff() {
 
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
-        !rendered.contains("[E] expand"),
+        !rendered.contains("⇧E] expand"),
         "short full-visible edit diff should not show expand badge:\n{rendered}"
     );
 }
@@ -520,7 +523,7 @@ fn test_expand_badge_renders_when_diffs_are_hidden() {
         app.diff_mode = mode;
         let rendered = render_and_snap(&app, &mut terminal);
         assert!(
-            rendered.contains("[E] expand"),
+            rendered.contains("⇧E] expand"),
             "{mode:?} should keep the expand badge on edit rows:\n{rendered}"
         );
     }
