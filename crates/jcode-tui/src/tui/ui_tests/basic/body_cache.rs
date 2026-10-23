@@ -806,7 +806,8 @@ fn test_prepare_body_anchors_tool_image_after_tool_message() {
     );
     let region = &prepared.image_regions[0];
     assert_eq!(region.render, jcode_tui_messages::ImageRegionRender::Fit);
-    assert!(region.width > 2);
+    assert_eq!(region.width, 0);
+    assert_eq!(region.height, 0, "tool images start collapsed");
 
     // The region must sit between the tool message and the assistant reply.
     let plain = &prepared.wrapped_plain_lines;
@@ -910,7 +911,7 @@ fn test_prepare_body_collapses_anchored_images_when_inline_images_hidden() {
 
     let prepared = super::prepare::prepare_body(&state, 80, false);
     assert!(
-        prepared.image_regions.is_empty(),
+        prepared.image_regions.iter().all(|region| region.height == 0),
         "collapsed images must not emit drawable regions"
     );
     let text = prepared.wrapped_plain_lines.join("\n");

@@ -311,9 +311,17 @@ fn assert_rendered_expand_badge_shortcut_expands_to_full_diff(
         rendered.contains("⇧E] expand"),
         "expected visible expand badge for collapsed edit diff:\n{rendered}"
     );
-    assert!(rendered.lines().any(|line| line.contains("╰─") && line.contains("⇧E] expand")),
-        "expand badge should be on the footer:\n{rendered}");
-    assert!(!rendered.lines().any(|line| line.contains("✓ edit") && line.contains("⇧E] expand")));
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.contains("╰─") && line.contains("⇧E] expand")),
+        "expand badge should be on the footer:\n{rendered}"
+    );
+    assert!(
+        !rendered
+            .lines()
+            .any(|line| line.contains("✓ edit") && line.contains("⇧E] expand"))
+    );
     assert!(
         crate::tui::ui::visible_expand_edit_badge_line().is_some(),
         "rendering a visible expand badge should register its line"
@@ -1048,6 +1056,7 @@ fn test_click_on_inline_image_label_line_cycles_level() {
         height: 400,
         label: "shot.png".to_string(),
         uses_text_fallback: true,
+        collapsed_by_default: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
 
@@ -1123,6 +1132,17 @@ fn test_click_on_inline_image_label_line_cycles_level() {
     );
 }
 
+#[test]
+fn test_collapsed_width_bound_image_can_open() {
+    use crate::tui::ui::inline_image_ui::ImageExpandLevel;
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    let id = 0xCA1100;
+    crate::tui::mermaid::register_inline_level_geometries(id, [(4, 80); 3]);
+    assert_eq!(app.cycle_image_expand(id), ImageExpandLevel::Large);
+    assert_eq!(app.cycle_image_expand(id), ImageExpandLevel::Fit);
+}
+
 /// Kitty reports mouse motion at pixel granularity, so a physically plain
 /// click usually arrives as Down -> Drag(same cell) -> Up. The same-cell Drag
 /// must NOT start a selection drag; the release must still fall through to the
@@ -1146,6 +1166,7 @@ fn test_kitty_jitter_click_on_image_label_still_cycles_level() {
         height: 400,
         label: "shot.png".to_string(),
         uses_text_fallback: false,
+        collapsed_by_default: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let label_line = section
@@ -1315,6 +1336,14 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         rendered.contains("shot.png"),
         "image label line must render in the live frame, got:\n{rendered}"
     );
+    assert!(
+        rendered.contains("click to show image"),
+        "tool image must start collapsed: {rendered}"
+    );
+    assert!(
+        !rendered.contains("IIMG:"),
+        "internal marker must never leak"
+    );
 
     // Find the label line in the actual buffer: scan rows for the row carrying
     // the image label, then click a cell inside the label text.
@@ -1328,7 +1357,7 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         }
         // The transcript also shows the tool-call row ("read shot.png"); the
         // image label row is the one that carries the show/hide badge keys.
-        if !line.contains("shot.png") || !line.contains("[I]") {
+        if !line.contains("shot.png") || !line.contains("show image") {
             continue;
         }
         // Click the first cell of the label text (the hit-region is the whole
@@ -1371,7 +1400,15 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "clicking the rendered image label must cycle Fit -> Large \
          (this is the exact path the user reported as broken)"
     );
-    assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
+    assert!(
+        app.status_notice()
+            .is_some_and(|notice| notice.starts_with("Image size: large"))
+    );
+    let expanded = render_and_snap(&app, &mut terminal);
+    assert!(
+        !expanded.contains("click to show image"),
+        "click should reveal the image: {expanded}"
+    );
 }
 
 /// The inline-image placeholder marker row must never reach the terminal as
@@ -1485,6 +1522,7 @@ fn test_click_on_inline_image_body_cycles_level() {
         height: 200,
         label: "shot.png".to_string(),
         uses_text_fallback: false,
+        collapsed_by_default: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let region = *section
@@ -1579,6 +1617,7 @@ fn test_ctrl_wheel_over_inline_image_zooms_without_wrapping() {
         height: 200,
         label: "pinch.png".to_string(),
         uses_text_fallback: false,
+        collapsed_by_default: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let region = *section
@@ -1706,8 +1745,7 @@ fn test_copy_selection_partial_drag_over_inline_math_copies_whole_formula() {
             text.contains("Euler").then_some((abs, text))
         })
         .expect("prose line");
-    let euler_col =
-        unicode_width::UnicodeWidthStr::width(&text[..text.find("Euler").unwrap()]);
+    let euler_col = unicode_width::UnicodeWidthStr::width(&text[..text.find("Euler").unwrap()]);
     // Drag from the start of "Euler" to two cells into the formula.
     let start_col = euler_col;
     let end_col = euler_col + "Euler ".len() + 2;
@@ -1742,7 +1780,10 @@ fn test_unicode_math_copy_badge_copies_latex_to_clipboard() {
     let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_math_copy_test_app();
     let screen = render_and_snap(&app, &mut terminal);
-    assert!(screen.contains("⇧S]"), "math frame should get a badge: {screen}");
+    assert!(
+        screen.contains("⇧S]"),
+        "math frame should get a badge: {screen}"
+    );
 
     app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
         .unwrap();

@@ -2803,6 +2803,38 @@ pub(crate) fn render_background_task_message(
         };
         let row_width = block_width.saturating_sub(1);
         let timing = msg
+    if parsed.status.starts_with('✓') {
+        let muted = Style::default().fg(dim_color());
+        let block_width = if centered {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let mut header = Line::from(vec![
+            Span::styled("  ✓ ", Style::default().fg(rgb(120, 210, 140))),
+            Span::styled(
+                tools_ui::resolve_display_tool_name(&parsed.tool_name).to_string(),
+                Style::default().fg(tool_color()),
+            ),
+        ]);
+        if task_label != parsed.tool_name {
+            header.spans.push(Span::styled(" · ", muted));
+            header.spans.push(Span::styled(
+                task_label.clone(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        let timing = Line::from(Span::styled(format!(" · took {}", parsed.duration), muted));
+        let mut lines = vec![super::truncate_line_preserving_suffix_to_width(
+            &header,
+            &timing,
+            block_width.saturating_sub(1),
+        )];
+        if centered {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return lines;
+    }
             .content
             .lines()
             .find_map(|line| {

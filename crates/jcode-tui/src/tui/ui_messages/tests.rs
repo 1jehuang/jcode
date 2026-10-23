@@ -944,7 +944,7 @@ fn render_background_task_failure_without_diagnostic_is_honest() {
 }
 
 #[test]
-fn render_background_task_message_uses_box_and_truncates_preview_lines() {
+fn render_background_task_success_is_compact_and_preserves_raw_output() {
     let msg = DisplayMessage::background_task(
         "**Background task** `bg123` · `bash` · ✓ completed · 7.1s · exit 0\n\n```text\nline 1\nline 2\nline 3\nline 4\nline 5\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
     );
@@ -961,10 +961,28 @@ fn render_background_task_message_uses_box_and_truncates_preview_lines() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("✓ bg bash completed · bg123"));
-    assert!(plain.contains("exit 0 · 7.1s"));
-    assert!(plain.contains("line 1"));
-    assert!(plain.contains("… +1 more line"));
+    assert_eq!(lines.len(), 1);
+    assert!(plain.contains("✓ bash · took 7.1s"), "{plain}");
+    assert!(!plain.contains("exit 0"));
+    assert!(!plain.contains("line 1"));
+    assert!(!plain.contains("more line"));
+    assert!(!plain.contains('╭') && !plain.contains('│') && !plain.contains('╰'));
+    assert!(
+        lines[0].spans.iter().any(|span| {
+            span.content.contains('✓') && span.style.fg == Some(rgb(120, 210, 140))
+        })
+    );
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|span| { span.content == "bash" && span.style.fg == Some(tool_color()) })
+    );
+    assert!(msg.content.contains("line 5"));
+    assert!(
+        msg.content
+            .contains("bg action=\"output\" task_id=\"bg123\"")
+    );
     assert!(!plain.contains("task bg123 · bash"));
     assert!(!plain.contains("Preview"));
     assert!(!plain.contains("Full output"));
@@ -972,7 +990,7 @@ fn render_background_task_message_uses_box_and_truncates_preview_lines() {
 }
 
 #[test]
-fn render_background_task_message_strips_ansi_from_existing_preview() {
+fn render_background_task_success_hides_ansi_preview_without_changing_raw() {
     let msg = DisplayMessage::background_task(
         "**Background task** `bg123` · `bash` · ✓ completed · 0.1s · exit 0\n\n```text\n\u{1b}[32m✓\u{1b}[39m passes \u{1b}[2m12ms\u{1b}[22m\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
     );
@@ -1000,14 +1018,14 @@ fn render_system_message_strips_ansi_from_existing_inline_command_preview() {
 
     let plain = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off)
         .iter()
+    let raw = msg.content.clone();
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        plain.contains("✓ passes 12ms"),
-        "rendered preview:\n{plain}"
-    );
+    assert!(plain.contains("✓ bash · took 0.1s"), "{plain}");
+    assert!(!plain.contains("passes"));
+    assert_eq!(msg.content, raw);
     assert!(!plain.contains('\u{1b}'));
     assert!(!plain.contains("[32m"));
     assert!(!plain.contains("[2m"));
@@ -1015,6 +1033,33 @@ fn render_system_message_strips_ansi_from_existing_inline_command_preview() {
 
 #[test]
 fn render_background_task_message_uses_swarm_flavor_for_swarm_tool() {
+#[test]
+fn render_background_task_success_fits_unicode_and_narrow_widths() {
+    let raw = "**Background task** `bg-unicode` · `验证界面 e\u{301} 🦀 long background intent` (`bash`) · ✓ completed · 12.3s · exit 0\n\n```text\nlarge output must stay hidden\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg-unicode\"`";
+    let msg = DisplayMessage::background_task(raw);
+    for width in [0, 1, 2, 3, 8, 16, 20, 40, 100] {
+        let lines =
+            render_background_task_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 1);
+        let text = extract_line_text(&lines[0]);
+        assert!(
+            UnicodeWidthStr::width(text.as_str()) <= width as usize,
+            "width={width}: {text}"
+        );
+        assert!(!text.contains("large output"));
+        if width >= 40 {
+            assert!(text.contains("took 12.3s"), "{text}");
+        }
+        if width == 100 {
+            assert!(
+                text.contains("✓ bash · 验证界面 e\u{301} 🦀 long background intent"),
+                "{text}"
+            );
+        }
+    }
+    assert_eq!(msg.content, raw);
+}
+
     crate::tui::markdown::set_center_code_blocks(false);
     let msg = DisplayMessage::background_task(
         "**Background task** `bg777` · `run_plan (6 nodes, deep mode)` (`swarm`) · ✓ completed · 92.4s · exit 0\n\n```text\nSwarm plan reached terminal/blocked state after 9 loop(s). completed=6 blocked=0 cycles=0 active=0 assignments=8\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg777\"`",
@@ -2202,7 +2247,7 @@ fn render_background_task_messages_prefer_display_name() {
             .map(extract_line_text)
             .collect::<Vec<_>>()
             .join("\n");
-    assert!(completion_plain.contains("✓ bg Run integration tests completed · bg123"));
+    assert!(completion_plain.contains("✓ bash · Run integration tests · took 7.1s"));
 
     let progress = DisplayMessage::background_task(
         "**Background task progress** `bg123` · `Run integration tests` (`bash`)\n\n[#####-------] 42% · Running tests (reported)",

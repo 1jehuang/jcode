@@ -1035,6 +1035,9 @@ pub(super) fn draw_messages(
             .partition_point(|region| region.abs_line_idx < visible_end);
 
         for region in &prepared.image_regions[visible_image_start..visible_image_end] {
+            if region.height == 0 {
+                continue;
+            }
             let abs_idx = region.abs_line_idx;
             let hash = region.hash;
             let total_height = region.height;
@@ -1229,6 +1232,9 @@ pub(super) fn draw_messages(
                 .image_regions
                 .partition_point(|region| region.abs_line_idx < prefetch_end);
             for region in &prepared.image_regions[band_start..band_end] {
+                if region.height == 0 {
+                    continue;
+                }
                 // Only inline raster images use the prewarm pipeline; mermaid
                 // crops build their own state at draw time. In pinned mode the
                 // raster images still render in the flow, so always prefetch.

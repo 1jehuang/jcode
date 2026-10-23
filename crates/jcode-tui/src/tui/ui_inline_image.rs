@@ -32,6 +32,7 @@ pub(crate) struct InlineImageItem {
     pub height: u32,
     pub label: String,
     pub uses_text_fallback: bool,
+    pub collapsed_by_default: bool,
 }
 
 /// Cap an inline image at this fraction of the chat viewport height so a tall
@@ -694,6 +695,10 @@ fn resolve_item(
         height,
         label,
         uses_text_fallback: mermaid::uses_text_image_fallback(),
+        collapsed_by_default: matches!(
+            image.anchor,
+            Some(crate::session::RenderedImageAnchor::ToolCall { .. })
+        ),
     })
 }
 
@@ -928,6 +933,13 @@ pub(crate) fn image_label_line(
     };
     let dim = Style::default().add_modifier(Modifier::DIM);
     let prefix = Line::from(vec![Span::styled("  ", dim), Span::styled(label, dim)]);
+    if item.collapsed_by_default && !images_visible {
+        return jcode_tui_render::truncate_line_preserving_suffix_to_width(
+            &prefix,
+            &Line::from(Span::styled(" · click to show image", dim)),
+            width as usize,
+        );
+    }
     let mut suffix = vec![Span::raw("  ")];
     suffix.extend(super::viewport::shortcut_badge_spans('I', dim, dim, dim));
     suffix.push(Span::raw(" "));
@@ -953,6 +965,10 @@ fn image_fallback_note_line(width: u16) -> Line<'static> {
     )
 }
 
+fn collapsed_image_marker(id: u64) -> Line<'static> {
+    mermaid::inline_image_placeholder_lines(id, 0, 0).remove(0)
+}
+
 /// Lines for images anchored at a transcript message: per image, a leading
 /// blank, a dim label, a geometry-encoding marker line plus blank placeholder
 /// rows (recognized by the image-region scan), and a trailing blank. When
@@ -968,6 +984,8 @@ pub(crate) fn anchored_image_lines(
     let mut lines = Vec::new();
     for item in items {
         let level = levels.expand_level(item.id);
+        let images_visible =
+            images_visible && (!item.collapsed_by_default || level != ImageExpandLevel::Fit);
         let fit = fit_geometry_anchored(item.width, item.height, width, ImageExpandLevel::Fit);
         register_level_geometries(item, width, fit);
         lines.push(Line::from(""));
@@ -978,6 +996,11 @@ pub(crate) fn anchored_image_lines(
             if item.uses_text_fallback {
                 lines.push(image_fallback_note_line(width));
             }
+        } else if item.collapsed_by_default {
+            // A zero-height region keeps the label clickable without decoding
+            // or drawing pixels. Reuse the trailing spacer for its marker.
+            lines.push(collapsed_image_marker(item.id));
+            continue;
         }
         lines.push(Line::from(""));
     }
@@ -1011,9 +1034,22 @@ pub(crate) fn build_section(
 
     for item in items {
         let level = levels.expand_level(item.id);
+        let images_visible =
+            images_visible && (!item.collapsed_by_default || level != ImageExpandLevel::Fit);
         let fit = fit_geometry(item.width, item.height, width, viewport_height);
         register_level_geometries(item, width, fit);
         lines.push(image_label_line(item, width, images_visible, level));
+
+        if !images_visible && item.collapsed_by_default {
+            image_regions.push(ImageRegion {
+                abs_line_idx: lines.len(),
+                end_line: lines.len(),
+                hash: item.id,
+                height: 0,
+                width: 0,
+                render: ImageRegionRender::Fit,
+            });
+        }
 
         if images_visible {
             // The bottom (unanchored) section is rebuilt every frame, not body
@@ -1103,7 +1139,43 @@ mod tests {
             height,
             label: "test.png".to_string(),
             uses_text_fallback: false,
+            collapsed_by_default: false,
         }
+    }
+
+    #[test]
+    fn tool_images_start_as_clickable_labels_and_expand_on_demand() {
+        struct Large;
+        impl ImageExpandLevels for Large {
+            fn expand_level(&self, _: u64) -> ImageExpandLevel {
+                ImageExpandLevel::Large
+            }
+        }
+        let mut image = item(600, 400);
+        image.collapsed_by_default = true;
+        let collapsed = anchored_image_lines(&[image.clone()], 80, true, &AllFit);
+        assert_eq!(collapsed.len(), 3);
+        assert!(jcode_tui_render::line_plain_text(&collapsed[1]).contains("click to show image"));
+        assert_eq!(
+            mermaid::parse_inline_image_placeholder(&collapsed[2]),
+            Some((image.id, 0, 0))
+        );
+        let expanded = anchored_image_lines(&[image.clone()], 80, true, &Large);
+        assert!(expanded.len() > collapsed.len());
+        assert!(
+            mermaid::parse_inline_image_placeholder(&expanded[2])
+                .unwrap()
+                .1
+                > 0
+        );
+        let section = build_section(&[image], 80, 40, false, true, &AllFit);
+        assert_eq!(section.image_regions[0].height, 0);
+        assert_eq!(section.wrapped_lines.len(), 2);
+        let user_image = anchored_image_lines(&[item(600, 400)], 80, true, &AllFit);
+        assert!(
+            user_image.len() > collapsed.len(),
+            "user attachments remain expanded"
+        );
     }
 
     /// 1x1 transparent PNG used by the materialize tests below.
