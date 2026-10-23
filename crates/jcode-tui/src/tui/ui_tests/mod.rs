@@ -144,6 +144,7 @@ struct TestState {
     side_pane_images: Vec<crate::session::RenderedImage>,
     pin_images: bool,
     inline_images_visible: bool,
+    image_expand_level: Option<crate::tui::ImageExpandLevel>,
     cache_ttl_status: Option<crate::tui::CacheTtlInfo>,
     openai_reset_hint: Option<&'static str>,
     status_notice: Option<String>,
@@ -183,6 +184,9 @@ impl crate::tui::TuiState for TestState {
     }
     fn side_pane_images(&self) -> Vec<crate::session::RenderedImage> {
         self.side_pane_images.clone()
+    }
+    fn image_expand_level(&self, _id: u64) -> crate::tui::ImageExpandLevel {
+        self.image_expand_level.unwrap_or_default()
     }
     fn display_messages_version(&self) -> u64 {
         self.messages_version
