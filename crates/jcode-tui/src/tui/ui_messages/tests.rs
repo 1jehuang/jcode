@@ -895,7 +895,7 @@ fn render_background_task_failure_is_compact() {
     assert!(!plain.contains("remote build"));
     assert_eq!(
         extract_line_text(&lines[1]).find('╰').unwrap(),
-        extract_line_text(&lines[0]).find('✗').unwrap() + 2
+        extract_line_text(&lines[0]).find('✗').unwrap()
     );
     assert!(
         lines[0]
