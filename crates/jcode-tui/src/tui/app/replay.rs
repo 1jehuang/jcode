@@ -582,6 +582,7 @@ mod tests {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    tool_duration_ms: None,
                 });
                 pane
             })

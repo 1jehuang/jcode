@@ -1322,6 +1322,7 @@ fn test_prepare_messages_restored_history_matches_live_tool_rows() {
             intent: Some("Check repo state".to_string()),
             thought_signature: None,
         }),
+        tool_duration_ms: None,
     };
     let assistant = |tool_calls: Vec<String>| DisplayMessage {
         role: "assistant".to_string(),
@@ -1330,6 +1331,7 @@ fn test_prepare_messages_restored_history_matches_live_tool_rows() {
         duration_secs: None,
         title: None,
         tool_data: None,
+        tool_duration_ms: None,
     };
     let render = |messages: Vec<DisplayMessage>| {
         let state = TestState {
