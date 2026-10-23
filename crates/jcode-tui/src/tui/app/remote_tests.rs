@@ -417,11 +417,13 @@ fn process_remote_followups_auto_submits_staged_startup_prompt() {
 }
 
 #[test]
-fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
+fn process_remote_followups_waits_for_history_before_sending_startup_image() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
     app.input = "Start the fork immediately".to_string();
+    let images = vec![("image/png".to_string(), "aW1hZ2U=".to_string())];
+    app.pending_images = images.clone();
     app.cursor_pos = app.input.len();
     app.submit_input_on_startup = true;
 
@@ -430,57 +432,56 @@ fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     assert!(!remote.has_loaded_history());
 
+    let next_request_id = remote.next_request_id_for_test();
     rt.block_on(process_remote_followups(&mut app, &mut remote));
 
-    assert!(!app.submit_input_on_startup);
-    assert!(app.input.is_empty());
+    assert!(app.submit_input_on_startup);
+    assert_eq!(app.input, "Start the fork immediately");
+    assert_eq!(app.pending_images, images);
+    assert!(!app.is_processing);
+    assert!(app.current_message_id.is_none());
+    assert!(app.pending_startup_prompt_echo.is_none());
+    assert_eq!(remote.next_request_id_for_test(), next_request_id);
     assert!(
-        app.is_processing,
-        "the ordered startup request should start immediately"
-    );
-    assert!(
-        app.pending_startup_prompt_echo.as_deref() == Some("Start the fork immediately"),
-        "the user echo must be retained until bootstrap History is applied"
+        !app.display_messages()
+            .iter()
+            .any(|message| message.role == "user")
     );
 
-    let startup_id = app.current_message_id.expect("startup request was sent");
-    let next_request_id = remote.next_request_id_for_test();
-    let processing_started = app.processing_started;
-    let visible_turn_started = app.visible_turn_started;
-    // A queued recovery continuation must not dispatch behind the already-sent
-    // startup turn when Subscribe's earlier, idle History snapshot arrives.
-    app.hidden_queued_system_messages
-        .push("Continue after reload".to_string());
     handle_server_event(&mut app, startup_history("startup-session"), &mut remote);
     assert!(remote.has_loaded_history());
     assert_eq!(app.remote_session_id.as_deref(), Some("startup-session"));
-    assert!(app.is_processing);
-    assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
-    assert_eq!(app.current_message_id, Some(startup_id));
-    assert_eq!(app.processing_started, processing_started);
-    assert_eq!(app.visible_turn_started, visible_turn_started);
-    assert_eq!(
-        app.rate_limit_pending_message
-            .as_ref()
-            .map(|pending| pending.content.as_str()),
-        Some("Start the fork immediately")
-    );
+    assert!(!app.is_processing);
+    assert_eq!(remote.next_request_id_for_test(), next_request_id);
 
     rt.block_on(process_remote_followups(&mut app, &mut remote));
-    assert_eq!(
-        remote.next_request_id_for_test(),
-        next_request_id,
-        "History must not enable a second send"
-    );
-    assert_eq!(app.current_message_id, Some(startup_id));
+    assert!(!app.submit_input_on_startup);
+    assert!(app.input.is_empty());
+    assert!(app.pending_images.is_empty());
     assert!(app.is_processing);
+    assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
+    let startup_id = app.current_message_id.expect("startup request was sent");
+    assert_eq!(startup_id, next_request_id);
+    let sent = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("sent payload");
+    assert_eq!(sent.content, "Start the fork immediately");
+    assert_eq!(sent.images, images);
+
+    let next_request_id = remote.next_request_id_for_test();
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert_eq!(remote.next_request_id_for_test(), next_request_id);
+    assert_eq!(app.current_message_id, Some(startup_id));
     assert_eq!(
-        app.hidden_queued_system_messages,
-        vec!["Continue after reload"]
+        app.display_messages()
+            .iter()
+            .filter(|message| {
+                message.role == "user" && message.content == "Start the fork immediately"
+            })
+            .count(),
+        1
     );
-    assert!(app.display_messages().iter().any(|message| {
-        message.role == "user" && message.content == "Start the fork immediately"
-    }));
     assert!(app.pending_startup_prompt_echo.is_none());
 }
 
@@ -628,9 +629,10 @@ fn startup_send_state_is_not_preserved_for_real_session_switch() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
     rt.block_on(process_remote_followups(&mut app, &mut remote));
     assert!(app.current_message_id.is_some());
-    assert!(app.pending_startup_prompt_echo.is_some());
+    assert!(app.is_processing);
 
     handle_server_event(&mut app, startup_history("different-session"), &mut remote);
 
