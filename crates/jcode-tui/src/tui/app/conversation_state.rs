@@ -90,20 +90,45 @@ impl App {
         context_limit: u64,
         strategy: &str,
     ) -> String {
-        let usage = |tokens: Option<u64>| match tokens {
-            Some(tokens) if context_limit > 0 => format!(
+        let usage = |tokens: u64| match context_limit {
+            limit if limit > 0 => format!(
                 "~{} tokens ({:.1}%)",
                 Self::format_compaction_number(tokens),
                 tokens as f64 / context_limit as f64 * 100.0,
             ),
-            Some(tokens) => format!("~{} tokens", Self::format_compaction_number(tokens)),
-            None => "unknown".to_string(),
+            _ => format!("~{} tokens", Self::format_compaction_number(tokens)),
         };
-        format!(
-            "📦 Compacted ({strategy}): {} → {}",
-            usage(event.pre_tokens),
-            usage(event.post_tokens),
-        )
+        // Native automatic compaction can report an encrypted state without
+        // either token total. Response input usage is not a before/after pair.
+        // Keep any supplied measurement, otherwise describe the known work.
+        match (event.pre_tokens, event.post_tokens) {
+            (Some(before), Some(after)) => format!(
+                "📦 Compacted ({strategy}): {} → {}",
+                usage(before),
+                usage(after),
+            ),
+            (Some(before), None) => format!(
+                "📦 Compacted ({strategy}): before {}; after unavailable",
+                usage(before),
+            ),
+            (None, Some(after)) => format!(
+                "📦 Compacted ({strategy}): after {}; before unavailable",
+                usage(after),
+            ),
+            (None, None) => match (event.messages_compacted, event.messages_dropped) {
+                (Some(count), _) => format!(
+                    "📦 Compacted {} {} ({strategy})",
+                    Self::format_compaction_number(count as u64),
+                    if count == 1 { "message" } else { "messages" },
+                ),
+                (None, Some(count)) => format!(
+                    "📦 Context compacted ({strategy}): {} {} dropped",
+                    Self::format_compaction_number(count as u64),
+                    if count == 1 { "message" } else { "messages" },
+                ),
+                (None, None) => format!("📦 Context compacted ({strategy})"),
+            },
+        }
     }
 
     pub(super) fn format_compaction_number(value: u64) -> String {
@@ -832,6 +857,10 @@ impl App {
 }
 
 #[cfg(test)]
+#[path = "compaction_notice_tests.rs"]
+mod compaction_notice_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::message::ToolCall;
@@ -871,7 +900,7 @@ mod tests {
         event.post_tokens = None;
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): unknown → unknown"
+            "📦 Compacted 100 messages (emergency)"
         );
         event.pre_tokens = Some(0);
         event.post_tokens = Some(0);

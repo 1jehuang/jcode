@@ -4425,6 +4425,7 @@ dependencies = [
  "jcode-logging",
  "jcode-productivity-core",
  "jcode-provider-core",
+ "jcode-provider-openai",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-terminal-image",
