@@ -232,6 +232,7 @@ impl App {
     }
 
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
+        self.save_panel_view_for_reload();
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
             !pending.auto_retry
                 && !pending.is_system
@@ -672,88 +673,6 @@ impl App {
         }
     }
 
-    pub(super) fn set_side_panel_snapshot(
-        &mut self,
-        snapshot: crate::side_panel::SidePanelSnapshot,
-    ) {
-        self.refresh_split_view_if_needed();
-        let focus_split = self.split_view_enabled
-            && self.side_panel.focused_page_id.as_deref()
-                == Some(super::split_view::SPLIT_VIEW_PAGE_ID);
-        let focus_observe = self.observe_mode_enabled
-            && self.side_panel.focused_page_id.as_deref() == Some(super::observe::OBSERVE_PAGE_ID);
-        let snapshot = if self.split_view_enabled {
-            self.decorate_side_panel_with_split_view(snapshot, focus_split)
-        } else {
-            snapshot
-        };
-        let focus_todos = self.todos_view_enabled
-            && self.side_panel.focused_page_id.as_deref()
-                == Some(super::todos_view::TODOS_VIEW_PAGE_ID);
-        let snapshot = if self.todos_view_enabled {
-            self.decorate_side_panel_with_todos_view(snapshot, focus_todos)
-        } else {
-            snapshot
-        };
-        let snapshot = if self.observe_mode_enabled {
-            self.decorate_side_panel_with_observe(snapshot, focus_observe)
-        } else {
-            snapshot
-        };
-        self.apply_side_panel_snapshot(snapshot);
-    }
-
-    pub(super) fn apply_side_panel_snapshot(
-        &mut self,
-        mut snapshot: crate::side_panel::SidePanelSnapshot,
-    ) {
-        // Local app panels refresh through this path too. Content updates must
-        // not undo a user dismissal or replace the saved selection.
-        if self.side_panel_user_hidden {
-            snapshot.focused_page_id = None;
-        }
-        if snapshot != self.side_panel {
-            self.wake_idle_hibernation();
-        }
-        let focused_before = self.side_panel.focused_page_id.clone();
-        let focused_after = snapshot.focused_page_id.clone();
-        let focused_changed = focused_before != focused_after;
-        let focused_title_after = snapshot.focused_page().map(|page| page.title.clone());
-        if let Some(focused_after) = focused_after.as_deref() {
-            if focused_after != super::observe::OBSERVE_PAGE_ID {
-                self.last_side_panel_focus_id = Some(focused_after.to_string());
-            }
-        } else if snapshot.pages.is_empty() {
-            self.last_side_panel_focus_id = None;
-        }
-        self.last_side_panel_refresh = None;
-        self.side_panel = snapshot;
-        if self.side_panel.focused_page().is_none() {
-            self.side_panel_fullscreen = false;
-        }
-        self.note_runtime_memory_event("side_panel_updated", "side_panel_snapshot_applied");
-        if focused_changed {
-            self.diff_pane_scroll = 0;
-            self.diff_pane_scroll_x = 0;
-            self.side_panel_image_zoom_percent = 100;
-            self.diff_pane_auto_scroll = true;
-        }
-        if focused_changed {
-            match (focused_after.as_deref(), focused_title_after.as_deref()) {
-                (Some(super::split_view::SPLIT_VIEW_PAGE_ID), _) => {
-                    self.set_status_notice("Split view")
-                }
-                (Some(super::todos_view::TODOS_VIEW_PAGE_ID), _) => self.set_status_notice("Todos"),
-                (Some(super::observe::OBSERVE_PAGE_ID), _) => self.set_status_notice("Observe"),
-                (Some("goals"), _) => self.set_status_notice("Goals"),
-                (Some(id), Some(title)) if id.starts_with("goal.") => self.set_status_notice(title),
-                _ => {}
-            }
-        }
-        self.sync_diagram_fit_context();
-        self.prewarm_focused_side_panel();
-    }
-
     pub(super) fn refresh_side_panel_linked_content_if_due(&mut self) -> bool {
         if crate::tui::is_ssh_remote() {
             // Linked paths in server snapshots belong to the remote filesystem.
@@ -847,7 +766,7 @@ impl App {
         self.connection_type = connection_type.map(str::to_string);
     }
 
-    fn prewarm_focused_side_panel(&self) {
+    pub(super) fn prewarm_focused_side_panel(&self) {
         if self.idle_hibernation.frame.is_some() {
             return;
         }

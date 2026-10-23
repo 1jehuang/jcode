@@ -1085,10 +1085,10 @@ pub(super) fn handle_disconnect(
         "handle_disconnect: session={:?}, remote_session_id={:?}, reason={:?}, detail={}",
         app.resume_session_id, app.remote_session_id, reason, detail
     ));
-    // A disconnect can drop the final auth catalog completion event. Keep any
-    // queued prompt for reconnect, but release the transient model-setup gate so
-    // it cannot remain blocked forever waiting for an event that was lost.
+    // Keep queued prompts, but release the setup gate when disconnect loses
+    // the final auth catalog completion event.
     app.finish_auth_catalog_refresh();
+    app.mark_side_panel_unavailable("reconnecting");
     state.last_disconnect_reason = Some(detail.clone());
 
     let scheduled_retry =

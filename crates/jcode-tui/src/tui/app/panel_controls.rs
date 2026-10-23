@@ -3,6 +3,7 @@ use super::*;
 
 impl App {
     pub(in crate::tui::app) fn dismiss_side_panel(&mut self) {
+        self.remember_side_panel_viewport();
         self.side_panel_fullscreen = false;
         crate::tui::clear_side_panel_render_caches();
         self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
@@ -76,6 +77,7 @@ impl App {
 
         self.side_panel.focused_page_id = Some(restore_id.clone());
         self.last_side_panel_focus_id = Some(restore_id);
+        self.restore_side_panel_viewport();
         self.side_panel_fullscreen = false;
         self.side_panel_user_hidden = false;
         self.side_panel_explicit_hidden = false;

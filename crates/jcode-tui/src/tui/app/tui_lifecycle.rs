@@ -592,6 +592,8 @@ impl App {
             diff_pane_focus: false,
             diff_pane_auto_scroll: true,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            panel_sessions: panel_session::PanelSessions::restore_for_client(),
+            pending_panel_action: None,
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),
             observe_page_updated_at_ms: 0,
@@ -1078,6 +1080,8 @@ impl App {
             diff_pane_focus: false,
             diff_pane_auto_scroll: true,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            panel_sessions: panel_session::PanelSessions::restore_for_client(),
+            pending_panel_action: None,
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),
             observe_page_updated_at_ms: 0,
@@ -1377,9 +1381,7 @@ impl App {
                     self.replace_display_messages(display);
                     self.remote_side_pane_images = images;
                     self.invalidate_side_pane_images_signature();
-                    self.set_side_panel_snapshot(
-                        crate::side_panel::snapshot_for_session(&session_id).unwrap_or_default(),
-                    );
+                    self.load_session_panels(&session_id);
                     return true;
                 }
                 crate::logging::info(&format!(
@@ -1419,13 +1421,11 @@ impl App {
         let render_ms = render_start.elapsed().as_millis();
 
         let image_ms = 0;
-        self.set_side_panel_snapshot(
-            crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
-        );
         if self.remote_session_id.as_deref() != Some(session_id) {
             self.remote_available_service_tiers = None;
         }
         self.remote_session_id = Some(session_id.to_string());
+        self.load_session_panels(session_id);
         session.strip_transcript_for_remote_client();
         // Strip clears transcript vectors but keeps capacity; free buffers.
         session.messages.shrink_to_fit();
@@ -1634,13 +1634,5 @@ impl App {
                 .join(" ")
         ));
         app
-    }
-
-    /// Mark that a server was just spawned - run_remote will retry initial connection
-    /// instead of failing fatally, allowing the TUI to show while the server starts.
-    pub fn set_server_spawning(&mut self) {
-        self.server_spawning = true;
-        self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
-        self.remote_startup_phase_started = Some(Instant::now());
     }
 }

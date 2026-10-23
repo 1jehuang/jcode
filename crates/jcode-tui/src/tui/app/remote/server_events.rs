@@ -1661,11 +1661,8 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::SessionId { session_id } => {
-            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
-                app.remote_available_service_tiers = None;
-            }
             remote.set_session_id(session_id.clone());
-            app.remote_session_id = Some(session_id.clone());
+            app.adopt_remote_panel_session(&session_id);
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
             app.update_terminal_title();
@@ -2083,7 +2080,10 @@ pub(in crate::tui::app) fn handle_server_event(
             history_laps.push(("pre_header_hint", history_lap.elapsed().as_millis()));
             history_lap = Instant::now();
             app.persist_remote_header_hint();
-            app.set_side_panel_snapshot(side_panel);
+            let carries_server_identity =
+                server_name.is_some() || server_version.is_some() || is_canary.is_some();
+            let authoritative = session_changed || carries_server_identity;
+            app.apply_history_panel_snapshot(side_panel, authoritative);
             if history_images_match_retained(&images, &app.remote_side_pane_images) {
                 // The already-retained image set is identical (count + per-image
                 // byte length + metadata). Drop the incoming copy immediately so
@@ -2115,9 +2115,6 @@ pub(in crate::tui::app) fn handle_server_event(
             // header and the Overview session row flickered (`peak hare` ->
             // `hare`). Only overwrite what the event actually carries; a real
             // session switch still resets everything.
-            let carries_server_identity =
-                server_name.is_some() || server_version.is_some() || is_canary.is_some();
-            let authoritative = session_changed || carries_server_identity;
             if authoritative || !skills.is_empty() {
                 app.remote_skills = skills;
                 app.invalidate_command_candidates_cache();

@@ -374,41 +374,7 @@ impl App {
             return true;
         }
 
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) => {
-                self.set_status_notice(format!("Failed to read Markdown file: {}", error));
-                return true;
-            }
-        };
-        let title = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(path_target)
-            .to_string();
-        let id = format!("linked-markdown:{}", path.display());
-        let page = crate::side_panel::SidePanelPage {
-            id: id.clone(),
-            title: title.clone(),
-            file_path: path.to_string_lossy().into_owned(),
-            format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
-            source: crate::side_panel::SidePanelPageSource::LinkedFile,
-            content,
-            updated_at_ms: 0,
-        };
-
-        let mut snapshot = self.side_panel.clone();
-        if let Some(existing) = snapshot.pages.iter_mut().find(|existing| existing.id == id) {
-            *existing = page;
-        } else {
-            snapshot.pages.push(page);
-        }
-        snapshot.focused_page_id = Some(id);
-        self.side_panel_user_hidden = false;
-        self.apply_side_panel_snapshot(snapshot);
-        self.set_diff_pane_focus(true);
-        self.set_status_notice(format!("Opened Markdown: {}", title));
+        self.open_registered_markdown_panel(&path, path_target);
         true
     }
 
@@ -710,10 +676,10 @@ impl App {
         let next_index = (current_index as isize + delta).rem_euclid(page_count as isize) as usize;
 
         let next_id = self.side_panel.pages[next_index].id.clone();
+        self.remember_side_panel_viewport();
         self.side_panel.focused_page_id = Some(next_id.clone());
         self.last_side_panel_focus_id = Some(next_id);
-        self.diff_pane_scroll = 0;
-        self.diff_pane_auto_scroll = true;
+        self.restore_side_panel_viewport();
         crate::tui::clear_side_panel_render_caches();
     }
 
