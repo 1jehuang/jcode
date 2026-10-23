@@ -49,6 +49,8 @@ pub(crate) use animations::{
 mod box_utils;
 #[path = "ui_changelog.rs"]
 mod changelog;
+#[path = "ui_copy_frames.rs"]
+mod copy_frames;
 #[path = "ui_debug_capture.rs"]
 mod debug_capture;
 #[path = "ui_diagram_pane.rs"]
@@ -104,6 +106,7 @@ use box_utils::{
 use changelog::get_grouped_changelog;
 #[cfg(test)]
 use changelog::{ChangelogEntry, group_changelog_entries, parse_changelog_from};
+pub(crate) use copy_frames::{copy_selection_metrics, copy_selection_text};
 use debug_capture::{
     build_info_widget_summary, capture_widget_placements, rect_within_bounds, rects_overlap,
     widget_overlaps_content,
@@ -1755,6 +1758,13 @@ impl CopyViewportSnapshot {
         }
     }
 
+    fn raw_line_is_literal(&self, raw_line: usize) -> bool {
+        match &self.data {
+            CopyViewportData::Dense { .. } => false,
+            CopyViewportData::ChatFrame { prepared } => prepared.raw_line_is_literal(raw_line),
+        }
+    }
+
     fn wrapped_line_map(&self, abs_line: usize) -> Option<WrappedLineMap> {
         match &self.data {
             CopyViewportData::Dense {
@@ -2312,63 +2322,6 @@ pub(crate) fn copy_pane_first_visible_point(
         abs_line: snapshot.scroll,
         column: 0,
     })
-}
-
-pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Option<String> {
-    if range.start.pane != range.end.pane {
-        return None;
-    }
-    let snapshot = copy_snapshot_for_pane(range.start.pane)?;
-    let (start, end) =
-        if (range.start.abs_line, range.start.column) <= (range.end.abs_line, range.end.column) {
-            (range.start, range.end)
-        } else {
-            (range.end, range.start)
-        };
-
-    if start.abs_line >= snapshot.wrapped_plain_line_count()
-        || end.abs_line >= snapshot.wrapped_plain_line_count()
-    {
-        return None;
-    }
-
-    copy_selection::copy_selection_text_any(&snapshot, start, end)
-}
-
-/// Compute `(char_count, line_count)` for the current copy selection without
-/// allocating the full joined selection string. Mirrors `copy_selection_text`
-/// so the status line "N chars · M lines" matches what would be copied, but is
-/// allocation-free so it can run cheaply on every render frame / drag move.
-pub(crate) fn copy_selection_metrics(
-    range: crate::tui::CopySelectionRange,
-) -> Option<(usize, usize)> {
-    if range.start.pane != range.end.pane {
-        return None;
-    }
-    let snapshot = copy_snapshot_for_pane(range.start.pane)?;
-    let (start, end) =
-        if (range.start.abs_line, range.start.column) <= (range.end.abs_line, range.end.column) {
-            (range.start, range.end)
-        } else {
-            (range.end, range.start)
-        };
-
-    if start.abs_line >= snapshot.wrapped_plain_line_count()
-        || end.abs_line >= snapshot.wrapped_plain_line_count()
-    {
-        return None;
-    }
-
-    if let Some(metrics) =
-        copy_selection::copy_selection_metrics_from_raw_lines(&snapshot, start, end)
-    {
-        return Some(metrics);
-    }
-
-    // Fallback for selections that start on unmapped chrome. Rare, so the
-    // allocation is acceptable and keeps metrics identical to copied text.
-    let text = copy_selection::copy_selection_text_from_wrapped_lines(&snapshot, start, end)?;
-    Some((text.chars().count(), text.split('\n').count().max(1)))
 }
 
 pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
