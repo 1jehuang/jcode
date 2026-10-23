@@ -401,12 +401,27 @@ fn sort_reports_most_recent_first(results: &mut [ProviderUsage]) {
 }
 
 /// Stamp a report with last-used recency from the activity ledger: sets the
-/// sort key and appends human-readable activity details. OpenAI OAuth totals
+/// sort key and appends human-readable activity details. OAuth totals
 /// are attached after fetching (including cached/error reports), so local usage
 /// never waits for the provider quota cache to expire.
 fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
-    if let Some(label) = source_key.strip_prefix("openai:oauth:") {
-        let mut details = crate::provider_activity::openai_oauth_usage_summary(label);
+    let oauth_details = source_key
+        .strip_prefix("openai:oauth:")
+        .map(|label| {
+            (
+                label,
+                crate::provider_activity::openai_oauth_usage_summary(label),
+            )
+        })
+        .or_else(|| {
+            source_key.strip_prefix("claude:oauth:").map(|label| {
+                (
+                    label,
+                    crate::provider_activity::anthropic_oauth_usage_summary(label),
+                )
+            })
+        });
+    if let Some((label, mut details)) = oauth_details {
         details.push(("Account label".to_string(), label.to_string()));
         // Replace rather than duplicate local values if a caller reattaches.
         report
