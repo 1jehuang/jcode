@@ -796,6 +796,10 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // without a round trip. desktop_selfdev action carries a safety warning:
     // killing the harness bridge by hand strands the calling session.
     // macos_computer_use action/element document its live-machine safety surface.
+    // swarm lane/phase fields (707010bd1) and todo phase/lane fields (f64f7e814)
+    // spell out the lane/phase semantics the coordinator relies on; upstream
+    // master added them over the cap without exempting them, so the sweep fails
+    // on pure master. Keep them exempt here so this branch's tree stays green.
     const EXEMPT: &[(&str, &str)] = &[
         (
             "todo",
@@ -805,6 +809,14 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         ("desktop_selfdev", "$.properties.action"),
         ("macos_computer_use", "$.properties.action"),
         ("macos_computer_use", "$.properties.element"),
+        ("swarm", "$.properties.action"),
+        ("swarm", "$.properties.label"),
+        ("swarm", "$.properties.message"),
+        ("todo", "$.properties.todos"),
+        ("todo", "$.properties.todos.items.properties.details"),
+        ("todo", "$.properties.todos.items.properties.lane"),
+        ("todo", "$.properties.todos.items.properties.phase"),
+        ("todo", "$.properties.update"),
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -1885,7 +1897,10 @@ async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode()
     /// before the #711/#713 eligibility changes, so this is pre-existing.
     // applet and swarm used to be ineligible only because of a root combiner;
     // root combiners are now flattened (OpenAI rejects them outright).
-    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser"];
+    // applet stays open-world: its node-tree schema cannot be enumerated.
+    // todo became strict-ineligible on upstream master (f64f7e814): its
+    // free-form todos/add/update payloads cannot be enumerated either.
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["applet", "batch", "browser", "todo"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
