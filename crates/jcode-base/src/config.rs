@@ -6,13 +6,14 @@
 pub use jcode_config_types::{
     AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
     CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig, CustomWebSearchMethod,
-    DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
-    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
-    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
-    NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
-    NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig,
-    SessionConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
-    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    D2Layout, DiagramConfig, DiagramDisplayMode, DiagramEngine, DiagramPanePosition,
+    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
+    KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
+    MarkdownSpacingMode, MenubarConfig, NamedProviderAuth, NamedProviderConfig,
+    NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig, NotificationsConfig,
+    PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionConfig,
+    SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig,
+    UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -234,6 +235,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_BROWSER_JEV_MODEL",
     "JCODE_VOICE_JEV_MODEL",
     "JCODE_ENABLE_MERMAID",
+    "JCODE_ENABLE_D2",
     "JCODE_MEMORY_MODEL",
     "JCODE_MEMORY_SIDECAR_ENABLED",
     "JCODE_PERSIST_MEMORY_INJECTIONS",
@@ -613,6 +615,9 @@ pub struct Config {
     /// Feature toggles
     pub features: FeatureConfig,
 
+    /// Diagram generation preference and local D2 renderer settings.
+    pub diagrams: DiagramConfig,
+
     /// Web search tool configuration
     pub websearch: WebSearchConfig,
 
@@ -980,6 +985,10 @@ mod env_overrides;
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_d2_tests.rs"]
+mod d2_tests;
 
 #[cfg(test)]
 #[path = "config_color_tests.rs"]

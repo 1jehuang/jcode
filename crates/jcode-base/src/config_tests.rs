@@ -6,7 +6,7 @@ use super::{
 use std::ffi::OsString;
 use std::path::Path;
 
-fn restore_env_var(key: &str, previous: Option<OsString>) {
+pub(super) fn restore_env_var(key: &str, previous: Option<OsString>) {
     if let Some(previous) = previous {
         crate::env::set_var(key, previous);
     } else {

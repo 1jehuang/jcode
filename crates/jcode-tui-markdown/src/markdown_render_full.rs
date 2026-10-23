@@ -47,6 +47,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     let mut in_code_block = false;
     let mut code_block_lang: Option<String> = None;
     let mut code_block_content = String::new();
+    let mut code_block_closed = false;
     let mut heading_level: Option<u8> = None;
     let mut blockquote_depth = 0usize;
     let mut blockquote_starts = Vec::new();
@@ -90,7 +91,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     let mut dbg_list_items = 0usize;
     let mut dbg_blockquotes = 0usize;
 
-    for event in parser {
+    for (event, event_range) in parser.into_offset_iter() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 dbg_headings += 1;
@@ -407,6 +408,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 );
                 enter_centered_structured_block(&mut centered_blocks, lines.len());
                 in_code_block = true;
+                code_block_closed = fenced_block_is_closed(&text[event_range]);
                 code_block_lang = match kind {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
                     _ => None,
@@ -418,7 +420,17 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 // Check if this is a mermaid diagram
                 let is_mermaid = should_render_mermaid_block(code_block_lang.as_deref());
 
-                if is_mermaid {
+                let (d2_lines, d2_error) = render_d2_block(
+                    code_block_lang.as_deref(),
+                    &code_block_content,
+                    max_width,
+                    !streaming_mode && mermaid_should_register_active(),
+                    streaming_mode.then_some(dbg_code_blocks as u64),
+                    code_block_closed,
+                );
+                if let Some(d2_lines) = d2_lines {
+                    lines.extend(d2_lines);
+                } else if is_mermaid {
                     dbg_mermaid_blocks += 1;
                     // Render mermaid diagram.
                     // In streaming mode this updates only the ephemeral preview entry.
@@ -497,6 +509,12 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                         Line::from(Span::styled("└─", Style::default().fg(md_dim_color())))
                             .left_aligned(),
                     );
+                }
+                if let Some(error) = d2_error {
+                    lines.push(d2_notice_line(
+                        &format!("D2: {error} (showing source)"),
+                        max_width,
+                    ));
                 }
                 exit_centered_structured_block(&mut centered_blocks, lines.len());
                 in_code_block = false;

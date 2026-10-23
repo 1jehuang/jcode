@@ -15,6 +15,25 @@ pub enum RenderResult {
     Error(String),
 }
 
+pub fn is_d2_lang(lang: &str) -> bool {
+    lang.split_whitespace()
+        .next()
+        .is_some_and(|token| token.eq_ignore_ascii_case("d2"))
+}
+pub fn d2_rendering_enabled() -> bool {
+    false
+}
+pub fn render_d2_deferred_with_registration(
+    _content: &str,
+    _terminal_width: Option<u16>,
+    _register: bool,
+    _stream_scope: Option<u64>,
+) -> Option<RenderResult> {
+    Some(RenderResult::Error(
+        "D2 rendering is disabled in this build".into(),
+    ))
+}
+
 pub fn is_mermaid_lang(lang: &str) -> bool {
     lang.eq_ignore_ascii_case("mermaid") || lang.eq_ignore_ascii_case("mmd")
 }

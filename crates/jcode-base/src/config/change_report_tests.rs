@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn d2_render_changes_need_restart_but_generation_preference_is_live() {
+    for key in [
+        "features.d2",
+        "diagrams.d2_layout",
+        "diagrams.d2_binary",
+        "diagrams.d2_timeout_secs",
+    ] {
+        assert_eq!(liveness_for_key(key), Liveness::NeedsRestart, "{key}");
+    }
+    assert_eq!(
+        liveness_for_key("diagrams.preferred_engine"),
+        Liveness::Live
+    );
+    let changes = diff_toml(
+        "[diagrams]\npreferred_engine = 'mermaid'\nd2_layout = 'dagre'\n",
+        "[diagrams]\npreferred_engine = 'd2'\nd2_layout = 'tala'\n",
+    );
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0].key, "diagrams.d2_layout");
+    assert_eq!(changes[0].liveness, Liveness::NeedsRestart);
+    assert_eq!(changes[1].liveness, Liveness::Live);
+    let summary = summarize_changes(&changes);
+    assert!(summary.contains("Restart required for: diagrams.d2_layout."));
+}
+
+#[test]
 fn keybinding_edit_reports_as_live() {
     let report = summarize_toml_change(
         "[keybindings]\nscroll_up = \"ctrl+k\"\n",

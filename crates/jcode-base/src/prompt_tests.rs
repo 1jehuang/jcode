@@ -1,5 +1,101 @@
 use super::*;
 
+#[test]
+fn diagram_prompt_preference_reaches_full_and_split_builders() {
+    use crate::config::{D2Layout, DiagramEngine};
+
+    let root = tempfile::tempdir().unwrap();
+    let cases = [
+        (DiagramEngine::Mermaid, true, true, Some("mermaid")),
+        (DiagramEngine::D2, true, true, Some("d2")),
+        (DiagramEngine::D2, true, false, Some("mermaid")),
+        (DiagramEngine::Mermaid, false, true, Some("d2")),
+        (DiagramEngine::D2, false, false, None),
+        (DiagramEngine::Mermaid, false, false, None),
+    ];
+    for (engine, mermaid, d2, expected) in cases {
+        let capabilities = PromptCapabilities {
+            mermaid,
+            d2,
+            diagram_engine: engine,
+            d2_layout: D2Layout::Tala,
+        };
+        let (full, _) = build_system_prompt_full_with_capabilities(
+            None,
+            &[],
+            false,
+            None,
+            Some(root.path()),
+            capabilities,
+        );
+        let (split, _) = build_system_prompt_split_with_capabilities(
+            None,
+            &[],
+            false,
+            None,
+            Some(root.path()),
+            capabilities,
+        );
+        for text in [&full, &split.static_part] {
+            assert_eq!(text.contains(MERMAID_PROMPT), expected == Some("mermaid"));
+            assert_eq!(text.contains(D2_PROMPT), expected == Some("d2"));
+            if expected == Some("d2") {
+                assert!(text.contains("configured local D2 layout is `tala`"));
+            }
+        }
+    }
+}
+
+#[test]
+fn diagram_prompt_defaults_remain_byte_identical_and_config_selects_tala() {
+    assert_eq!(
+        PromptCapabilities::default().d2_layout,
+        crate::config::D2Layout::Tala
+    );
+    assert_eq!(
+        diagram_prompt(PromptCapabilities::default()).as_deref(),
+        Some(MERMAID_PROMPT)
+    );
+    let config: crate::config::Config =
+        toml::from_str("[diagrams]\npreferred_engine = 'd2'\n").unwrap();
+    let capabilities = PromptCapabilities::from_config(&config);
+    assert_eq!(
+        capabilities.diagram_engine,
+        crate::config::DiagramEngine::D2
+    );
+    assert_eq!(capabilities.d2_layout, crate::config::D2Layout::Tala);
+    let (full, _) =
+        build_system_prompt_full_with_capabilities(None, &[], false, None, None, capabilities);
+    assert!(full.contains(D2_PROMPT));
+    assert!(full.contains("configured local D2 layout is `tala`"));
+}
+
+#[test]
+fn diagram_prompt_is_appended_to_project_base_prompt_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join(".jcode")).unwrap();
+    std::fs::write(
+        root.path().join(".jcode/system-prompt.md"),
+        "Project base prompt.",
+    )
+    .unwrap();
+    let capabilities = PromptCapabilities {
+        diagram_engine: crate::config::DiagramEngine::D2,
+        ..Default::default()
+    };
+    let (prompt, _) = build_system_prompt_full_with_capabilities(
+        None,
+        &[],
+        false,
+        None,
+        Some(root.path()),
+        capabilities,
+    );
+    assert!(prompt.starts_with("Project base prompt."));
+    assert!(prompt.contains(D2_PROMPT));
+    assert!(!prompt.contains(DEFAULT_SYSTEM_PROMPT));
+}
+
 /// Verify the default system prompt does NOT identify as "Claude Code"
 /// It's fine to say "powered by Claude" but not "Claude Code" (Anthropic's product)
 #[test]
@@ -24,7 +120,10 @@ fn mermaid_prompt_module_follows_capability() {
         false,
         None,
         None,
-        PromptCapabilities { mermaid: true },
+        PromptCapabilities {
+            mermaid: true,
+            ..Default::default()
+        },
     );
     assert!(enabled.static_part.contains(MERMAID_PROMPT));
 
@@ -34,7 +133,11 @@ fn mermaid_prompt_module_follows_capability() {
         false,
         None,
         None,
-        PromptCapabilities { mermaid: false },
+        PromptCapabilities {
+            mermaid: false,
+            d2: false,
+            ..Default::default()
+        },
     );
     assert!(!disabled.static_part.contains("Mermaid diagrams"));
     assert!(!disabled.static_part.contains("fenced `mermaid` code block"));

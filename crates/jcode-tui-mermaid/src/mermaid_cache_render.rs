@@ -712,7 +712,7 @@ pub(super) fn get_cached_diagram_prefer_width(
         .get_preferred_width_or_any_in_memory(hash, min_width)
 }
 
-fn get_cached_diagram_for_profile(
+pub(super) fn get_cached_diagram_for_profile(
     hash: u64,
     min_width: Option<u32>,
     profile: RenderProfile,
@@ -726,7 +726,7 @@ pub fn get_cached_path(hash: u64) -> Option<PathBuf> {
 }
 
 #[cfg(feature = "renderer")]
-fn invalidate_cached_image(hash: u64) {
+pub(super) fn invalidate_cached_image(hash: u64) {
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.remove(&hash);
     }

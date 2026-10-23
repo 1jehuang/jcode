@@ -1,4 +1,8 @@
 use super::*;
+
+// These tests reset the process-wide failure cache. Keep each test's cache
+// lifecycle intact when the normal test runner executes cases in parallel.
+static FAILED_RENDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn latex_deferred_worker_batches_wakeups_and_bounds_batches() {
     for count in [0usize, 3, 65] {
@@ -205,6 +209,9 @@ fn non_handterm_and_unsupported_math_keep_existing_fallback_path() {
 
 #[test]
 fn failed_renders_are_remembered_so_the_toolchain_is_not_respawned() {
+    let _guard = FAILED_RENDER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     // #563: a failing snippet must not re-run latex/pdflatex on every redraw.
     reset_failed_render_cache();
     let key = cache_key("unique_failed_render_test_2026", true, 240);
@@ -226,6 +233,9 @@ fn failed_renders_are_remembered_so_the_toolchain_is_not_respawned() {
 #[cfg(unix)]
 #[test]
 fn a_failing_snippet_spawns_the_toolchain_only_once_across_many_redraws() {
+    let _guard = FAILED_RENDER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     // #563: the real symptom was a chain of latex/pdflatex processes, one per
     // redraw. Count actual spawns via a stub that appends to a log file, and
     // assert repeated render attempts do not re-spawn it.
@@ -320,6 +330,9 @@ fn uncached_math_returns_immediately_instead_of_blocking_the_draw_path() {
 
 #[test]
 fn failed_render_cache_is_bounded() {
+    let _guard = FAILED_RENDER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_failed_render_cache();
     for i in 0..(FAILED_RENDER_CACHE_LIMIT + 50) {
         remember_render_failure(i as u64, "boom");

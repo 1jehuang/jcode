@@ -113,6 +113,22 @@ Agents are also able to spawn their own swarms autonomously. They have a swarm t
 
 Supports a [wide range of providers](https://jcode.sh/docs#providers), including Claude OAuth and OpenAI Codex OAuth.
 
+## Diagrams
+
+Mermaid is the default diagram engine. Explicit `d2` fences render locally using an installed D2 executable, with TALA as the default D2 layout. Both diagram features are enabled by default.
+
+These are the defaults in `~/.jcode/config.toml`:
+
+```toml
+[diagrams]
+preferred_engine = "mermaid"
+d2_layout = "tala"
+```
+
+Set `preferred_engine = "d2"` to request D2 diagrams from the model. Existing Mermaid fences keep their renderer. Jcode doesn't install D2 or layout plugins, so use a D2 build with TALA available or choose `d2_layout = "dagre"` or `"elk"`. Restart the TUI after changing rendering settings. Both the daemon and client need a build with D2 support.
+
+See [D2 setup and rendering limits](docs/d2-diagrams.md) for executable paths, feature flags, and the supported source subset.
+
 ## Customizability / Self-Dev
 
 Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self development, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically.

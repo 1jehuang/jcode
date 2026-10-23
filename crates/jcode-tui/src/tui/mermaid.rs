@@ -41,7 +41,25 @@ pub use jcode_tui_mermaid::{ImageScrollBenchmark, cache_stat_syscalls};
 #[cfg(feature = "mmdr-size-api")]
 pub use jcode_tui_mermaid::terminal_theme;
 
+pub use jcode_tui_mermaid::{
+    D2Layout, D2Options, DiagramLanguage, DiagramSource, configure_d2, diagram_source_for_hash,
+    render_d2_sized_with_options,
+};
+
 pub fn install_jcode_mermaid_hooks() {
+    let config = crate::config::config();
+    configure_d2(
+        config.features.d2,
+        D2Options {
+            binary: std::path::PathBuf::from(&config.diagrams.d2_binary),
+            layout: match config.diagrams.d2_layout {
+                crate::config::D2Layout::Dagre => D2Layout::Dagre,
+                crate::config::D2Layout::Elk => D2Layout::Elk,
+                crate::config::D2Layout::Tala => D2Layout::Tala,
+            },
+            timeout: std::time::Duration::from_secs(config.diagrams.bounded_d2_timeout_secs()),
+        },
+    );
     jcode_tui_mermaid::set_log_hooks(crate::logging::info, crate::logging::warn);
     jcode_tui_mermaid::set_render_completed_hook(|| {
         crate::bus::Bus::global().publish(crate::bus::BusEvent::MermaidRenderCompleted);
