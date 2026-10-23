@@ -4,7 +4,7 @@ use super::{dim_color, rgb, tool_color, truncate_line_preserving_suffix_to_width
 use ratatui::prelude::*;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub(super) use jcode_tui_tool_display::concise_tool_error_summary;
+pub(super) use jcode_tui_tool_display::parse_tool_failure;
 pub(crate) use jcode_tui_tool_display::{
     canonical_tool_name, edit_render_name, is_edit_tool_name, resolve_display_tool_name,
     tool_output_looks_failed,

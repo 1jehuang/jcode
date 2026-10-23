@@ -2743,7 +2743,7 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
     assert!(
         extract_line_text(&lines[1])
             .trim_start()
-            .starts_with("╰─ error: command not found")
+            .starts_with("╰─ command not found")
     );
     assert!(
         lines[1]
@@ -2835,7 +2835,7 @@ fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
             assert!(
                 extract_line_text(&lines[1])
                     .trim_start()
-                    .starts_with("╰─ error: permission denied")
+                    .starts_with("╰─ permission denied")
             );
             assert!(
                 lines[1].spans.iter().all(
@@ -2861,7 +2861,7 @@ fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
             );
             assert_eq!(
                 extract_line_text(&lines[1]).find('╰').unwrap(),
-                header.find('✗').unwrap() + 2
+                header.find('✗').unwrap()
             );
             assert!(
                 extract_line_text(&success_lines[0])
@@ -2895,7 +2895,7 @@ fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason()
     assert_eq!(lines.len(), 4);
     assert_eq!(
         extract_line_text(&lines[2]).find('╰').unwrap(),
-        extract_line_text(&lines[1]).find('✗').unwrap() + 2
+        extract_line_text(&lines[1]).find('✗').unwrap()
     );
     assert!(extract_line_text(&lines[0]).contains("⚠ batch"));
     assert!(
@@ -2907,7 +2907,7 @@ fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason()
     assert!(
         extract_line_text(&lines[2])
             .trim_start()
-            .starts_with("╰─ error: permission denied")
+            .starts_with("╰─ permission denied")
     );
     assert!(
         lines[2]
@@ -2946,7 +2946,71 @@ fn render_tool_message_batch_level_failure_does_not_invent_successful_children()
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 2);
     assert!(extract_line_text(&lines[0]).contains("✗ batch · Inspect sources"));
-    assert!(extract_line_text(&lines[1]).contains("╰─ error: invalid tool_calls payload"));
+    assert!(extract_line_text(&lines[1]).contains("╰─ invalid tool_calls payload"));
+}
+
+#[test]
+fn compact_error_rows_normalize_logged_wrappers_and_align_under_status() {
+    let raw = "Error: [selfdev] Error: `selfdev build` requires a non-empty `reason` so other queued agents can see why the build is needed.";
+    let mut msg = DisplayMessage::system(raw);
+    msg.role = "tool".to_string();
+    msg.tool_data = Some(crate::message::ToolCall {
+        id: "logged-selfdev".to_string(),
+        name: "selfdev".to_string(),
+        input: serde_json::json!({"action": "build"}),
+        intent: Some("Build UI".to_string()),
+        thought_signature: None,
+    });
+    let lines = render_tool_message(&msg, 180, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 2);
+    let reason = extract_line_text(&lines[1]);
+    assert!(
+        reason.contains("`selfdev build` requires a non-empty `reason`"),
+        "{reason}"
+    );
+    assert!(
+        !reason.contains("Error:") && !reason.contains("error:") && !reason.contains("[selfdev]"),
+        "{reason}"
+    );
+    let wide_reason = extract_line_text(&render_tool_failure_reason(raw, 180, 2));
+    assert!(
+        !wide_reason.contains('…'),
+        "wide reasons must not be pre-truncated: {wide_reason}"
+    );
+    assert_eq!(extract_line_text(&lines[0]).find('✗'), reason.find('╰'));
+    assert_eq!(msg.content, raw, "normalization must not change raw logs");
+}
+
+#[test]
+fn background_errors_share_cause_selection_and_deduplicate_exit_codes() {
+    for (preview, expected) in [
+        (
+            "Error: [bash] Error: Command exited with code 101\n[stderr] error[E0308]: mismatched types",
+            "exit 101 · [E0308]: mismatched types",
+        ),
+        (
+            "Error: [bash] Error: Command exited with code 101",
+            "exit 101",
+        ),
+    ] {
+        let msg = DisplayMessage::background_task(format!(
+            "**Background task** `logged-bg` · `bash` · ✗ failed · 1.0s · exit 101\n\n```text\n{preview}\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"logged-bg\"`"
+        ));
+        let lines = render_background_task_message(&msg, 160, crate::config::DiffDisplayMode::Off);
+        let reason = extract_line_text(&lines[1]);
+        assert!(reason.ends_with(expected), "{reason}");
+        assert_eq!(reason.matches("exit 101").count(), 1, "{reason}");
+        assert_eq!(extract_line_text(&lines[0]).find('✗'), reason.find('╰'));
+    }
+}
+
+#[test]
+fn background_explicit_failure_reason_survives_without_prefix_or_preview() {
+    let msg = DisplayMessage::background_task(
+        "**Background task** `reason-only` · `bash` · ✗ failed · 1.0s · exit 1\n\n_Failure:_ permission denied\n\n_No output captured._\n\n_Full output:_ `bg action=\"output\" task_id=\"reason-only\"`"
+    );
+    let lines = render_background_task_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    assert!(extract_line_text(&lines[1]).ends_with("exit 1 · permission denied"));
 }
 
 #[test]
@@ -2962,16 +3026,16 @@ fn tool_failure_reason_handles_exit_codes_fallback_and_unicode_widths() {
         ),
         (
             "\u{1b}[31mError: 文件 e\u{301} missing\u{1b}[0m\nmore detail",
-            "error: 文件 e\u{301} missing",
+            "文件 e\u{301} missing",
         ),
         ("", "Tool call failed"),
         (
             "[tool timing: start=2026-10-23T00:00:00Z]\n[stderr] warning: unused variable\n[stderr] error[E0308]: mismatched types\n--- Command finished with exit code: 101 ---",
-            "error[E0308]: mismatched types",
+            "[E0308]: mismatched types",
         ),
         (
             "[tool timing: start=2026-10-23T00:00:00Z]\n[stderr] Error: permission denied",
-            "error: permission denied",
+            "permission denied",
         ),
     ] {
         let reason = render_tool_failure_reason(content, 120, 4);

@@ -2820,32 +2820,23 @@ pub(crate) fn render_background_task_message(
                 })
             })
             .unwrap_or_else(|| format!("took {}", parsed.duration));
-        let summary = parsed.failure_summary.clone().or_else(|| {
-            let preview = strip_ansi_escape_sequences(parsed.preview.as_deref()?);
-            preview
-                .lines()
-                .map(str::trim)
-                .map(|line| {
-                    line.strip_prefix("[stderr] ")
-                        .or_else(|| line.strip_prefix("[stdout] "))
-                        .unwrap_or(line)
-                })
-                .find(|line| {
-                    line.starts_with("error")
-                        || line.starts_with("Error:")
-                        || line.starts_with("Failed:")
-                        || line.contains("panicked at")
-                })
-                .map(str::to_owned)
-        });
-        let detail = summary
-            .map(|text| {
-                let clean = strip_ansi_escape_sequences(&text);
-                format!(
-                    "{} · {}",
-                    parsed.exit_label,
-                    clean.split_whitespace().collect::<Vec<_>>().join(" ")
-                )
+        // The notification's explicit failure field is already known to be an
+        // error even when its text has no severity prefix. Feed that evidence
+        // into the same parser; a stronger diagnostic in the preview can win.
+        let output = format!(
+            "Error: {}\n{}",
+            parsed.failure_summary.as_deref().unwrap_or(""),
+            parsed.preview.as_deref().unwrap_or("")
+        );
+        let clean = strip_ansi_escape_sequences(&output);
+        let detail = tools_ui::parse_tool_failure(&clean)
+            .map(|failure| {
+                let reason = failure.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+                if reason == parsed.exit_label {
+                    reason
+                } else {
+                    format!("{} · {}", parsed.exit_label, reason)
+                }
             })
             .unwrap_or_else(|| format!("{} · no diagnostic captured", parsed.exit_label));
         let mut header = Line::from(vec![
@@ -2865,7 +2856,7 @@ pub(crate) fn render_background_task_message(
         let timing = Line::from(Span::styled(format!(" · {timing}"), muted));
         header = super::truncate_line_preserving_suffix_to_width(&header, &timing, row_width);
         let reason = Line::from(vec![
-            Span::styled("    ╰─ ", muted),
+            Span::styled("  ╰─ ", muted),
             Span::styled(detail, muted),
         ]);
         let mut lines = vec![
@@ -4179,30 +4170,9 @@ fn expanded_diff_row(
 
 fn render_tool_failure_reason(content: &str, width: usize, indent: usize) -> Line<'static> {
     let clean = strip_ansi_escape_sequences(content);
-    let normalized = clean
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with("[tool timing:") && !line.starts_with("[tool duration:"))
-        .map(|line| {
-            line.strip_prefix("[stderr] ")
-                .or_else(|| line.strip_prefix("[stdout] "))
-                .unwrap_or(line)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let diagnostic = normalized
-        .lines()
-        .find(|line| line.starts_with("error[") || line.contains("panicked at"));
-    let summary = diagnostic
-        .map(str::to_owned)
-        .or_else(|| tools_ui::concise_tool_error_summary(&normalized))
-        .unwrap_or_else(|| {
-            normalized
-                .lines()
-                .find(|line| !line.is_empty())
-                .unwrap_or("Tool call failed")
-                .to_string()
-        });
+    let summary = tools_ui::parse_tool_failure(&clean)
+        .map(|failure| failure.reason)
+        .unwrap_or_else(|| "Tool call failed".to_string());
     let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
     super::truncate_line_with_ellipsis_to_width(
         &Line::from(Span::styled(
@@ -4513,7 +4483,7 @@ pub(crate) fn render_tool_message(
     let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
     if is_error && (tc.name != "batch" || batch_counts.is_none()) {
-        lines.push(render_tool_failure_reason(&msg.content, row_width, 4));
+        lines.push(render_tool_failure_reason(&msg.content, row_width, 2));
         if centered {
             super::left_pad_lines_to_block_width(&mut lines, width, block_width);
         }
@@ -4639,7 +4609,7 @@ pub(crate) fn render_tool_message(
                         .map(|result| result.content.as_str())
                         .unwrap_or("Error: Tool call failed"),
                     row_width,
-                    6,
+                    4,
                 ));
                 continue;
             }
