@@ -300,7 +300,113 @@ mod macos {
             return StdinState::Reading;
         }
 
+        // The process itself is not reading, but a wrapper shell's own thread
+        // parks while it waits on a child, and the `TH_FLAGS_SWAPPED` filter
+        // above correctly excludes that parked thread. `bash -c 'cat; echo'`
+        // never exec-optimizes multi-command scripts, so the actual reader is
+        // a grandchild: walk the descendant tree so the blocked `cat` is still
+        // detected and the stdin prompt fires. Children inherit the wrapper's
+        // fd 0 by default, so the same pipe/pty gate keeps unrelated readers
+        // out.
+        if descendant_is_reading(pid) {
+            return StdinState::Reading;
+        }
+
         StdinState::NotReading
+    }
+
+    /// `struct kinfo_proc` is not exposed by the `libc` crate, but its
+    /// layout is a stable kernel ABI: total size 648 bytes with `kp_proc.p_pid`
+    /// at offset 40 and `kp_eproc.e_ppid` at offset 560 (verified against
+    /// `sys/sysctl.h` on macOS 15). Parsing the raw `sysctl` buffer with these
+    /// offsets avoids hand-rolling the full struct and its padding rules.
+    const KINFO_PROC_SIZE: usize = 648;
+    const KINFO_PID_OFFSET: usize = 40;
+    const KINFO_PPID_OFFSET: usize = 560;
+
+    /// One `sysctl(KERN_PROC_ALL)` snapshot mapped to parent-child edges,
+    /// so the walk costs one syscall regardless of tree width. A process that
+    /// spawned between the snapshot and a thread check is simply missed until
+    /// the next poll.
+    fn child_map() -> std::collections::HashMap<u32, Vec<u32>> {
+        let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL];
+        let mut size = 0usize;
+        let ret = unsafe { libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) };
+        if ret != 0 || size == 0 || size % KINFO_PROC_SIZE != 0 {
+            return std::collections::HashMap::new();
+        }
+        // Bound the snapshot: a busy machine can report thousands of processes,
+        // and this runs inside the bash tool's poll loop.
+        let count = (size / KINFO_PROC_SIZE).min(4096);
+        let mut buf: Vec<u8> = vec![0u8; count * KINFO_PROC_SIZE];
+        let filled = unsafe { libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) };
+        if filled != 0 {
+            return std::collections::HashMap::new();
+        }
+        let count = (size / KINFO_PROC_SIZE).min(count);
+        let read_pid = |entry: &[u8], offset: usize| -> u32 {
+            i32::from_ne_bytes([
+                entry[offset],
+                entry[offset + 1],
+                entry[offset + 2],
+                entry[offset + 3],
+            ]) as u32
+        };
+        let mut map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        for i in 0..count {
+            let entry = &buf[i * KINFO_PROC_SIZE..(i + 1) * KINFO_PROC_SIZE];
+            let child = read_pid(entry, KINFO_PID_OFFSET);
+            let parent = read_pid(entry, KINFO_PPID_OFFSET);
+            if parent == 0 {
+                continue;
+            }
+            map.entry(parent).or_default().push(child);
+        }
+        map
+    }
+
+    /// Breadth-first descent of the descendant tree looking for a blocked
+    /// stdin reader, mirroring Linux's `check_process_tree`. The fd 0 gate
+    /// applies to every descendant, so a background child that redirected its
+    /// own stdin elsewhere never matches.
+    fn descendant_is_reading(pid: u32) -> bool {
+        const MAX_DEPTH: usize = 32;
+        const MAX_VISITED: usize = 512;
+        let children = child_map();
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        visited.insert(pid);
+        let mut queue: std::collections::VecDeque<(u32, usize)> = children
+            .get(&pid)
+            .map(|cs| cs.iter().map(|&c| (c, 1usize)).collect())
+            .unwrap_or_default();
+        while let Some((child, depth)) = queue.pop_front() {
+            if !visited.insert(child) || visited.len() > MAX_VISITED || depth > MAX_DEPTH {
+                continue;
+            }
+            if stdin_is_interactive(child as i32) && is_thread_waiting(child as i32) {
+                return true;
+            }
+            if let Some(grandchildren) = children.get(&child) {
+                for &grandchild in grandchildren {
+                    queue.push_back((grandchild, depth + 1));
+                }
+            }
+        }
+        false
     }
 
     fn stdin_is_interactive(pid: i32) -> bool {
