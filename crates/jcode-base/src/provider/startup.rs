@@ -678,7 +678,15 @@ impl MultiProvider {
             return;
         }
 
-        tokio::spawn(async move {
+        // MultiProvider::new() runs in plain #[test] contexts too, where no
+        // Tokio runtime exists; tokio::spawn would panic there (bus.rs uses
+        // the same try_current guard). Release the in-flight guard and skip.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            CURSOR_ACP_REFRESH_IN_FLIGHT.store(false, Ordering::SeqCst);
+            return;
+        };
+
+        handle.spawn(async move {
             match cursor_acp.prefetch_models().await {
                 Ok(()) => crate::logging::info(
                     "Cursor ACP model catalog prefetched from provider bootstrap",
