@@ -162,7 +162,7 @@ pub(super) async fn process_message_with_server_failover(
     enabled: bool,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
-    let mut result = super::client_lifecycle::process_message_streaming_mpsc(
+    let result = super::client_lifecycle::process_message_streaming_mpsc(
         Arc::clone(&agent),
         content,
         images,

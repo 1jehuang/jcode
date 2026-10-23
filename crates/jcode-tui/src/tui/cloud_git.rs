@@ -160,9 +160,7 @@ pub(crate) async fn bounded_output(
     let Ok(mut child) = command.spawn() else {
         return None;
     };
-    let Some(stdout) = child.stdout.take() else {
-        return None;
-    };
+    let stdout = child.stdout.take()?;
     let result = tokio::time::timeout(deadline, async {
         let mut bytes = Vec::new();
         stdout

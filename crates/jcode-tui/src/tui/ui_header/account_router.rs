@@ -305,9 +305,8 @@ fn inventory_lines(
         })
         .collect();
     if lines.is_empty() {
-        lines.push(Line::styled(
+        lines.push(Line::raw(
             "No auto-routing accounts · /login to add credential",
-            Style::default().fg(dim_color()),
         ));
     }
     lines
