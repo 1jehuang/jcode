@@ -1,6 +1,12 @@
 use super::*;
 
 #[test]
+fn default_options_use_tala_layout() {
+    assert_eq!(D2Layout::default(), D2Layout::Tala);
+    assert_eq!(D2Options::default().layout, D2Layout::Tala);
+}
+
+#[test]
 fn source_guard_rejects_imports_and_asset_forms_before_compilation() {
     for source in [
         "...@/private/example",
@@ -216,7 +222,6 @@ fn compiler_passes_fixed_local_flags_and_source_on_stdin() {
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let options = D2Options {
         binary: executable,
-        layout: D2Layout::Tala,
         ..D2Options::default()
     };
     assert!(compile_d2("a -> b", &options).unwrap().contains("<svg"));

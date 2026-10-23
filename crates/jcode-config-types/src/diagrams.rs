@@ -22,9 +22,9 @@ impl DiagramEngine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum D2Layout {
-    #[default]
     Dagre,
     Elk,
+    #[default]
     Tala,
 }
 
@@ -57,7 +57,7 @@ impl Default for DiagramConfig {
     fn default() -> Self {
         Self {
             preferred_engine: DiagramEngine::Mermaid,
-            d2_layout: D2Layout::Dagre,
+            d2_layout: D2Layout::default(),
             d2_binary: "d2".to_string(),
             d2_timeout_secs: 10,
         }
@@ -79,7 +79,8 @@ mod tests {
         let config: DiagramConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config, DiagramConfig::default());
         assert_eq!(config.preferred_engine, DiagramEngine::Mermaid);
-        assert_eq!(config.d2_layout, D2Layout::Dagre);
+        assert_eq!(config.d2_layout, D2Layout::Tala);
+        assert_eq!(D2Layout::default(), D2Layout::Tala);
         assert_eq!(config.d2_binary, "d2");
         assert_eq!(config.bounded_d2_timeout_secs(), 10);
     }
@@ -109,7 +110,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(config.preferred_engine, DiagramEngine::Mermaid);
-        assert_eq!(config.d2_layout, D2Layout::Dagre);
+        assert_eq!(config.d2_layout, D2Layout::Tala);
         assert_eq!(config.d2_binary, "/configured/d2");
         assert_eq!(config.bounded_d2_timeout_secs(), 7);
     }

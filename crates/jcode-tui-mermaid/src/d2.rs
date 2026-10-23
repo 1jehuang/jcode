@@ -14,9 +14,9 @@ const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum D2Layout {
-    #[default]
     Dagre,
     Elk,
+    #[default]
     Tala,
 }
 
@@ -42,7 +42,7 @@ impl Default for D2Options {
     fn default() -> Self {
         Self {
             binary: PathBuf::from("d2"),
-            layout: D2Layout::Dagre,
+            layout: D2Layout::default(),
             timeout: Duration::from_secs(10),
         }
     }

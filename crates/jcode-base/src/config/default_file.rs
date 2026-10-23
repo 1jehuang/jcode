@@ -324,8 +324,8 @@ update_channel = "stable"
 [diagrams]
 # Generation preference: "mermaid" (default) or "d2". Both fence languages work.
 preferred_engine = "mermaid"
-# D2 layout: "dagre" (default), "elk", or "tala". No automatic layout fallback.
-d2_layout = "dagre"
+# D2 layout: "tala" (default), "dagre", or "elk". No automatic layout fallback.
+d2_layout = "tala"
 # Executable name or path, not a shell command. Never downloaded automatically.
 d2_binary = "d2"
 # Render deadline, clamped to 1-30 seconds. Restart the TUI after render changes.

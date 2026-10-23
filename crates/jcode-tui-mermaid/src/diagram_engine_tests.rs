@@ -13,7 +13,13 @@ fn fence_matching_is_token_based_and_case_insensitive() {
 #[test]
 fn artifact_identity_separates_engines_and_layouts() {
     let source = "a -> b";
-    let dagre = Settings::new(false, D2Options::default());
+    let dagre = Settings::new(
+        false,
+        D2Options {
+            layout: super::super::D2Layout::Dagre,
+            ..D2Options::default()
+        },
+    );
     let tala = Settings::new(
         false,
         D2Options {

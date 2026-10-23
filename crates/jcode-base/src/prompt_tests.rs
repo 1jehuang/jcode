@@ -49,11 +49,15 @@ fn diagram_prompt_preference_reaches_full_and_split_builders() {
 #[test]
 fn diagram_prompt_defaults_remain_byte_identical_and_config_selects_tala() {
     assert_eq!(
+        PromptCapabilities::default().d2_layout,
+        crate::config::D2Layout::Tala
+    );
+    assert_eq!(
         diagram_prompt(PromptCapabilities::default()).as_deref(),
         Some(MERMAID_PROMPT)
     );
     let config: crate::config::Config =
-        toml::from_str("[diagrams]\npreferred_engine = 'd2'\nd2_layout = 'tala'\n").unwrap();
+        toml::from_str("[diagrams]\npreferred_engine = 'd2'\n").unwrap();
     let capabilities = PromptCapabilities::from_config(&config);
     assert_eq!(
         capabilities.diagram_engine,

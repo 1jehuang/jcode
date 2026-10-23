@@ -1,6 +1,6 @@
 # D2 diagrams
 
-Jcode can render self-contained `d2` fences with an installed local D2 executable. Mermaid remains the default syntax requested from the model. A fence's language selects its renderer, so choosing D2 doesn't reinterpret existing Mermaid diagrams.
+Jcode can render self-contained `d2` fences with an installed local D2 executable. Mermaid remains the default syntax requested from the model, and TALA is the default layout for D2. A fence's language selects its renderer, so choosing D2 doesn't reinterpret existing Mermaid diagrams.
 
 To prefer D2 with TALA, add this to `~/.jcode/config.toml`:
 
@@ -16,7 +16,7 @@ d2_binary = "d2"
 d2_timeout_secs = 10
 ```
 
-`d2_binary` accepts an executable name on PATH or a path such as `/opt/homebrew/bin/d2`, not a shell command. Jcode doesn't install D2 or download layout plugins. Use a D2 build with the requested layout available. `dagre` is the default layout; `elk` and `tala` are also accepted. A layout failure keeps the source visible instead of silently switching engines.
+`d2_binary` accepts an executable name on PATH or a path such as `/opt/homebrew/bin/d2`, not a shell command. Jcode doesn't install D2 or download layout plugins. Use a D2 build with the requested layout available. `tala` is the default layout; set `d2_layout = "dagre"` or `d2_layout = "elk"` if you want another layout or your D2 build doesn't provide TALA. A layout failure keeps the source visible instead of silently switching engines.
 
 `JCODE_ENABLE_D2=0` or `JCODE_ENABLE_D2=false` disables D2 independently of the config file. Restart the TUI after changing D2 rendering settings or its feature flag, and after installing or replacing D2 following a failed render. The client snapshots those settings at startup so cached Markdown and images use consistent options. The generation preference is separate: the daemon uses it when assembling model guidance. Both the daemon and client need a build with D2 support. An explicit full system-prompt override still replaces assembled guidance.
 

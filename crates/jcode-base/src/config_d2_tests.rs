@@ -28,6 +28,8 @@ fn d2_diagram_configuration_preserves_defaults_and_unrelated_settings() {
     let defaults: Config = toml::from_str("").unwrap();
     assert!(defaults.features.d2);
     assert_eq!(defaults.diagrams, DiagramConfig::default());
+    assert_eq!(defaults.diagrams.preferred_engine, DiagramEngine::Mermaid);
+    assert_eq!(defaults.diagrams.d2_layout, D2Layout::Tala);
     let config: Config = toml::from_str(
         "[features]\nd2 = false\n[display]\ncentered = true\n[diagrams]\npreferred_engine = 'unknown'\nd2_layout = 'unknown'\nd2_binary = '/local/d2'\n",
     ).unwrap();
@@ -35,11 +37,29 @@ fn d2_diagram_configuration_preserves_defaults_and_unrelated_settings() {
     assert!(config.features.mermaid);
     assert!(config.display.centered);
     assert_eq!(config.diagrams.preferred_engine, DiagramEngine::Mermaid);
-    assert_eq!(config.diagrams.d2_layout, D2Layout::Dagre);
+    assert_eq!(config.diagrams.d2_layout, D2Layout::Tala);
     assert_eq!(config.diagrams.d2_binary, "/local/d2");
     let template: Config = toml::from_str(&Config::default_config_file_contents()).unwrap();
     assert_eq!(template.diagrams, DiagramConfig::default());
     assert!(template.features.d2);
+}
+
+#[test]
+fn d2_diagram_readme_configuration_keeps_mermaid_and_defaults_to_tala() {
+    let readme = include_str!("../../../README.md");
+    let example = readme
+        .split("```toml\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let config: Config = toml::from_str(example).unwrap();
+    assert!(config.features.mermaid);
+    assert!(config.features.d2);
+    assert_eq!(config.diagrams, DiagramConfig::default());
+    assert_eq!(config.diagrams.preferred_engine, DiagramEngine::Mermaid);
+    assert_eq!(config.diagrams.d2_layout, D2Layout::Tala);
 }
 
 #[test]

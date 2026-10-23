@@ -52,7 +52,7 @@ impl Default for PromptCapabilities {
             mermaid: true,
             d2: true,
             diagram_engine: crate::config::DiagramEngine::Mermaid,
-            d2_layout: crate::config::D2Layout::Dagre,
+            d2_layout: crate::config::D2Layout::default(),
         }
     }
 }
