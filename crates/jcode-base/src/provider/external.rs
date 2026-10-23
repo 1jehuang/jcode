@@ -45,6 +45,11 @@ pub const GROK_BUILD_RUNTIME: &str = "grok-build";
 /// API-key runtime, and direct OpenAI-compatible profile endpoints), so the
 /// composition root registers one parameterized factory instead of one
 /// zero-arg factory per identity.
+///
+/// `NamedProfile` is large because `NamedProviderConfig` is a full config
+/// struct, but the spec is built once per provider switch and moved straight
+/// into the factory call; boxing it would add indirection for no measured win.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum OpenRouterRuntimeSpec {
     /// Environment-derived default runtime (`OpenRouterProvider::new()`).
