@@ -45,6 +45,7 @@ mod memory_profile;
 mod model;
 mod persistence;
 mod render;
+mod rewind;
 mod storage_paths;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
@@ -1521,33 +1522,6 @@ request in this new forked session, using the inherited conversation only as con
             }
         }
         None
-    }
-
-    /// Stored-message indices of the rewind targets shown in the TUI's
-    /// numbered `/rewind` list, in display order.
-    ///
-    /// The TUI numbers user/assistant *transcript entries* (what the user
-    /// actually sees), not raw stored messages. Stored tool-result messages
-    /// and tool-call-only assistant messages render as tool cards or nothing,
-    /// so counting raw stored messages diverges wildly from the on-screen
-    /// numbering in tool-heavy sessions (issue #432). Deriving targets from
-    /// the same rendering used for the transcript keeps `/rewind N` aligned
-    /// with the numbers `/rewind` prints.
-    ///
-    /// A single stored message can produce multiple transcript entries (text
-    /// split around a tool result); each entry keeps its own number and maps
-    /// to the same stored index so numbering matches the visible list exactly.
-    pub fn rewind_target_stored_indices(&self) -> Vec<usize> {
-        render_messages(self)
-            .into_iter()
-            .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
-            .filter_map(|message| message.stored_index)
-            .collect()
-    }
-
-    /// Number of `/rewind` targets (see [`Self::rewind_target_stored_indices`]).
-    pub fn rewind_target_count(&self) -> usize {
-        self.rewind_target_stored_indices().len()
     }
 
     /// Record a memory injection event for replay visualization

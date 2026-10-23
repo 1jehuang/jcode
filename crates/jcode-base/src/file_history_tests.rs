@@ -2,6 +2,9 @@ use super::*;
 use crate::message::{ContentBlock, Role};
 use jcode_session_types::RewindMode;
 
+#[path = "file_history_assistant_tests.rs"]
+mod assistant;
+
 struct TestHome {
     _dir: tempfile::TempDir,
     old: Option<std::ffi::OsString>,
