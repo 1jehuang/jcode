@@ -342,6 +342,7 @@ impl App {
         self.kv_cache.kv_cache_baseline = None;
         self.token_accounting.cache_next_optimal_input_tokens = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
+        self.kv_cache.beep_milestones_fired = 0;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.context_warning_shown = false;
