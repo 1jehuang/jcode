@@ -183,7 +183,11 @@ pub(crate) fn apply_configured_palette() {
         crate::logging::info(&format!(
             "Failed to load theme '{name}' ({err:#}); using system theme"
         ));
-        let _ = jcode_tui_style::theme::set_theme("system", None);
+        if let Err(fallback_err) = jcode_tui_style::theme::set_theme("system", None) {
+            crate::logging::info(&format!(
+                "Failed to apply system theme fallback ({fallback_err:#})"
+            ));
+        }
     }
 }
 

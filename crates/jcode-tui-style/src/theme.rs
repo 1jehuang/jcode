@@ -82,6 +82,12 @@ static ACTIVE_THEME: OnceLock<AtomicPtr<ThemeSnapshot>> = OnceLock::new();
 struct ThemeSnapshot {
     name: String,
     colors: [Color; THEME_COLOR_COUNT],
+    /// Which semantic roles the theme recolors relative to the palette
+    /// defaults, and to what. Empty for the built-in themes, which reuse the
+    /// palette defaults exactly; every entry is a semantic override a custom
+    /// TOML theme asked for. Precomputed at snapshot build so the per-frame
+    /// substitution pass never compares per cell.
+    semantic_overrides: Vec<(crate::palette::Role, Color)>,
     uses_terminal_adaptation: bool,
 }
 
@@ -89,9 +95,11 @@ impl ThemeSnapshot {
     fn from_theme(theme: &Theme) -> Self {
         let name = theme.name().to_string();
         let uses_terminal_adaptation = theme_uses_terminal_adaptation(&name);
+        let colors = theme_colors_array(theme);
         Self {
             name,
-            colors: theme_colors_array(theme),
+            semantic_overrides: theme_semantic_overrides(theme),
+            colors,
             uses_terminal_adaptation,
         }
     }
@@ -202,9 +210,63 @@ pub fn available_theme_names(themes_dir: Option<&Path>) -> Vec<String> {
 // Build the snapshot color array indexed by ThemeColor discriminant.
 // ALL_THEME_COLORS is count- and order-checked at compile time below, so
 // every discriminant slot gets its own variant's color.
+//
+// Every RGB value is routed through `color::rgb`, the same quantizing gate
+// all other color sources pass through, so a custom theme renders
+// identically on truecolor and 256-color terminals (#1877). Named colors
+// and `Color::Reset` are already renderable as-is and pass through
+// untouched.
 fn theme_colors_array(theme: &Theme) -> [Color; THEME_COLOR_COUNT] {
-    std::array::from_fn(|i| theme.color(ALL_THEME_COLORS[i]))
+    std::array::from_fn(|i| quantized(theme.color(ALL_THEME_COLORS[i])))
 }
+
+/// Terminal-quantize one theme color for display. Hex values from
+/// `parse_color` arrive as raw `Color::Rgb`; renderable named colors and
+/// `Reset` are returned unchanged.
+fn quantized(color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => color::rgb(r, g, b),
+        other => other,
+    }
+}
+
+/// Semantic roles a theme overrides, with the theme's replacement color
+/// (already quantized). A role is listed only when the theme's value differs
+/// from the palette default the historical UI rendered, so built-in themes
+/// produce an empty list and the substitution pass is a no-op for them.
+fn theme_semantic_overrides(theme: &Theme) -> Vec<(crate::palette::Role, Color)> {
+    SEMANTIC_ROLE_SLOTS
+        .iter()
+        .copied()
+        .filter(|&(key, role)| !theme_color_is_default(theme.color(key), role.default_rgb()))
+        .map(|(key, role)| (role, quantized(theme.color(key))))
+        .collect()
+}
+
+/// Whether a theme color equals the palette default for its role. Built-in
+/// theme colors are already quantized (`rgb(...)` at build), custom TOML
+/// values are raw `Color::Rgb`, so both representations are recognized.
+fn theme_color_is_default(color: Color, default: (u8, u8, u8)) -> bool {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b) == default,
+        Color::Indexed(index) => {
+            crate::color::indexed_to_rgb(index) == default
+                || crate::color::rgb_to_xterm256(default.0, default.1, default.2) == index
+        }
+        _ => false,
+    }
+}
+
+/// The six semantic theme slots and the palette role each recolors. Their
+/// defaults must match `Role::default_rgb`; asserted in theme tests.
+const SEMANTIC_ROLE_SLOTS: [(ThemeColor, crate::palette::Role); 6] = [
+    (ThemeColor::Success, crate::palette::Role::Success),
+    (ThemeColor::Warning, crate::palette::Role::Warning),
+    (ThemeColor::Error, crate::palette::Role::Error),
+    (ThemeColor::Info, crate::palette::Role::Info),
+    (ThemeColor::Border, crate::palette::Role::Border),
+    (ThemeColor::SelectionBg, crate::palette::Role::SelectionBg),
+];
 
 // One entry per ThemeColor variant, in discriminant order. The declared
 // length is THEME_COLOR_COUNT, so adding or removing a variant without
@@ -477,6 +539,11 @@ pub fn user_bg() -> Color {
 pub fn input_text() -> Color {
     themed_color(ThemeColor::InputText)
 }
+/// Ready-made style for input text lines, so callers do not each wrap
+/// `input_text()` in a fresh `Style`.
+pub fn input_text_style() -> Style {
+    Style::default().fg(input_text())
+}
 pub fn input_bg() -> Color {
     themed_color(ThemeColor::InputBg)
 }
@@ -521,6 +588,26 @@ pub fn border_color() -> Color {
 }
 pub fn selection_bg_color() -> Color {
     themed_color(ThemeColor::SelectionBg)
+}
+
+/// Themed selection background, if the active theme overrides it. The
+/// historical selection fill is a blend computed per base background, so it
+/// never matches a role default; `selection_bg_for` consults this directly.
+/// Returns the value only when it differs from the palette default, which
+/// keeps built-in themes on the blend path.
+pub fn themed_selection_bg() -> Option<Color> {
+    let snapshot = active_theme_snapshot();
+    snapshot
+        .semantic_overrides
+        .iter()
+        .find(|(role, _)| *role == crate::palette::Role::SelectionBg)
+        .map(|(_, color)| *color)
+}
+
+/// Semantic overrides of the active theme, for the per-frame substitution
+/// pass. Empty for built-in themes, so the pass short-circuits.
+pub(crate) fn semantic_overrides() -> &'static [(crate::palette::Role, Color)] {
+    active_theme_snapshot().semantic_overrides.as_slice()
 }
 
 // Spinner frames for animated status. Keep these single-cell because the fast

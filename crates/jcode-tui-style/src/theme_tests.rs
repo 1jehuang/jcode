@@ -2,14 +2,18 @@
 // Split from theme.rs to keep the production file under the
 // 1200-LOC code-size budget (see scripts/check_code_size_budget.py).
 use super::*;
-use std::sync::Mutex;
 
 /// Serializes tests that mutate the process-global `ACTIVE_THEME`. Without
 /// this, parallel test threads race on the singleton and flake (e.g. one
 /// test asserts `light` while another has just re-set it to `dark`). The
 /// lock is held until `ActiveThemeGuard` has restored the default theme on
 /// drop, so no mutating test observes another's transient state.
-static THEME_TEST_MUTEX: Mutex<()> = Mutex::new(());
+///
+/// This is the crate-level `STYLE_TEST_LOCK` itself, not a twin: palette
+/// tests that install themes (`themed_semantics`) hold the same lock, so a
+/// theme test can never interleave with a palette test over the shared
+/// globals (the exact hazard lib.rs documents).
+use crate::STYLE_TEST_LOCK as THEME_TEST_MUTEX;
 
 #[test]
 fn loads_custom_theme_from_toml() {
@@ -736,4 +740,117 @@ fn contract_every_theme_color_variant_is_parseable_and_resolvable() {
             "Theme::color({variant:?}) should return the stored color"
         );
     }
+}
+
+// ---- snapshot quantization + semantic overrides (#1877) ----
+//
+// Theme objects keep raw hex values (config layer), but the published
+// snapshot must route every RGB through `color::rgb`, so custom themes
+// render identically on truecolor and 256-color terminals, and the semantic
+// slots must surface as overrides only when the theme actually recolors
+// them.
+
+/// Every SEMANTIC_ROLE_SLOTS default must equal the mapped role's
+/// `Role::default_rgb`, so theme-override detection compares against the
+/// same defaults the substitution pass attributes cells by.
+#[test]
+fn semantic_role_slots_defaults_match_role_defaults() {
+    for &(key, role) in &SEMANTIC_ROLE_SLOTS {
+        let expected = role.default_rgb();
+        let (r, g, b) = expected;
+        assert_eq!(
+            theme_color_is_default(Color::Rgb(r, g, b), expected),
+            true,
+            "{key:?} default must match Role::{}::default_rgb",
+            role.key()
+        );
+    }
+}
+
+#[test]
+fn builtin_themes_have_no_semantic_overrides() {
+    let _lock = THEME_TEST_MUTEX.lock().unwrap();
+    let _guard = ActiveThemeGuard;
+    for &name in &["system", "light", "dark"] {
+        let theme = load_theme(name, None).expect("builtin theme");
+        assert!(
+            theme_semantic_overrides(&theme).is_empty(),
+            "{name} ships the palette defaults, so it must not override semantics"
+        );
+    }
+}
+
+#[test]
+fn semantic_accessors_follow_custom_theme() {
+    let _lock = THEME_TEST_MUTEX.lock().unwrap();
+    let _guard = ActiveThemeGuard;
+    color::pin_truecolor_for_tests();
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("semantic.toml"),
+        "[colors]\nsuccess = \"#010203\"\nborder = \"#040506\"\nselection_bg = \"#070809\"\n",
+    )
+    .expect("write semantic.toml");
+
+    set_theme("semantic", Some(temp.path())).expect("set semantic theme");
+    assert_eq!(success_color(), Color::Rgb(1, 2, 3));
+    assert_eq!(border_color(), Color::Rgb(4, 5, 6));
+    assert_eq!(selection_bg_color(), Color::Rgb(7, 8, 9));
+    // Explicitly set selection background surfaces through the helper the
+    // selection renderer consults.
+    assert_eq!(themed_selection_bg(), Some(Color::Rgb(7, 8, 9)));
+    // Roles the theme did not touch keep no override entry.
+    let overrides = semantic_overrides();
+    assert!(
+        overrides
+            .iter()
+            .any(|(role, _)| *role == crate::palette::Role::Success)
+    );
+    assert!(
+        !overrides
+            .iter()
+            .any(|(role, _)| *role == crate::palette::Role::Warning)
+    );
+}
+
+#[test]
+fn snapshot_colors_quantize_on_256_color_terminals() {
+    let _lock = THEME_TEST_MUTEX.lock().unwrap();
+    let _guard = ActiveThemeGuard;
+    color::pin_color256_for_tests();
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("quantized.toml"),
+        "[colors]\nuser = \"#0a0b0c\"\nerror = \"#0d0e0f\"\n",
+    )
+    .expect("write quantized.toml");
+
+    set_theme("quantized", Some(temp.path())).expect("set quantized theme");
+    // Raw hex must not survive the snapshot: on a 256-color terminal the
+    // accessor emits the same indexed color `color::rgb` would.
+    assert_eq!(
+        user_color(),
+        crate::color::rgb(10, 11, 12),
+        "snapshot must quantize custom theme colors like every other color source"
+    );
+    assert_eq!(error_color(), crate::color::rgb(13, 14, 15));
+    assert!(matches!(user_color(), Color::Indexed(_)));
+}
+
+#[test]
+fn named_colors_in_custom_theme_survive_snapshot_unquantized() {
+    let _lock = THEME_TEST_MUTEX.lock().unwrap();
+    let _guard = ActiveThemeGuard;
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("named.toml"),
+        "[colors]\nuser = \"cyan\"\nbackground = \"reset\"\n",
+    )
+    .expect("write named.toml");
+
+    set_theme("named", Some(temp.path())).expect("set named theme");
+    // Named colors and Reset are renderable as-is; the snapshot must not
+    // touch them.
+    assert_eq!(user_color(), Color::Cyan);
+    assert_eq!(background_color(), Color::Reset);
 }

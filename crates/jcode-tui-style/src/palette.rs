@@ -339,12 +339,19 @@ pub(crate) fn configured_palette() -> Option<Palette> {
 /// luminance-flipped for light mode, but `[display.colors]` role overrides
 /// still apply. This applies those overrides to a rendered frame without any
 /// theme-mode flipping or contrast repair.
+///
+/// Theme semantic overrides substitute first (custom TOML themes recolor
+/// role-default cells), then `[display.colors]` overrides substitute last, so
+/// the user's explicit palette wins over the theme. The pass runs even with
+/// no palette overrides, because the theme layer alone must apply.
 pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
-    let Some(palette) = configured_palette() else {
+    let palette = configured_palette();
+    let semantic = crate::theme::semantic_overrides();
+    if semantic.is_empty() && palette.is_none() {
         return;
-    };
+    }
     for cell in buf.content.iter_mut() {
-        adapt_one_cell_for_palette(&palette, cell);
+        adapt_one_cell_for_palette(palette.as_ref(), semantic, cell);
     }
 }
 
@@ -352,20 +359,44 @@ pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
 /// must apply the same policy to freshly written cells without re-running the
 /// non-idempotent passes over the reused buffer.
 pub fn adapt_cell_for_palette(cell: &mut ratatui::buffer::Cell) {
-    let Some(palette) = configured_palette() else {
+    let palette = configured_palette();
+    let semantic = crate::theme::semantic_overrides();
+    if semantic.is_empty() && palette.is_none() {
         return;
-    };
-    adapt_one_cell_for_palette(&palette, cell);
+    }
+    adapt_one_cell_for_palette(palette.as_ref(), semantic, cell);
 }
 
-fn adapt_one_cell_for_palette(palette: &Palette, cell: &mut ratatui::buffer::Cell) {
-    if let Some(chosen) = configured_native_color(palette, cell.fg) {
+fn adapt_one_cell_for_palette(
+    palette: Option<&Palette>,
+    semantic: &[ThemedOverride],
+    cell: &mut ratatui::buffer::Cell,
+) {
+    // Attribute on the pre-substitution colors: if the theme layer rewrites
+    // a cell first, the palette layer could no longer recognize the role
+    // default underneath it. The palette override must win, so resolve it
+    // from the original colors and apply it last.
+    let palette_fg = palette.and_then(|p| configured_native_color(p, cell.fg));
+    let palette_bg = palette.and_then(|p| configured_native_color(p, cell.bg));
+    let palette_underline = palette.and_then(|p| configured_native_color(p, cell.underline_color));
+
+    if let Some(chosen) = themed_native_color(semantic, cell.fg) {
         cell.fg = chosen;
     }
-    if let Some(chosen) = configured_native_color(palette, cell.bg) {
+    if let Some(chosen) = themed_native_color(semantic, cell.bg) {
         cell.bg = chosen;
     }
-    if let Some(chosen) = configured_native_color(palette, cell.underline_color) {
+    if let Some(chosen) = themed_native_color(semantic, cell.underline_color) {
+        cell.underline_color = chosen;
+    }
+
+    if let Some(chosen) = palette_fg {
+        cell.fg = chosen;
+    }
+    if let Some(chosen) = palette_bg {
+        cell.bg = chosen;
+    }
+    if let Some(chosen) = palette_underline {
         cell.underline_color = chosen;
     }
 }
@@ -408,6 +439,47 @@ pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option
     })?;
     let (r, g, b) = palette.rgb(role);
     Some(crate::color::rgb(r, g, b))
+}
+
+/// A theme semantic override ready for per-cell substitution: the role and
+/// the theme's quantized replacement color.
+pub(crate) type ThemedOverride = (Role, Color);
+
+/// Resolve a theme semantic override from a rendered cell color. Mirrors
+/// [`configured_native_color`]'s attribution rules: a cell is recolored only
+/// when it *is* the role's default (literal RGB, or a 256-color index the
+/// default quantizes to), or a terminal-named color mapped to the role.
+/// Colors another role carries are never touched, and the user's
+/// `[display.colors]` override still wins because it substitutes after this.
+pub(crate) fn themed_native_color(semantic: &[ThemedOverride], color: Color) -> Option<Color> {
+    let rgb = match color {
+        Color::Reset => return None,
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => crate::color::indexed_to_rgb(index),
+        named => {
+            let role = match named {
+                Color::Red | Color::LightRed => Role::Error,
+                Color::Green | Color::LightGreen => Role::Success,
+                Color::Yellow | Color::LightYellow => Role::Warning,
+                Color::Blue | Color::LightBlue => Role::Info,
+                Color::Cyan | Color::LightCyan => Role::HeaderIcon,
+                _ => return None,
+            };
+            return semantic.iter().find(|(r, _)| *r == role).map(|(_, c)| *c);
+        }
+    };
+    semantic
+        .iter()
+        .find(|(role, _)| {
+            let (r, g, b) = role.default_rgb();
+            match color {
+                Color::Indexed(index) => {
+                    (r, g, b) == rgb || crate::color::rgb_to_xterm256(r, g, b) == index
+                }
+                _ => (r, g, b) == rgb,
+            }
+        })
+        .map(|(_, c)| *c)
 }
 
 /// Resolve a role to a renderable color.
@@ -693,6 +765,136 @@ mod buffer_tests {
                 "a second palette pass must not shift colors again"
             );
         });
+    }
+}
+
+/// Theme semantic overrides in the palette-only pass (#1877). A custom TOML
+/// theme's success/warning/error/info/border/selection_bg values must recolor
+/// the cells those roles carry, even when no `[display.colors]` overrides
+/// exist; an explicit `[display.colors]` override must still win.
+#[cfg(test)]
+mod themed_semantics {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    use crate::STYLE_TEST_LOCK as TEST_LOCK;
+
+    /// Install a custom theme with the given TOML body for the duration of
+    /// `body`, always restoring `system` and the default palette on drop so a
+    /// failure cannot leak state into another test.
+    fn with_theme(toml: &str, palette: Palette, body: impl FnOnce()) {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = crate::theme::set_theme("system", None);
+                set_palette(Palette::default());
+            }
+        }
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = Restore;
+        crate::color::pin_truecolor_for_tests();
+        set_palette(palette);
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("themed.toml"), toml).expect("write themed.toml");
+        crate::theme::set_theme("themed", Some(temp.path())).expect("set themed theme");
+        body();
+    }
+
+    fn buffer_with(colors: &[Color]) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, colors.len() as u16, 1));
+        for (cell, color) in buf.content.iter_mut().zip(colors) {
+            cell.fg = *color;
+        }
+        buf
+    }
+
+    #[test]
+    fn theme_override_recolors_role_cells_without_palette_config() {
+        with_theme(
+            "[colors]\nsuccess = \"#00ff88\"\nerror = \"#ff8800\"\n",
+            Palette::default(),
+            || {
+                let mut buf = buffer_with(&[
+                    role_color(Role::Success), // the role's own output
+                    Color::Green,              // the named stand-in for success
+                    role_color(Role::Error),
+                    Color::Rgb(40, 200, 90), // unrelated green, no role
+                    Color::Reset,
+                ]);
+                adapt_buffer_for_palette(&mut buf);
+
+                let themed = crate::color::rgb(0, 255, 136);
+                assert_eq!(buf.content[0].fg, themed);
+                assert_eq!(buf.content[1].fg, themed);
+                assert_eq!(buf.content[2].fg, crate::color::rgb(255, 136, 0));
+                assert_eq!(
+                    buf.content[3].fg,
+                    crate::color::rgb(40, 200, 90),
+                    "an untagged literal must not follow any role"
+                );
+                assert_eq!(buf.content[4].fg, Color::Reset, "Reset must be preserved");
+            },
+        );
+    }
+
+    #[test]
+    fn palette_override_wins_over_theme_override() {
+        let mut palette = Palette::default();
+        palette.set(Role::Success, (9, 90, 250));
+        with_theme("[colors]\nsuccess = \"#00ff88\"\n", palette, || {
+            let mut buf = buffer_with(&[role_color(Role::Success)]);
+            adapt_buffer_for_palette(&mut buf);
+            assert_eq!(
+                buf.content[0].fg,
+                crate::color::rgb(9, 90, 250),
+                "[display.colors] must win over the theme's semantic override"
+            );
+        });
+    }
+
+    #[test]
+    fn builtin_theme_leaves_the_frame_untouched() {
+        // The system theme ships the palette defaults, so the pass must be a
+        // no-op byte-identical to before the theme layer existed.
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = crate::theme::set_theme("system", None);
+                set_palette(Palette::default());
+            }
+        }
+        let _restore = Restore;
+        crate::color::pin_truecolor_for_tests();
+        set_palette(Palette::default());
+        let _ = crate::theme::set_theme("system", None);
+
+        let original = buffer_with(&[
+            role_color(Role::Success),
+            role_color(Role::Border),
+            Color::Rgb(200, 150, 70),
+            Color::Reset,
+        ]);
+        let mut adapted = original.clone();
+        adapt_buffer_for_palette(&mut adapted);
+        assert_eq!(adapted, original);
+    }
+
+    #[test]
+    fn themed_native_color_attributes_indexed_defaults() {
+        // On a 256-color terminal the role default renders as an xterm
+        // index; the theme layer must attribute it exactly like the palette
+        // layer does (#1663). The matching is index-space arithmetic, so no
+        // capability pin (and no process-global pin leak) is needed.
+        let (r, g, b) = Role::Warning.default_rgb();
+        let quantized = crate::color::rgb_to_xterm256(r, g, b);
+        let semantic: &[ThemedOverride] = &[(Role::Warning, Color::Indexed(99))];
+        assert_eq!(
+            themed_native_color(semantic, Color::Indexed(quantized)),
+            Some(Color::Indexed(99))
+        );
+        assert_eq!(themed_native_color(semantic, Color::Indexed(7)), None);
     }
 }
 
