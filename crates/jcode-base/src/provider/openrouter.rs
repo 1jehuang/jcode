@@ -15,8 +15,8 @@
 
 use crate::provider_catalog::{
     OPENAI_COMPAT_PROFILE, is_safe_env_file_name, is_safe_env_key_name,
-    load_api_key_from_env_or_config, load_openai_compatible_profile_api_key, normalize_api_base,
-    openai_compatible_profiles, resolve_openai_compatible_profile,
+    load_api_key_from_env_or_config, normalize_api_base, openai_compatible_profiles,
+    resolve_openai_compatible_profile,
 };
 pub use jcode_provider_openrouter::{
     EndpointInfo, ModelInfo, ModelPricing, ModelTimestampIndex, ProviderRouting,
