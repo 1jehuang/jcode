@@ -129,12 +129,27 @@ fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
         patched.area, expected.area,
         "partial repaint changed the frame geometry"
     );
+
+    // The fast path only owns the animated rectangle, so only that rectangle
+    // is comparable. The rest of the buffer comes from two independent full
+    // renders, and those can legitimately differ between the draws: the
+    // header's account inventory loads from machine state in a background
+    // thread, so its row flips from "No auto-routing accounts" to real
+    // logins between frame 1 and frame 2 on machines with saved accounts.
+    // Out-of-area immutability is pinned separately by
+    // `advancing_the_animation_actually_changes_the_animated_rows`.
     let mismatches: Vec<_> = patched
         .content
         .iter()
         .zip(expected.content.iter())
         .enumerate()
-        .filter(|(_, (left, right))| left != right)
+        .filter(|(idx, (left, right))| {
+            let (x, y) = (
+                *idx as u16 % patched.area.width,
+                *idx as u16 / patched.area.width,
+            );
+            area.contains((x, y).into()) && left != right
+        })
         .map(|(idx, (l, r))| {
             (
                 idx as u16 % patched.area.width,
@@ -197,12 +212,22 @@ fn partial_repaint_keeps_a_custom_light_theme_background_and_foreground() {
     let second = render_full(&idle_animation_state(1.5), 100, 40);
     let expected = second.backend().buffer();
 
+    // Same contract as the plain parity test above: compare the animated
+    // rectangle the partial repaint writes. Outside it, the two full renders
+    // can differ on their own (account inventory warm-up), and the colors
+    // this test pins live inside the rectangle anyway.
     let mismatches: Vec<_> = patched
         .content
         .iter()
         .zip(expected.content.iter())
         .enumerate()
-        .filter(|(_, (left, right))| left != right)
+        .filter(|(idx, (left, right))| {
+            let (x, y) = (
+                *idx as u16 % patched.area.width,
+                *idx as u16 / patched.area.width,
+            );
+            area.contains((x, y).into()) && left != right
+        })
         .map(|(idx, (l, r))| {
             (
                 idx as u16 % patched.area.width,
