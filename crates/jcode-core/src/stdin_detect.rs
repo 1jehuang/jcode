@@ -331,29 +331,33 @@ mod macos {
     fn child_map() -> std::collections::HashMap<u32, Vec<u32>> {
         let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL];
         let mut size = 0usize;
-        let ret = unsafe { libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            std::ptr::null_mut(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        ) };
-        if ret != 0 || size == 0 || size % KINFO_PROC_SIZE != 0 {
+        let ret = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if ret != 0 || size == 0 || !size.is_multiple_of(KINFO_PROC_SIZE) {
             return std::collections::HashMap::new();
         }
         // Bound the snapshot: a busy machine can report thousands of processes,
         // and this runs inside the bash tool's poll loop.
         let count = (size / KINFO_PROC_SIZE).min(4096);
         let mut buf: Vec<u8> = vec![0u8; count * KINFO_PROC_SIZE];
-        let filled = unsafe { libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        ) };
+        let filled = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
         if filled != 0 {
             return std::collections::HashMap::new();
         }
