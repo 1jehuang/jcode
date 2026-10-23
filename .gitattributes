@@ -8,3 +8,6 @@
 # `text=auto` keeps binary files untouched and lets git detect them, so this is
 # safe to apply repository-wide.
 * text=auto
+
+# PDF cross-reference offsets require byte-for-byte checkout preservation.
+*.pdf binary
