@@ -6,7 +6,7 @@ fn test_local_error_copy_badge_shortcut_supported() {
 
     let initial = render_and_snap(&app, &mut terminal);
     assert!(
-        initial.contains("[S]"),
+        initial.contains("⇧S]"),
         "expected visible error copy badge: {}",
         initial
     );
@@ -44,7 +44,7 @@ fn test_clicking_copy_badge_copies_its_target() {
         let line = (0..area.width)
             .map(|col| buf[(col, row)].symbol())
             .collect::<String>();
-        if let Some(byte) = line.find("[S]") {
+        if let Some(byte) = line.find("⇧S]") {
             badge = Some((line[..byte].chars().count() as u16, row));
             break 'rows;
         }
@@ -77,7 +77,7 @@ fn test_local_tool_error_copy_badge_shortcut_supported() {
 
     let initial = render_and_snap(&app, &mut terminal);
     assert!(
-        initial.contains("[S]"),
+        initial.contains("⇧S]"),
         "expected visible tool error copy badge: {}",
         initial
     );
@@ -110,7 +110,7 @@ fn test_local_tool_failed_output_copy_badge_shortcut_supported() {
 
     let initial = render_and_snap(&app, &mut terminal);
     assert!(
-        initial.contains("[S]"),
+        initial.contains("⇧S]"),
         "expected visible failed tool output copy badge: {}",
         initial
     );
@@ -143,7 +143,7 @@ fn test_local_blockquote_copy_badge_shortcut_supported() {
 
     let initial = render_and_snap(&app, &mut terminal);
     assert!(
-        initial.contains("[S]"),
+        initial.contains("⇧S]"),
         "expected visible blockquote copy badge: {}",
         initial
     );
@@ -204,7 +204,7 @@ fn test_copy_selection_select_all_uses_rendered_chat_text_without_copy_badges() 
     assert!(selected.contains("fn main() {"));
     assert!(selected.contains("println!(\"hello\");"));
     assert!(
-        !selected.contains("[Alt]") && !selected.contains("[⌥]"),
+        !selected.contains("[Alt⇧") && !selected.contains("[⌥⇧"),
         "selection should use chat text, not copy badge chrome: {}",
         selected
     );

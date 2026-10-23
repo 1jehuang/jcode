@@ -145,7 +145,15 @@ pub(super) fn changes_height(info: &GitInfo) -> u16 {
 /// status line.
 pub(super) fn render_changes_framed(data: &InfoWidgetData, inner: Rect) -> Framed {
     if data.dual_git_info.is_some() {
-        return Framed::body(render_git_widget(data, inner)).title(frame::label("Repositories"));
+        let dual = data.dual_git_info.as_ref().unwrap();
+        let source = if dual.local_is_source {
+            "local → cloud"
+        } else {
+            "local not source"
+        };
+        return Framed::body(render_git_widget(data, inner))
+            .title(frame::label("Repositories"))
+            .footer(frame::dim(source));
     }
     let Some(info) = &data.git_info else {
         return Framed::default();
@@ -173,8 +181,27 @@ pub(super) fn render_changes_framed(data: &InfoWidgetData, inner: Rect) -> Frame
     }
     if hidden > 0 {
         framed = framed.footer(frame::more(hidden));
+    } else {
+        let directories: std::collections::HashSet<_> = info
+            .dirty_files
+            .iter()
+            .flat_map(|f| f.path.split(" -> "))
+            .map(|path| {
+                std::path::Path::new(path.trim_matches('"'))
+                    .parent()
+                    .unwrap_or(std::path::Path::new(""))
+            })
+            .collect();
+        let count = directories.len();
+        framed = framed.footer(frame::dim(format!(
+            "{count} {}",
+            if count == 1 { "dir" } else { "dirs" }
+        )));
     }
     if let Some(legend) = changes_legend(data, inner.height) {
+        if hidden == 0 {
+            framed.footer = None;
+        }
         framed = framed.footer_right(legend);
     }
     framed
@@ -468,6 +495,32 @@ pub(super) fn changes_display_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changes_footer_aggregates_directories_without_repeating_file_counts() {
+        let data = InfoWidgetData {
+            git_info: Some(info(
+                &[('M', "src/a.rs"), ('M', "src/b.rs"), ('?', "tests/c.rs")],
+                3,
+            )),
+            ..Default::default()
+        };
+        let card = render_changes_framed(&data, Rect::new(0, 0, 40, 5));
+        assert_eq!(card.footer.unwrap().to_string(), "2 dirs");
+        let mut dual_data = data;
+        dual_data.dual_git_info = Some(super::super::super::cloud_git::DualGitInfo {
+            local_is_source: true,
+            local: super::super::super::cloud_git::RepoState::Loading,
+            cloud: super::super::super::cloud_git::RepoState::Loading,
+        });
+        assert_eq!(
+            render_changes_framed(&dual_data, Rect::new(0, 0, 40, 5))
+                .footer
+                .unwrap()
+                .to_string(),
+            "local → cloud"
+        );
+    }
 
     fn info(files: &[(char, &str)], total: usize) -> GitInfo {
         GitInfo {

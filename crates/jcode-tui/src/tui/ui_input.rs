@@ -1682,15 +1682,10 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
             };
             spans.push(Span::styled(feedback_text, feedback_style));
         }
-        spans.push(Span::styled(
-            super::viewport::copy_badge_alt_badge(),
+        spans.extend(super::viewport::shortcut_badge_spans(
+            key,
             alt_style,
-        ));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled("[⇧]", shift_style));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!("[{}]", key.to_ascii_uppercase()),
+            shift_style,
             key_style,
         ));
     }

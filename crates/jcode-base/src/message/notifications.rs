@@ -254,6 +254,17 @@ pub fn format_background_task_notification_markdown(task: &BackgroundTaskComplet
         exit_code,
     );
 
+    if matches!(task.status, BackgroundTaskStatus::Failed) {
+        // Completion events are formatted on delivery. Preserve the inferred call
+        // time so the UI can show age rather than confusing runtime with age.
+        if let Ok(elapsed) = std::time::Duration::try_from_secs_f64(task.duration_secs)
+            && let Ok(elapsed) = chrono::Duration::from_std(elapsed)
+            && let Some(called_at) = chrono::Utc::now().checked_sub_signed(elapsed)
+        {
+            message.push_str(&format!("\n\n_Called at:_ `{}`", called_at.to_rfc3339()));
+        }
+    }
+
     if matches!(task.status, BackgroundTaskStatus::Failed)
         && let Some(summary) = background_task_failure_summary(&task.output_preview)
     {

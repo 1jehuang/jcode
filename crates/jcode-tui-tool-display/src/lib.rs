@@ -59,25 +59,62 @@ pub fn edit_render_name<'a>(name: &'a str, input: &serde_json::Value) -> &'a str
     }
 }
 
-fn parse_nonzero_exit_code_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    if let Some(rest) = trimmed.strip_prefix("Exit code:") {
-        return rest
-            .trim()
-            .parse::<i32>()
-            .map(|code| code != 0)
-            .unwrap_or(false);
+/// A compact diagnostic, independent of transport wrappers and UI truncation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolFailureSummary {
+    pub reason: String,
+    pub exit_code: Option<i32>,
+}
+
+fn exit_code(line: &str) -> Option<i32> {
+    let lower = line.to_ascii_lowercase();
+    let rest = [
+        "exit status:",
+        "exit code:",
+        "exit code ",
+        "exited with code ",
+        "exited code ",
+        "exited code",
+    ]
+    .iter()
+    .find_map(|marker| lower.find(marker).map(|at| &line[at + marker.len()..]))?;
+    let number = rest
+        .trim_start()
+        .split(|c: char| !c.is_ascii_digit() && c != '-')
+        .next()?;
+    number.parse().ok()
+}
+
+fn strip_wrappers(mut line: &str) -> (&str, u8) {
+    let mut severity = 0;
+    loop {
+        line = line.trim();
+        let lower = line.to_ascii_lowercase();
+        if let Some(prefix) = ["error:", "failed:", "fatal:"]
+            .iter()
+            .find(|prefix| lower.starts_with(**prefix))
+        {
+            line = &line[prefix.len()..];
+            severity = severity.max(if *prefix == "fatal:" { 65 } else { 50 });
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('✗') {
+            line = rest;
+            severity = severity.max(50);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some((tag, tail)) = rest.split_once(']')
+            && !tag.is_empty()
+            && tag.chars().all(|c| c.is_ascii_alphanumeric() || "_-./".contains(c))
+            // Uppercase errno and compiler codes are content, not transport labels.
+            && !tag.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        {
+            line = tail;
+            continue;
+        }
+        return (line.trim(), severity);
     }
-    if let Some(rest) = trimmed.strip_prefix("--- Command finished with exit code:") {
-        return rest
-            .trim()
-            .trim_end_matches('-')
-            .trim()
-            .parse::<i32>()
-            .map(|code| code != 0)
-            .unwrap_or(false);
-    }
-    false
 }
 
 fn display_prefix_by_width(s: &str, max_width: usize) -> &str {
@@ -134,88 +171,163 @@ pub fn truncate_middle_display(s: &str, max_width: usize) -> String {
     )
 }
 
-fn normalize_backticked_identifier(text: &str) -> String {
-    text.replace('`', "").trim().to_string()
+/// Remove terminal control sequences for classification and compact display only.
+/// The caller's original tool output remains untouched.
+fn without_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for ch in chars.by_ref() {
+                    if ('@'..='~').contains(&ch) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(ch) = chars.next() {
+                    if ch == '\u{7}' || (ch == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
-pub fn concise_tool_error_summary(content: &str) -> Option<String> {
-    for raw_line in content.lines() {
-        let line = raw_line.trim();
+/// Extract the strongest diagnostic across the entire output, without modifying
+/// raw output or applying display-width limits. Wrappers and exit summaries are
+/// weaker evidence than diagnostics and explicit cause chains.
+pub fn parse_tool_failure(content: &str) -> Option<ToolFailureSummary> {
+    let mut best: Option<(u8, String)> = None;
+    let mut code = None;
+    let mut cause_chain = false;
+    let mut panic_location: Option<String> = None;
+    let normalized = without_ansi(content);
+    for raw in normalized.lines() {
+        let raw = raw.trim_end();
+        // Only a standalone timing record is metadata. A diagnostic may
+        // legitimately contain the same text and must not be truncated.
+        if raw.trim_start().starts_with("[tool timing:") && raw.ends_with(']') {
+            continue;
+        }
+        let (mut line, marked) = strip_wrappers(raw);
         if line.is_empty() {
             continue;
         }
-
-        let detail = line
-            .strip_prefix("Error:")
-            .or_else(|| line.strip_prefix("error:"))
-            .or_else(|| line.strip_prefix("Failed:"))
-            .map(str::trim);
-        if let Some(detail) = detail {
-            if let Some(field) = detail.strip_prefix("missing field ") {
-                return Some(format!(
-                    "invalid input: missing {}",
-                    normalize_backticked_identifier(field)
-                ));
-            }
-            if detail.starts_with("invalid type") || detail.starts_with("unknown variant") {
-                return Some(format!("invalid input: {}", detail));
-            }
-            if detail.contains("source metadata") && detail.contains("was for") {
-                return Some("build source changed before reload".to_string());
-            }
-            if detail.starts_with("Refusing to publish") {
-                return Some("reload refused: rebuild against current source".to_string());
-            }
-            return Some(format!("error: {}", truncate_middle_display(detail, 80)));
-        }
-
-        if line.contains("Compile terminated by signal") {
-            return Some(line.to_string());
-        }
-        if let Some(rest) = line.strip_prefix("Exit code:")
-            && let Ok(code) = rest.trim().parse::<i32>()
-            && code != 0
+        let lower = line.to_ascii_lowercase();
+        let is_exit = lower.starts_with("exit code:")
+            || lower.starts_with("--- command finished with exit code:")
+            || lower.starts_with("command exited")
+            || lower.starts_with("process exited")
+            || lower.starts_with("process didn't exit successfully");
+        if is_exit
+            && let Some(value) = exit_code(line)
+            && value != 0
         {
-            return Some(format!("exit {}", code));
+            code = Some(value);
         }
-        if let Some(rest) = line.strip_prefix("--- Command finished with exit code:") {
-            let code = rest.trim().trim_end_matches('-').trim();
-            if code != "0" && !code.is_empty() {
-                return Some(format!("exit {}", code));
+        let mut score = marked;
+        if let Some((tag, _)) = line.strip_prefix('[').and_then(|rest| rest.split_once(']'))
+            && tag.starts_with('E')
+            && tag.len() > 1
+            && tag
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        {
+            score = 80;
+        }
+        if lower.starts_with("error[e") && line.contains("]:") {
+            line = &line[5..];
+            score = 80;
+        }
+        if lower.starts_with("caused by:") {
+            cause_chain = true;
+            line = line[10..].trim();
+            score = 70;
+        } else if cause_chain && raw.starts_with(char::is_whitespace) {
+            if let Some((index, rest)) = line.split_once(':')
+                && index.chars().all(|c| c.is_ascii_digit())
+            {
+                line = rest.trim();
             }
+            score = 70;
+        } else {
+            cause_chain = false;
+        }
+        let mut panic_reason = None;
+        if lower.starts_with("thread '") && lower.contains("panicked at") {
+            panic_location = line
+                .split_once("panicked at ")
+                .and_then(|(_, location)| location.strip_suffix(':').map(str::to_string));
+            score = 60;
+        } else if let Some(location) = panic_location.take() {
+            if !lower.starts_with("note:")
+                && !lower.starts_with("stack backtrace:")
+                && !lower.starts_with("backtrace:")
+                && !line.starts_with(|c: char| c.is_ascii_digit())
+            {
+                panic_reason = Some(format!("{location}: {line}"));
+                score = 85;
+            }
+        }
+        if let Some((kind, _)) = line.split_once(':')
+            && (kind.ends_with("Error") || kind.ends_with("Exception"))
+            && kind
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+        {
+            score = 80;
+        }
+        if lower.contains("compile terminated by signal") {
+            score = 60;
+        }
+        if lower == "status: failed" || lower == "failed to start" || lower == "terminated" {
+            score = 20;
+        }
+        if is_exit
+            || lower.starts_with("could not compile ")
+            || lower.starts_with("aborting due to ")
+        {
+            score = if marked > 0 && !(is_exit && code.is_some()) {
+                10
+            } else {
+                0
+            };
+        }
+        let (reason, _) = strip_wrappers(line);
+        if score > 0
+            && !reason.is_empty()
+            && best.as_ref().is_none_or(|(previous, _)| {
+                score > *previous || (cause_chain && score == *previous)
+            })
+        {
+            best = Some((score, panic_reason.unwrap_or_else(|| reason.to_string())));
         }
     }
+    let reason = best
+        .filter(|(score, _)| *score > 10 || code.is_none())
+        .map(|(_, reason)| reason)
+        .or_else(|| code.map(|code| format!("exit {code}")))?;
+    Some(ToolFailureSummary {
+        reason,
+        exit_code: code,
+    })
+}
 
-    None
+pub fn concise_tool_error_summary(content: &str) -> Option<String> {
+    parse_tool_failure(content).map(|failure| failure.reason)
 }
 
 pub fn tool_output_looks_failed(content: &str) -> bool {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let normalized = trimmed
-        .strip_prefix('[')
-        .and_then(|rest| rest.split_once("] "))
-        .filter(|(label, _)| !label.is_empty() && !label.contains(['\n', '\r']))
-        .map(|(_, rest)| rest)
-        .unwrap_or(trimmed);
-    let lower = normalized.to_ascii_lowercase();
-    if concise_tool_error_summary(normalized).is_some()
-        || lower.starts_with("error:")
-        || lower.starts_with("failed:")
-        || normalized.starts_with('✗')
-    {
-        return true;
-    }
-
-    normalized.lines().any(|line| {
-        let line = line.trim();
-        parse_nonzero_exit_code_line(line)
-            || line.eq_ignore_ascii_case("Status: failed")
-            || line.eq_ignore_ascii_case("failed to start")
-            || line.eq_ignore_ascii_case("terminated")
-    })
+    parse_tool_failure(content).is_some()
 }
 
 #[cfg(test)]
@@ -233,12 +345,212 @@ mod tests {
     fn summarizes_tool_errors() {
         assert_eq!(
             concise_tool_error_summary("Error: missing field `command`").as_deref(),
-            Some("invalid input: missing command")
+            Some("missing field `command`")
         );
         assert_eq!(
             concise_tool_error_summary("--- Command finished with exit code: 2 ---").as_deref(),
             Some("exit 2")
         );
+    }
+
+    #[test]
+    fn structural_failure_regressions() {
+        for (input, reason, code) in [
+            (
+                "Error: [selfdev] Error: source metadata was for /old/path",
+                "source metadata was for /old/path",
+                None,
+            ),
+            (
+                "Error: error: Error: Unexpected string",
+                "Unexpected string",
+                None,
+            ),
+            (
+                "[stderr] warning: unused variable\n[stderr] error[E0308]: mismatched types",
+                "[E0308]: mismatched types",
+                None,
+            ),
+            (
+                "Command exited code101\nError: /src/main.rs: incorrect argument",
+                "/src/main.rs: incorrect argument",
+                Some(101),
+            ),
+            (
+                "error: could not compile `demo` due to 1 previous error\nerror[E0308]: mismatched types",
+                "[E0308]: mismatched types",
+                None,
+            ),
+            ("Error: Command exited with code 101", "exit 101", Some(101)),
+            ("Exit code: 2", "exit 2", Some(2)),
+            (
+                "Error: request failed\nCaused by:\n    0: opening /tmp/data\n    1: permission denied",
+                "permission denied",
+                None,
+            ),
+            (
+                "thread 'main' panicked at src/main.rs:4:2:\nmissing configuration /etc/demo",
+                "src/main.rs:4:2: missing configuration /etc/demo",
+                None,
+            ),
+            (
+                "Traceback (most recent call last):\n  File \"main.py\", line 3\nValueError: invalid value",
+                "ValueError: invalid value",
+                None,
+            ),
+            (
+                "[tool timing: duration=3ms]\nError: [read] Failed: unavailable",
+                "unavailable",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                parse_tool_failure(input),
+                Some(ToolFailureSummary {
+                    reason: reason.into(),
+                    exit_code: code
+                }),
+                "{input}"
+            );
+            assert!(tool_output_looks_failed(input));
+            assert_eq!(concise_tool_error_summary(input).as_deref(), Some(reason));
+        }
+    }
+
+    #[test]
+    fn preserves_full_diagnostics_and_ignores_success() {
+        let reason = format!("/a/long/path: {}", "detail ".repeat(100));
+        assert_eq!(
+            concise_tool_error_summary(&format!("Error: {reason}")),
+            Some(reason.trim_end().into())
+        );
+        for output in [
+            "",
+            "Exit code: 0",
+            "Command exited code0",
+            "[stderr] warning: unused variable",
+            "[read] completed successfully",
+            "There was an error: in the example",
+            "[tool timing: duration=3ms]",
+            "Finished successfully\n0 errors, 0 failures",
+        ] {
+            assert_eq!(parse_tool_failure(output), None, "{output}");
+            assert!(!tool_output_looks_failed(output));
+        }
+    }
+
+    #[test]
+    fn preserves_codes_and_normalizes_ansi() {
+        for (raw, expected) in [
+            (
+                "Error: [read] [ENOENT] /tmp/missing",
+                "[ENOENT] /tmp/missing",
+            ),
+            ("[stderr] [EACCES] /private/data", "[EACCES] /private/data"),
+            (
+                "\u{1b}[31mError:\u{1b}[0m [selfdev] Error: denied",
+                "denied",
+            ),
+            (
+                "\u{1b}[1;31merror[E0308]\u{1b}[0m: mismatched types",
+                "[E0308]: mismatched types",
+            ),
+            (
+                "Error: expected literal [tool timing: duration=3ms] here",
+                "expected literal [tool timing: duration=3ms] here",
+            ),
+            (
+                "Error: expected literal [tool timing: duration=3ms]",
+                "expected literal [tool timing: duration=3ms]",
+            ),
+            (
+                "\u{1b}]8;;https://example.invalid\u{1b}\\Error: denied\u{1b}]8;;\u{1b}\\",
+                "denied",
+            ),
+        ] {
+            assert_eq!(
+                concise_tool_error_summary(raw).as_deref(),
+                Some(expected),
+                "{raw:?}"
+            );
+            assert!(tool_output_looks_failed(raw));
+        }
+        assert!(!tool_output_looks_failed(
+            "\u{1b}[32m[stderr] warning: unused\u{1b}[0m"
+        ));
+    }
+
+    #[test]
+    fn panic_notes_and_backtraces_are_not_causes() {
+        let header = "thread 'main' panicked at src/main.rs:42:9:";
+        for suffix in [
+            "note: run with RUST_BACKTRACE=1\nstack backtrace:\n   0: demo::main",
+            "stack backtrace:\n   0: demo::main",
+        ] {
+            assert_eq!(
+                concise_tool_error_summary(&format!("{header}\n{suffix}")).as_deref(),
+                Some(header)
+            );
+        }
+        assert_eq!(
+            concise_tool_error_summary(&format!(
+                "{header}\nactual cause\nnote: run with RUST_BACKTRACE=1"
+            ))
+            .as_deref(),
+            Some("src/main.rs:42:9: actual cause")
+        );
+        let inline = "thread 'main' panicked at src/main.rs:42:9: actual cause";
+        assert_eq!(
+            concise_tool_error_summary(&format!("{inline}\nnote: run with RUST_BACKTRACE=1"))
+                .as_deref(),
+            Some(inline)
+        );
+    }
+
+    #[test]
+    fn exit_only_is_canonical_even_with_boilerplate() {
+        for raw in [
+            "Error: Command exited with code 101",
+            "error: could not compile `demo` due to 1 previous error\nExit code: 101",
+            "\u{1b}[31mExit code: 101\u{1b}[0m",
+        ] {
+            assert_eq!(
+                parse_tool_failure(raw),
+                Some(ToolFailureSummary {
+                    reason: "exit 101".into(),
+                    exit_code: Some(101)
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn fatal_diagnostics_outrank_generic_errors() {
+        let reason = "loose object abc123 is corrupt";
+        for (output, exit_code) in [
+            ("fatal: loose object abc123 is corrupt", None),
+            (
+                "error: object file .git/objects/ab/c123 is empty\nfatal: loose object abc123 is corrupt",
+                None,
+            ),
+            (
+                "Error: Command exited with code 128\nerror: object file .git/objects/ab/c123 is empty\n[stderr] fatal: loose object abc123 is corrupt",
+                Some(128),
+            ),
+            (
+                "Error: [stderr] FATAL: loose object abc123 is corrupt",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                parse_tool_failure(output),
+                Some(ToolFailureSummary {
+                    reason: reason.into(),
+                    exit_code
+                })
+            );
+            assert!(tool_output_looks_failed(output));
+        }
     }
 
     #[test]

@@ -2790,8 +2790,115 @@ pub(crate) fn render_background_task_message(
         parsed.display_name.as_deref(),
     );
     let is_swarm = parsed.tool_name == "swarm";
-    if is_swarm {
+    if is_swarm && !parsed.status.starts_with('✗') {
         return render_compact_swarm_background_completion(&parsed, width);
+    }
+    if parsed.status.starts_with('✓') {
+        let muted = Style::default().fg(dim_color());
+        let block_width = if centered {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let mut header = Line::from(vec![
+            Span::styled("  ✓ ", Style::default().fg(rgb(120, 210, 140))),
+            Span::styled(
+                tools_ui::resolve_display_tool_name(&parsed.tool_name).to_string(),
+                Style::default().fg(tool_color()),
+            ),
+        ]);
+        if task_label != parsed.tool_name {
+            header.spans.push(Span::styled(" · ", muted));
+            header.spans.push(Span::styled(
+                task_label.clone(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        let timing = Line::from(Span::styled(format!(" · took {}", parsed.duration), muted));
+        let mut lines = vec![super::truncate_line_preserving_suffix_to_width(
+            &header,
+            &timing,
+            block_width.saturating_sub(1),
+        )];
+        if centered {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return lines;
+    }
+    if parsed.status.starts_with('✗') {
+        let muted = Style::default().fg(dim_color());
+        let failure = Style::default().fg(rgb(220, 100, 100));
+        let block_width = if centered {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let row_width = block_width.saturating_sub(1);
+        let timing = msg
+            .content
+            .lines()
+            .find_map(|line| {
+                let timestamp = line.strip_prefix("_Called at:_ `")?.strip_suffix('`')?;
+                let called = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+                let seconds = (chrono::Utc::now() - called.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0);
+                Some(if seconds < 60 {
+                    format!("{seconds}s ago")
+                } else if seconds < 3600 {
+                    format!("{}m ago", seconds / 60)
+                } else {
+                    format!("{}h ago", seconds / 3600)
+                })
+            })
+            .unwrap_or_else(|| format!("took {}", parsed.duration));
+        // The notification's explicit failure field is already known to be an
+        // error even when its text has no severity prefix. Feed that evidence
+        // into the same parser; a stronger diagnostic in the preview can win.
+        let output = format!(
+            "Error: {}\n{}",
+            parsed.failure_summary.as_deref().unwrap_or(""),
+            parsed.preview.as_deref().unwrap_or("")
+        );
+        let clean = strip_ansi_escape_sequences(&output);
+        let detail = tools_ui::parse_tool_failure(&clean)
+            .map(|failure| {
+                let reason = failure.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+                if reason == parsed.exit_label {
+                    reason
+                } else {
+                    format!("{} · {}", parsed.exit_label, reason)
+                }
+            })
+            .unwrap_or_else(|| format!("{} · no diagnostic captured", parsed.exit_label));
+        let mut header = Line::from(vec![
+            Span::styled("  ✗ ", failure),
+            Span::styled(
+                tools_ui::resolve_display_tool_name(&parsed.tool_name).to_string(),
+                Style::default().fg(tool_color()),
+            ),
+        ]);
+        if task_label != parsed.tool_name {
+            header.spans.push(Span::styled(" · ", muted));
+            header.spans.push(Span::styled(
+                task_label.clone(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        let timing = Line::from(Span::styled(format!(" · {timing}"), muted));
+        header = super::truncate_line_preserving_suffix_to_width(&header, &timing, row_width);
+        let reason = Line::from(vec![
+            Span::styled("  ╰─", muted),
+            Span::styled(detail, muted),
+        ]);
+        let mut lines = vec![
+            header,
+            super::truncate_line_with_ellipsis_to_width(&reason, row_width),
+        ];
+        if centered {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return lines;
     }
     let (title, border_color, status_color, preview_color) = if parsed.status.starts_with('✓') {
         (
@@ -3981,6 +4088,133 @@ fn render_discovery_card(
     Some(content)
 }
 
+/// Fit diff chrome to one row, preserving the filename before path prefixes.
+fn inline_diff_header(
+    prefix: &str,
+    counts: Option<(usize, usize)>,
+    file_path: Option<&str>,
+    width: usize,
+) -> Line<'static> {
+    let dim = Style::default().fg(dim_color());
+    let mut header = vec![Span::styled(format!("{prefix} diff"), dim)];
+    if let Some((additions, deletions)) =
+        counts.filter(|&(additions, deletions)| additions > 0 || deletions > 0)
+    {
+        header.extend([
+            Span::styled(" · ", dim),
+            Span::styled(
+                format!("+{additions}"),
+                Style::default().fg(diff_add_color()),
+            ),
+            Span::styled(" ", dim),
+            Span::styled(
+                format!("-{deletions}"),
+                Style::default().fg(diff_del_color()),
+            ),
+        ]);
+    }
+    let mut header = Line::from(header);
+    if let Some(path) = file_path {
+        let path_width = width.saturating_sub(header.width().saturating_add(3));
+        if path_width > 0 {
+            header.spans.push(Span::styled(
+                format!(" · {}", tools_ui::truncate_path_display(path, path_width)),
+                dim,
+            ));
+        }
+    }
+    super::truncate_line_with_ellipsis_to_width(&header, width)
+        .alignment(ratatui::layout::Alignment::Left)
+}
+
+/// Keep expanded source lines inside their frame. Wrap the styled source, not
+/// the gutter, so continuation rows cannot masquerade as another changed line.
+fn expanded_diff_row(
+    line: &ParsedDiffLine,
+    file_ext: Option<&str>,
+    number_width: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(dim_color());
+    let color = if line.kind == DiffLineKind::Add {
+        diff_add_color()
+    } else {
+        diff_del_color()
+    };
+    let sign = if line.kind == DiffLineKind::Add {
+        "+"
+    } else {
+        "-"
+    };
+    let number = line.prefix.trim().trim_end_matches(['+', '-']);
+    let gutter = vec![
+        Span::styled(format!("│ {number:>number_width$} "), dim),
+        Span::styled(format!("{sign} "), Style::default().fg(color)),
+    ];
+    let gutter_width = number_width + 5;
+    // Leave room for a wide source character even on very narrow terminals.
+    if width < gutter_width + 2 {
+        return vec![super::truncate_line_with_ellipsis_to_width(
+            &Line::from(gutter),
+            width,
+        )];
+    }
+    let content_width = width - gutter_width;
+    let mut rows = Vec::new();
+    let mut spans = gutter;
+    let mut used = 0;
+    // Expand tabs in source-column coordinates, independent of the gutter.
+    let mut column = 0usize;
+    let mut source = String::new();
+    for ch in line.content.chars() {
+        if ch == '\t' {
+            let spaces = 4 - column % 4;
+            source.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else {
+            source.push(ch);
+            column += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    for span in markdown::highlight_line(&source, file_ext) {
+        let span = tint_span_with_diff_color(span, color);
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cells > content_width {
+                if !text.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut text), span.style));
+                }
+                rows.push(Line::from(std::mem::take(&mut spans)).alignment(Alignment::Left));
+                spans.push(Span::styled(format!("│ {:>number_width$} ↪ ", ""), dim));
+                used = 0;
+            }
+            text.push(ch);
+            used += cells;
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, span.style));
+        }
+    }
+    rows.push(Line::from(spans).alignment(Alignment::Left));
+    rows
+}
+
+fn render_tool_failure_reason(content: &str, width: usize, indent: usize) -> Line<'static> {
+    let clean = strip_ansi_escape_sequences(content);
+    let summary = tools_ui::parse_tool_failure(&clean)
+        .map(|failure| failure.reason)
+        .unwrap_or_else(|| "Tool call failed".to_string());
+    let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    super::truncate_line_with_ellipsis_to_width(
+        &Line::from(Span::styled(
+            format!("{}╰─{}", " ".repeat(indent), summary),
+            Style::default().fg(dim_color()),
+        )),
+        width,
+    )
+}
+
 pub(crate) fn render_tool_message(
     msg: &DisplayMessage,
     width: u16,
@@ -3991,7 +4225,9 @@ pub(crate) fn render_tool_message(
     }
 
     let centered = markdown::center_code_blocks();
-    let token_badge = tool_output_token_badge(&msg.content);
+    let mut token_badge = tool_output_token_badge(&msg.content);
+    token_badge.label =
+        tools_ui::tool_usage_label(&token_badge.label, msg.duration_secs, &msg.content);
 
     // A restored or remotely mirrored transcript can occasionally retain the
     // todo result while losing its paired ToolCall metadata. Recognize the
@@ -4040,7 +4276,7 @@ pub(crate) fn render_tool_message(
         return lines;
     };
 
-    if tools_ui::is_memory_store_tool(tc) && !msg.content.starts_with("Error:") {
+    if tools_ui::is_memory_store_tool(tc) && !tools_ui::tool_output_looks_failed(&msg.content) {
         let content = tc
             .input
             .get("content")
@@ -4078,7 +4314,7 @@ pub(crate) fn render_tool_message(
         return lines;
     }
 
-    if tools_ui::is_memory_recall_tool(tc) && !msg.content.starts_with("Error:") {
+    if tools_ui::is_memory_recall_tool(tc) && !tools_ui::tool_output_looks_failed(&msg.content) {
         let border_style = Style::default().fg(rgb(150, 180, 255));
         let text_style = Style::default().fg(dim_color());
 
@@ -4152,6 +4388,9 @@ pub(crate) fn render_tool_message(
         (0, 0)
     };
     let has_diff_changes = additions > 0 || deletions > 0;
+    let show_header_diff_counts = is_edit_tool
+        && has_diff_changes
+        && !(diff_mode.is_inline() && edit_tool_has_inline_diff(tc, &msg.content));
 
     let block_width = if centered {
         super::centered_content_block_width(width, 96)
@@ -4163,7 +4402,7 @@ pub(crate) fn render_tool_message(
     let base_prefix = format!("  {} {} ", icon, display_name);
     let token_suffix_width =
         UnicodeWidthStr::width(format!(" · {}", token_badge.label.as_str()).as_str());
-    let edit_suffix_width = if is_edit_tool && has_diff_changes {
+    let edit_suffix_width = if show_header_diff_counts {
         UnicodeWidthStr::width(format!(" (+{} -{})", additions, deletions).as_str())
     } else {
         0
@@ -4196,8 +4435,6 @@ pub(crate) fn render_tool_message(
         } else {
             format!("{} calls", counts.total())
         }
-    } else if let Some(error_summary) = tools_ui::concise_tool_error_summary(&msg.content) {
-        error_summary
     } else if tc.name == "subagent" {
         msg.title
             .as_deref()
@@ -4216,7 +4453,7 @@ pub(crate) fn render_tool_message(
     };
     // Edit rows read like every other tool row: the intent. The file path is
     // already shown on the inline diff header right below, so repeating it on
-    // the row is noise. Errors keep their summary so failures stay diagnosable.
+    // the row is noise. Failures keep their call description on the header.
     let edit_path_on_diff_header = is_edit_tool
         && !is_error
         && diff_mode.is_inline()
@@ -4237,9 +4474,7 @@ pub(crate) fn render_tool_message(
             intent.to_string(),
             Style::default().fg(tool_color()),
         ));
-        // Error summaries always render so failures stay diagnosable even
-        // when technical details are hidden.
-        let show_detail = tools_ui::show_tool_call_details() || is_error || is_partial_batch;
+        let show_detail = tools_ui::show_tool_call_details() || is_partial_batch;
         if show_detail && !summary.is_empty() && summary != intent {
             tool_line.push(Span::styled(" · ", Style::default().fg(dim_color())));
             tool_line.push(Span::styled(summary, Style::default().fg(dim_color())));
@@ -4250,7 +4485,7 @@ pub(crate) fn render_tool_message(
             Style::default().fg(dim_color()),
         ));
     }
-    if is_edit_tool && has_diff_changes {
+    if show_header_diff_counts {
         tool_line.push(Span::styled(" (", Style::default().fg(dim_color())));
         tool_line.push(Span::styled(
             format!("+{}", additions),
@@ -4263,10 +4498,14 @@ pub(crate) fn render_tool_message(
         ));
         tool_line.push(Span::styled(")", Style::default().fg(dim_color())));
     }
-    let token_suffix = Line::from(vec![
-        Span::styled(" · ", Style::default().fg(dim_color())),
-        Span::styled(token_badge.label, Style::default().fg(token_badge.color)),
-    ]);
+    let mut usage_spans = vec![Span::styled(" · ", Style::default().fg(dim_color()))];
+    usage_spans.extend(tools_ui::tool_usage_spans(
+        token_badge.label,
+        token_badge.color,
+        msg.duration_secs,
+        &msg.content,
+    ));
+    let token_suffix = Line::from(usage_spans);
 
     let rendered_tool_line = super::truncate_line_preserving_suffix_to_width(
         &Line::from(tool_line),
@@ -4275,6 +4514,13 @@ pub(crate) fn render_tool_message(
     );
     let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
+    if is_error && (tc.name != "batch" || batch_counts.is_none()) {
+        lines.push(render_tool_failure_reason(&msg.content, row_width, 2));
+        if centered {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return lines;
+    }
     if let Some(draft_lines) = render_gmail_draft_card(tc, &msg.content, is_error, row_width) {
         lines.extend(draft_lines);
     }
@@ -4389,6 +4635,17 @@ pub(crate) fn render_tool_message(
                 sub_result.map(|result| result.content.as_str()),
             ));
 
+            if sub_errored {
+                lines.push(render_tool_failure_reason(
+                    sub_result
+                        .map(|result| result.content.as_str())
+                        .unwrap_or("Error: Tool call failed"),
+                    row_width,
+                    4,
+                ));
+                continue;
+            }
+
             if let Some(result) = sub_result
                 && let Some(mut draft_lines) = render_gmail_draft_card(
                     &sub_tc,
@@ -4499,21 +4756,20 @@ pub(crate) fn render_tool_message(
         let diff_file_path =
             |line: &ParsedDiffLine| line.file_path.clone().or_else(|| file_path_for_ext.clone());
         let first_file_path = display_lines.first().and_then(|line| diff_file_path(line));
-        let diff_header = |prefix: &str, file_path: Option<&str>| match file_path {
-            Some(path) => format!("{pad_str}{prefix} diff · {path}"),
-            None => format!("{pad_str}{prefix} diff"),
-        };
-
-        lines.push(
-            Line::from(Span::styled(
-                diff_header("┌─", first_file_path.as_deref()),
-                Style::default().fg(dim_color()),
-            ))
-            .alignment(ratatui::layout::Alignment::Left),
-        );
+        lines.push(inline_diff_header(
+            "╭─",
+            Some((additions, deletions)),
+            first_file_path.as_deref(),
+            row_width,
+        ));
 
         let mut shown_truncation = false;
         let mut previous_file_path = first_file_path;
+        let number_width = change_lines
+            .iter()
+            .map(|line| line.prefix.trim().trim_end_matches(['+', '-']).len())
+            .max()
+            .unwrap_or(0);
 
         for (i, line) in display_lines.iter().enumerate() {
             if truncated && !shown_truncation && i >= half_point {
@@ -4530,15 +4786,23 @@ pub(crate) fn render_tool_message(
 
             let current_file_path = diff_file_path(line);
             if i > 0 && current_file_path != previous_file_path {
-                lines.push(
-                    Line::from(Span::styled(
-                        diff_header("├─", current_file_path.as_deref()),
-                        Style::default().fg(dim_color()),
-                    ))
-                    .alignment(ratatui::layout::Alignment::Left),
-                );
+                lines.push(inline_diff_header(
+                    "├─",
+                    None,
+                    current_file_path.as_deref(),
+                    row_width,
+                ));
             }
             previous_file_path = current_file_path.clone();
+
+            if full_inline {
+                let file_ext = current_file_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).extension())
+                    .and_then(|e| e.to_str());
+                lines.extend(expanded_diff_row(line, file_ext, number_width, row_width));
+                continue;
+            }
 
             let base_color = if line.kind == DiffLineKind::Add {
                 diff_add_color()
@@ -4549,7 +4813,7 @@ pub(crate) fn render_tool_message(
             let border_prefix = format!("{}│ ", pad_str);
             let prefix_visual_width = unicode_width::UnicodeWidthStr::width(border_prefix.as_str())
                 + unicode_width::UnicodeWidthStr::width(line.prefix.as_str());
-            let max_content_width = (width as usize).saturating_sub(prefix_visual_width + 1);
+            let max_content_width = row_width.saturating_sub(prefix_visual_width);
 
             let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(border_prefix, Style::default().fg(dim_color())),
@@ -4592,14 +4856,13 @@ pub(crate) fn render_tool_message(
             lines.push(Line::from(spans).alignment(ratatui::layout::Alignment::Left));
         }
 
-        let footer = if total_changes > 0 && truncated {
-            format!("{}└─ (+{} -{} total)", pad_str, additions, deletions)
-        } else {
-            format!("{}└─", pad_str)
-        };
+        let footer = format!("{pad_str}╰─");
         lines.push(
-            Line::from(Span::styled(footer, Style::default().fg(dim_color())))
-                .alignment(ratatui::layout::Alignment::Left),
+            super::truncate_line_with_ellipsis_to_width(
+                &Line::from(Span::styled(footer, Style::default().fg(dim_color()))),
+                width as usize,
+            )
+            .alignment(ratatui::layout::Alignment::Left),
         );
     }
 

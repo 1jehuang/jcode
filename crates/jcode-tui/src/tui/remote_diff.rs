@@ -14,6 +14,7 @@ pub(crate) struct RemoteDiffTracker {
     pub(crate) pending_diffs: HashMap<String, PendingFileDiff>,
     pub(crate) current_tool_id: Option<String>,
     tool_inputs: HashMap<String, String>,
+    tool_exec_starts: HashMap<String, std::time::Instant>,
 }
 
 impl RemoteDiffTracker {
@@ -38,6 +39,9 @@ impl RemoteDiffTracker {
     }
 
     pub(crate) fn handle_tool_exec(&mut self, id: &str, name: &str) {
+        self.tool_exec_starts
+            .entry(id.to_string())
+            .or_insert_with(std::time::Instant::now);
         let input = self.tool_input_json(id);
         if show_diffs_enabled()
             && matches!(
@@ -63,7 +67,14 @@ impl RemoteDiffTracker {
         }
     }
 
+    pub(crate) fn take_tool_duration(&mut self, id: &str) -> Option<f32> {
+        self.tool_exec_starts
+            .remove(id)
+            .map(|start| start.elapsed().as_secs_f32())
+    }
+
     pub(crate) fn finish_tool(&mut self, id: &str, name: &str, output: &str) -> String {
+        self.tool_exec_starts.remove(id);
         if let Some(pending) = self.pending_diffs.remove(id) {
             let new_content = std::fs::read_to_string(&pending.file_path).unwrap_or_default();
             let diff =
@@ -80,6 +91,7 @@ impl RemoteDiffTracker {
         self.pending_diffs.clear();
         self.current_tool_id = None;
         self.tool_inputs.clear();
+        self.tool_exec_starts.clear();
     }
 }
 
@@ -172,6 +184,28 @@ mod keyed_tool_tests {
             assert!(a_diff.contains("-before a\n+after a"));
             assert!(b_diff.contains("-before b\n+after b"));
         }
+    }
+
+    #[test]
+    fn tool_duration_tracks_execution_not_input_and_clears_state() {
+        let mut tracker = RemoteDiffTracker::default();
+        tracker.handle_tool_start("a", "read");
+        assert_eq!(tracker.take_tool_duration("a"), None);
+        tracker.handle_tool_exec("a", "read");
+        tracker.handle_tool_exec("b", "read");
+        tracker.tool_exec_starts.insert(
+            "a".into(),
+            std::time::Instant::now() - std::time::Duration::from_secs(2),
+        );
+        assert!(tracker.take_tool_duration("a").unwrap() >= 2.0);
+        assert_eq!(tracker.take_tool_duration("a"), None);
+        assert!(tracker.take_tool_duration("b").is_some());
+        tracker.handle_tool_exec("c", "read");
+        tracker.finish_tool("c", "read", "done");
+        assert_eq!(tracker.take_tool_duration("c"), None);
+        tracker.handle_tool_exec("d", "read");
+        tracker.clear();
+        assert_eq!(tracker.take_tool_duration("d"), None);
     }
 
     #[test]

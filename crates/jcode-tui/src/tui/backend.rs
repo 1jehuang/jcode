@@ -294,6 +294,10 @@ pub(crate) trait RemoteEventState {
     fn get_tool_input(&self, id: &str) -> serde_json::Value;
     fn handle_tool_exec(&mut self, id: &str, name: &str);
     fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String;
+    // Replays deliberately do not use wall-clock time: playback speed is arbitrary.
+    fn take_tool_duration(&mut self, _id: &str) -> Option<f32> {
+        None
+    }
     fn clear_pending(&mut self);
     fn call_output_tokens_seen(&mut self) -> &mut u64;
     fn reset_call_output_tokens_seen(&mut self);
@@ -1526,6 +1530,10 @@ impl RemoteEventState for RemoteConnection {
 
     fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
         Self::handle_tool_done(self, id, name, output)
+    }
+
+    fn take_tool_duration(&mut self, id: &str) -> Option<f32> {
+        self.tool_diff.take_tool_duration(id)
     }
 
     fn clear_pending(&mut self) {

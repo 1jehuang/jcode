@@ -930,6 +930,44 @@ fn attach_activity_refreshes_openai_oauth_totals_even_on_error() {
     );
 }
 
+#[test]
+fn attach_activity_refreshes_anthropic_oauth_totals_even_on_error() {
+    let label = "test-anthropic-summary-no-account";
+    let expected = crate::provider_activity::anthropic_oauth_usage_summary(label);
+    let mut report = ProviderUsage {
+        error: Some("quota unavailable".into()),
+        extra_info: vec![
+            ("Plan".into(), "Max".into()),
+            ("Today".into(), "stale".into()),
+        ],
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        attach_activity(&mut report, &format!("claude:oauth:{label}"));
+        for row in &expected {
+            assert!(report.extra_info.contains(row));
+            assert_eq!(
+                report
+                    .extra_info
+                    .iter()
+                    .filter(|(key, _)| key == &row.0)
+                    .count(),
+                1
+            );
+        }
+        assert!(
+            report
+                .extra_info
+                .contains(&("Account label".into(), label.into()))
+        );
+        assert!(report.error.is_some());
+        assert!(report.extra_info.contains(&("Plan".into(), "Max".into())));
+    }
+    let mut api = ProviderUsage::default();
+    attach_activity(&mut api, "claude:api-key");
+    assert!(!api.extra_info.iter().any(|(key, _)| key == "Today"));
+}
+
 fn jcode_me(memory_used: u64, upgrade: bool) -> crate::subscription_api::SubscriptionMe {
     serde_json::from_value(serde_json::json!({
         "account_id": "a", "email": "e@example.com", "tier": "plus", "status": "active",
