@@ -1033,6 +1033,8 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
         content: content.to_string(),
         tool_calls: None,
         tool_data: None,
+        timestamp: None,
+        tool_duration_ms: None,
     };
     let messages = vec![message("user", "hi"), message("assistant", "hello")];
     let whole =
