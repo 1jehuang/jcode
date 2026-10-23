@@ -161,7 +161,7 @@ impl SkillTool {
 
     async fn list_skills(&self, working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {
         let registry = self.effective_registry(working_dir).await;
-        let mut skills = registry.list();
+        let mut skills = registry.list_model_invocable();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
 
         let installed: std::collections::HashSet<&str> =
@@ -252,7 +252,7 @@ impl SkillTool {
         match reloaded {
             Ok(global_count) => {
                 let effective = self.effective_registry(working_dir).await;
-                let skills = effective.list();
+                let skills = effective.list_model_invocable();
                 let mut output = format!(
                     "Reloaded {} global skills ({} effective for this session)\n\n",
                     global_count,
@@ -645,5 +645,71 @@ mod tests {
             "skill edits must be visible without daemon restart, got: {}",
             read.output
         );
+    }
+
+    fn write_manual_only_project_skill(root: &std::path::Path, name: &str) {
+        let skill_dir = root.join(".agents").join("skills").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: Manual only skill {name}\ndisable-model-invocation: true\n---\n\nManual body."
+            ),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_disable_model_invocation_skill_is_not_advertised_by_list_or_reload_all() {
+        let tool = create_test_tool();
+        let repo = tempfile::tempdir().unwrap();
+        write_project_skill(repo.path(), "model-visible-skill");
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+
+        for action in ["list", "reload_all"] {
+            let result = tool
+                .execute(
+                    json!({"action": action}),
+                    context_with_working_dir(repo.path()),
+                )
+                .await
+                .unwrap();
+            assert!(
+                result.output.contains("model-visible-skill"),
+                "{action} must still list model-invocable skills, got: {}",
+                result.output
+            );
+            assert!(
+                !result.output.contains("manual-only-skill"),
+                "{action} must not advertise disable-model-invocation skills, got: {}",
+                result.output
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_disable_model_invocation_skill_still_loads_and_reads_by_name() {
+        let tool = create_test_tool();
+        let repo = tempfile::tempdir().unwrap();
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+
+        let load = tool
+            .execute(
+                json!({"action": "load", "name": "manual-only-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+            .unwrap();
+        assert!(load.output.contains("## Skill: manual-only-skill"));
+        assert!(load.output.contains("Manual body."));
+
+        let read = tool
+            .execute(
+                json!({"action": "read", "name": "manual-only-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+            .unwrap();
+        assert!(read.output.contains("Manual only skill manual-only-skill"));
     }
 }

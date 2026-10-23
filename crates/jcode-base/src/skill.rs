@@ -17,6 +17,9 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// `disable-model-invocation: true`: the user can still run the skill via
+    /// `/name`, but it is kept out of every model-facing skill listing.
+    pub disable_model_invocation: bool,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -31,6 +34,8 @@ struct SkillFrontmatter {
     description: String,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
+    #[serde(rename = "disable-model-invocation", default)]
+    disable_model_invocation: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -524,6 +529,7 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            disable_model_invocation,
         } = frontmatter;
 
         let allowed_tools = allowed_tools.map(|tools| match tools {
@@ -537,6 +543,7 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            disable_model_invocation,
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
@@ -581,6 +588,15 @@ impl SkillRegistry {
     pub fn list(&self) -> Vec<&Skill> {
         let mut skills: Vec<&Skill> = self.skills.values().collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
+        skills
+    }
+
+    /// Skills the model may discover: [`Self::list`] minus skills that set
+    /// `disable-model-invocation`. Slash invocation, autocomplete and `/skills`
+    /// keep using [`Self::list`] and [`Self::get`].
+    pub fn list_model_invocable(&self) -> Vec<&Skill> {
+        let mut skills = self.list();
+        skills.retain(|skill| !skill.disable_model_invocation);
         skills
     }
 
@@ -993,6 +1009,7 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
             allowed_tools: None,
+            disable_model_invocation: false,
             content: content.to_string(),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             search_text: std::sync::OnceLock::from(build_skill_search_text(
@@ -1096,6 +1113,58 @@ mod tests {
         .expect("write skill");
 
         assert!(SkillRegistry::parse_skill_inner(&path).is_err());
+    }
+
+    #[test]
+    fn disable_model_invocation_parses_true_false_and_absence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cases = [
+            ("disable-model-invocation: true\n", true),
+            ("disable-model-invocation: false\n", false),
+            ("", false),
+        ];
+
+        for (index, (field, expected)) in cases.into_iter().enumerate() {
+            let path = temp.path().join(format!("skill-{index}.md"));
+            std::fs::write(
+                &path,
+                format!("---\nname: test\ndescription: Test skill\n{field}---\n\nBody\n"),
+            )
+            .expect("write skill");
+            let skill = SkillRegistry::parse_skill_inner(&path).expect("parse skill");
+            assert_eq!(skill.disable_model_invocation, expected, "{field:?}");
+        }
+    }
+
+    #[test]
+    fn disable_model_invocation_skill_is_hidden_from_model_list_but_still_resolvable() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        write_skill_file(
+            temp.path(),
+            "visible",
+            "---\nname: visible\ndescription: Visible skill\n---\n\nBody\n",
+        );
+        write_skill_file(
+            temp.path(),
+            "manual-only",
+            "---\nname: manual-only\ndescription: Manual only\ndisable-model-invocation: true\n---\n\nBody\n",
+        );
+        let mut registry = SkillRegistry::default();
+        registry.load_from_dir(temp.path()).expect("load skills");
+
+        let names = |skills: Vec<&Skill>| -> Vec<String> {
+            skills.into_iter().map(|skill| skill.name.clone()).collect()
+        };
+        assert_eq!(names(registry.list_model_invocable()), ["visible"]);
+        assert_eq!(names(registry.list()), ["manual-only", "visible"]);
+        assert!(registry.get("manual-only").is_some());
+        assert_eq!(
+            registry.resolve_invocation("/manual-only run it"),
+            Some(SkillInvocation {
+                name: "manual-only",
+                prompt: Some("run it"),
+            })
+        );
     }
 
     #[test]
