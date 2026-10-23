@@ -36,7 +36,14 @@ fn scrollbar_junctions_survive_every_thumb_position() {
             let thumb =
                 super::super::native_scrollbar_thumb(scrollbar.area, scroll, 40, 10).unwrap();
             for y in [2, 4, 7, 9] {
-                assert_eq!(buf[(19, y)].symbol(), "┤", "scroll={scroll}, y={y}");
+                let expected = if thumb.contains(usize::from(y - 1)) {
+                    "┤"
+                } else if y == 2 || y == 7 {
+                    "╮"
+                } else {
+                    "╯"
+                };
+                assert_eq!(buf[(19, y)].symbol(), expected, "scroll={scroll}, y={y}");
                 assert_eq!(buf[(18, y)].symbol(), "─");
                 if thumb.contains(usize::from(y - 1)) {
                     assert_eq!(
@@ -45,8 +52,13 @@ fn scrollbar_junctions_survive_every_thumb_position() {
                     );
                 }
             }
-            for y in 1..11 {
-                assert_ne!(buf[(19, y)].symbol(), " ", "broken track at {y}");
+            // Between/outside widgets, only the thumb may occupy the track.
+            for y in [1, 5, 6, 10] {
+                assert_eq!(
+                    buf[(19, y)].symbol() == " ",
+                    !thumb.contains(usize::from(y - 1)),
+                    "unexpected track at scroll={scroll}, y={y}"
+                );
             }
             assert_eq!(buf[(19, 0)].symbol(), " ");
             assert_eq!(buf[(19, 11)].symbol(), " ");
@@ -106,7 +118,7 @@ fn scrollbar_thumb_overlay_draws_in_front_of_widget_border() {
     assert_eq!(buf[(9, 2)].symbol(), "╵");
     // Track rows below the thumb keep the widget border visible.
     assert_eq!(buf[(9, 3)].symbol(), "│");
-    assert_eq!(buf[(9, 7)].symbol(), "┤");
-    // The shared track continues below the widget without a gutter.
-    assert_eq!(buf[(9, 8)].symbol(), "│");
+    assert_eq!(buf[(9, 7)].symbol(), "┘");
+    // Outside the thumb and widget, the track remains invisible.
+    assert_eq!(buf[(9, 8)].symbol(), " ");
 }

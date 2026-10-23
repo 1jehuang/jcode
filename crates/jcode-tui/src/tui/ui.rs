@@ -3693,8 +3693,8 @@ impl NativeScrollbar {
         );
     }
 
-    /// Merge the track with docked widget borders. Thumb color carries through
-    /// junctions so scrolling never cuts a widget's horizontal border.
+    /// Merge only visible thumb cells with docked widget borders. Leave the
+    /// invisible track and all corners outside the thumb untouched.
     pub(crate) fn render_thumb_overlay(&self, frame: &mut Frame) {
         let Some(thumb) = native_scrollbar_thumb(
             self.area,
@@ -3707,20 +3707,12 @@ impl NativeScrollbar {
         let color = native_scrollbar_thumb_color(self.focused);
         let buf = frame.buffer_mut();
         let x = self.area.x;
-        for row in 0..self.area.height as usize {
+        for row in thumb.offset..thumb.offset + thumb.height {
             let y = self.area.y + row as u16;
             if let Some(cell) = buf.cell_mut((x, y)) {
                 let junction = matches!(cell.symbol(), "╮" | "╯" | "┐" | "┘" | "┤");
-                if junction {
-                    cell.set_symbol("┤");
-                } else if thumb.contains(row) {
-                    cell.set_symbol(thumb.glyph(row));
-                } else if cell.symbol() == " " {
-                    cell.set_symbol("│").set_fg(dim_color());
-                }
-                if thumb.contains(row) {
-                    cell.set_fg(color);
-                }
+                cell.set_symbol(if junction { "┤" } else { thumb.glyph(row) })
+                    .set_fg(color);
             }
         }
     }
