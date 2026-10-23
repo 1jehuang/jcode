@@ -327,7 +327,12 @@ pub enum ApiEvent {
     /// This is separate from `SessionStatus`: a session can be `generating`
     /// throughout all of these phases, while clients need the finer progress to
     /// avoid looking stuck before the model emits its first token.
-    ConnectionPhase { session_id: String, phase: String },
+    ConnectionPhase {
+        session_id: String,
+        phase: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry: Option<jcode_message_types::RetryMetadata>,
+    },
 
     /// The provider and model serving the attached session.
     ///

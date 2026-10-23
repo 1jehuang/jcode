@@ -37,6 +37,17 @@ test("handshake records server identity and capabilities", async () => {
   await server.close();
 });
 
+test("connection_phase decoding preserves optional retry metadata", () => {
+  const decoder = new NdjsonDecoder();
+  const legacy = { v: 1, ev: "connection_phase", session_id: "s1", phase: "retrying (2/3)" };
+  const retry = { attempt: 2, max: 3, delay_ms: 0, reason: "rate_limit" };
+  const structured = { ...legacy, retry };
+  assert.deepEqual(decoder.push(`${JSON.stringify(legacy)}\n${JSON.stringify(structured)}\n`), [
+    legacy,
+    structured,
+  ]);
+});
+
 test("replies are correlated by id even when out of order", async () => {
   const server = await startMockHarness({
     onRequest(request, send) {

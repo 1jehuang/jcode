@@ -2,6 +2,32 @@
 
 use super::*;
 
+#[cfg(test)]
+mod retry_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn connection_phase_legacy_and_metadata_roundtrip() {
+        for phase in ["connecting", "retrying (2/3)"] {
+            let wire = serde_json::json!({"type":"connection_phase","phase":phase});
+            let event: ServerEvent = serde_json::from_value(wire.clone()).unwrap();
+            assert!(matches!(
+                &event,
+                ServerEvent::ConnectionPhase { retry: None, .. }
+            ));
+            assert_eq!(serde_json::to_value(event).unwrap(), wire);
+        }
+        let wire = serde_json::json!({"type":"connection_phase","phase":"retrying (2/3)",
+            "retry":{"attempt":2,"max":3,"delay_ms":1500,"reason":"transport"}});
+        let event: ServerEvent = serde_json::from_value(wire.clone()).unwrap();
+        assert!(
+            matches!(&event, ServerEvent::ConnectionPhase { retry: Some(retry), .. }
+            if retry.reason == jcode_message_types::RetryReason::Transport)
+        );
+        assert_eq!(serde_json::to_value(event).unwrap(), wire);
+    }
+}
+
 /// Credential-free usage attributed to an OAuth account on the daemon host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountUsageSnapshot {
@@ -267,7 +293,11 @@ pub enum ServerEvent {
 
     /// Connection phase update (authenticating, connecting, waiting, etc.)
     #[serde(rename = "connection_phase")]
-    ConnectionPhase { phase: String },
+    ConnectionPhase {
+        phase: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry: Option<jcode_message_types::RetryMetadata>,
+    },
 
     /// Provider-supplied human-readable transport detail for the current stream.
     #[serde(rename = "status_detail")]

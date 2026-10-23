@@ -3437,12 +3437,13 @@ fn emit_ndjson_event(
                 &serde_json::json!({ "type": "connection_type", "connection": connection }),
             )
         }
-        ServerEvent::ConnectionPhase { phase } => {
+        ServerEvent::ConnectionPhase { phase, retry } => {
             state.connection_phase = Some(phase.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "connection_phase", "phase": phase }),
-            )
+            let mut event = serde_json::json!({ "type": "connection_phase", "phase": phase });
+            if let Some(retry) = retry {
+                event["retry"] = serde_json::to_value(retry)?;
+            }
+            write_json_line(stdout, &event)
         }
         ServerEvent::StatusDetail { detail } => {
             state.status_detail = Some(detail.clone());

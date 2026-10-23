@@ -1019,22 +1019,28 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::Pong { .. } => false,
-        ServerEvent::ConnectionPhase { phase } => {
-            let cp = match phase.as_str() {
-                "authenticating" => crate::message::ConnectionPhase::Authenticating,
-                "connecting" => crate::message::ConnectionPhase::Connecting,
-                "sending request" => crate::message::ConnectionPhase::SendingRequest,
-                "waiting for response" => crate::message::ConnectionPhase::WaitingForResponse,
-                "streaming" => crate::message::ConnectionPhase::Streaming,
-                _ if phase.starts_with("retrying (") && phase.ends_with(')') => {
-                    let inner = &phase[10..phase.len() - 1];
-                    let (attempt, max) = inner
-                        .split_once('/')
-                        .and_then(|(a, m)| Some((a.parse::<u32>().ok()?, m.parse::<u32>().ok()?)))
-                        .unwrap_or((1, 1));
-                    crate::message::ConnectionPhase::Retrying { attempt, max }
+        ServerEvent::ConnectionPhase { phase, retry } => {
+            let cp = if let Some(retry) = retry {
+                crate::message::ConnectionPhase::RetryingWithMetadata { retry }
+            } else {
+                match phase.as_str() {
+                    "authenticating" => crate::message::ConnectionPhase::Authenticating,
+                    "connecting" => crate::message::ConnectionPhase::Connecting,
+                    "sending request" => crate::message::ConnectionPhase::SendingRequest,
+                    "waiting for response" => crate::message::ConnectionPhase::WaitingForResponse,
+                    "streaming" => crate::message::ConnectionPhase::Streaming,
+                    _ if phase.starts_with("retrying (") && phase.ends_with(')') => {
+                        let inner = &phase[10..phase.len() - 1];
+                        let (attempt, max) = inner
+                            .split_once('/')
+                            .and_then(|(a, m)| {
+                                Some((a.parse::<u32>().ok()?, m.parse::<u32>().ok()?))
+                            })
+                            .unwrap_or((1, 1));
+                        crate::message::ConnectionPhase::Retrying { attempt, max }
+                    }
+                    _ => crate::message::ConnectionPhase::Connecting,
                 }
-                _ => crate::message::ConnectionPhase::Connecting,
             };
             app.status = if matches!(cp, crate::message::ConnectionPhase::Streaming) {
                 app.resume_streaming_tps();

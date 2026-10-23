@@ -141,6 +141,7 @@ fn test_handle_server_event_kv_cache_request_resets_tps_output_watermark_for_nex
     app.handle_server_event(
         crate::protocol::ServerEvent::ConnectionPhase {
             phase: "streaming".to_string(),
+            retry: None,
         },
         &mut remote,
     );
@@ -243,6 +244,7 @@ fn test_handle_server_event_tps_connection_phase_streaming_starts_collection_onl
     app.handle_server_event(
         crate::protocol::ServerEvent::ConnectionPhase {
             phase: "waiting for response".to_string(),
+            retry: None,
         },
         &mut remote,
     );
@@ -253,6 +255,7 @@ fn test_handle_server_event_tps_connection_phase_streaming_starts_collection_onl
     app.handle_server_event(
         crate::protocol::ServerEvent::ConnectionPhase {
             phase: "streaming".to_string(),
+            retry: None,
         },
         &mut remote,
     );
@@ -281,6 +284,7 @@ fn test_connection_phase_elapsed_resets_per_attempt_not_per_turn() {
     app.handle_server_event(
         crate::protocol::ServerEvent::ConnectionPhase {
             phase: "connecting".to_string(),
+            retry: None,
         },
         &mut remote,
     );
@@ -302,6 +306,7 @@ fn test_connection_phase_elapsed_resets_per_attempt_not_per_turn() {
     app.handle_server_event(
         crate::protocol::ServerEvent::ConnectionPhase {
             phase: "waiting for response".to_string(),
+            retry: None,
         },
         &mut remote,
     );
@@ -314,10 +319,35 @@ fn test_connection_phase_elapsed_resets_per_attempt_not_per_turn() {
     app.handle_server_event(
         crate::protocol::ServerEvent::ConnectionPhase {
             phase: "streaming".to_string(),
+            retry: None,
         },
         &mut remote,
     );
     assert!(app.connection_phase_started.is_none());
+}
+
+#[test]
+fn test_connection_phase_preserves_typed_retry_metadata() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let retry = crate::message::RetryMetadata {
+        attempt: 2,
+        max: 3,
+        delay_ms: 1500,
+        reason: crate::message::RetryReason::RateLimit,
+    };
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ConnectionPhase {
+            phase: "retrying (2/3)".into(),
+            retry: Some(retry.clone()),
+        },
+        &mut remote,
+    );
+    assert!(matches!(app.status, ProcessingStatus::Connecting(
+        crate::message::ConnectionPhase::RetryingWithMetadata { retry: actual }
+    ) if actual == retry));
 }
 
 #[test]
@@ -330,6 +360,7 @@ fn test_handle_server_event_tps_message_end_counts_late_usage_without_timer_runn
     app.handle_server_event(
         crate::protocol::ServerEvent::ConnectionPhase {
             phase: "streaming".to_string(),
+            retry: None,
         },
         &mut remote,
     );
@@ -370,6 +401,7 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
     app.handle_server_event(
         crate::protocol::ServerEvent::ConnectionPhase {
             phase: "streaming".to_string(),
+            retry: None,
         },
         &mut remote,
     );

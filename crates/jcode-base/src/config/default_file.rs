@@ -438,6 +438,10 @@ openai_reasoning_effort = "low"
 # xhigh needs Opus 4.7/4.8 or Fable 5; max needs an output_config effort model (Opus/Sonnet 4.6+).
 # Defaults to xhigh for Claude Opus 4.7/4.8 (high on older Opus) when unset; other models keep their own default.
 # anthropic_reasoning_effort = "medium"
+# Optional cumulative retry-sleep budget per Anthropic request. Unset keeps
+# existing retries. Zero forbids positive sleeps. Retry-After is never shortened.
+# Env override: JCODE_ANTHROPIC_RETRY_WAIT_BUDGET_SECS.
+# anthropic_retry_wait_budget_secs = 30
 # OpenAI transport mode (auto|websocket|https)
 # openai_transport = "auto"
 # OpenAI service tier override (priority|ultrafast|flex|off)

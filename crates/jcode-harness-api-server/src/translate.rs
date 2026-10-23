@@ -1842,6 +1842,9 @@ impl BridgeState {
             "connection_phase" => vec![ServerFrame::event(ApiEvent::ConnectionPhase {
                 session_id: session(self),
                 phase: event["phase"].as_str().unwrap_or("connecting").to_string(),
+                retry: event
+                    .get("retry")
+                    .and_then(|retry| serde_json::from_value(retry.clone()).ok()),
             })],
             // Argument streaming is not an assistant-message boundary.
             "tool_start" => vec![ServerFrame::event(ApiEvent::ToolStart {

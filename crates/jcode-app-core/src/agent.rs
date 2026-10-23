@@ -14,6 +14,8 @@ mod model_usage_tests;
 mod prompting;
 mod provider;
 mod response_recovery;
+#[cfg(test)]
+mod retry_tool_tests;
 mod status;
 mod streaming;
 #[cfg(test)]

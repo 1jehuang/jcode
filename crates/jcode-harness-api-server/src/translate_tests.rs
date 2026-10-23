@@ -246,7 +246,24 @@ fn connection_phase_is_forwarded_to_api_clients() {
         ApiEvent::ConnectionPhase {
             session_id: "s1".into(),
             phase: "sending request".into(),
+            retry: None,
         }
+    );
+}
+
+#[test]
+fn connection_phase_retry_metadata_is_forwarded_without_raw_fields() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type":"connection_phase", "phase":"retrying (2/3)",
+        "retry":{"attempt":2,"max":3,"delay_ms":1500,"reason":"overloaded","raw_error":"not forwarded"}
+    }));
+    assert_eq!(frames.len(), 1);
+    let wire = serde_json::to_value(&frames[0].event).unwrap();
+    assert_eq!(wire["phase"], "retrying (2/3)");
+    assert_eq!(
+        wire["retry"],
+        json!({"attempt":2,"max":3,"delay_ms":1500,"reason":"overloaded"})
     );
 }
 

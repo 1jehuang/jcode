@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 11;
+export const API_VERSION_MINOR = 12;
 
 export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
 
@@ -375,7 +375,17 @@ export type ApiEvent =
   /** Attachment recovery intent. Can precede attached. Never auto-sent by the bridge. */
   | { ev: "session_recovery"; session_id: string; continuation_message: string; reconnect_notice?: string }
   | { ev: "session_status"; session_id: string; status: string; pending_soft_interrupts?: number }
-  | { ev: "connection_phase"; session_id: string; phase: string }
+  | {
+      ev: "connection_phase";
+      session_id: string;
+      phase: string;
+      retry?: {
+        attempt: number;
+        max: number;
+        delay_ms: number;
+        reason: "rate_limit" | "overloaded" | "transport" | "unknown";
+      };
+    }
   | {
       ev: "model_info";
       session_id: string;

@@ -907,6 +907,11 @@ impl Config {
         {
             self.provider.max_retries = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_ANTHROPIC_RETRY_WAIT_BUDGET_SECS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.provider.anthropic_retry_wait_budget_secs = Some(parsed);
+        }
         if let Ok(v) = std::env::var("JCODE_RETRY_BACKOFF_CAP_SECS")
             && let Ok(parsed) = v.trim().parse::<u64>()
             && parsed > 0

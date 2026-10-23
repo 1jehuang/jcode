@@ -541,6 +541,9 @@ fn connection_phase_label(phase: &ConnectionPhase) -> String {
         ConnectionPhase::WaitingForResponse => "waiting for response".to_string(),
         ConnectionPhase::Streaming => "streaming".to_string(),
         ConnectionPhase::Retrying { attempt, max } => format!("retrying {}/{}", attempt, max),
+        ConnectionPhase::RetryingWithMetadata { retry } => {
+            format!("retrying {}/{}", retry.attempt, retry.max)
+        }
     }
 }
 
@@ -783,7 +786,10 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     .connection_phase_elapsed()
                     .map_or(elapsed, |d| d.as_secs_f32());
                 let label_color = match phase {
-                    crate::message::ConnectionPhase::Retrying { .. } => rgb(255, 193, 7),
+                    crate::message::ConnectionPhase::Retrying { .. }
+                    | crate::message::ConnectionPhase::RetryingWithMetadata { .. } => {
+                        rgb(255, 193, 7)
+                    }
                     crate::message::ConnectionPhase::Authenticating if phase_elapsed > 10.0 => {
                         rgb(255, 193, 7)
                     }

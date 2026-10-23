@@ -55,6 +55,24 @@ test("event tags match the Rust ApiEvent enum", () => {
   assert.deepEqual([...KNOWN_EVENT_KINDS].sort(), rust);
 });
 
+test("connection_phase optional retry metadata matches the Rust schema", () => {
+  const rust = fs.readFileSync(path.join(rustCrate, "events.rs"), "utf8");
+  const messages = fs.readFileSync(path.resolve(rustCrate, "../../jcode-message-types/src/lib.rs"), "utf8");
+  const typescript = fs.readFileSync(path.resolve(here, "../src/protocol.ts"), "utf8");
+  assert.match(rust, /ConnectionPhase\s*{[^}]*retry:\s*Option<jcode_message_types::RetryMetadata>/);
+  assert.match(typescript, /ev: "connection_phase";[^}]*retry\?:\s*{/);
+  for (const field of ["attempt", "max", "delay_ms"]) {
+    assert.match(messages, new RegExp(`pub ${field}: u(?:32|64)`));
+    assert.match(typescript, new RegExp(`${field}: number`));
+  }
+  const reasons = /pub enum RetryReason \{([^}]+)\}/.exec(messages)![1]
+    .split(",").map((value) => value.trim()).filter(Boolean).map(snakeCase);
+  const retryShape = /ev: "connection_phase";[^}]*retry\?:\s*\{([^}]+)\}/.exec(typescript)![1];
+  const tsReasons = /reason: ([^;]+);/.exec(retryShape)![1].match(/"([a-z_]+)"/g)!
+    .map((value) => JSON.parse(value));
+  assert.deepEqual(tsReasons.sort(), reasons.sort());
+});
+
 test("send_message no_reply field matches the Rust schema", () => {
   const rust = fs.readFileSync(path.join(rustCrate, "requests.rs"), "utf8");
   const typescript = fs.readFileSync(path.resolve(here, "../src/protocol.ts"), "utf8");

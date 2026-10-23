@@ -16,6 +16,9 @@
 //! This provides better control and eliminates the Python dependency.
 
 mod reasoning_request;
+mod retry_sleep;
+#[cfg(test)]
+mod retry_sleep_tests;
 
 use jcode_base::auth;
 use jcode_base::auth::oauth;
@@ -1905,7 +1908,9 @@ async fn run_stream_with_retries(
     retry_settings: reasoning_request::RetrySettings,
 ) {
     let mut token = initial_token;
-    let mut last_error = None;
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut sleep_budget =
+        retry_sleep::RetrySleepBudget::new(retry_settings.retry_wait_budget_secs);
     let mut next_retry_delay = None;
     let mut attempted_forced_refresh = false;
     let original_model = model_name.clone();
@@ -1915,6 +1920,9 @@ async fn run_stream_with_retries(
     let mut tried_models: Vec<String> = vec![original_model.clone()];
 
     for attempt in 0..MAX_RETRIES {
+        if tx.is_closed() {
+            return;
+        }
         if attempt > 0 {
             // Exponential backoff with jitter: ~1s, ~2s, ~4s
             let delay = jcode_provider_core::retry_after::retry_delay(
@@ -1922,15 +1930,41 @@ async fn run_stream_with_retries(
                 RETRY_BASE_DELAY_MS,
                 next_retry_delay.take(),
             );
-            let _ = tx
-                .send(Ok(StreamEvent::ConnectionPhase {
-                    phase: jcode_message_types::ConnectionPhase::Retrying {
+            if tokio::time::Instant::now().checked_add(delay).is_none()
+                || !sleep_budget.reserve(delay)
+            {
+                // Keep the exact provider error, including its typed source chain.
+                if let Some(error) = last_error.take() {
+                    let _ = tx.send(Err(error)).await;
+                }
+                return;
+            }
+            let phase = match last_error.as_ref() {
+                Some(error) => jcode_message_types::ConnectionPhase::RetryingWithMetadata {
+                    retry: jcode_message_types::RetryMetadata {
                         attempt: attempt + 1,
                         max: MAX_RETRIES,
+                        delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                        reason: retry_sleep::retry_reason(error),
                     },
-                }))
-                .await;
-            tokio::time::sleep(delay).await;
+                },
+                None => jcode_message_types::ConnectionPhase::Retrying {
+                    attempt: attempt + 1,
+                    max: MAX_RETRIES,
+                },
+            };
+            if tx
+                .send(Ok(StreamEvent::ConnectionPhase { phase }))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                _ = tokio::time::sleep(delay) => {},
+            }
             jcode_base::logging::info(&format!(
                 "Retrying Anthropic API request (attempt {}/{})",
                 attempt + 1,
@@ -1956,19 +1990,22 @@ async fn run_stream_with_retries(
         };
 
         let mut response_accepted = false;
-        match stream_response(
-            attempt_client,
-            token.clone(),
-            is_oauth,
-            request.clone(),
-            attempt_tx,
-            &model_name,
-            &oauth_session_id,
-            &direct_transport,
-            &mut response_accepted,
-        )
-        .await
-        {
+        let result = tokio::select! {
+            biased;
+            _ = tx.closed() => return,
+            result = stream_response(
+                attempt_client,
+                token.clone(),
+                is_oauth,
+                request.clone(),
+                attempt_tx,
+                &model_name,
+                &oauth_session_id,
+                &direct_transport,
+                &mut response_accepted,
+            ) => result,
+        };
+        match result {
             Ok(()) => {
                 let _ = attempt_guard.finish().await;
                 return; // Success
@@ -2165,7 +2202,11 @@ async fn run_stream_with_retries(
                     } else {
                         jcode_base::logging::info(&format!("Transient error, will retry: {}", e));
                     }
-                    next_retry_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+                    next_retry_delay = if retry_settings.retry_wait_budget_secs.is_some() {
+                        jcode_provider_core::retry_after::retry_after_required_from_error(&e)
+                    } else {
+                        jcode_provider_core::retry_after::retry_after_from_error(&e)
+                    };
                     last_error = Some(e);
                     continue;
                 }
