@@ -3544,8 +3544,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
         let widget_start = Instant::now();
         info_widget::render_all(frame, &placements, &widget_data);
-        // Keep the chat scrollbar thumb in front of info widget borders that
-        // dock against the right edge of the messages area.
+        // Merge docked widget borders into the shared scrollbar column, then
+        // highlight the thumb without erasing horizontal border connections.
         if let Some(scrollbar) = chat_scrollbar
             && placements
                 .iter()
@@ -3693,8 +3693,8 @@ impl NativeScrollbar {
         );
     }
 
-    /// Draw only the thumb cells, leaving the rest of the track untouched so an
-    /// overlapping widget border stays visible while the thumb sits in front.
+    /// Merge the track with docked widget borders. Thumb color carries through
+    /// junctions so scrolling never cuts a widget's horizontal border.
     pub(crate) fn render_thumb_overlay(&self, frame: &mut Frame) {
         let Some(thumb) = native_scrollbar_thumb(
             self.area,
@@ -3707,10 +3707,20 @@ impl NativeScrollbar {
         let color = native_scrollbar_thumb_color(self.focused);
         let buf = frame.buffer_mut();
         let x = self.area.x;
-        for row in thumb.offset..thumb.offset + thumb.height {
+        for row in 0..self.area.height as usize {
             let y = self.area.y + row as u16;
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(thumb.glyph(row)).set_fg(color);
+                let junction = matches!(cell.symbol(), "╮" | "╯" | "┐" | "┘" | "┤");
+                if junction {
+                    cell.set_symbol("┤");
+                } else if thumb.contains(row) {
+                    cell.set_symbol(thumb.glyph(row));
+                } else if cell.symbol() == " " {
+                    cell.set_symbol("│").set_fg(dim_color());
+                }
+                if thumb.contains(row) {
+                    cell.set_fg(color);
+                }
             }
         }
     }
