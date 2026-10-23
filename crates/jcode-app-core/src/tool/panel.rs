@@ -43,8 +43,8 @@ impl Tool for PanelTool {
             "additionalProperties": false,
             "properties": {
                 "intent": super::intent_schema_property(),
-                "action": {"type":"string", "enum":["spawn","update","focus","close","list","history","reopen","purge"], "default":"spawn", "description":"Default spawn. Close archives recoverably. Reopen restores an open or archived panel. Purge permanently removes its saved copy, never the linked source. List/history return metadata without bodies."},
-                "panel_id": {"type":"string", "description":"Same-session panel ID for update/focus/close/reopen/purge. Omit for spawn/list/history."},
+                "action": {"type":"string", "enum":["spawn","update","focus","close","list","history","reopen","purge","refresh"], "default":"spawn", "description":"Default spawn. Close archives recoverably. Reopen restores an open or archived panel. Refresh retries an open panel's linked source while retaining its saved copy on failure. Purge permanently removes its saved copy, never the linked source. List/history return metadata without bodies."},
+                "panel_id": {"type":"string", "description":"Same-session panel ID for update/focus/close/reopen/purge/refresh. Omit for spawn/list/history."},
                 "title": {"type":"string", "description":"Panel title for spawn/update."},
                 "content": {"type":"string", "description":"Markdown for spawn/update, mutually exclusive with file_path."},
                 "file_path": {"type":"string", "description":"Markdown/PDF path for spawn/update, relative to cwd. Exclusive with content."},
@@ -55,7 +55,10 @@ impl Tool for PanelTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: PanelInput = serde_json::from_value(input)?;
         let action = params.action.as_deref().unwrap_or("spawn");
-        if matches!(action, "close" | "reopen" | "purge" | "list" | "history") {
+        if matches!(
+            action,
+            "close" | "reopen" | "purge" | "list" | "history" | "refresh"
+        ) {
             ensure!(
                 params.content.is_none()
                     && params.file_path.is_none()
@@ -77,6 +80,16 @@ impl Tool for PanelTool {
                 match action {
                     "close" => crate::side_panel::archive_page(&ctx.session_id, id)?,
                     "reopen" => crate::side_panel::reopen_page(&ctx.session_id, id)?,
+                    "refresh" => {
+                        let mut snapshot =
+                            crate::side_panel::snapshot_for_session(&ctx.session_id)?;
+                        ensure!(
+                            snapshot.pages.iter().any(|page| page.id == id),
+                            "Panel not found in this session: {id}"
+                        );
+                        crate::side_panel::refresh_linked_page_content(&mut snapshot, Some(id));
+                        snapshot
+                    }
                     _ => crate::side_panel::purge_page(&ctx.session_id, id)?,
                 }
             };

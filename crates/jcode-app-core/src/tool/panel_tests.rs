@@ -180,6 +180,73 @@ async fn panel_registered_lifecycle_and_validation() {
         .await
         .unwrap();
     assert_eq!(focused.metadata.unwrap()["focused_page_id"], *id);
+    std::fs::remove_file(&path).unwrap();
+    let failed_refresh = registry
+        .execute(
+            "panel",
+            json!({"action":"refresh", "panel_id":id}),
+            context(temp.path(), "panel-test"),
+        )
+        .await
+        .unwrap();
+    let failed_refresh: SidePanelSnapshot =
+        serde_json::from_value(failed_refresh.metadata.unwrap()).unwrap();
+    let failed_page = failed_refresh
+        .pages
+        .iter()
+        .find(|page| &page.id == id)
+        .unwrap();
+    assert!(failed_page.status.stale_reason.is_some());
+    assert!(failed_page.content.is_empty() && failed_page.pdf_data.is_none());
+    assert!(
+        crate::side_panel::snapshot_for_session("panel-test")
+            .unwrap()
+            .pages
+            .iter()
+            .any(|page| &page.id == id && page.pdf_data.is_some())
+    );
+    std::fs::write(&path, synthetic_pdf("Refreshed panel")).unwrap();
+    let refreshed = registry
+        .execute(
+            "panel",
+            json!({"action":"refresh", "panel_id":id}),
+            context(temp.path(), "panel-test"),
+        )
+        .await
+        .unwrap();
+    let refreshed: SidePanelSnapshot = serde_json::from_value(refreshed.metadata.unwrap()).unwrap();
+    assert!(
+        refreshed
+            .pages
+            .iter()
+            .find(|page| &page.id == id)
+            .unwrap()
+            .status
+            .stale_reason
+            .is_none()
+    );
+    for input in [
+        json!({"action":"refresh"}),
+        json!({"action":"refresh", "panel_id":id, "content":"invalid"}),
+        json!({"action":"refresh", "panel_id":"missing"}),
+    ] {
+        assert!(
+            registry
+                .execute("panel", input, context(temp.path(), "panel-test"))
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        registry
+            .execute(
+                "panel",
+                json!({"action":"refresh", "panel_id":id}),
+                context(temp.path(), "other-session")
+            )
+            .await
+            .is_err()
+    );
     registry
         .execute(
             "panel",
@@ -335,7 +402,7 @@ fn panel_history_schema_and_sendable_future() {
     let tool = PanelTool::new();
     let schema = tool.parameters_schema();
     for action in [
-        "spawn", "update", "focus", "close", "list", "history", "reopen", "purge",
+        "spawn", "update", "focus", "close", "list", "history", "reopen", "purge", "refresh",
     ] {
         assert!(
             schema["properties"]["action"]["enum"]

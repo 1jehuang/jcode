@@ -1,6 +1,127 @@
 use super::*;
 
 #[test]
+fn panel_history_retained_hidden_page_focuses_offline_without_panel_action() {
+    let _lock = crate::storage::lock_test_env();
+    let prior = std::env::var_os("JCODE_SSH_REMOTE");
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(value) = &self.0 {
+                crate::env::set_var("JCODE_SSH_REMOTE", value);
+            } else {
+                crate::env::remove_var("JCODE_SSH_REMOTE");
+            }
+        }
+    }
+    let _restore = Restore(prior);
+    for ssh in [false, true] {
+        if ssh {
+            crate::env::set_var("JCODE_SSH_REMOTE", "synthetic-offline-host");
+        } else {
+            crate::env::remove_var("JCODE_SSH_REMOTE");
+        }
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        app.remote_session_id = Some("session-a".into());
+        app.set_side_panel_snapshot(snapshot());
+        // Old servers have no inventory identity or PanelAction capability.
+        app.side_panel.session_id = None;
+        app.diff_pane_scroll = 17;
+        app.diff_pane_scroll_x = 6;
+        app.side_panel_image_zoom_percent = 140;
+        app.diff_pane_auto_scroll = false;
+        app.dismiss_side_panel();
+        app.pending_panel_action = Some(("session-a".into(), "reopen".into(), "closed".into()));
+        assert!(handle_panels_command(&mut app, "/panels roadmap"));
+        app.handle_inline_interactive_key(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("open"));
+        assert!(!app.side_panel_user_hidden);
+        assert!(!app.side_panel_explicit_hidden);
+        assert_eq!(app.diff_pane_scroll, 17);
+        assert_eq!(app.diff_pane_scroll_x, 6);
+        assert_eq!(app.side_panel_image_zoom_percent, 140);
+        assert!(!app.diff_pane_auto_scroll);
+        assert!(app.pending_panel_action.is_none());
+        app.reopen_panel_from_history("session-a", "open");
+        assert!(app.pending_panel_action.is_none());
+        assert_eq!(app.diff_pane_scroll, 17);
+        app.reopen_panel_from_history("session-a", "missing");
+        assert!(app.pending_panel_action.is_none());
+    }
+}
+
+#[test]
+fn panel_history_refresh_command_queues_expected_remote_session() {
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("session-a".into());
+    app.side_panel = snapshot();
+    for command in ["/panels refresh", "/panels refresh open extra"] {
+        assert!(handle_panels_command(&mut app, command));
+        assert!(app.pending_panel_action.is_none());
+    }
+    app.refresh_panel_from_history("session-b", "open");
+    assert!(app.pending_panel_action.is_none());
+    assert!(handle_panels_command(&mut app, "/panels refresh open"));
+    assert_eq!(
+        app.pending_panel_action,
+        Some(("session-a".into(), "refresh".into(), "open".into()))
+    );
+}
+
+#[test]
+fn panel_history_explicit_local_refresh_retains_failed_source_then_recovers_empty_markdown() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(value) = &self.0 {
+                crate::env::set_var("JCODE_HOME", value);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+    let _restore = Restore(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let mut app = crate::tui::app::tests::create_test_app();
+    let session = app.session.id.clone();
+    let path = temp.path().join("synthetic-linked.md");
+    std::fs::write(&path, "# Saved body").unwrap();
+    app.set_side_panel_snapshot(
+        crate::side_panel::load_file(&session, "linked", Some("Linked"), &path, true).unwrap(),
+    );
+    app.diff_pane_scroll = 17;
+    std::fs::remove_file(&path).unwrap();
+    assert!(handle_panels_command(&mut app, "/panels refresh linked"));
+    assert_eq!(
+        app.side_panel.focused_page().unwrap().content,
+        "# Saved body"
+    );
+    assert!(
+        app.side_panel
+            .focused_page()
+            .unwrap()
+            .status
+            .stale_reason
+            .is_some()
+    );
+    std::fs::write(&path, "").unwrap();
+    assert!(handle_panels_command(&mut app, "/panels refresh linked"));
+    let page = app.side_panel.focused_page().unwrap();
+    assert_eq!(page.content, "");
+    assert!(page.status.stale_reason.is_none());
+    assert!(page.status.last_successful_update_ms > 0);
+    assert_eq!(app.diff_pane_scroll, 17);
+}
+
+#[test]
 fn panel_history_archive_reopen_restores_saved_viewport() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().unwrap();

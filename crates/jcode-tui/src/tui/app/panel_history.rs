@@ -14,12 +14,16 @@ pub(super) fn active_session_id(app: &App) -> String {
 }
 
 fn timestamp(value: u64) -> String {
-    i64::try_from(value)
-        .ok()
-        .filter(|v| *v > 0)
-        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
-        .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
-        .unwrap_or_else(|| "unknown".into())
+    let millis = match i64::try_from(value) {
+        Ok(millis) if millis > 0 => millis,
+        // Legacy records have no wall-clock timestamp. Out-of-range revisions
+        // are not dates either, and must not be displayed as the Unix epoch.
+        _ => return "unknown".into(),
+    };
+    match chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis) {
+        Some(time) => time.format("%Y-%m-%d %H:%M UTC").to_string(),
+        None => "unknown".into(),
+    }
 }
 
 fn entry(
@@ -44,14 +48,14 @@ fn entry(
                 path.replace(['\n', '\r', '\t'], " "),
                 timestamp(status.last_opened_at_ms),
                 timestamp(status.last_successful_update_ms),
-                status
-                    .stale_reason
-                    .as_ref()
-                    .map(|reason| format!(
-                        " · Enter retries source · {}",
+                match &status.stale_reason {
+                    Some(reason) => format!(
+                        " · /panels refresh {id} retries source · {}",
                         reason.replace(['\n', '\r', '\t'], " ")
-                    ))
-                    .unwrap_or_default()
+                    ),
+                    // No warning is normal after a successful refresh.
+                    None => String::new(),
+                }
             ),
             estimated_reference_cost_micros: None,
         }],
@@ -146,6 +150,14 @@ pub(super) fn handle_panels_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     };
     let session = active_session_id(app);
+    let mut args = rest.split_whitespace();
+    if args.next() == Some("refresh") {
+        match (args.next(), args.next()) {
+            (Some(id), None) => app.refresh_panel_from_history(&session, id),
+            _ => app.set_status_notice("Usage: /panels refresh <panel_id>"),
+        }
+        return true;
+    }
     let entries = history_entries(&app.side_panel, &session, app.side_panel_user_hidden);
     app.inline_view_state = None;
     let mut picker = InlineInteractiveState {
@@ -174,6 +186,16 @@ impl App {
             return;
         }
         self.remember_side_panel_viewport();
+        // Opening a retained page is a client presentation action, including
+        // disconnected SSH clients and servers without PanelAction support.
+        if self.side_panel.pages.iter().any(|page| page.id == id) {
+            self.focus_retained_panel(id);
+            return;
+        }
+        if !self.side_panel.archived.iter().any(|page| page.id == id) {
+            self.set_status_notice("Panel not found in this session");
+            return;
+        }
         if self.is_remote {
             self.pending_panel_action = Some((session.into(), "reopen".into(), id.into()));
             self.set_status_notice("Reopening panel...");
@@ -182,18 +204,58 @@ impl App {
         match crate::side_panel::reopen_page(session, id) {
             Ok(snapshot) => {
                 self.set_side_panel_snapshot(snapshot);
-                self.side_panel.focused_page_id = Some(id.into());
-                self.last_side_panel_focus_id = Some(id.into());
-                self.side_panel_user_hidden = false;
-                self.side_panel_explicit_hidden = false;
-                self.side_panel_fullscreen = false;
-                self.restore_side_panel_viewport();
-                self.set_diff_pane_focus(true);
-                self.sync_diagram_fit_context();
-                self.set_status_notice("Panel reopened");
+                self.focus_retained_panel(id);
             }
             Err(error) => self.push_display_message(DisplayMessage::error(format!(
                 "Couldn't reopen panel: {error}"
+            ))),
+        }
+    }
+
+    fn focus_retained_panel(&mut self, id: &str) {
+        if self
+            .pending_panel_action
+            .as_ref()
+            .is_some_and(|(_, action, _)| matches!(action.as_str(), "focus" | "reopen"))
+        {
+            self.pending_panel_action = None;
+        }
+        self.side_panel.focused_page_id = Some(id.into());
+        self.last_side_panel_focus_id = Some(id.into());
+        self.side_panel_user_hidden = false;
+        self.side_panel_explicit_hidden = false;
+        self.side_panel_fullscreen = false;
+        self.restore_side_panel_viewport();
+        self.set_diff_pane_focus(true);
+        self.sync_diagram_fit_context();
+        self.set_status_notice("Panel reopened");
+    }
+
+    pub(super) fn refresh_panel_from_history(&mut self, session: &str, id: &str) {
+        if active_session_id(self) != session {
+            self.set_status_notice("Panel belongs to another session");
+            return;
+        }
+        if self.is_remote {
+            self.pending_panel_action = Some((session.into(), "refresh".into(), id.into()));
+            self.set_status_notice("Refreshing panel...");
+            return;
+        }
+        let result = crate::side_panel::snapshot_for_session(session).and_then(|mut snapshot| {
+            anyhow::ensure!(
+                snapshot.pages.iter().any(|page| page.id == id),
+                "Panel not found in this session: {id}"
+            );
+            crate::side_panel::refresh_linked_page_content(&mut snapshot, Some(id));
+            Ok(snapshot)
+        });
+        match result {
+            Ok(snapshot) => {
+                self.set_side_panel_snapshot(snapshot);
+                self.set_status_notice("Panel refresh checked");
+            }
+            Err(error) => self.push_display_message(DisplayMessage::error(format!(
+                "Couldn't refresh panel: {error}"
             ))),
         }
     }

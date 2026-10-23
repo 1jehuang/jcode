@@ -114,7 +114,7 @@ impl PickerKind {
                 // the row even though the underlying id is `claude-opus-4-8`.
                 let pretty =
                     crate::tui::app::helpers::model_names::pretty_known_model_family(&entry.name)
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| entry.name.clone());
                 format!(
                     "{} {} {} {} {}",
                     entry.name, pretty, provider, method, detail
