@@ -104,6 +104,9 @@ impl App {
         if is_background_task_lifecycle_message(&message.content) {
             return;
         }
+        if message.role == "tool" && message.duration_secs.is_none() {
+            message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
+        }
         compact_display_message_tool_data(&mut message);
         // Keep Ctrl+L's spacer as a clear boundary when new content arrives.
         // The renderer packs only the content after it while following the tail,
@@ -137,6 +140,11 @@ impl App {
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
         messages.retain(|message| !is_background_task_lifecycle_message(&message.content));
+        for message in &mut messages {
+            if message.role == "tool" && message.duration_secs.is_none() {
+                message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
+            }
+        }
         compact_display_messages_for_storage(&mut messages);
         self.display_messages = messages;
         self.attempt_committed_assistant_messages = 0;
@@ -172,6 +180,18 @@ impl App {
             true
         } else {
             false
+        }
+    }
+
+    pub(super) fn set_latest_tool_duration(&mut self, tool_call_id: &str, seconds: f32) {
+        if let Some(message) = self.display_messages.iter_mut().rev().find(|message| {
+            message
+                .tool_data
+                .as_ref()
+                .is_some_and(|tool| tool.id == tool_call_id)
+        }) {
+            message.duration_secs = Some(seconds);
+            self.bump_display_messages_version();
         }
     }
 

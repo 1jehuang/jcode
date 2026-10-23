@@ -1051,6 +1051,7 @@ impl App {
                                         if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
                                             dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
                                         }) {
+                                            dm.duration_secs = DisplayMessage::tool_duration_from_output(&content);
                                             dm.content = content.clone();
                                             self.bump_display_messages_version();
                                         }
@@ -1426,6 +1427,9 @@ impl App {
                         sdk_content.clone()
                     };
                     let _ = self.replace_latest_tool_display_message(&tc.id, None, display_output);
+                    if let Some(seconds) = DisplayMessage::tool_duration_from_output(&sdk_content) {
+                        self.set_latest_tool_duration(&tc.id, seconds);
+                    }
 
                     self.observe_tool_result(&tc, &sdk_content, sdk_is_error, None);
                     self.note_tool_completed(&tc, sdk_is_error);
@@ -1668,6 +1672,7 @@ impl App {
                     output.clone(),
                 );
 
+                self.set_latest_tool_duration(&tc.id, tool_duration_ms as f32 / 1000.0);
                 self.add_provider_message(Message::tool_result_with_duration(
                     &tc.id,
                     &output,
