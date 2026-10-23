@@ -1,4 +1,4 @@
-//! First-class desktop panel lifecycle, backed by the legacy shared panel state.
+//! Session panel lifecycle shared by TUI and desktop clients.
 use super::{Tool, ToolContext, ToolOutput};
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
@@ -35,7 +35,7 @@ impl Tool for PanelTool {
         "panel"
     }
     fn description(&self) -> &str {
-        "Open and manage desktop panels from Markdown content or a Markdown/PDF file."
+        "Open and manage session panels shared by the TUI and desktop from Markdown content or a Markdown/PDF file."
     }
     fn parameters_schema(&self) -> Value {
         json!({

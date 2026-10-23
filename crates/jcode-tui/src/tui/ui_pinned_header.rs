@@ -37,17 +37,29 @@ pub(super) fn freshness_label(
     format!("Updated {age}")
 }
 
+pub(super) struct PanelHeaderOptions {
+    pub page_index: usize,
+    pub page_count: usize,
+    pub fullscreen: bool,
+    pub focused: bool,
+    pub scrollable_images: bool,
+    pub zoom: u8,
+}
+
 pub(super) fn panel_header(
     title: &str,
     badge: &str,
-    page_index: usize,
-    page_count: usize,
-    fullscreen: bool,
-    focused: bool,
-    scrollable_images: bool,
-    zoom: u8,
+    options: PanelHeaderOptions,
     width: usize,
 ) -> Line<'static> {
+    let PanelHeaderOptions {
+        page_index,
+        page_count,
+        fullscreen,
+        focused,
+        scrollable_images,
+        zoom,
+    } = options;
     let mut parts = vec![Span::styled(" side ", Style::default().fg(tool_color()))];
     // Put refresh warnings before the arbitrary document title so they survive
     // truncation on narrow terminals.
@@ -151,12 +163,14 @@ mod tests {
             let line = panel_header(
                 "界界👩‍💻 title\nnext",
                 "Source unavailable · showing saved copy",
-                1,
-                2,
-                false,
-                true,
-                true,
-                120,
+                PanelHeaderOptions {
+                    page_index: 1,
+                    page_count: 2,
+                    fullscreen: false,
+                    focused: true,
+                    scrollable_images: true,
+                    zoom: 120,
+                },
                 width,
             );
             assert!(line.width() <= width, "width {width}: {line:?}");

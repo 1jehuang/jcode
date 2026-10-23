@@ -72,7 +72,8 @@ async fn panel_registered_lifecycle_and_validation() {
         .iter()
         .find(|d| d.name == "panel")
         .expect("model-visible panel definition");
-    assert!(definition.description.contains("desktop panels"));
+    assert!(definition.description.contains("session panels"));
+    assert!(definition.description.contains("TUI and desktop"));
     let mut events = crate::bus::Bus::global().subscribe();
     // Another session's event may arrive before this test's panel write.
     crate::bus::Bus::global().publish(crate::bus::BusEvent::SidePanelUpdated(

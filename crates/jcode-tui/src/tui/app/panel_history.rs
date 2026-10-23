@@ -26,16 +26,22 @@ fn timestamp(value: u64) -> String {
     }
 }
 
-fn entry(
-    session: &str,
-    id: &str,
-    title: &str,
-    path: &str,
+struct HistoryDocument<'a> {
+    id: &'a str,
+    title: &'a str,
+    path: &'a str,
     source: SidePanelPageSource,
-    status: &SidePanelPageStatus,
-    state: &str,
-    current: bool,
-) -> PickerEntry {
+    status: &'a SidePanelPageStatus,
+}
+
+fn entry(session: &str, document: HistoryDocument<'_>, state: &str, current: bool) -> PickerEntry {
+    let HistoryDocument {
+        id,
+        title,
+        path,
+        source,
+        status,
+    } = document;
     PickerEntry {
         name: title.replace(['\n', '\r', '\t'], " "),
         options: vec![PickerOption {
@@ -102,11 +108,13 @@ fn history_entries(snapshot: &SidePanelSnapshot, session: &str, hidden: bool) ->
             page.status.last_opened_at_ms,
             entry(
                 session,
-                &page.id,
-                &page.title,
-                &page.file_path,
-                page.source,
-                &page.status,
+                HistoryDocument {
+                    id: &page.id,
+                    title: &page.title,
+                    path: &page.file_path,
+                    source: page.source,
+                    status: &page.status,
+                },
                 state,
                 snapshot.focused_page_id.as_deref() == Some(&page.id),
             ),
@@ -127,11 +135,13 @@ fn history_entries(snapshot: &SidePanelSnapshot, session: &str, hidden: bool) ->
             page.status.last_opened_at_ms,
             entry(
                 session,
-                &page.id,
-                &page.title,
-                &page.file_path,
-                page.source,
-                &page.status,
+                HistoryDocument {
+                    id: &page.id,
+                    title: &page.title,
+                    path: &page.file_path,
+                    source: page.source,
+                    status: &page.status,
+                },
                 state,
                 false,
             ),

@@ -577,12 +577,14 @@ pub(super) fn draw_side_panel_markdown(
     let title_line = header::panel_header(
         &page.title,
         &badge,
-        page_index,
-        page_count,
-        app.side_panel_fullscreen(),
-        focused,
-        rendered_full_width.has_scrollable_images,
-        image_zoom_percent,
+        header::PanelHeaderOptions {
+            page_index,
+            page_count,
+            fullscreen: app.side_panel_fullscreen(),
+            focused,
+            scrollable_images: rendered_full_width.has_scrollable_images,
+            zoom: image_zoom_percent,
+        },
         area.width.saturating_sub(1) as usize,
     );
 
