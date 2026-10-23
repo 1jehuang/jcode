@@ -38,11 +38,11 @@ impl SidePanelPageSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistedSidePanelState {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub revision: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archived: Vec<SidePanelHistoryEntry>,
     #[serde(default)]
     pub focus_revision: u64,
@@ -54,9 +54,9 @@ pub struct PersistedSidePanelState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSidePanelPage {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "SidePanelPageStatus::is_default")]
     pub status: SidePanelPageStatus,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_path: Option<String>,
     pub id: String,
     pub title: String,
@@ -70,7 +70,7 @@ pub struct PersistedSidePanelPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SidePanelPage {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "SidePanelPageStatus::is_default")]
     pub status: SidePanelPageStatus,
     pub id: String,
     pub title: String,
@@ -90,13 +90,13 @@ pub struct SidePanelPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SidePanelSnapshot {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub revision: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archived: Vec<SidePanelHistoryEntry>,
     #[serde(default)]
     pub focus_revision: u64,
@@ -127,16 +127,26 @@ pub fn snapshot_is_empty(snapshot: &SidePanelSnapshot) -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SidePanelPageStatus {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub last_successful_update_ms: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub source_revision: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub last_opened_at_ms: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_from_session: Option<String>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl SidePanelPageStatus {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// Archived metadata only. Bodies are read only when reopening a page.
@@ -151,10 +161,10 @@ pub struct SidePanelHistoryEntry {
     pub source: SidePanelPageSource,
     #[serde(default)]
     pub updated_at_ms: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "SidePanelPageStatus::is_default")]
     pub status: SidePanelPageStatus,
     #[serde(default)]
     pub archived_at_ms: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_path: Option<String>,
 }

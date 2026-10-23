@@ -5,8 +5,9 @@ pub const MAX_ARCHIVED_PAGES: usize = 50;
 pub const MAX_ARCHIVED_BYTES: u64 = 128 * 1024 * 1024;
 
 pub(super) fn atomic_content(path: &Path, bytes: &[u8]) -> Result<()> {
-    crate::storage::ensure_dir(path.parent().context("content parent")?)?;
-    let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+    let parent = path.parent().context("content parent")?;
+    crate::storage::ensure_dir(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     use std::io::Write;
     temp.write_all(bytes)?;
     temp.as_file().sync_all()?;
@@ -28,7 +29,8 @@ pub(super) fn cache_loaded(
         .context("page missing")?;
     let revision = linked_file_revision(Path::new(&page.file_path));
     // Immutable generations ensure an interrupted metadata commit still references the old body.
-    let path = session_dir(session)?.join(format!("{}.{}.{}.cache", id, now_ms(), revision));
+    let nonce: u64 = rand::random();
+    let path = session_dir(session)?.join(format!("{id}.{nonce:016x}.cache"));
     let bytes = match pdf {
         Some(data) => base64::engine::general_purpose::STANDARD.decode(data)?,
         None => content.as_bytes().to_vec(),
@@ -43,6 +45,13 @@ pub(super) fn cache_loaded(
 }
 
 pub(super) fn hydrate(state: PersistedSidePanelState) -> Result<SidePanelSnapshot> {
+    hydrate_with_refresh(state, None)
+}
+
+fn hydrate_with_refresh(
+    state: PersistedSidePanelState,
+    force_page: Option<&str>,
+) -> Result<SidePanelSnapshot> {
     let session = state
         .session_id
         .as_deref()
@@ -56,7 +65,11 @@ pub(super) fn hydrate(state: PersistedSidePanelState) -> Result<SidePanelSnapsho
         }
         let page = &state.pages[i];
         let revision = linked_file_revision(Path::new(&page.file_path));
-        if revision == page.status.source_revision && page.cache_path.is_some() {
+        if revision == page.status.source_revision
+            && page.cache_path.is_some()
+            && page.status.stale_reason.is_none()
+            && force_page != Some(page.id.as_str())
+        {
             continue;
         }
         let result = read_page_content(Path::new(&page.file_path), page.format);
@@ -112,7 +125,7 @@ pub(super) fn hydrate(state: PersistedSidePanelState) -> Result<SidePanelSnapsho
     })
 }
 
-pub(super) fn refresh_snapshot(snapshot: &mut SidePanelSnapshot, _page: Option<&str>) -> bool {
+pub(super) fn refresh_snapshot(snapshot: &mut SidePanelSnapshot, force_page: Option<&str>) -> bool {
     let Some(session) = snapshot.session_id.clone() else {
         let mut changed = false;
         for page in &mut snapshot.pages {
@@ -120,7 +133,10 @@ pub(super) fn refresh_snapshot(snapshot: &mut SidePanelSnapshot, _page: Option<&
                 continue;
             }
             let revision = linked_file_revision(Path::new(&page.file_path));
-            if page.status.source_revision == revision {
+            if page.status.source_revision == revision
+                && page.status.stale_reason.is_none()
+                && force_page != Some(page.id.as_str())
+            {
                 continue;
             }
             match read_page_content(Path::new(&page.file_path), page.format) {
@@ -146,7 +162,9 @@ pub(super) fn refresh_snapshot(snapshot: &mut SidePanelSnapshot, _page: Option<&
         }
         return changed;
     };
-    let result = store_lock().and_then(|_lock| load_state(&session).and_then(hydrate));
+    let result = store_lock().and_then(|_lock| {
+        load_state(&session).and_then(|state| hydrate_with_refresh(state, force_page))
+    });
     match result {
         Ok(next) => {
             let changed = *snapshot != next;
@@ -234,7 +252,15 @@ pub(super) fn remove_replaced(
         if let Some(candidate) = candidate {
             let path = Path::new(candidate);
             if path.parent() == Some(dir.as_path()) && !protected.contains(&candidate) {
-                let _ = std::fs::remove_file(path);
+                match std::fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("failed to retire side panel body {}", path.display())
+                        });
+                    }
+                }
             }
         }
     }

@@ -6,6 +6,8 @@ pub use retention::{
     MAX_ARCHIVED_BYTES, MAX_ARCHIVED_PAGES, archive_page, history, inherit_for_recovery,
     purge_page, reopen_page,
 };
+mod persistence;
+use persistence::save_state;
 mod locking;
 use locking::store_lock;
 
@@ -127,14 +129,8 @@ pub fn focus_page(session_id: &str, page_id: &str) -> Result<SidePanelSnapshot> 
     let _lock = store_lock()?;
     validate_page_id(page_id)?;
     let mut state = load_state(session_id)?;
-    if state.pages.iter().any(|page| page.id == page_id) {
-        state
-            .pages
-            .iter_mut()
-            .find(|page| page.id == page_id)
-            .unwrap()
-            .status
-            .last_opened_at_ms = now_ms();
+    if let Some(page) = state.pages.iter_mut().find(|page| page.id == page_id) {
+        page.status.last_opened_at_ms = now_ms();
         state.focused_page_id = Some(page_id.to_string());
         state.focus_revision = next_focus_revision(state.focus_revision);
         save_state(session_id, &state)?;
@@ -209,9 +205,14 @@ fn write_page(
         anyhow::bail!("cannot append Markdown to a PDF panel; use write to replace it");
     }
 
-    let combined_content = if append && page_path.exists() {
-        let mut existing = std::fs::read_to_string(&page_path)
-            .with_context(|| format!("failed to read {}", page_path.display()))?;
+    let prefix_path = state
+        .pages
+        .iter()
+        .find(|page| page.id == page_id)
+        .map(|page| Path::new(page.cache_path.as_deref().unwrap_or(&page.file_path)));
+    let combined_content = if append && let Some(prefix_path) = prefix_path {
+        let mut existing = std::fs::read_to_string(prefix_path)
+            .with_context(|| format!("failed to read {}", prefix_path.display()))?;
         if !existing.is_empty() && !existing.ends_with('\n') {
             existing.push('\n');
         }
@@ -330,29 +331,6 @@ fn load_state(session_id: &str) -> Result<PersistedSidePanelState> {
     let mut state: PersistedSidePanelState = crate::storage::read_json(&path)?;
     state.session_id = Some(session_id.to_string());
     Ok(state)
-}
-
-fn save_state(session_id: &str, state: &PersistedSidePanelState) -> Result<()> {
-    let path = state_file(session_id)?;
-    let mut state = state.clone();
-    state.session_id = Some(session_id.to_string());
-    state
-        .pages
-        .retain(|p| p.source != SidePanelPageSource::Ephemeral);
-    state
-        .archived
-        .retain(|p| p.source != SidePanelPageSource::Ephemeral);
-    state.revision = state.revision.saturating_add(1);
-    let previous = if path.exists() {
-        Some(crate::storage::read_json::<PersistedSidePanelState>(&path)?)
-    } else {
-        None
-    };
-    crate::storage::write_json_fast(&path, &state)?;
-    if let Some(previous) = previous {
-        retention::remove_replaced(session_id, &previous, &state)?;
-    }
-    Ok(())
 }
 
 fn session_dir(session_id: &str) -> Result<PathBuf> {
@@ -549,6 +527,10 @@ fn linked_file_revision(path: &Path) -> u64 {
 
     hasher.finish()
 }
+
+#[cfg(test)]
+#[path = "side_panel/review_regression_tests.rs"]
+mod review_regression_tests;
 
 #[cfg(test)]
 #[path = "side_panel/retention_process_tests.rs"]
