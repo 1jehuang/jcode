@@ -1215,6 +1215,7 @@ pub struct App {
     // Running `/cloud` or `/local` job (wakes the machine, moves the session).
     cloud_job: Option<commands_cloud::CloudJob>,
     pending_cloud_handoff: Option<commands_cloud::PendingCloudHandoff>,
+    cloud_recovery_context: Option<(String, String)>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message

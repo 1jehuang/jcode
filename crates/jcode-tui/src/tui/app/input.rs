@@ -4151,7 +4151,11 @@ impl App {
             });
             self.session.add_message(Role::User, blocks);
         }
-        self.append_turn_system_reminder(mission_turn_reminder(&self.session.id));
+        let reminder = merge_turn_reminders(
+            mission_turn_reminder(&self.session.id),
+            self.take_cloud_recovery_reminder(),
+        );
+        self.append_turn_system_reminder(reminder);
         crate::telemetry::record_turn();
         self.session_save_pending = true;
 
@@ -4225,6 +4229,8 @@ impl App {
 
             let turn_reminder =
                 merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
+            let turn_reminder =
+                merge_turn_reminders(turn_reminder, self.take_cloud_recovery_reminder());
 
             if has_combined {
                 let combined = crate::prompt::with_swarm_user_message_reminder(

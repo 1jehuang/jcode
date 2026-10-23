@@ -16,6 +16,12 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
+    let recovery = app.cloud_recovery_reminder();
+    let system_reminder = match (system_reminder, recovery.as_ref()) {
+        (Some(reminder), Some(recovery)) => Some(format!("{reminder}\n\n{recovery}")),
+        (None, Some(recovery)) => Some(recovery.clone()),
+        (reminder, None) => reminder,
+    };
     let msg_id = remote
         .send_message_with_images_reminder_and_skill(
             content.clone(),
@@ -24,6 +30,9 @@ pub(in crate::tui::app) async fn begin_remote_send(
             app.active_skill.clone(),
         )
         .await?;
+    if recovery.is_some() {
+        app.cloud_recovery_context = None;
+    }
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
     app.is_processing = true;
