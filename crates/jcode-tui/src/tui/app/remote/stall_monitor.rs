@@ -68,7 +68,9 @@ pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteCo
                     .or(app.processing_started.map(|t| t.elapsed()))
             ));
             if let Err(error) = remote.cancel_with_reason("stall_guard").await {
-                crate::logging::warn(&format!("Stall-guard cancellation could not reach daemon: {error}"));
+                crate::logging::warn(&format!(
+                    "Stall-guard cancellation could not reach daemon: {error}"
+                ));
             }
             app.is_processing = false;
             app.clear_visible_turn_started();

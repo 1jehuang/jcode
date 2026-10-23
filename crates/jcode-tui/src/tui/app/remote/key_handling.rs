@@ -69,7 +69,9 @@ pub(in crate::tui::app) async fn reload_stale_remote_server_before_update(
 /// Step the remote session's speed tier (Standard -> Fast -> Ultrafast).
 #[path = "key_handling/model_controls.rs"]
 mod model_controls;
-use model_controls::{apply_remote_speed_direction, request_remote_service_tier, apply_remote_effort_direction};
+use model_controls::{
+    apply_remote_effort_direction, apply_remote_speed_direction, request_remote_service_tier,
+};
 
 impl App {
     pub(super) async fn handle_account_picker_command_remote(

@@ -808,7 +808,10 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
     let event: crate::protocol::ServerEvent =
         serde_json::from_str(line.trim()).expect("decode model catalog event");
     let wire: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-    assert!(wire.get("side_panel").is_none(), "catalog replies must not claim an empty panel inventory");
+    assert!(
+        wire.get("side_panel").is_none(),
+        "catalog replies must not claim an empty panel inventory"
+    );
 
     match event {
         crate::protocol::ServerEvent::History {

@@ -12,7 +12,7 @@ Use `/panels` to search recent documents in the current session. Entries show th
 
 ## Saved copies and freshness
 
-Linked documents retain their last successfully loaded content. If the source disappears, becomes unreadable, or fails PDF validation, the panel shows the saved copy with a source-unavailable warning. A successful refresh clears that warning.
+Linked documents retain their last successfully loaded content. If the source disappears, becomes unreadable, or fails PDF validation, the panel shows the saved copy with a source-unavailable warning. A successful refresh clears that warning. Use `/panels refresh <panel-id>` or the `panel` tool's `refresh` action to retry a source without changing the selected document.
 
 An update time records when content was successfully loaded. It doesn't claim that the document's assertions are still correct. A reconnect or recovery label explains why a saved copy may need checking. Legacy documents without a real update timestamp aren't assigned a fabricated age.
 
@@ -22,6 +22,6 @@ PDF safety limits remain 20 MiB per document and 32 MiB of decoded PDF payload p
 
 The `panel` tool's `close` action archives a document. `reopen` restores it, `history` lists archived metadata, and `purge` permanently removes the retained entry. Purging never deletes an external linked source file. UI dismissal remains a visibility change rather than an archive operation.
 
-Archived history is bounded to 50 entries and 128 MiB of retained archive bodies per session. Old archived entries are evicted when either limit is reached. This isn't a revision timeline for every streamed update to one document.
+Archived history is bounded to 50 entries and 128 MiB of retained archive bodies per session. Old archived entries are evicted when either limit is reached. The cap doesn't include active documents or unreferenced cache generations left by an interrupted write. This isn't a revision timeline for every streamed update to one document.
 
 Client reload preserves session-specific visibility, selection, fullscreen state, and per-document viewport without putting document bodies in the reload handoff. Switching sessions restores each session's own view. Ctrl+R recovery carries retained documents into the replacement session with recovery provenance. `/clear` starts a genuinely new, empty session; the old session's documents remain associated with that old session.

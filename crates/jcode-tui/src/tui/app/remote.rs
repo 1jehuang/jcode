@@ -1827,7 +1827,9 @@ fn detect_starved_queued_followup(app: &mut App) -> bool {
 }
 
 mod stall_monitor;
-use stall_monitor::{detect_and_cancel_stall, format_stall_duration, stall_timeout};
+use stall_monitor::detect_and_cancel_stall;
+#[cfg(test)]
+use stall_monitor::{format_stall_duration, stall_timeout};
 
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
     app.handle_mouse_event(mouse);

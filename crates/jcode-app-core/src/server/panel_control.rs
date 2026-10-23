@@ -41,11 +41,14 @@ pub(super) fn handle_panel_request(
     events: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if attached_session != expected_session {
-        send_panel_event(events, ServerEvent::Error {
-            id,
-            message: "Panel action belongs to a different session".to_string(),
-            retry_after_secs: None,
-        });
+        send_panel_event(
+            events,
+            ServerEvent::Error {
+                id,
+                message: "Panel action belongs to a different session".to_string(),
+                retry_after_secs: None,
+            },
+        );
         return;
     }
     handle_panel_action(
@@ -72,20 +75,26 @@ fn handle_panel_action(
                 session_id: session_id.to_string(),
                 snapshot: snapshot.clone(),
             }));
-            send_panel_event(events, ServerEvent::SidePanelState {
-                snapshot: super::client_writer::side_panel_for_client(
-                    snapshot,
-                    supports_pdf_panels,
-                ),
-            });
+            send_panel_event(
+                events,
+                ServerEvent::SidePanelState {
+                    snapshot: super::client_writer::side_panel_for_client(
+                        snapshot,
+                        supports_pdf_panels,
+                    ),
+                },
+            );
             send_panel_event(events, ServerEvent::Done { id });
         }
         Err(error) => {
-            send_panel_event(events, ServerEvent::Error {
-                id,
-                message: format!("Panel action failed: {error:#}"),
-                retry_after_secs: None,
-            });
+            send_panel_event(
+                events,
+                ServerEvent::Error {
+                    id,
+                    message: format!("Panel action failed: {error:#}"),
+                    retry_after_secs: None,
+                },
+            );
         }
     }
 }

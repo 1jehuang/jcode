@@ -392,21 +392,25 @@ fn side_panel_reexec_accepts_backup_inventory_but_live_client_rejects_older() {
     second.restore_panel_sessions(serde_json::from_slice(&saved).unwrap());
     second.set_side_panel_snapshot(inventory("panel-test-a", 4));
     assert_second(&second);
-    assert!(second
-        .side_panel
-        .pages
-        .iter()
-        .all(|page| page.status.stale_reason.is_some()));
+    assert!(
+        second
+            .side_panel
+            .pages
+            .iter()
+            .all(|page| page.status.stale_reason.is_some())
+    );
     assert_eq!(second.side_panel.revision, 4);
     assert!(!second.set_side_panel_snapshot_changed(inventory("panel-test-a", 3)));
     assert_eq!(second.side_panel.revision, 4);
     second.set_side_panel_snapshot(inventory("panel-test-a", 5));
     assert_second(&second);
-    assert!(second
-        .side_panel
-        .pages
-        .iter()
-        .all(|page| page.status.stale_reason.is_none()));
+    assert!(
+        second
+            .side_panel
+            .pages
+            .iter()
+            .all(|page| page.status.stale_reason.is_none())
+    );
     assert!(!second.set_side_panel_snapshot_changed(inventory("panel-test-a", 4)));
     assert_eq!(second.side_panel.revision, 5);
 }
