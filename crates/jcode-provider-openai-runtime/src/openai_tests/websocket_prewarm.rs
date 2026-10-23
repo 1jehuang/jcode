@@ -17,6 +17,7 @@ fn prewarm_test_tool() -> ToolDefinition {
             "properties": { "key": { "type": "string" } },
             "required": ["key"]
         }),
+        defer_loading: false,
     }
 }
 
@@ -89,6 +90,7 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
         assert_eq!(warm["instructions"], "preserve this system prompt");
         assert_eq!(warm["input"], serde_json::json!([]));
         assert_eq!(warm["generate"], false);
+        assert!(warm["prompt_cache_key"].as_str().is_some_and(|key| !key.is_empty()));
         assert_eq!(warm["reasoning"]["effort"], "high");
         assert_eq!(warm["tools"][0]["name"], "lookup");
         socket
@@ -114,6 +116,7 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
         .expect("generated JSON");
         assert_eq!(generated["type"], "response.create");
         assert_eq!(generated["previous_response_id"], "resp_warm");
+        assert_eq!(generated["prompt_cache_key"], warm["prompt_cache_key"]);
         assert_eq!(generated["model"], "gpt-5.6-sol");
         assert_eq!(generated["instructions"], "preserve this system prompt");
         assert_eq!(generated["reasoning"]["effort"], "high");

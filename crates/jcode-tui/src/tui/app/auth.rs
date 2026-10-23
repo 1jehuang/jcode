@@ -1,7 +1,16 @@
+#[path = "auth_subscription_status.rs"]
+mod subscription_status;
+
 #[path = "auth_account_commands.rs"]
 mod auth_account_commands;
 #[path = "auth_account_picker.rs"]
 mod auth_account_picker;
+#[path = "auth/auth_muse.rs"]
+pub(super) mod auth_muse;
+#[path = "auth_progress.rs"]
+mod auth_progress;
+/// Attempt-scoped Muse event helpers shared with the remote event forwarder.
+pub(super) use auth_muse as auth_muse_helpers;
 #[path = "auth_types.rs"]
 mod auth_types;
 pub(crate) use self::auth_account_commands::{
@@ -14,6 +23,64 @@ pub(super) use self::auth_types::{AccountCommand, PendingAccountInput, PendingLo
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::Arc;
+
+fn saved_account_route_selection(
+    provider_id: &str,
+    label: &str,
+    current_provider: &str,
+    current_model: &str,
+    configured_default: Option<&str>,
+) -> anyhow::Result<crate::provider::RouteSelection> {
+    if !matches!(provider_id, "claude" | "openai") {
+        anyhow::bail!("Saved OAuth accounts are not supported for provider {provider_id}");
+    }
+    let (runtime_key, provider_label, method) = if provider_id == "claude" {
+        (
+            crate::provider::RuntimeKey::ClaudeOAuth,
+            "Claude",
+            "claude-oauth",
+        )
+    } else {
+        (
+            crate::provider::RuntimeKey::OpenAIOAuth,
+            "OpenAI",
+            "openai-oauth",
+        )
+    };
+    let same_provider = current_provider.eq_ignore_ascii_case(provider_label)
+        || (provider_id == "claude" && current_provider.eq_ignore_ascii_case("anthropic"));
+    let configured_model = configured_default
+        .and_then(|spec| {
+            jcode_provider_core::selection::explicit_model_provider_prefix(spec.trim())
+        })
+        .filter(|(provider, _, _)| {
+            matches!(
+                (provider_id, provider),
+                ("claude", jcode_provider_core::ActiveProvider::Claude)
+                    | ("openai", jcode_provider_core::ActiveProvider::OpenAI)
+            )
+        })
+        .map(|(_, _, model)| model.trim())
+        .filter(|model| !model.is_empty());
+    let model = if same_provider && !current_model.trim().is_empty() {
+        current_model
+    } else {
+        configured_model
+            .or_else(|| crate::auth::lifecycle::default_model_for_provider(provider_id))
+            .ok_or_else(|| anyhow::anyhow!("No default model is configured for {provider_label}"))?
+    };
+    Ok(crate::provider::RouteSelection {
+        model: model.to_string(),
+        runtime_key,
+        api_method: format!("{method}@{label}"),
+        provider_label: provider_label.to_string(),
+        detail: format!("Saved account {label}"),
+    })
+}
+
+#[cfg(test)]
+#[path = "saved_account_route_tests.rs"]
+mod saved_account_route_tests;
 
 impl App {
     pub(super) fn open_auth_browser(url: &str) -> bool {
@@ -64,139 +131,6 @@ impl App {
             ));
         }
         notices.join("\n")
-    }
-
-    pub(super) fn show_jcode_subscription_status(&mut self) {
-        let configured_key = crate::subscription_catalog::configured_api_key().is_some();
-        let configured_base = crate::subscription_catalog::configured_api_base()
-            .unwrap_or_else(|| crate::subscription_catalog::DEFAULT_JCODE_API_BASE.to_string());
-        let runtime_mode = crate::subscription_catalog::is_runtime_mode_enabled();
-
-        let mut message = String::from("Jcode Hosted Model Status\n\n");
-        message.push_str(&format!(
-            "  - Credentials: {}\n",
-            if configured_key {
-                "configured"
-            } else {
-                "not configured (/login jcode)"
-            }
-        ));
-        message.push_str(&format!(
-            "  - Router base: {}{}\n",
-            configured_base,
-            if crate::subscription_catalog::has_router_base() {
-                ""
-            } else {
-                " (default)"
-            }
-        ));
-        message.push_str("  - Billing: pay as you go, no subscription fee\n");
-        message.push_str(&format!(
-            "  - Runtime mode: {}\n\n",
-            if runtime_mode {
-                "active for this session"
-            } else {
-                "inactive for this session"
-            }
-        ));
-
-        message.push_str("Catalog\n\n");
-        for model in crate::subscription_catalog::curated_models() {
-            let default_suffix = if model.default_enabled {
-                " (default)"
-            } else {
-                ""
-            };
-            let tier_suffix = String::new();
-            message.push_str(&format!(
-                "  - {} - {}{}{}\n      - {}\n      - {}\n",
-                model.display_name,
-                model.id,
-                default_suffix,
-                tier_suffix,
-                crate::subscription_catalog::routing_policy_detail(model),
-                model.note
-            ));
-        }
-
-        message.push_str("\nBilling\n\n");
-        message.push_str("  - Set the monthly spending limit you control in your Jcode account\n");
-        message.push_str("  - Email and account warnings are sent at usage milestones\n");
-        message.push_str("  - Warning milestones do not rate limit hosted requests\n");
-        message.push_str("  - Charges begin at $20, then use progressively larger tranches\n");
-        message.push_str("  - Any unbilled remainder is collected at your limit or month end\n");
-
-        if configured_key {
-            message.push_str("\nFetching hosted usage and spending limit...");
-        } else {
-            message.push_str(
-                "\nLog in with /login jcode to set a spending limit and connect hosted models.",
-            );
-        }
-
-        self.push_display_message(DisplayMessage::system(message));
-
-        // With credentials present, fetch live account status (/v1/me) in the
-        // background and surface it via a UiActivity card. Short timeout keeps
-        // this responsive; offline failures degrade to a quiet log line.
-        if configured_key {
-            let session_id = self.session.id.clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    match crate::subscription_api::fetch_subscription_me().await {
-                        Ok(me) => {
-                            let resets = me
-                                .usage
-                                .resets_at
-                                .as_deref()
-                                .map(|at| format!(", resets {}", at))
-                                .unwrap_or_default();
-                            crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
-                                crate::bus::UiActivity::background(
-                                    Some(session_id),
-                                    format!(
-                                        "Jcode Hosted Model Account\n\n  - Email: {}\n  - Billing: {}\n  - Spend: ${:.2} of ${:.2} monthly limit\n  - Billed in tranches: ${:.2}{}{}",
-                                        me.email,
-                                        me.status,
-                                        me.usage.used_usd,
-                                        me.usage.budget_usd,
-                                        me.usage.billed_usd,
-                                        me.usage
-                                            .next_charge_at_usd
-                                            .map(|amount| format!("\n  - Next tranche at: ${amount:.2}"))
-                                            .unwrap_or_default(),
-                                        resets
-                                    ),
-                                    Some("Hosted usage: account status loaded"),
-                                ),
-                            ));
-                        }
-                        Err(error) => {
-                            let message = if error
-                                .downcast_ref::<crate::subscription_api::AccountApiError>()
-                                == Some(&crate::subscription_api::AccountApiError::Unauthorized)
-                            {
-                                let _ = crate::subscription_catalog::clear_account_credentials();
-                                "Jcode Account Status\n\nThe saved account key was revoked or expired. Local credentials were cleared. Use /account jcode login to sign in again."
-                                    .to_string()
-                            } else {
-                                format!(
-                                    "Jcode Account Status\n\nCould not load /v1/me: {}\n\nThe local credential was retained. Retry /account jcode status, open /account jcode manage, or use /account jcode logout.",
-                                    error
-                                )
-                            };
-                            crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
-                                crate::bus::UiActivity::background(
-                                    Some(session_id),
-                                    message,
-                                    Some("Jcode account status unavailable"),
-                                ),
-                            ));
-                        }
-                    }
-                });
-            }
-        }
     }
 
     pub(super) fn show_auth_status(&mut self) {
@@ -315,14 +249,21 @@ impl App {
                 Ok("Logged out of Azure OpenAI API key / Entra configuration.".to_string())
             }
             LoginProviderTarget::OpenAiCompatible(profile) => {
-                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                Self::clear_api_key_login(&resolved.api_key_env, &resolved.env_file)?;
-                crate::provider_catalog::save_env_value_to_env_file(
-                    crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
-                    &resolved.env_file,
-                    None,
-                )?;
-                Ok(format!("Logged out of {} API key.", resolved.display_name))
+                // Native Muse subscription credentials live in auth::muse's own
+                // JSON store, not in profile env files; clear them there.
+                if auth_muse::is_muse_subscription_profile(profile) {
+                    auth_muse::logout_provider()
+                } else {
+                    let resolved =
+                        crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                    Self::clear_api_key_login(&resolved.api_key_env, &resolved.env_file)?;
+                    crate::provider_catalog::save_env_value_to_env_file(
+                        crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                        &resolved.env_file,
+                        None,
+                    )?;
+                    Ok(format!("Logged out of {} API key.", resolved.display_name))
+                }
             }
             LoginProviderTarget::Cursor => {
                 crate::auth::cursor::clear_api_key()?;
@@ -434,6 +375,13 @@ impl App {
             errors.push(format!("Azure OpenAI Entra config: {}", err));
         }
         for profile in crate::provider_catalog::openai_compatible_profiles() {
+            // Native Muse subscription credentials live in auth::muse's own JSON
+            // store, not in a profile env file; clear them there instead of the
+            // generic API-key path.
+            if auth_muse::is_muse_subscription_profile(*profile) {
+                auth_muse::logout_all(&mut summary, &mut errors);
+                continue;
+            }
             let resolved = crate::provider_catalog::resolve_openai_compatible_profile(*profile);
             Self::clear_api_key_logout_summary(
                 &mut summary,
@@ -558,7 +506,11 @@ impl App {
             crate::provider_catalog::LoginProviderTarget::Bedrock => self.start_bedrock_login(),
             crate::provider_catalog::LoginProviderTarget::Azure => self.start_azure_login(),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
-                self.start_openai_compatible_profile_login(profile)
+                if auth_muse::is_muse_subscription_profile(profile) {
+                    self.start_muse_subscription_login();
+                } else {
+                    self.start_openai_compatible_profile_login(profile)
+                }
             }
             crate::provider_catalog::LoginProviderTarget::Cursor => self.start_cursor_login(),
             crate::provider_catalog::LoginProviderTarget::GrokBuild => {
@@ -895,7 +847,7 @@ impl App {
                 (auth_url, redirect_uri)
             }
         };
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
             &auth_url,
             "Scan this on another device if this machine has no browser:",
         )
@@ -1007,35 +959,60 @@ impl App {
     }
 
     pub(super) fn switch_account(&mut self, label: &str) {
-        match crate::auth::claude::set_active_account(label) {
-            Ok(()) => {
-                {
-                    let provider = self.provider.clone();
-                    let label_owned = label.to_string();
-                    tokio::spawn(async move {
-                        provider.invalidate_credentials().await;
-                        crate::logging::info(&format!(
-                            "Switched to Anthropic account '{}'",
-                            label_owned
-                        ));
-                    });
-                }
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Switched to Anthropic account {}.",
-                    label
-                )));
-                // Keep account-sensitive UI state in sync immediately.
-                crate::auth::AuthStatus::invalidate_cache();
-                self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
-            }
-            Err(e) => {
+        self.switch_saved_oauth_account("claude", label);
+    }
+
+    fn switch_saved_oauth_account(&mut self, provider_id: &str, label: &str) {
+        let selection = match saved_account_route_selection(
+            provider_id,
+            label,
+            self.provider.name(),
+            &self.provider.model(),
+            crate::config::config().provider.default_model.as_deref(),
+        ) {
+            Ok(selection) => selection,
+            Err(error) => {
                 self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to switch account: {}",
-                    e
+                    "Failed to select saved account {label}: {error}"
                 )));
+                return;
             }
+        };
+        let model_request = selection.routed_model_spec();
+        if let Err(error) = self.provider.set_route_selection(&selection) {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Failed to switch {} account: {}",
+                selection.provider_label, error
+            )));
+            return;
         }
+        // Reset upstream conversation state and persist the qualified account
+        // route, not just the process-wide saved-login preference.
+        self.finalize_model_switch(&model_request);
+        let saved = if provider_id == "claude" {
+            crate::auth::claude::set_active_account(label)
+        } else {
+            crate::auth::codex::set_active_account(label)
+        };
+        if let Err(error) = saved {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Selected {} account {} for this session, but could not save the active login: {}",
+                selection.provider_label, label, error
+            )));
+        } else {
+            self.push_display_message(DisplayMessage::system(format!(
+                "Switched to {} account {}.",
+                selection.provider_label, label
+            )));
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+        let provider = self.provider.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                provider.invalidate_credentials().await;
+            });
+        }
+        self.set_context_limit_and_sync_budget(self.provider.context_window());
     }
 
     pub(super) fn switch_account_by_label(&mut self, label: &str) {
@@ -1080,34 +1057,7 @@ impl App {
     }
 
     pub(super) fn switch_openai_account(&mut self, label: &str) {
-        match crate::auth::codex::set_active_account(label) {
-            Ok(()) => {
-                {
-                    let provider = self.provider.clone();
-                    let label_owned = label.to_string();
-                    tokio::spawn(async move {
-                        provider.invalidate_credentials().await;
-                        crate::logging::info(&format!(
-                            "Switched to OpenAI account '{}'",
-                            label_owned
-                        ));
-                    });
-                }
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Switched to OpenAI account {}.",
-                    label
-                )));
-                crate::auth::AuthStatus::invalidate_cache();
-                self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
-            }
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to switch OpenAI account: {}",
-                    e
-                )));
-            }
-        }
+        self.switch_saved_oauth_account("openai", label);
     }
 
     pub(super) fn remove_openai_account(&mut self, label: &str) {
@@ -1168,7 +1118,7 @@ impl App {
             &state,
             Some("login"),
         );
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
             &auth_url,
             "Scan this on another device if this machine has no browser, then paste the full callback URL here:",
         )
@@ -1229,29 +1179,13 @@ impl App {
             Some(callback_available),
         );
 
-        self.push_display_message(DisplayMessage::system(format!(
-            "OpenAI OAuth Login (account: {})\n\n\
-             Opening browser for authentication...\n\n\
-             If the browser didn't open, visit:\n{}\n\n\
-             Note: Wait a few seconds for the page to fully load before clicking Continue. \
-             OpenAI's verification system may briefly disable the button.\n\n\
-             {}{}{}\
-             Or paste the full callback URL or query string here to finish from another device. Type /cancel to abort.{}",
+        self.show_openai_login_progress(
             label,
-            auth_url,
-            if preflight.is_empty() {
-                String::new()
-            } else {
-                format!("{}\n", preflight)
-            },
-            callback_line,
-            if preflight.is_empty() {
-                String::new()
-            } else {
-                "Manual-safe fallback is already active here.\n".to_string()
-            },
-            qr_section
-        )));
+            &auth_url,
+            browser_opened,
+            callback_available,
+            &format!("{preflight}\n{callback_line}\nIf Continue is disabled, wait for the page to finish loading.\nPaste the full callback URL or query string to finish from another device.{qr_section}"),
+        );
         self.set_status_notice(format!("Login [{}]: waiting...", label));
         self.begin_pending_login(PendingLogin::OpenAiAccount {
             verifier,
@@ -1353,7 +1287,7 @@ impl App {
             }
         };
 
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
             &auth_url,
             "Scan this on another device if this machine has no browser, then paste the callback URL or authorization code here:",
         )
@@ -1669,110 +1603,6 @@ impl App {
         self.begin_pending_login(PendingLogin::CursorApiKey);
     }
 
-    fn start_copilot_login(&mut self) {
-        self.set_status_notice("Login: copilot device flow...");
-        self.begin_pending_login(PendingLogin::Copilot);
-
-        tokio::spawn(async move {
-            let client = crate::provider::shared_http_client();
-
-            let device_resp = match crate::auth::copilot::initiate_device_flow(&client).await {
-                Ok(resp) => resp,
-                Err(e) => {
-                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                        provider: "copilot".to_string(),
-                        success: false,
-                        message: format!("Copilot device flow failed: {}", e),
-                    }));
-                    return;
-                }
-            };
-
-            let user_code = device_resp.user_code.clone();
-            let verification_uri = device_resp.verification_uri.clone();
-
-            let clipboard_ok = copy_to_clipboard(&user_code);
-            let clipboard_msg = if clipboard_ok {
-                " (copied to clipboard - just paste it!)"
-            } else {
-                ""
-            };
-
-            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                provider: "copilot_code".to_string(),
-                success: true,
-                message: {
-                    let qr_section = crate::login_qr::markdown_section_for_tui(
-                        &verification_uri,
-                        "Scan this on another device to open the GitHub verification page:",
-                    )
-                    .map(|section| format!("\n\n{section}"))
-                    .unwrap_or_default();
-                    format!(
-                        "GitHub Copilot Login\n\n\
-                         Your code: {}{}\n\n\
-                         Opening browser to {} ...\n\
-                         Paste the code there and authorize.{}\n\n\
-                         Waiting for authorization... (type /cancel to abort)",
-                        user_code, clipboard_msg, verification_uri, qr_section
-                    )
-                },
-            }));
-
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let _ = Self::open_auth_browser(&verification_uri);
-
-            let token = match crate::auth::copilot::poll_for_access_token(
-                &client,
-                &device_resp.device_code,
-                device_resp.interval,
-            )
-            .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                        provider: "copilot".to_string(),
-                        success: false,
-                        message: format!("Copilot login failed: {}", e),
-                    }));
-                    return;
-                }
-            };
-
-            let username = crate::auth::copilot::fetch_github_username(&client, &token)
-                .await
-                .unwrap_or_else(|_| "unknown".to_string());
-
-            match crate::auth::copilot::save_github_token(&token, &username) {
-                Ok(()) => {
-                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                        provider: "copilot".to_string(),
-                        success: true,
-                        message: format!(
-                            "Authenticated as {} via GitHub Copilot.\n\n\
-                             Copilot models are now available in /model.",
-                            username
-                        ),
-                    }));
-                }
-                Err(e) => {
-                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                        provider: "copilot".to_string(),
-                        success: false,
-                        message: format!("Failed to save Copilot token: {}", e),
-                    }));
-                }
-            }
-        });
-
-        self.push_display_message(DisplayMessage::system(
-            "GitHub Copilot Login\n\n\
-             Starting device flow... please wait. Type /cancel to abort."
-                .to_string(),
-        ));
-    }
-
     fn start_grok_build_login(&mut self) {
         self.set_status_notice("Grok Build: preparing sign-in...");
         self.begin_pending_login(PendingLogin::GrokBuild);
@@ -1861,7 +1691,7 @@ impl App {
             }
         };
 
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
             &auth_url,
             "Scan this on another device if this machine has no browser, then paste the full callback URL or query string here:",
         )
@@ -2011,10 +1841,34 @@ impl App {
     pub(super) fn handle_login_input(&mut self, pending: PendingLogin, input: String) {
         let trimmed = input.trim();
         if trimmed == "/cancel" {
+            if matches!(&pending, PendingLogin::Exchanging { .. }) {
+                self.set_status_notice("Login exchange is running. Wait for completion.");
+                self.pending_login = Some(pending);
+                return;
+            }
+            // Signal the Muse subscription background task (if any) and drop
+            // its credential slot: no late progress, error, or approval event
+            // is accepted afterwards, and nothing is ever persisted.
+            if let PendingLogin::MuseSubscription {
+                cancelled,
+                approved,
+                ..
+            } = &pending
+            {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+                if let Ok(mut slot) = approved.lock() {
+                    *slot = None;
+                }
+            }
             if let Some((provider, method)) = pending.telemetry_context() {
                 crate::telemetry::record_auth_cancelled(&provider, &method);
             }
-            self.push_display_message(DisplayMessage::system("Login cancelled.".to_string()));
+            let replaced = matches!(&pending, PendingLogin::OpenAiAccount { .. })
+                && self.finish_openai_login_progress("OpenAI login cancelled.".to_string());
+            if !replaced {
+                self.push_display_message(DisplayMessage::system("Login cancelled.".to_string()));
+            }
+            self.set_status_notice("Login cancelled");
             return;
         }
 
@@ -2049,6 +1903,10 @@ impl App {
         }
 
         match pending {
+            PendingLogin::Exchanging { provider } => {
+                self.set_status_notice("Login only: exchanging credentials, input not sent to AI");
+                self.pending_login = Some(PendingLogin::Exchanging { provider });
+            }
             PendingLogin::Remote => {
                 // SSH input must never fall through to laptop credential handlers.
                 self.append_ssh_login_input(&input);
@@ -2058,6 +1916,9 @@ impl App {
                 label,
                 redirect_uri,
             } => {
+                self.pending_login = Some(PendingLogin::Exchanging {
+                    provider: "claude".to_string(),
+                });
                 self.set_status_notice(format!("Login [{}]: exchanging...", label));
                 let input_owned = input.clone();
                 let label_clone = label.clone();
@@ -2097,6 +1958,9 @@ impl App {
                 expected_state,
                 redirect_uri,
             } => {
+                self.pending_login = Some(PendingLogin::Exchanging {
+                    provider: "openai".to_string(),
+                });
                 self.set_status_notice(format!("Login [{}]: exchanging...", label));
                 let input_owned = input.clone();
                 let label_clone = label.clone();
@@ -2126,16 +1990,16 @@ impl App {
                         }
                     }
                 });
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Exchanging OpenAI callback for account {}...",
-                    label
-                )));
+                self.update_openai_login_exchange(&label);
             }
             PendingLogin::Gemini {
                 verifier,
                 expected_state,
                 redirect_uri,
             } => {
+                self.pending_login = Some(PendingLogin::Exchanging {
+                    provider: "gemini".to_string(),
+                });
                 self.set_status_notice("Login: exchanging...");
                 let input_owned = input.clone();
                 tokio::spawn(async move {
@@ -2177,6 +2041,9 @@ impl App {
                 expected_state,
                 redirect_uri,
             } => {
+                self.pending_login = Some(PendingLogin::Exchanging {
+                    provider: "antigravity".to_string(),
+                });
                 self.set_status_notice("Login: exchanging...");
                 let input_owned = input.clone();
                 tokio::spawn(async move {
@@ -2293,70 +2160,74 @@ impl App {
                     ],
                 );
 
-                let save_result: anyhow::Result<()> =
-                    if let Some(resolved) = resolved_openai_compatible.as_ref() {
-                        (|| {
-                            if resolved.requires_api_key {
+                let save_result: anyhow::Result<()> = if let Some(resolved) =
+                    resolved_openai_compatible.as_ref()
+                {
+                    (|| {
+                        if resolved.requires_api_key {
+                            crate::provider_catalog::save_env_value_to_env_file(
+                                crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                                &resolved.env_file,
+                                None,
+                            )?;
+                            crate::provider_catalog::save_named_api_key(
+                                &resolved.env_file,
+                                &resolved.api_key_env,
+                                key.trim(),
+                            )
+                        } else {
+                            crate::provider_catalog::save_env_value_to_env_file(
+                                crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                                &resolved.env_file,
+                                Some("1"),
+                            )?;
+                            if key.trim().is_empty() {
                                 crate::provider_catalog::save_env_value_to_env_file(
-                                    crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                                    &resolved.api_key_env,
                                     &resolved.env_file,
                                     None,
-                                )?;
-                                crate::provider_catalog::save_env_value_to_env_file(
-                                    &resolved.api_key_env,
-                                    &resolved.env_file,
-                                    Some(key.trim()),
                                 )
                             } else {
-                                crate::provider_catalog::save_env_value_to_env_file(
-                                    crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                                crate::provider_catalog::save_named_api_key(
                                     &resolved.env_file,
-                                    Some("1"),
-                                )?;
-                                crate::provider_catalog::save_env_value_to_env_file(
                                     &resolved.api_key_env,
-                                    &resolved.env_file,
-                                    if key.trim().is_empty() {
-                                        None
-                                    } else {
-                                        Some(key.trim())
-                                    },
+                                    key.trim(),
                                 )
                             }
-                        })()
-                    } else if key_name == crate::subscription_catalog::JCODE_API_KEY_ENV {
-                        (|| {
-                            let mut content = format!("{}={}\n", key_name, key);
-                            if let Some(base) = crate::subscription_catalog::configured_api_base() {
-                                content.push_str(&format!(
-                                    "{}={}\n",
-                                    crate::subscription_catalog::JCODE_API_BASE_ENV,
-                                    base
-                                ));
-                            }
+                        }
+                    })()
+                } else if key_name == crate::subscription_catalog::JCODE_API_KEY_ENV {
+                    (|| {
+                        let mut content = format!("{}={}\n", key_name, key);
+                        if let Some(base) = crate::subscription_catalog::configured_api_base() {
+                            content.push_str(&format!(
+                                "{}={}\n",
+                                crate::subscription_catalog::JCODE_API_BASE_ENV,
+                                base
+                            ));
+                        }
 
-                            let config_dir = crate::storage::app_config_dir()?;
-                            std::fs::create_dir_all(&config_dir)?;
-                            crate::platform::set_directory_permissions_owner_only(&config_dir)?;
+                        let config_dir = crate::storage::app_config_dir()?;
+                        std::fs::create_dir_all(&config_dir)?;
+                        crate::platform::set_directory_permissions_owner_only(&config_dir)?;
 
-                            let file_path = config_dir.join(&env_file);
-                            std::fs::write(&file_path, content)?;
-                            crate::platform::set_permissions_owner_only(&file_path)?;
-                            crate::env::set_var(&key_name, &key);
-                            Ok(())
-                        })()
-                    } else if key_name == crate::provider::bedrock::API_KEY_ENV {
-                        (|| {
-                            Self::save_named_api_key(&env_file, &key_name, &key)?;
-                            crate::provider_catalog::save_env_value_to_env_file(
-                                crate::provider::bedrock::REGION_ENV,
-                                &env_file,
-                                Some("us-east-2"),
-                            )
-                        })()
-                    } else {
-                        Self::save_named_api_key(&env_file, &key_name, &key)
-                    };
+                        let file_path = config_dir.join(&env_file);
+                        std::fs::write(&file_path, content)?;
+                        crate::platform::set_permissions_owner_only(&file_path)?;
+                        Ok(())
+                    })()
+                } else if key_name == crate::provider::bedrock::API_KEY_ENV {
+                    (|| {
+                        crate::provider_catalog::save_named_api_key(&env_file, &key_name, &key)?;
+                        crate::provider_catalog::save_env_value_to_env_file(
+                            crate::provider::bedrock::REGION_ENV,
+                            &env_file,
+                            Some("us-east-2"),
+                        )
+                    })()
+                } else {
+                    crate::provider_catalog::save_named_api_key(&env_file, &key_name, &key)
+                };
 
                 match save_result {
                     Ok(()) => {
@@ -2676,6 +2547,14 @@ impl App {
                         .to_string(),
                 ));
                 self.pending_login = Some(PendingLogin::Copilot);
+            }
+            PendingLogin::MuseSubscription { .. } => {
+                self.push_display_message(DisplayMessage::system(
+                    "Muse subscription login is waiting for browser authorization.\n\
+                     Complete the login in your browser, or type /cancel to abort."
+                        .to_string(),
+                ));
+                self.pending_login = Some(pending);
             }
             PendingLogin::GrokBuild => {
                 self.push_display_message(DisplayMessage::system(
@@ -3242,6 +3121,61 @@ impl App {
             }
             return;
         }
+        // A callback may complete while the user is still typing a URL/code.
+        // Never leave that authentication input armed as the next AI prompt.
+        if !matches!(
+            self.pending_login,
+            Some(PendingLogin::MuseSubscription { .. })
+        ) && self
+            .pending_login
+            .as_ref()
+            .and_then(PendingLogin::telemetry_context)
+            .is_some_and(|(provider, _)| provider == login.provider)
+        {
+            self.input.clear();
+            self.cursor_pos = 0;
+            self.pasted_contents.clear();
+            self.clear_input_undo_history();
+        }
+        // Native Muse subscription progress (device code display): render only,
+        // like copilot_code. This is pending approval, never a completed login.
+        // Progress events carry the attempt id (`muse_subscription_code#<id>`)
+        // and are accepted only while the same attempt is still pending and active.
+        // (copilot_code keeps its dedicated handler above.)
+        if let Some(attempt) = login.provider.strip_prefix("muse_subscription_code#") {
+            let (is_match, is_cancelled) = match &self.pending_login {
+                Some(PendingLogin::MuseSubscription {
+                    attempt: pending_attempt,
+                    cancelled,
+                    ..
+                }) if auth_muse_helpers::pending_attempt_matches(pending_attempt, attempt) => {
+                    (true, cancelled.load(std::sync::atomic::Ordering::Acquire))
+                }
+                _ => (false, false),
+            };
+            if !is_match || is_cancelled {
+                return;
+            }
+            self.push_display_message(DisplayMessage::system(login.message.clone()));
+            if let Some(code) = login
+                .message
+                .split("Your code: ")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+            {
+                self.set_status_notice(format!("Login: enter {} at Meta", code));
+            }
+            return;
+        }
+        // Native Muse subscription approval: the background task placed the
+        // credentials in the pending slot and never persisted. Take them here
+        // on the main thread and save synchronously, but only when the event's
+        // attempt id matches the currently pending attempt. Anything else
+        // (cancelled, superseded, or cross-session) is ignored, and a missing
+        // slot can never switch the provider.
+        if self.take_muse_subscription_approval(&login) {
+            return;
+        }
         crate::auth::AuthStatus::invalidate_cache();
         crate::logging::event_info(
             "login_completed",
@@ -3256,7 +3190,12 @@ impl App {
             .and_then(PendingLogin::telemetry_context)
         {
             if login.success {
-                crate::telemetry::record_auth_success(&provider, &method);
+                if !matches!(
+                    self.pending_login,
+                    Some(PendingLogin::MuseSubscription { .. })
+                ) {
+                    crate::telemetry::record_auth_success(&provider, &method);
+                }
             } else {
                 let reason =
                     crate::auth::login_diagnostics::classify_auth_failure_message(&login.message);
@@ -3264,15 +3203,19 @@ impl App {
             }
         }
         if login.success {
+            let replaced_login_card = login.provider == "openai"
+                && self.finish_openai_login_progress("✓ OpenAI login complete.".to_string());
             self.recent_authenticated_provider = Some((login.provider.clone(), Instant::now()));
             // A fresh login is exactly what the credential-failure breaker is
             // waiting for: give automatic retries a fresh budget.
             self.reset_credential_failure_breaker();
             self.auth_catalog_refresh_pending = true;
             self.invalidate_model_picker_cache();
-            let suppress_first_run_login_noise =
-                self.onboarding_flow_active() && !matches!(login.provider.as_str(), "copilot_code");
-            if !suppress_first_run_login_noise {
+            let progress_provider = login.provider.as_str();
+            let suppress_first_run_login_noise = self.onboarding_flow_active()
+                && !(progress_provider == "copilot_code"
+                    || progress_provider.starts_with("muse_subscription_code#"));
+            if !suppress_first_run_login_noise && !replaced_login_card {
                 self.push_display_message(DisplayMessage::system(login.message));
             }
             self.set_status_notice(format!("Login: {} ready", login.provider));
@@ -3316,15 +3259,29 @@ impl App {
             // During onboarding we route the failure to the recovery screen
             // (which explains next steps) instead of dumping a raw error message
             // and a status notice the user can miss.
+            let replaced_login_card = login.provider == "openai"
+                && self.finish_openai_login_progress(format!(
+                    "OpenAI login failed: {message}\nRetry /login openai."
+                ));
             if self.onboarding_flow_active() {
                 self.onboarding_handle_login_failed(Some(message));
             } else {
-                self.push_display_message(DisplayMessage::error(message));
+                if !replaced_login_card {
+                    self.push_display_message(DisplayMessage::error(message));
+                }
                 self.set_status_notice(format!("Login: {} failed", login.provider));
                 self.onboarding_handle_login_failed(None);
             }
         }
-        if self.pending_login.is_some() {
+        if !matches!(
+            self.pending_login,
+            Some(PendingLogin::MuseSubscription { .. })
+        ) && self
+            .pending_login
+            .as_ref()
+            .and_then(PendingLogin::telemetry_context)
+            .is_some_and(|(provider, _)| provider == login.provider)
+        {
             self.pending_login = None;
         }
     }
@@ -3370,21 +3327,6 @@ impl App {
         ))
     }
 
-    fn save_named_api_key(env_file: &str, key_name: &str, key: &str) -> anyhow::Result<()> {
-        if !crate::provider_catalog::is_safe_env_key_name(key_name) {
-            anyhow::bail!("Invalid API key variable name: {}", key_name);
-        }
-        if !crate::provider_catalog::is_safe_env_file_name(env_file) {
-            anyhow::bail!("Invalid env file name: {}", env_file);
-        }
-
-        let config_dir = crate::storage::app_config_dir()?;
-        let file_path = config_dir.join(env_file);
-        crate::storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
-        crate::env::set_var(key_name, key);
-        Ok(())
-    }
-
     fn save_azure_config(
         endpoint: &str,
         model: &str,
@@ -3409,10 +3351,10 @@ impl App {
             Some(if use_entra { "1" } else { "0" }),
         )?;
         if let Some(api_key) = api_key {
-            crate::provider_catalog::save_env_value_to_env_file(
-                azure::API_KEY_ENV,
+            crate::provider_catalog::save_named_api_key(
                 azure::ENV_FILE,
-                Some(api_key),
+                azure::API_KEY_ENV,
+                api_key,
             )?;
         }
         azure::apply_runtime_env()?;
@@ -3487,10 +3429,10 @@ fn save_tui_openai_compatible_key(
             &resolved.env_file,
             None,
         )?;
-        crate::provider_catalog::save_env_value_to_env_file(
-            &resolved.api_key_env,
+        crate::provider_catalog::save_named_api_key(
             &resolved.env_file,
-            Some(key.trim()),
+            &resolved.api_key_env,
+            key.trim(),
         )?;
     } else {
         crate::provider_catalog::save_env_value_to_env_file(
@@ -3498,15 +3440,19 @@ fn save_tui_openai_compatible_key(
             &resolved.env_file,
             Some("1"),
         )?;
-        crate::provider_catalog::save_env_value_to_env_file(
-            &resolved.api_key_env,
-            &resolved.env_file,
-            if key.trim().is_empty() {
-                None
-            } else {
-                Some(key.trim())
-            },
-        )?;
+        if key.trim().is_empty() {
+            crate::provider_catalog::save_env_value_to_env_file(
+                &resolved.api_key_env,
+                &resolved.env_file,
+                None,
+            )?;
+        } else {
+            crate::provider_catalog::save_named_api_key(
+                &resolved.env_file,
+                &resolved.api_key_env,
+                key.trim(),
+            )?;
+        }
     }
     Ok(resolved)
 }

@@ -5,8 +5,8 @@ use crate::background::TaskResult;
 use crate::plan::PlanItem;
 use crate::protocol::{
     AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, CommDeliveryMode, ContextEntry,
-    HistoryMessage, PlanGraphStatus, Request, ServerEvent, SwarmChannelInfo, TaskGraphNodeSpec,
-    ToolCallSummary, comm_cleanup_candidate_session_ids, default_comm_await_target_statuses,
+    HistoryMessage, PlanGraphStatus, Request, ServerEvent, SwarmChannelInfo, ToolCallSummary,
+    comm_cleanup_candidate_session_ids, default_comm_await_target_statuses,
     default_comm_cleanup_target_statuses, default_comm_run_await_statuses,
     format_comm_awaited_members_with_reports, format_comm_channels, format_comm_context_entries,
     format_comm_context_history, format_comm_members, format_comm_plan_followup,
@@ -18,16 +18,13 @@ use async_trait::async_trait;
 use jcode_swarm_core::validate_swarm_tldr;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 
 const REQUEST_ID: u64 = 1;
 
-/// Default number of workers `run_plan` keeps active at once for a **light**-mode
-/// plan. Light mode is the cheap fan-out preset, so this stays small. Deep mode
-/// instead uses `agents.swarm_max_concurrent_agents` (configurable and shared
-/// with the server's recursive-spawn RAM safety guard).
-const LIGHT_MODE_DEFAULT_CONCURRENCY: usize = 4;
+/// Default number of workers `run_plan` keeps active at once when the caller
+/// does not pass `concurrency_limit`.
+const DEFAULT_RUN_PLAN_CONCURRENCY: usize = 4;
 
 mod transport;
 use transport::{send_request, send_request_with_timeout};
@@ -54,95 +51,6 @@ fn ensure_success(response: &ServerEvent) -> Result<()> {
     } else {
         Ok(())
     }
-}
-
-fn seed_node_id_collision(response: &ServerEvent) -> Option<&str> {
-    let message = check_error(response)?;
-    let (_, tail) = message.split_once("duplicate node id '")?;
-    let (id, _) = tail.split_once('\'')?;
-    (!id.is_empty()).then_some(id)
-}
-
-fn plan_graph_node_ids(summary: &PlanGraphStatus) -> HashSet<String> {
-    summary
-        .ready_ids
-        .iter()
-        .chain(&summary.blocked_ids)
-        .chain(&summary.active_ids)
-        .chain(&summary.completed_ids)
-        .chain(&summary.failed_ids)
-        .chain(&summary.cycle_ids)
-        .chain(&summary.unresolved_dependency_ids)
-        .cloned()
-        .collect()
-}
-
-fn seed_retry_scope(ctx: &ToolContext) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    ctx.session_id.hash(&mut hasher);
-    ctx.message_id.hash(&mut hasher);
-    format!("seed-{:08x}", hasher.finish() as u32)
-}
-
-/// Rename only seed ids that collide with the existing durable plan, then rewrite
-/// intra-batch dependency edges to follow them. The scope is stable for a tool
-/// turn, so retrying the same call produces the same ids and is itself idempotent.
-fn remap_conflicting_seed_nodes(
-    nodes: &[TaskGraphNodeSpec],
-    occupied: &HashSet<String>,
-    conflicting_id: &str,
-    scope: &str,
-) -> (Vec<TaskGraphNodeSpec>, Vec<(String, String)>) {
-    let original_ids: HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
-    let mut reserved = occupied.clone();
-    reserved.extend(original_ids.iter().map(|id| (*id).to_string()));
-    let mut mapping = HashMap::<String, String>::new();
-
-    if occupied.contains(conflicting_id) && nodes.iter().any(|node| node.id == conflicting_id) {
-        let node_id = conflicting_id.to_string();
-        let base = format!("{conflicting_id}::{scope}");
-        let mut candidate = base.clone();
-        let mut discriminator = 2usize;
-        while reserved.contains(&candidate) {
-            candidate = format!("{base}-{discriminator}");
-            discriminator += 1;
-        }
-        reserved.insert(candidate.clone());
-        mapping.insert(node_id, candidate);
-    }
-
-    let remapped = nodes
-        .iter()
-        .cloned()
-        .map(|mut node| {
-            if let Some(id) = mapping.get(&node.id) {
-                node.id = id.clone();
-            }
-            for dependency in &mut node.depends_on {
-                if let Some(id) = mapping.get(dependency) {
-                    *dependency = id.clone();
-                }
-            }
-            node
-        })
-        .collect();
-    let changes = nodes
-        .iter()
-        .filter_map(|node| {
-            mapping
-                .get(&node.id)
-                .map(|mapped| (node.id.clone(), mapped.clone()))
-        })
-        .collect();
-    (remapped, changes)
-}
-
-fn format_seed_remaps(changes: &[(String, String)]) -> String {
-    changes
-        .iter()
-        .map(|(from, to)| format!("{from} -> {to}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 async fn fetch_plan_status(session_id: &str) -> Result<PlanGraphStatus> {
@@ -513,39 +421,16 @@ async fn await_swarm_progress(
     }
 }
 
-/// Decide how many swarm workers `run_plan` keeps active at once.
-///
-/// Policy:
-///   * an explicit `requested` limit always wins (clamped to >= 1);
-///   * deep mode with no explicit limit fans out wide: use `deep_cap`, where
-///     `0` means "no extra cap" (`usize::MAX`) so the whole ready set is
-///     dispatched, bounded only by the swarm member cap;
-///   * light mode with no explicit limit keeps the small, cheap fan-out default.
-///
-/// Pure and side-effect free so the concurrency contract is unit-testable
-/// without a live swarm.
-fn resolve_run_plan_concurrency(requested: Option<usize>, is_deep: bool, deep_cap: usize) -> usize {
-    match requested {
-        Some(explicit) => explicit.max(1),
-        None if is_deep => {
-            if deep_cap == 0 {
-                usize::MAX
-            } else {
-                deep_cap
-            }
-        }
-        None => LIGHT_MODE_DEFAULT_CONCURRENCY,
-    }
+/// Decide how many swarm workers `run_plan` keeps active at once: an explicit
+/// limit wins (clamped to >= 1), otherwise the small default.
+fn resolve_run_plan_concurrency(requested: Option<usize>) -> usize {
+    requested.map_or(DEFAULT_RUN_PLAN_CONCURRENCY, |explicit| explicit.max(1))
 }
 
 /// Running tally of how well a `run_plan` drive used its concurrency budget.
 ///
-/// Deep mode's promise is comprehensiveness through parallel fan-out, so a run
-/// that finishes with peak parallelism ~1 despite a 32+ slot budget means the
-/// graph was decomposed serially and the budget was wasted. Tracking this per
-/// loop (max in-flight, plus how often open slots sat idle with no ready work)
-/// turns "did we actually use the budget?" into a measured, reportable number
-/// instead of a hope.
+/// Tracks peak parallelism and how often open slots sat idle with no ready
+/// work, so the terminal report shows whether the budget was used.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct RunPlanUtilization {
     /// Highest number of simultaneously in-flight tasks observed.
@@ -572,29 +457,17 @@ impl RunPlanUtilization {
         }
     }
 
-    /// Render the utilization line for the terminal report. In deep mode a
-    /// starved run also gets an actionable hint, because the fix (wider
-    /// decomposition) belongs to the model reading this output.
-    fn report(&self, concurrency_limit: usize, is_deep: bool) -> String {
+    /// Render the utilization line for the terminal report.
+    fn report(&self, concurrency_limit: usize) -> String {
         let limit_label = if concurrency_limit == usize::MAX {
             "unbounded".to_string()
         } else {
             concurrency_limit.to_string()
         };
-        let mut line = format!(
+        format!(
             "Budget utilization: peak {} of {} concurrent worker slot(s); {} of {} loop(s) had idle capacity with nothing ready.",
             self.peak_in_flight, limit_label, self.starved_loops, self.loops
-        );
-        let mostly_starved = self.loops > 0 && self.starved_loops * 2 >= self.loops;
-        let ran_narrow = self.loops >= 3 && self.peak_in_flight <= 2;
-        if is_deep && (mostly_starved || ran_narrow) {
-            line.push_str(
-                "\nDeep-mode hint: the graph ran much narrower than the agent budget. If coverage \
-                 matters, expand remaining or follow-up work into MANY independent sibling nodes \
-                 (depends_on only for real data dependencies) so the ready set fills the budget.",
-            );
-        }
-        line
+        )
     }
 }
 
@@ -818,6 +691,36 @@ fn try_claim_run_plan_driver(
     })
 }
 
+/// Make the swarm plan mirror the caller's todo list: one item per lane.
+///
+/// `launch` calls this every time, so the plan can never drift from the
+/// todos; the server keeps the status and owner of lanes already running.
+/// The legacy `run_plan` only seeds an empty plan, so a hand-written
+/// `propose_plan` still wins there. Returns quietly with no open todos.
+async fn sync_plan_from_todos(ctx: &ToolContext, only_if_empty: bool) -> Result<()> {
+    if only_if_empty
+        && fetch_plan_status(&ctx.session_id)
+            .await
+            .is_ok_and(|summary| summary.item_count > 0)
+    {
+        return Ok(());
+    }
+    let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
+    let items = crate::server::swarm_todo_link::plan_items_from_todos(&todos);
+    if items.is_empty() {
+        return Ok(());
+    }
+    let request = Request::CommProposePlan {
+        id: REQUEST_ID,
+        session_id: ctx.session_id.clone(),
+        items,
+    };
+    let response = send_request(request)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to seed swarm plan from todos: {}", e))?;
+    ensure_success(&response)
+}
+
 /// Drive `run_plan` as a managed background task and return immediately.
 ///
 /// The coordinating agent stays responsive: the plan loop runs inside the
@@ -863,10 +766,7 @@ async fn run_swarm_plan_in_background(
     let wake = params.wake.unwrap_or(true);
     // Keep the display name free of the "·" separator used by the background
     // notification markdown header, or downstream parsing mis-splits the label.
-    let display_name = format!(
-        "run_plan ({} nodes, {} mode)",
-        initial_summary.item_count, initial_summary.mode
-    );
+    let display_name = format!("run_plan ({} tasks)", initial_summary.item_count);
 
     let bg_ctx = ctx.clone();
     let info = crate::background::global()
@@ -904,14 +804,13 @@ async fn run_swarm_plan_in_background(
     let output = format!(
         "🐝 Swarm plan running in background.\n\n\
          Task ID: {}\n\
-         Plan: {} node(s), {} mode\n\
+         Plan: {} task(s)\n\
          Output file: {}\n\n\
          {}\n\
          Check progress: use the `bg` tool with action=\"status\" and task_id=\"{}\", or `swarm plan_status`.\n\
          Note: a server reload stops this driver (workers keep running); rerun `swarm run_plan` to resume driving the same plan.",
         info.task_id,
         initial_summary.item_count,
-        initial_summary.mode,
         info.output_file.display(),
         delivery_note,
         info.task_id,
@@ -1055,12 +954,6 @@ fn format_run_plan_terminal_summary(
         summary.active_ids.len(),
         assignment_count
     );
-    if summary.mode.eq_ignore_ascii_case("deep") {
-        output.push_str(&format!(
-            "\nGrowth: {} seeded -> {} nodes ({} machinery-grown: expansions, gate-injected gaps, gates).",
-            summary.seeded_count, summary.item_count, summary.grown_count
-        ));
-    }
     if !summary.failed_ids.is_empty() {
         output.push_str(&format!(
             "\nFailed nodes: {}. This run did NOT finish cleanly; inspect them with `swarm plan_status` and retry or salvage before trusting the result.",
@@ -1211,6 +1104,8 @@ async fn broadcast_plan_alert(ctx: &ToolContext, message: &str) -> Result<()> {
         wake: None,
         delivery: None,
         tldr: Some("run_plan paused: credential failure wave; fix auth then retry".to_string()),
+        to_swarm: None,
+        require_target: false,
     };
     match send_request(request).await {
         Ok(response) => ensure_success(&response),
@@ -1241,21 +1136,16 @@ async fn run_swarm_plan_loop(
     params: &CommunicateInput,
     reporter: &RunPlanReporter,
 ) -> Result<ToolOutput> {
-    let initial_summary = fetch_plan_status(&ctx.session_id).await?;
-    let is_deep = initial_summary.mode.eq_ignore_ascii_case("deep");
-
-    let configured_deep_cap = crate::config::config().agents.swarm_max_concurrent_agents;
-    let concurrency_limit =
-        resolve_run_plan_concurrency(params.concurrency_limit, is_deep, configured_deep_cap);
+    // Fail fast when the plan cannot be read before spawning any workers.
+    fetch_plan_status(&ctx.session_id).await?;
+    let concurrency_limit = resolve_run_plan_concurrency(params.concurrency_limit);
     let timeout_minutes = params.timeout_minutes.unwrap_or(60).max(1);
     let retain_agents = params.retain_agents.unwrap_or(false);
     let spawn_if_needed = params.spawn_if_needed.or(Some(true));
-    // Default to a fresh worker per task-graph node. Reusing a worker that already
-    // completed a *different* node carries that node's conversation into the next
-    // assignment, and the model often just re-reports its prior result instead of
-    // doing the new work (observed leaving gap/synthesis nodes stuck). The task-DAG
-    // model assumes clean, isolated workers, so unless the caller explicitly opts
-    // into reuse (`prefer_spawn=false`), prefer spawning a fresh worker per node.
+    // Default to a fresh worker per task. Reusing a worker that already completed
+    // a *different* task carries that conversation into the next assignment, and
+    // the model often just re-reports its prior result instead of doing the new
+    // work. Callers can opt into reuse with `prefer_spawn=false`.
     let prefer_spawn = params.prefer_spawn.or(Some(true));
     let mut assignment_count = 0usize;
     let mut loop_count = 0usize;
@@ -1322,18 +1212,7 @@ async fn run_swarm_plan_loop(
         if no_more_runnable || terminal_count >= summary.item_count {
             let mut output =
                 format_run_plan_terminal_summary(loop_count, &summary, assignment_count);
-            output.push_str(&format!(
-                "\n{}",
-                utilization.report(concurrency_limit, is_deep)
-            ));
-            if !summary.low_confidence_ids.is_empty() {
-                output.push_str(&format!(
-                    "\nConfidence coverage: {} completed node(s) self-reported LOW confidence: {}. \
-                     Consider seeding follow-up nodes to shore these up before trusting the result.",
-                    summary.low_confidence_ids.len(),
-                    summary.low_confidence_ids.join(", ")
-                ));
-            }
+            output.push_str(&format!("\n{}", utilization.report(concurrency_limit)));
             if retain_agents {
                 output.push_str("\nRetained spawned workers because retain_agents=true.");
             } else {
@@ -1384,7 +1263,9 @@ async fn run_swarm_plan_loop(
                 },
                 message: params.message.clone(),
                 model: params.model.clone(),
-                effort: params.effort.clone(),
+                // Worker effort is not agent-controlled: the server applies
+                // `agents.swarm_effort` (default "low").
+                effort: None,
             };
             match send_request(request).await {
                 Ok(ServerEvent::CommAssignTaskResponse {
@@ -1535,7 +1416,9 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         request_nonce: Some(fresh_spawn_request_nonce(ctx)),
         spawn_mode: params.spawn_mode.clone(),
         model: params.model.clone(),
-        effort: params.effort.clone(),
+        // Worker effort is not agent-controlled: the server applies
+        // `agents.swarm_effort` (default "low").
+        effort: None,
         label: None,
     };
 
@@ -1607,57 +1490,7 @@ fn format_status_snapshot(snapshot: &AgentStatusSnapshot) -> ToolOutput {
 }
 
 fn format_plan_status(summary: &PlanGraphStatus) -> ToolOutput {
-    let mut output = format_comm_plan_status(summary);
-    if let Some(budget_line) = plan_status_budget_line(
-        summary,
-        crate::config::config().agents.swarm_max_concurrent_agents,
-    ) {
-        output.push_str(&budget_line);
-    }
-    ToolOutput::new(output)
-}
-
-/// Deep-mode budget line for `plan_status`: how wide the ready frontier is
-/// versus the concurrency budget, with a widen-the-graph nudge when the ready
-/// set cannot fill the slots. This makes under-utilization visible at plan
-/// time, before `run_plan` even starts, so the coordinator can restructure the
-/// graph instead of discovering the waste after the run. Pure over its inputs
-/// for unit testing; returns `None` for light plans.
-fn plan_status_budget_line(summary: &PlanGraphStatus, deep_cap: usize) -> Option<String> {
-    if !summary.mode.eq_ignore_ascii_case("deep") {
-        return None;
-    }
-    let budget = resolve_run_plan_concurrency(None, true, deep_cap);
-    let budget_label = if budget == usize::MAX {
-        format!("{} (member cap)", jcode_swarm_core::MAX_SWARM_MEMBERS)
-    } else {
-        budget.to_string()
-    };
-    let ready_width = summary.ready_ids.len();
-    let active_width = summary.active_ids.len();
-    let mut line = format!(
-        "  Parallel budget: {} concurrent worker slot(s); ready set is {} wide ({} active).\n",
-        budget_label, ready_width, active_width
-    );
-    let effective_budget = if budget == usize::MAX {
-        jcode_swarm_core::MAX_SWARM_MEMBERS
-    } else {
-        budget
-    };
-    // Nudge only when narrowness is structural: the frontier cannot fill the
-    // budget while other non-terminal work exists but is serialized behind
-    // depends_on edges. A small plan that is simply almost done gets no nudge.
-    let frontier = ready_width + active_width;
-    let terminal = summary.completed_ids.len() + summary.cycle_ids.len();
-    let serialized_remaining = summary.item_count > terminal + frontier;
-    if frontier < effective_budget && serialized_remaining {
-        line.push_str(
-            "  The ready frontier is narrower than the budget while more work waits behind \
-             depends_on edges: prefer expand_node with MANY independent siblings (depends_on \
-             only for real data dependencies) to widen it.\n",
-        );
-    }
-    Some(line)
+    ToolOutput::new(format_comm_plan_status(summary))
 }
 
 fn format_context_history(target: &str, messages: &[HistoryMessage]) -> ToolOutput {
@@ -1724,6 +1557,43 @@ fn default_await_target_statuses() -> Vec<String> {
     default_comm_await_target_statuses()
 }
 
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn cross_swarm_confirmation(swarm: &str, to_session: Option<&str>, message: &str) -> String {
+    match to_session {
+        Some(target) => format!("Cross-swarm DM sent to {target} in swarm '{swarm}': {message}"),
+        None => format!("Cross-swarm DM sent to the coordinator of swarm '{swarm}': {message}"),
+    }
+}
+
+/// Render the `list_swarms` directory: one line per live swarm with label,
+/// id, coordinator, and member count. The caller's own swarm is marked.
+pub(super) fn format_swarm_directory(swarms: &[crate::protocol::SwarmInfo]) -> String {
+    if swarms.is_empty() {
+        return "No live swarms.".to_string();
+    }
+    let mut out = String::from("Live swarms:\n\n");
+    for swarm in swarms {
+        let name = swarm.label.as_deref().unwrap_or("(unlabeled)");
+        let own = if swarm.is_own { " [yours]" } else { "" };
+        let coordinator = match (&swarm.coordinator_name, &swarm.coordinator_session_id) {
+            (Some(name), Some(id)) => format!("{name} [{id}]"),
+            (None, Some(id)) => id.clone(),
+            _ => "none".to_string(),
+        };
+        out.push_str(&format!(
+            "- {name}{own}\n  id: {}\n  coordinator: {coordinator}\n  members: {}\n",
+            swarm.swarm_id, swarm.member_count
+        ));
+    }
+    out.push_str(
+        "\nCross-swarm DM: action=dm with to_swarm=<label or id> and optional to_session (defaults to that swarm's coordinator).",
+    );
+    out
+}
+
 fn format_channels(channels: &[SwarmChannelInfo]) -> ToolOutput {
     ToolOutput::new(format_comm_channels(channels))
 }
@@ -1774,7 +1644,6 @@ fn format_swarm_model_list(
             route.model, route.provider, route.api_method, availability, cost, detail
         ));
     }
-    out.push_str("\nAlso pass effort (none|minimal|low|medium|high|xhigh|max) to set the spawned agent's reasoning effort.");
     out
 }
 
@@ -1805,6 +1674,28 @@ impl CommunicateTool {
     }
 }
 
+/// Swarm actions advertised to models. Real usage is dominated by messaging,
+/// reports, listing and spawning; the plan/task-graph actions (propose_plan,
+/// assign_task, assign_next, fill_slots, run_plan, resync_plan, ...) are
+/// subsumed by `launch` and lane-owning `spawn`. Unlisted actions still
+/// execute for old transcripts and scripts, they are just not offered.
+const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
+    "launch",
+    "spawn",
+    "message",
+    "report",
+    "status",
+    "plan_status",
+    "list",
+    "summary",
+    "await_members",
+    "stop",
+    "resume",
+    "retry",
+    "list_models",
+    "list_swarms",
+];
+
 #[derive(Clone, Deserialize)]
 struct CommunicateInput {
     action: String,
@@ -1816,6 +1707,9 @@ struct CommunicateInput {
     message: Option<String>,
     #[serde(default)]
     to_session: Option<String>,
+    /// Cross-swarm DM target: swarm label or id (see list_swarms).
+    #[serde(default)]
+    to_swarm: Option<String>,
     #[serde(default)]
     channel: Option<String>,
     #[serde(default)]
@@ -1842,16 +1736,6 @@ struct CommunicateInput {
     prefer_spawn: Option<bool>,
     #[serde(default)]
     plan_items: Option<Vec<PlanItem>>,
-    #[serde(default)]
-    node_id: Option<String>,
-    #[serde(default)]
-    gate_id: Option<String>,
-    /// Task-DAG node specs for task_graph/expand_node/inject_gap actions.
-    #[serde(default)]
-    nodes: Option<Vec<crate::protocol::TaskGraphNodeSpec>>,
-    /// Handoff artifact (object) for complete_node.
-    #[serde(default)]
-    artifact: Option<serde_json::Value>,
     #[serde(default)]
     target_status: Option<Vec<String>>,
     #[serde(default)]
@@ -1887,9 +1771,6 @@ struct CommunicateInput {
     /// threshold.
     #[serde(default)]
     tldr: Option<String>,
-    /// Reasoning effort for spawned agents (none|minimal|low|medium|high|xhigh|max).
-    #[serde(default)]
-    effort: Option<String>,
     /// Per-worker model override for spawn and assignment-created workers.
     /// Takes precedence over agents.swarm_model; see list_models for routes.
     #[serde(default)]
@@ -1898,6 +1779,10 @@ struct CommunicateInput {
     /// Required and nonblank for the explicit `spawn` action.
     #[serde(default)]
     label: Option<String>,
+    /// Phase (todo `stage`) a spawned worker's lane joins. Defaults to the
+    /// active phase.
+    #[serde(default, alias = "stage")]
+    phase: Option<u32>,
 }
 
 impl CommunicateInput {
@@ -1937,9 +1822,13 @@ fn canonical_swarm_action(action: &str) -> &str {
     match action.trim().to_ascii_lowercase().as_str() {
         "inbox" | "messages" | "check_messages" | "read_messages" | "read_inbox" => "read",
         "send" | "msg" | "send_message" => "message",
-        "dm_session" | "direct_message" | "whisper" => "dm",
+        // `dm` was its own action; `message` with `to_session` is identical,
+        // so route it there (one way to talk to an agent).
+        "dm" | "dm_session" | "direct_message" | "whisper" => "message",
         "broadcast_all" | "announce" => "broadcast",
         "agents" | "members" | "list_agents" | "list_members" | "roster" => "list",
+        "swarms" | "list_swarm" | "swarm_list" => "list_swarms",
+        "label_swarm" | "name_swarm" | "rename_swarm" | "set_label" => "set_swarm_label",
         "models" | "model_list" | "list_model" | "list_providers" | "list_routes" => "list_models",
         "plan" | "status_plan" => "plan_status",
         "assign" => "assign_task",
@@ -1966,28 +1855,16 @@ impl Tool for CommunicateTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["share", "share_append", "read", "message", "broadcast", "dm", "channel", "list", "list_channels", "channel_members",
-                             "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
-                             "status", "report", "plan_status", "summary", "read_context", "resync_plan", "assign_task", "assign_next", "fill_slots", "run_plan", "cleanup",
-                             "task_graph", "expand_node", "complete_node", "inject_gap",
-                             "start", "start_task", "wake", "resume", "retry", "reassign", "replace", "salvage",
-                             "subscribe_channel", "unsubscribe_channel", "await_members", "list_models"],
-                    "description": "Action. spawn requires label and should include prompt. list_models shows available models/routes."
-                },
-                "key": {
-                    "type": "string",
-                    "description": "Shared-context key for share/share_append/read. Discouraged: prefer the repo and node artifacts."
-                },
-                "value": {
-                    "type": "string"
+                    "enum": ADVERTISED_SWARM_ACTIONS,
+                    "description": "Action. launch runs your todo list (one agent per lane). spawn starts one worker on a lane; spawn requires label and should include prompt. message sends to one agent (to_session) or a channel; only the coordinator may omit both to message everyone. list_models shows available models/routes."
                 },
                 "message": {
                     "type": "string",
-                    "description": "Message body: DM with to_session, channel post with channel, else broadcast. For report, the body."
+                    "description": "Message body. Goes to to_session, or to channel; with neither, everyone (coordinator only). For report, the body."
                 },
                 "tldr": {
                     "type": "string",
-                    "description": "One-line summary under ~120 chars. Required for message/report bodies longer than 240 chars."
+                    "description": "Optional one-line summary (under ~120 chars); recommended for bodies over 240 chars, else auto-derived."
                 },
                 "status": {
                     "type": "string",
@@ -2005,24 +1882,27 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "description": "Session ID or unique friendly name of one agent. Alias of target_session."
                 },
+                "to_swarm": {
+                    "type": "string",
+                    "description": "Cross-swarm DM: swarm label or id (see list_swarms). With to_session, that agent; else its coordinator."
+                },
                 "channel": {
                     "type": "string",
-                    "description": "Channel name for channel actions. Discouraged: prefer DMs and task-graph artifacts."
+                    "description": "Channel name for channel actions. Discouraged: prefer DMs."
                 },
-                "proposer_session": { "type": "string" },
-                "reason": { "type": "string" },
                 "target_session": {
                     "type": "string",
                     "description": "Session ID or unique friendly name for management actions. Alias of to_session."
                 },
-                "role": {
-                    "type": "string",
-                    "enum": ["agent", "coordinator"]
-                },
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn. Short label shown on the agent's chip (e.g. 'api reviewer')."
+                    "description": "Required for spawn: the worker's lane name (e.g. 'auth refactor'). Each spawned worker owns that lane in your todo list (created from the prompt if missing); its todo list is the lane and syncs only it."
+                },
+                "phase": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "For spawn: which phase the worker's lane belongs to. Defaults to the active phase."
                 },
                 "working_dir": {
                     "type": "string",
@@ -2045,27 +1925,14 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "description": "Optional plan task ID. When omitted the coordinator picks or resumes the relevant task."
                 },
-                "spawn_if_needed": {
-                    "type": "boolean",
-                    "description": "For assign_task: spawn a fresh agent when no reusable one is available."
-                },
-                "prefer_spawn": {
-                    "type": "boolean",
-                    "description": "For assign_task: prefer spawning fresh over reusing an idle worker."
-                },
                 "spawn_mode": {
                     "type": "string",
                     "enum": ["visible", "headless", "inline", "auto"],
-                    "description": "Spawn UI mode: visible terminal, headless, inline gallery, or auto. Defaults to inline."
+                    "description": "Omit to use the user's configured mode. Set only when the user asks for one."
                 },
                 "model": {
                     "type": "string",
                     "description": "Model for new workers, e.g. 'openai-api:gpt-5.6-luna'. 'inherit' uses yours. See list_models."
-                },
-                "effort": {
-                    "type": "string",
-                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
-                    "description": "Optional reasoning effort for spawned agents. Omit for the model default."
                 },
                 "session_ids": {
                     "type": "array",
@@ -2073,8 +1940,8 @@ impl Tool for CommunicateTool {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["all", "any", "deep", "light"],
-                    "description": "task_graph: deep (gated) or light (fan-out). await_members: all or any."
+                    "enum": ["all", "any"],
+                    "description": "await_members: all or any."
                 },
                 "target_status": {
                     "type": "array",
@@ -2088,7 +1955,7 @@ impl Tool for CommunicateTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "For run_plan: detach as a background task (default true); false blocks until the plan resolves."
+                    "description": "For launch/run_plan: detach as a background task (default true); false blocks until the plan resolves."
                 },
                 "notify": {
                     "type": "boolean",
@@ -2097,7 +1964,7 @@ impl Tool for CommunicateTool {
                 "concurrency_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max live workers. Required for fill_slots; optional override for run_plan."
+                    "description": "Max live workers for launch."
                 },
                 "force": {
                     "type": "boolean",
@@ -2105,7 +1972,7 @@ impl Tool for CommunicateTool {
                 },
                 "retain_agents": {
                     "type": "boolean",
-                    "description": "For run_plan: keep spawned workers after the plan finishes. Defaults to false."
+                    "description": "For launch/run_plan: keep spawned workers after the plan finishes. Defaults to false."
                 },
                 "wake": {
                     "type": "boolean",
@@ -2116,53 +1983,8 @@ impl Tool for CommunicateTool {
                     "enum": ["notify", "interrupt", "wake"],
                     "description": "Optional delivery mode for dm/channel messaging."
                 },
-                "plan_items": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": true
-                    }
-                }
             }
         });
-
-        // Task-DAG properties are added after the macro to keep `json!` nesting
-        // depth under the macro recursion limit.
-        if let Some(props) = schema
-            .get_mut("properties")
-            .and_then(|value| value.as_object_mut())
-        {
-            props.insert(
-                "node_id".to_string(),
-                json!({
-                    "type": "string",
-                    "description": "Task-DAG node id for expand_node/complete_node."
-                }),
-            );
-            props.insert(
-                "gate_id".to_string(),
-                json!({
-                    "type": "string",
-                    "description": "Gate node id for inject_gap (a critique/verify gate the caller owns)."
-                }),
-            );
-            props.insert(
-                "nodes".to_string(),
-                json!({
-                    "type": "array",
-                    "description": "Node specs for task_graph/expand_node/inject_gap. Each: {id, content, kind?, depends_on?, priority?}.",
-                    "items": { "type": "object", "additionalProperties": true }
-                }),
-            );
-            props.insert(
-                "artifact".to_string(),
-                json!({
-                    "type": "object",
-                    "description": "Handoff artifact for complete_node: findings, evidence[], validation, open_questions[], confidence.",
-                    "additionalProperties": true
-                }),
-            );
-        }
 
         // `swarm` is a multi-action tool, so putting `label` in the top-level
         // `required` array would incorrectly require it for read/list/message and
@@ -2283,6 +2105,7 @@ impl Tool for CommunicateTool {
                     .map_err(|e| anyhow::anyhow!(e))?;
                 let to_session = params.to_session.clone();
                 let channel = params.channel.clone();
+                let to_swarm = non_blank(params.to_swarm.clone());
 
                 let request = Request::CommMessage {
                     id: REQUEST_ID,
@@ -2293,11 +2116,22 @@ impl Tool for CommunicateTool {
                     wake: params.wake,
                     delivery: params.delivery,
                     tldr,
+                    to_swarm: to_swarm.clone(),
+                    // A worker that forgets `to_session` gets an error rather
+                    // than broadcasting; the coordinator may still message all.
+                    require_target: true,
                 };
 
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(swarm) = to_swarm {
+                            return Ok(ToolOutput::new(cross_swarm_confirmation(
+                                &swarm,
+                                to_session.as_deref(),
+                                &message,
+                            )));
+                        }
                         let confirmation = match (to_session, channel) {
                             (Some(target), _) => {
                                 format!("Direct message sent to {}: {}", target, message)
@@ -2320,7 +2154,7 @@ impl Tool for CommunicateTool {
                 // coordinator reaches the whole swarm). Any `to_session`/
                 // `channel` is intentionally ignored so the action stays an
                 // unambiguous group send; use `message`/`dm`/`channel` to target.
-                // Prefer DMs or task-graph artifacts; group sends are for rare
+                // Prefer DMs; group sends are for rare
                 // coordination moments, not routine status updates.
                 let message = params
                     .message
@@ -2337,6 +2171,8 @@ impl Tool for CommunicateTool {
                     wake: params.wake,
                     delivery: params.delivery,
                     tldr,
+                    to_swarm: None,
+                    require_target: false,
                 };
 
                 match send_request(request).await {
@@ -2357,24 +2193,38 @@ impl Tool for CommunicateTool {
                     .ok_or_else(|| anyhow::anyhow!("'message' is required for dm action"))?;
                 let tldr = validate_swarm_tldr(params.tldr.as_deref(), &message, "this DM")
                     .map_err(|e| anyhow::anyhow!(e))?;
-                let to_session = params.to_session.ok_or_else(|| {
-                    anyhow::anyhow!("'to_session' (or 'target_session') is required for dm action")
-                })?;
+                let to_swarm = non_blank(params.to_swarm.clone());
+                if to_swarm.is_none() && params.to_session.is_none() {
+                    return Err(anyhow::anyhow!(
+                        "'to_session' (or 'target_session') is required for dm action, or pass 'to_swarm' to DM another swarm's coordinator"
+                    ));
+                }
+                let to_session = params.to_session.clone();
 
                 let request = Request::CommMessage {
                     id: REQUEST_ID,
                     from_session: ctx.session_id.clone(),
                     message: message.clone(),
-                    to_session: Some(to_session.clone()),
+                    to_session: to_session.clone(),
                     channel: None,
                     delivery: params.delivery,
                     wake: params.wake,
                     tldr,
+                    to_swarm: to_swarm.clone(),
+                    require_target: false,
                 };
 
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(swarm) = to_swarm {
+                            return Ok(ToolOutput::new(cross_swarm_confirmation(
+                                &swarm,
+                                to_session.as_deref(),
+                                &message,
+                            )));
+                        }
+                        let to_session = to_session.unwrap_or_default();
                         Ok(ToolOutput::new(format!(
                             "Direct message sent to {}: {}",
                             to_session, message
@@ -2404,6 +2254,8 @@ impl Tool for CommunicateTool {
                     delivery: params.delivery,
                     wake: params.wake,
                     tldr,
+                    to_swarm: None,
+                    require_target: false,
                 };
 
                 match send_request(request).await {
@@ -2433,6 +2285,61 @@ impl Tool for CommunicateTool {
                         Ok(ToolOutput::new("No agents found."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to list agents: {}", e)),
+                }
+            }
+
+            "list_swarms" => {
+                let request = Request::CommListSwarms {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                };
+                match send_request(request).await {
+                    Ok(ServerEvent::CommSwarms { swarms, .. }) => {
+                        Ok(ToolOutput::new(format_swarm_directory(&swarms)))
+                    }
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No swarms found."))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to list swarms: {}", e)),
+                }
+            }
+
+            "set_swarm_label" => {
+                let label = params
+                    .label
+                    .clone()
+                    .or_else(|| params.value.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "'label' is required for set_swarm_label (empty string clears it)"
+                        )
+                    })?;
+                let request = Request::CommSetSwarmLabel {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    label: label.clone(),
+                };
+                match send_request(request).await {
+                    Ok(ServerEvent::CommSwarms { swarms, .. }) => {
+                        let applied = swarms
+                            .iter()
+                            .find(|swarm| swarm.is_own)
+                            .and_then(|swarm| swarm.label.clone());
+                        let head = match applied {
+                            Some(label) => format!("Your swarm is now labeled '{label}'.\n\n"),
+                            None => "Your swarm label was cleared.\n\n".to_string(),
+                        };
+                        Ok(ToolOutput::new(format!(
+                            "{head}{}",
+                            format_swarm_directory(&swarms)
+                        )))
+                    }
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new(format!("Swarm label set to '{label}'.")))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to set swarm label: {}", e)),
                 }
             }
 
@@ -2567,171 +2474,39 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "task_graph" | "seed_graph" => {
-                let nodes = params
-                    .nodes
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("'nodes' is required for task_graph action"))?;
-                if nodes.is_empty() {
-                    return Err(anyhow::anyhow!("'nodes' must include at least one node"));
-                }
-                let count = nodes.len();
-                let mut seed_nodes = nodes.clone();
-                let request = Request::CommSeedGraph {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    mode: params.mode.clone(),
-                    nodes: seed_nodes.clone(),
-                };
-                let mut response = send_request(request)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to seed task graph: {}", e))?;
-                let mut changes = Vec::new();
-                let mut occupied = None;
-                // At most one durable collision can be resolved per request. The
-                // extra iteration consumes the final success response after all
-                // colliding ids have been remapped.
-                for _ in 0..=nodes.len() {
-                    let Some(conflicting_id) = seed_node_id_collision(&response) else {
-                        ensure_success(&response)?;
-                        let suffix = if changes.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " Renamed conflicting ids: {}.",
-                                format_seed_remaps(&changes)
-                            )
-                        };
-                        return Ok(ToolOutput::new(format!(
-                            "Seeded task graph ({} nodes).{}",
-                            count, suffix
-                        )));
-                    };
-                    if occupied.is_none() {
-                        let summary = fetch_plan_status(&ctx.session_id).await?;
-                        occupied = Some(plan_graph_node_ids(&summary));
-                    }
-                    let occupied = occupied
-                        .as_ref()
-                        .expect("occupied ids were initialized above");
-                    let (remapped, mut remaps) = remap_conflicting_seed_nodes(
-                        &seed_nodes,
-                        occupied,
-                        conflicting_id,
-                        &seed_retry_scope(&ctx),
-                    );
-                    if remaps.is_empty() {
-                        ensure_success(&response)?;
-                        unreachable!("a duplicate seed error should have returned above")
-                    }
-                    seed_nodes = remapped;
-                    changes.append(&mut remaps);
-                    response = send_request(Request::CommSeedGraph {
-                        id: REQUEST_ID,
-                        session_id: ctx.session_id.clone(),
-                        mode: params.mode.clone(),
-                        nodes: seed_nodes.clone(),
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to retry task graph seed: {}", e))?;
-                }
-                ensure_success(&response)?;
-                unreachable!("seed retry loop only exhausts while the server returns collisions")
-            }
-
-            "expand_node" => {
-                let node_id = params.node_id.clone().ok_or_else(|| {
-                    anyhow::anyhow!("'node_id' is required for expand_node action")
-                })?;
-                let children = params.nodes.clone().ok_or_else(|| {
-                    anyhow::anyhow!("'nodes' (children) is required for expand_node action")
-                })?;
-                if children.is_empty() {
-                    return Err(anyhow::anyhow!("expand_node requires at least one child"));
-                }
-                let count = children.len();
-                let request = Request::CommExpandNode {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    node_id: node_id.clone(),
-                    children,
-                };
-                match send_request(request).await {
-                    Ok(response) => {
-                        ensure_success(&response)?;
-                        Ok(ToolOutput::new(format!(
-                            "Decomposed '{}' into {} children.",
-                            node_id, count
-                        )))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to expand node: {}", e)),
-                }
-            }
-
-            "complete_node" => {
-                let node_id = params.node_id.clone().ok_or_else(|| {
-                    anyhow::anyhow!("'node_id' is required for complete_node action")
-                })?;
-                let artifact_json = match params.artifact.clone() {
-                    Some(value) => serde_json::to_string(&value)
-                        .map_err(|e| anyhow::anyhow!("invalid artifact: {}", e))?,
-                    None => {
-                        return Err(anyhow::anyhow!(
-                            "'artifact' object is required for complete_node action"
-                        ));
-                    }
-                };
-                let request = Request::CommCompleteNode {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    node_id: node_id.clone(),
-                    artifact_json,
-                };
-                match send_request(request).await {
-                    Ok(response) => {
-                        ensure_success(&response)?;
-                        Ok(ToolOutput::new(format!("Completed node '{}'.", node_id)))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to complete node: {}", e)),
-                }
-            }
-
-            "inject_gap" => {
-                let gate_id = params
-                    .gate_id
-                    .clone()
-                    .or_else(|| params.node_id.clone())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("'gate_id' is required for inject_gap action")
-                    })?;
-                let nodes = params
-                    .nodes
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("'nodes' is required for inject_gap action"))?;
-                if nodes.is_empty() {
-                    return Err(anyhow::anyhow!("inject_gap requires at least one node"));
-                }
-                let count = nodes.len();
-                let request = Request::CommInjectGap {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    gate_id: gate_id.clone(),
-                    nodes,
-                };
-                match send_request(request).await {
-                    Ok(response) => {
-                        ensure_success(&response)?;
-                        Ok(ToolOutput::new(format!(
-                            "Injected {} gap node(s) from gate '{}'.",
-                            count, gate_id
-                        )))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to inject gap nodes: {}", e)),
-                }
-            }
-
             "spawn" => {
                 let label = params.required_spawn_label()?;
+                // Every spawned worker owns one lane in the coordinator's todo
+                // list: the lane named `label` in `phase` (default: the active
+                // phase), created from the prompt when it does not exist. The
+                // worker's own todo list is that lane and syncs only it.
+                let prompt = params.spawn_initial_message();
+                let lane_id = {
+                    let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
+                    let title = prompt
+                        .as_deref()
+                        .and_then(|prompt| prompt.lines().map(str::trim).find(|l| !l.is_empty()))
+                        .map(|line| line.chars().take(60).collect::<String>())
+                        .unwrap_or_else(|| label.clone());
+                    let (updated, lane_id) = crate::todo::stages::ensure_spawn_lane(
+                        &todos,
+                        &label,
+                        params.phase,
+                        &title,
+                        prompt.as_deref(),
+                        &{
+                            let mut n = todos.len() + 1;
+                            while todos.iter().any(|t| t.id == format!("lane-{n}")) {
+                                n += 1;
+                            }
+                            format!("lane-{n}")
+                        },
+                    );
+                    if updated != todos {
+                        crate::todo::save_todos(&ctx.session_id, &updated)?;
+                    }
+                    lane_id
+                };
                 let request = Request::CommSpawn {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -2740,7 +2515,9 @@ impl Tool for CommunicateTool {
                     request_nonce: None,
                     spawn_mode: params.spawn_mode.clone(),
                     model: params.model.clone(),
-                    effort: params.effort.clone(),
+                    // Worker effort is not agent-controlled: the server applies
+                    // `agents.swarm_effort` (default "low").
+                    effort: None,
                     label: Some(label),
                 };
 
@@ -2748,10 +2525,18 @@ impl Tool for CommunicateTool {
                     Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
                         if !new_session_id.is_empty() =>
                     {
+                        crate::server::swarm_todo_link::link_assignment(
+                            &ctx.session_id,
+                            &lane_id,
+                            "",
+                            &new_session_id,
+                        );
                         Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {}",
-                            new_session_id
-                        )))
+                            "Spawned new agent: {new_session_id}"
+                        ))
+                        .with_metadata(
+                            serde_json::json!({"session_id": new_session_id, "lane": lane_id}),
+                        ))
                     }
                     Ok(response) => {
                         ensure_success(&response)?;
@@ -3045,7 +2830,9 @@ impl Tool for CommunicateTool {
                     spawn_if_needed: params.spawn_if_needed,
                     message: params.message.clone(),
                     model: params.model.clone(),
-                    effort: params.effort.clone(),
+                    // Worker effort is not agent-controlled: the server applies
+                    // `agents.swarm_effort` (default "low").
+                    effort: None,
                 };
 
                 match send_request(request).await {
@@ -3097,7 +2884,9 @@ impl Tool for CommunicateTool {
                         spawn_if_needed: params.spawn_if_needed,
                         message: params.message.clone(),
                         model: params.model.clone(),
-                        effort: params.effort.clone(),
+                        // Worker effort is not agent-controlled: the server applies
+                        // `agents.swarm_effort` (default "low").
+                        effort: None,
                     };
 
                     match send_request(request).await {
@@ -3143,7 +2932,13 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "run_plan" => {
+            "launch" | "run_plan" => {
+                // The coordinator's todo list is the plan: each lane (a group
+                // within a stage) becomes one item owned by one worker, whose
+                // own todo list is the lane. `launch` re-syncs every time so
+                // the plan never drifts; legacy `run_plan` keeps a hand-written
+                // `propose_plan` by only seeding an empty plan.
+                sync_plan_from_todos(&ctx, params.action == "run_plan").await?;
                 // Background-by-default: the plan driver runs as a managed
                 // background task (progress card, bg tool, notify/wake) so the
                 // coordinating agent stays responsive. Pass background=false

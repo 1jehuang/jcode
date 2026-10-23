@@ -1,5 +1,61 @@
 use super::*;
 
+#[test]
+fn runtime_commands_are_capability_gated_and_never_send_a_prompt() {
+    let request = json!({"id": 501, "req": "runtime_command", "session_id": "s1", "command": "memory", "args": ["status"]});
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        ..Default::default()
+    };
+    let output = state.api_request_to_legacy(&request);
+    assert!(matches!(
+        &output[..],
+        [Outbound::Reply(ServerFrame {
+            event: ApiEvent::Error { .. },
+            ..
+        })]
+    ));
+    state.runtime_commands_supported = true;
+    let output = state.api_request_to_legacy(&request);
+    let [Outbound::Legacy(legacy)] = &output[..] else {
+        panic!("expected native runtime command")
+    };
+    assert_eq!(legacy["type"], "runtime_command");
+    assert_eq!(legacy["command"], "memory");
+    assert_eq!(legacy["args"], json!(["status"]));
+    assert!(legacy.get("content").is_none());
+    let frames = state.legacy_event_to_api(&json!({"type": "runtime_command_result", "id": legacy["id"], "command": "memory", "data": {"enabled": true}, "message": "Memory on"}));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, Some(501));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::RuntimeCommandResult { session_id, command: jcode_harness_api::RuntimeCommand::Memory, .. } if session_id == "s1")
+    );
+}
+
+#[test]
+fn runtime_commands_reject_wrong_session_unknown_commands_and_malformed_args() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        runtime_commands_supported: true,
+        ..Default::default()
+    };
+    for request in [
+        json!({"id": 1, "req": "runtime_command", "session_id": "s2", "command": "memory"}),
+        json!({"id": 2, "req": "runtime_command", "session_id": "s1", "command": "nonexistent"}),
+        json!({"id": 3, "req": "runtime_command", "session_id": "s1", "command": "memory", "args": "on"}),
+    ] {
+        let output = state.api_request_to_legacy(&request);
+        assert!(matches!(
+            &output[..],
+            [Outbound::Reply(ServerFrame {
+                event: ApiEvent::Error { .. },
+                ..
+            })]
+        ));
+    }
+    assert!(state.pending_simple.is_empty());
+}
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
@@ -30,6 +86,37 @@ fn token_usage_preserves_cache_creation_and_missing_counters() {
             }
         );
     }
+}
+
+#[test]
+fn kv_cache_miss_is_forwarded_with_session() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        ..Default::default()
+    };
+    let wire = serde_json::to_value(jcode_protocol_like_kv_miss()).unwrap();
+    let frames = state.legacy_event_to_api(&wire);
+    assert_eq!(
+        frames.iter().map(|f| f.event.clone()).collect::<Vec<_>>(),
+        vec![ApiEvent::KvCacheMiss {
+            session_id: "s1".into(),
+            reason: "prefix_changed".into(),
+            harness_caused: true,
+            missed_tokens: 46_000,
+            expected_tokens: 50_000,
+            read_tokens: 4_000,
+            documented_cause: None,
+            message: "KV cache miss: ~46K tokens resent".into(),
+        }]
+    );
+}
+
+fn jcode_protocol_like_kv_miss() -> Value {
+    json!({
+        "type": "kv_cache_miss", "reason": "prefix_changed", "harness_caused": true,
+        "missed_tokens": 46_000, "expected_tokens": 50_000, "read_tokens": 4_000,
+        "message": "KV cache miss: ~46K tokens resent"
+    })
 }
 
 struct ScopedJcodeHome {
@@ -237,6 +324,27 @@ fn create_session_preserves_explicit_working_dir() {
 }
 
 #[test]
+fn created_session_reports_requested_working_dir_before_first_prompt() {
+    let _home = ScopedJcodeHome::new("create-unpersisted-working-dir");
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "create_session", "id": 7, "working_dir": "/workspace/fresh",
+    }));
+    let Outbound::Legacy(probe) = &out[1] else {
+        panic!("expected state")
+    };
+    let reply = state.legacy_event_to_api(&json!({
+        "type": "state", "id": probe["id"], "session_id": "fresh",
+        "message_count": 0, "is_processing": false,
+    }));
+    let ApiEvent::Attached { session } = &reply[0].event else {
+        panic!("expected attached")
+    };
+    assert_eq!(session.working_dir.as_deref(), Some("/workspace/fresh"));
+    assert!(state.pending_create_dir.is_none());
+}
+
+#[test]
 fn attach_session_defers_to_daemon_even_with_persisted_working_dir() {
     let home = ScopedJcodeHome::new("attach-working-dir");
     let original = home.path.join("original");
@@ -413,7 +521,7 @@ fn send_message_then_done_becomes_turn_done() {
     let done = state.legacy_event_to_api(&json!({"type": "done", "id": legacy_id}));
     assert!(matches!(
         &done[1].event,
-        ApiEvent::TurnDone { session_id } if session_id == "s1"
+        ApiEvent::TurnDone { session_id, .. } if session_id == "s1"
     ));
     assert!(matches!(&done[0].event, ApiEvent::TextDone { .. }));
 }
@@ -494,7 +602,217 @@ fn idle_soft_interrupt_done_becomes_turn_done() {
     let done = state.legacy_event_to_api(&json!({"type": "done", "id": interrupt_id}));
     assert!(matches!(
         &done[0].event,
-        ApiEvent::TurnDone { session_id } if session_id == "s1"
+        ApiEvent::TurnDone { session_id, .. } if session_id == "s1"
+    ));
+}
+
+fn ids_state() -> BridgeState {
+    BridgeState {
+        session_id: Some("s1".into()),
+        soft_interrupt_ids_supported: true,
+        ..Default::default()
+    }
+}
+
+fn legacy_out(out: &[Outbound]) -> &serde_json::Value {
+    match out {
+        [Outbound::Legacy(value)] => value,
+        other => panic!("expected one legacy frame, got {other:?}"),
+    }
+}
+
+#[test]
+fn soft_interrupt_forwards_client_id() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "soft_interrupt", "id": 3, "session_id": "s1",
+        "content": "steer", "client_id": "f1"
+    }));
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["type"], "soft_interrupt");
+    assert_eq!(legacy["client_id"], "f1");
+
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "soft_interrupt", "id": 4, "session_id": "s1", "content": "plain"
+    }));
+    assert!(legacy_out(&out).get("client_id").is_none());
+}
+
+#[test]
+fn soft_interrupt_injected_closes_open_text_and_carries_ids() {
+    let mut state = ids_state();
+    state.legacy_event_to_api(&json!({"type": "text_delta", "text": "working on it"}));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "soft_interrupt_injected",
+        "content": "first\n\nsecond",
+        "point": "D",
+        "client_ids": ["f1", "f2"],
+    }));
+    assert_eq!(frames.len(), 2, "{frames:?}");
+    assert!(matches!(frames[0].event, ApiEvent::TextDone { .. }));
+    assert_eq!(
+        frames[1].event,
+        ApiEvent::SoftInterruptInjected {
+            session_id: "s1".into(),
+            client_ids: vec!["f1".into(), "f2".into()],
+            point: "D".into(),
+            tools_skipped: None,
+            display_role: None,
+        }
+    );
+
+    // Daemon-originated injections are forwarded too, with no ids.
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "soft_interrupt_injected",
+        "content": "[Background Task Completed]",
+        "display_role": "background_task",
+        "point": "B",
+    }));
+    assert!(matches!(
+        &frames[..],
+        [frame] if matches!(&frame.event, ApiEvent::SoftInterruptInjected {
+            client_ids, display_role: Some(role), point, ..
+        } if client_ids.is_empty() && role == "background_task" && point == "B")
+    ));
+}
+
+#[test]
+fn cancel_soft_interrupts_by_id_waits_for_the_exact_result() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "cancel_soft_interrupts", "id": 9, "session_id": "s1",
+        "client_ids": ["f1", "f2"]
+    }));
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["client_ids"], json!(["f1", "f2"]));
+    let legacy_id = legacy["id"].as_u64().unwrap();
+
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "ack", "id": legacy_id}))
+            .is_empty(),
+        "the early ack is not the answer"
+    );
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "soft_interrupts_cancelled", "id": legacy_id,
+        "cancelled": ["f2"], "not_queued": ["f1"]
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, Some(9));
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::SoftInterruptsCancelled {
+            cancelled: vec!["f2".into()],
+            not_queued: vec!["f1".into()],
+        }
+    );
+}
+
+#[test]
+fn cancel_soft_interrupts_without_ids_keeps_legacy_behavior() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "cancel_soft_interrupts", "id": 9, "session_id": "s1"
+    }));
+    let legacy = legacy_out(&out);
+    assert!(legacy.get("client_ids").is_none());
+    let id = legacy["id"].as_u64().unwrap();
+    let frames = state.legacy_event_to_api(&json!({"type": "ack", "id": id}));
+    assert!(matches!(&frames[..], [f] if f.reply_to == Some(9) && f.event == ApiEvent::Ok));
+}
+
+#[test]
+fn filtered_cancel_is_refused_by_an_old_daemon_instead_of_clearing_everything() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "cancel_soft_interrupts", "id": 9, "session_id": "s1", "client_ids": ["f1"]
+    }));
+    assert!(matches!(
+        &out[..],
+        [Outbound::Reply(frame)] if matches!(frame.event, ApiEvent::Error { code: ErrorCode::UnknownRequest, .. })
+    ));
+
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "cancel_soft_interrupts", "id": 9, "session_id": "s1", "client_ids": "f1"
+    }));
+    assert!(matches!(
+        &out[..],
+        [Outbound::Reply(frame)] if matches!(frame.event, ApiEvent::Error { code: ErrorCode::InvalidRequest, .. })
+    ));
+}
+
+#[test]
+fn background_tool_reports_what_moved() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "background_tool", "id": 5, "session_id": "s1"
+    }));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "ack", "id": id}))
+            .is_empty()
+    );
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "background_tool_result", "id": id, "moved": true,
+        "tool_call_id": "call_1", "tool_name": "bash"
+    }));
+    assert_eq!(frames[0].reply_to, Some(5));
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::BackgroundToolResult {
+            moved: true,
+            tool_call_id: Some("call_1".into()),
+            tool_name: Some("bash".into()),
+        }
+    );
+
+    // Against an older daemon the plain ack still answers.
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "background_tool", "id": 6, "session_id": "s1"
+    }));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    let frames = state.legacy_event_to_api(&json!({"type": "ack", "id": id}));
+    assert!(matches!(&frames[..], [f] if f.reply_to == Some(6) && f.event == ApiEvent::Ok));
+}
+
+#[test]
+fn turn_done_reports_interrupts_left_in_the_queue() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message", "id": 1, "session_id": "s1", "content": "go"
+    }));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    state.legacy_event_to_api(&json!({"type": "ack", "id": id}));
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "soft_interrupt_queue", "pending": 2}))
+            .is_empty()
+    );
+    let frames = state.legacy_event_to_api(&json!({"type": "done", "id": id}));
+    assert!(matches!(
+        frames.last().map(|f| &f.event),
+        Some(ApiEvent::TurnDone {
+            pending_soft_interrupts: Some(2),
+            ..
+        })
+    ));
+
+    // The count belongs to that turn only.
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message", "id": 2, "session_id": "s1", "content": "again"
+    }));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    let frames = state.legacy_event_to_api(&json!({"type": "done", "id": id}));
+    assert!(matches!(
+        frames.last().map(|f| &f.event),
+        Some(ApiEvent::TurnDone {
+            pending_soft_interrupts: None,
+            ..
+        })
     ));
 }
 
@@ -1302,6 +1620,33 @@ fn a_scheduled_compaction_reports_its_status() {
     }
 }
 
+/// Saving forwards the flag and label so the daemon can title the session.
+#[test]
+fn set_session_saved_forwards_flag_and_label() {
+    let mut state = state_with_session();
+    let save = state.api_request_to_legacy(&json!({
+        "id": 7, "req": "set_session_saved", "saved": true, "label": "yc mcp",
+    }));
+    match &save[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["type"], "set_session_saved");
+            assert_eq!(value["saved"], true);
+            assert_eq!(value["label"], "yc mcp");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    let unsave = state.api_request_to_legacy(&json!({
+        "id": 8, "req": "set_session_saved", "saved": false,
+    }));
+    match &unsave[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["saved"], false);
+            assert!(value.get("label").is_none());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// Clearing a title is distinct from setting an empty one, so an absent title
 /// must not be sent as `""`, which the daemon would store as a real title.
 #[test]
@@ -1358,6 +1703,7 @@ fn capability_requests_need_an_attached_session() {
         ("rename_session", json!({})),
         ("rewind_undo", json!({})),
         ("cancel_soft_interrupts", json!({})),
+        ("background_tool", json!({})),
     ] {
         let mut state = BridgeState::default();
         let mut request = json!({"id": 1, "req": req});
@@ -1593,6 +1939,61 @@ fn unattached_list_sessions_handles_no_session_candidates() {
 }
 
 #[test]
+fn user_connections_are_global_independent_and_fresh_in_list_metadata() {
+    let home = ScopedJcodeHome::new("global-user-presence");
+    for id in [
+        "connected-idle",
+        "connected-busy",
+        "loaded-history",
+        "headless",
+    ] {
+        write_session_record(&home.path, id, &home.path);
+    }
+    let mut state = BridgeState {
+        user_connected_sessions: ["connected-idle".into(), "connected-busy".into()]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let ApiEvent::Sessions { sessions } =
+        only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":7})))
+    else {
+        panic!("expected list");
+    };
+    for session in sessions {
+        assert_eq!(
+            session.user_connected,
+            session.session_id.starts_with("connected-")
+        );
+        assert_eq!(
+            session.status, "idle",
+            "connection truth must not overwrite lifecycle/attachment status"
+        );
+    }
+    let ApiEvent::Sessions { sessions: limited } = only_reply_event(
+        state.api_request_to_legacy(&json!({"req":"list_sessions","id":9,"limit":0})),
+    ) else {
+        panic!("expected list");
+    };
+    assert_eq!(
+        limited.len(),
+        2,
+        "connected idle users survive an empty recency page"
+    );
+    assert!(limited.iter().all(|session| session.user_connected));
+    state.user_connected_sessions.clear();
+    let ApiEvent::Sessions { sessions } =
+        only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":8})))
+    else {
+        panic!("expected list");
+    };
+    assert!(sessions.iter().all(|session| !session.user_connected));
+    let legacy: SessionInfo =
+        serde_json::from_value(json!({"session_id":"legacy","status":"idle"})).unwrap();
+    assert!(!legacy.user_connected);
+}
+
+#[test]
 fn unattached_list_sessions_discovers_all_persisted_records() {
     let home = ScopedJcodeHome::new("persisted-discovery");
     let first_root = home.path.join("first-project");
@@ -1675,12 +2076,19 @@ fn limited_session_list_reads_compact_index_without_transcript_records() {
     assert_eq!(newest.save_label.as_deref(), Some("investor catch up"));
     assert_eq!(newest.updated_at_ms, Some(99));
     assert_eq!(newest.last_active_at_ms, Some(99));
-    assert!(sessions.iter().all(|session| {
-        session
-            .title
-            .as_deref()
-            .is_some_and(|title| title.starts_with("Indexed goal "))
-    }));
+    // A save label is the name the user chose, so it outranks derived titles.
+    assert_eq!(newest.title.as_deref(), Some("investor catch up"));
+    assert!(
+        sessions
+            .iter()
+            .filter(|session| session.session_id != "indexed_099")
+            .all(|session| {
+                session
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.starts_with("Indexed goal "))
+            })
+    );
 }
 
 #[test]
@@ -1691,6 +2099,7 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
         "provider_name": "anthropic",
         "provider_model": "claude-sonnet",
         "reasoning_effort": "high",
+        "resolved_credential": "oauth",
         "available_models": ["claude-sonnet", "gemini-pro"],
         "available_model_routes": [
             {
@@ -1720,6 +2129,7 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
         provider,
         model,
         reasoning_effort,
+        auth_method,
         routes,
     } = event
     else {
@@ -1729,9 +2139,52 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
     assert_eq!(provider.as_deref(), Some("anthropic"));
     assert_eq!(model.as_deref(), Some("claude-sonnet"));
     assert_eq!(reasoning_effort.as_deref(), Some("high"));
+    // The daemon's resolved credential travels with the identity, so a
+    // client never has to guess it from a model that has both routes.
+    assert_eq!(auth_method.as_deref(), Some("oauth"));
     assert_eq!(routes.len(), 2);
     assert_eq!(routes[1].provider, "gemini");
     assert!(!routes[1].available);
+}
+
+#[test]
+fn retention_never_archives_users_connected_in_other_windows() {
+    let home = ScopedJcodeHome::new("connected-retention");
+    let old_time = SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+    for id in ["old-connected", "old-disconnected"] {
+        let path = write_session_record(&home.path, id, &home.path);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+    }
+    let mut state = BridgeState {
+        user_connected_sessions: ["old-connected".into()].into_iter().collect(),
+        ..Default::default()
+    };
+    only_reply_event(state.api_request_to_legacy(
+        &json!({"req":"set_retention_policy","id":1,"archive_after_days":1}),
+    ));
+    let ApiEvent::Sessions { sessions } = only_reply_event(
+        state.api_request_to_legacy(&json!({"req":"list_sessions","id":2,"include_archived":true})),
+    ) else {
+        panic!("expected list");
+    };
+    let connected = sessions
+        .iter()
+        .find(|session| session.session_id == "old-connected")
+        .unwrap();
+    assert!(connected.user_connected);
+    assert!(!connected.archived);
+    assert!(
+        sessions
+            .iter()
+            .find(|session| session.session_id == "old-disconnected")
+            .unwrap()
+            .archived
+    );
 }
 
 #[test]
@@ -2249,6 +2702,53 @@ fn model_change_without_provider_preserves_known_provider() {
     );
 }
 
+/// A successful change that leaves no effort must clear the cache, or later
+/// identity events would keep advertising the old level.
+#[test]
+fn a_successful_change_to_no_effort_clears_the_cached_effort() {
+    let mut state = state_with_session();
+    state.note_models(&json!({"reasoning_effort": "high"}));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "reasoning_effort_changed", "id": 999,
+    }));
+    assert!(state.current_effort.is_none());
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::ModelInfo {
+            reasoning_effort: None,
+            ..
+        }
+    ));
+}
+
+/// A model switch can clear or change the effort (the new model may not
+/// advertise the old level). The daemon now reports it on `model_changed`,
+/// and the broadcast identity must follow it instead of the stale cache.
+#[test]
+fn model_change_reports_the_effort_the_new_model_runs_with() {
+    let mut state = state_with_session();
+    state.note_models(&json!({"provider_name": "known", "reasoning_effort": "max"}));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 99, "model": "new", "reasoning_effort": "high",
+    }));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { reasoning_effort, .. }
+        if reasoning_effort.as_deref() == Some("high"))
+    );
+
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 99, "model": "plain", "reasoning_effort": null,
+    }));
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::ModelInfo {
+            reasoning_effort: None,
+            ..
+        }
+    ));
+    assert!(state.current_effort.is_none());
+}
+
 #[test]
 fn observer_and_server_initiated_turns_finish_without_a_local_message_id() {
     for id in [0, 999_999] {
@@ -2256,7 +2756,7 @@ fn observer_and_server_initiated_turns_finish_without_a_local_message_id() {
         state.legacy_event_to_api(&json!({"type":"text_delta", "text":"finished"}));
         let frames = state.legacy_event_to_api(&json!({"type":"done", "id":id}));
         assert!(
-            matches!(&frames.last().unwrap().event, ApiEvent::TurnDone { session_id } if session_id == "s1")
+            matches!(&frames.last().unwrap().event, ApiEvent::TurnDone { session_id, .. } if session_id == "s1")
         );
         assert!(
             state
@@ -2357,7 +2857,11 @@ fn delayed_history_activity_cannot_resurrect_or_stop_a_newer_turn() {
             state.legacy_event_to_api(&json!({"type":"text_delta", "text":"next"}));
         }
         let frames = state.legacy_event_to_api(&json!({"type":"history", "id":probe["id"], "messages":[], "activity":{"is_processing":active}}));
-        assert_eq!(frames.len(), 2, "history and panel only, no stale activity");
+        assert_eq!(
+            frames.len(),
+            3,
+            "history, panel and applets only, no stale activity"
+        );
         assert_eq!(state.observed_turn_active, !active);
     }
 }
@@ -2614,7 +3118,8 @@ fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
                 assert!(matches!(frames[0].event, ApiEvent::Attached { .. }));
             }
             let frames = state.legacy_event_to_api(&history);
-            assert_eq!(frames.len(), 2);
+            assert_eq!(frames.len(), 3);
+            assert!(matches!(frames[2].event, ApiEvent::AppletState { .. }));
             assert_eq!(
                 frames[0],
                 ServerFrame::event(ApiEvent::SessionRecovery {
@@ -2650,7 +3155,7 @@ fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
             );
             // Each new attachment gets its own single opportunity.
             let (history, _) = recovery_attach(&mut state, target);
-            assert_eq!(state.legacy_event_to_api(&history).len(), 2);
+            assert_eq!(state.legacy_event_to_api(&history).len(), 3);
         }
     }
 }
@@ -2693,10 +3198,16 @@ fn attachment_recovery_suppresses_empty_active_completed_and_blank_directives_on
         assert!(
             matches!(
                 state.legacy_event_to_api(&history).as_slice(),
-                [ServerFrame {
-                    event: ApiEvent::SidePanelState { .. },
-                    ..
-                }]
+                [
+                    ServerFrame {
+                        event: ApiEvent::SidePanelState { .. },
+                        ..
+                    },
+                    ServerFrame {
+                        event: ApiEvent::AppletState { .. },
+                        ..
+                    }
+                ]
             ),
             "{case}"
         );
@@ -2762,7 +3273,9 @@ fn hidden_system_reminder_is_forwarded_without_visible_content_or_no_reply() {
     assert_eq!(message["system_reminder"], "continue task");
     assert!(message.get("no_reply").is_none());
     let frames = state.legacy_event_to_api(&json!({"type":"done", "id":message["id"]}));
-    assert!(matches!(&frames[0].event, ApiEvent::TurnDone {session_id} if session_id == "s1"));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::TurnDone { session_id, .. } if session_id == "s1")
+    );
     let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":92,
         "session_id":"s1", "content":"normal user message"}));
     let Outbound::Legacy(message) = &out[0] else {
@@ -2961,226 +3474,8 @@ fn side_panel_history_refresh_hydrates_but_catalog_does_not_clear_panel() {
     );
 }
 
-#[test]
-fn text_framing_preserves_chunks_and_reasoning_then_separates_messages() {
-    let mut state = state_with_session();
-    let first = state.legacy_event_to_api(&json!({"type":"text_delta","text":"The cause is "}));
-    let ApiEvent::TextDelta {
-        message_id: Some(id),
-        ..
-    } = &first[0].event
-    else {
-        panic!("missing id")
-    };
-    state.legacy_event_to_api(&json!({"type":"reasoning_delta","text":"thinking"}));
-    state.legacy_event_to_api(&json!({"type":"reasoning_done"}));
-    let second = state.legacy_event_to_api(&json!({"type":"text_delta","text":"the retry loop."}));
-    assert!(
-        matches!(&second[0].event, ApiEvent::TextDelta { message_id: Some(next), .. } if next == id)
-    );
-    let end = state.legacy_event_to_api(&json!({"type":"text_done"}));
-    assert!(
-        matches!(&end[0].event, ApiEvent::TextDone { message_id: Some(next), .. } if next == id)
-    );
-    assert!(
-        state
-            .legacy_event_to_api(&json!({"type":"text_done"}))
-            .is_empty()
-    );
-    let next = state.legacy_event_to_api(&json!({"type":"text_delta","text":"Another message"}));
-    assert!(
-        matches!(&next[0].event, ApiEvent::TextDelta { message_id: Some(next), .. } if next != id)
-    );
-    assert!(matches!(
-        &state.legacy_event_to_api(&json!({"type":"message_end"}))[0].event,
-        ApiEvent::TextDone { .. }
-    ));
-    assert!(
-        state
-            .legacy_event_to_api(&json!({"type":"message_end"}))
-            .is_empty()
-    );
-    assert!(matches!(
-        state
-            .legacy_event_to_api(&json!({"type":"done","id":0}))
-            .as_slice(),
-        [ServerFrame {
-            event: ApiEvent::TurnDone { .. },
-            ..
-        }]
-    ));
-}
-
-#[test]
-fn text_framing_tools_and_turn_fallback_close_once_without_phantom_messages() {
-    let mut state = state_with_session();
-    state.legacy_event_to_api(&json!({"type":"text_delta","text":"Checking"}));
-    let tool = state.legacy_event_to_api(&json!({"type":"tool_start","id":"t","name":"read"}));
-    assert!(matches!(
-        tool.as_slice(),
-        [ServerFrame {
-            event: ApiEvent::ToolStart { .. },
-            ..
-        }]
-    ));
-    // A text content block after streamed tool arguments is still the same
-    // assistant message. Only execution forces a fallback boundary.
-    state.legacy_event_to_api(&json!({"type":"text_delta","text":" logs"}));
-    let exec = state.legacy_event_to_api(&json!({"type":"tool_exec","id":"t","name":"read"}));
-    assert!(matches!(
-        exec.as_slice(),
-        [
-            ServerFrame {
-                event: ApiEvent::TextDone { .. },
-                ..
-            },
-            ServerFrame {
-                event: ApiEvent::ToolExec { .. },
-                ..
-            }
-        ]
-    ));
-    assert_eq!(
-        state
-            .legacy_event_to_api(&json!({"type":"tool_exec","id":"t2","name":"read"}))
-            .len(),
-        1
-    );
-    state.legacy_event_to_api(&json!({"type":"message_end"}));
-    state.legacy_event_to_api(&json!({"type":"text_delta","text":"Answer"}));
-    let end = state.legacy_event_to_api(&json!({"type":"done","id":0}));
-    assert!(matches!(
-        end.as_slice(),
-        [
-            ServerFrame {
-                event: ApiEvent::TextDone { .. },
-                ..
-            },
-            ServerFrame {
-                event: ApiEvent::TurnDone { .. },
-                ..
-            }
-        ]
-    ));
-    state.legacy_event_to_api(&json!({"type":"reasoning_delta","text":"thinking only"}));
-    state.legacy_event_to_api(&json!({"type":"text_delta","text":""}));
-    assert!(
-        state
-            .legacy_event_to_api(&json!({"type":"message_end"}))
-            .is_empty()
-    );
-    assert_eq!(
-        state
-            .legacy_event_to_api(&json!({"type":"done","id":0}))
-            .len(),
-        1
-    );
-}
-
-#[test]
-fn text_retry_retracts_completed_and_live_messages_and_late_replacements_keep_ids() {
-    let mut state = state_with_session();
-    state.legacy_event_to_api(&json!({"type":"text_delta","text":"first"}));
-    state.legacy_event_to_api(&json!({"type":"text_done"}));
-    state.legacy_event_to_api(&json!({"type":"text_delta","text":"second"}));
-    let rollback = state.legacy_event_to_api(&json!({"type":"retry_rollback","attempt":2,"max":3}));
-    assert_eq!(rollback.len(), 2);
-    assert!(rollback.iter().all(|frame| matches!(&frame.event, ApiEvent::TextReplace { text, message_id: Some(_), .. } if text.is_empty())));
-    assert!(
-        state
-            .legacy_event_to_api(&json!({"type":"text_done"}))
-            .is_empty()
-    );
-    let retry = state.legacy_event_to_api(&json!({"type":"text_delta","text":"valid <tool>"}));
-    let ApiEvent::TextDelta { message_id, .. } = &retry[0].event else {
-        panic!()
-    };
-    state.legacy_event_to_api(&json!({"type":"message_end"}));
-    let corrected = state.legacy_event_to_api(&json!({"type":"text_replace","text":"valid"}));
-    assert!(
-        matches!(&corrected[0].event, ApiEvent::TextReplace { message_id: id, text, .. } if id == message_id && text == "valid")
-    );
-}
-
-#[test]
-fn new_request_retry_does_not_retract_previous_response() {
-    for activity in ["reasoning_delta", "tool_start"] {
-        let mut state = state_with_session();
-        state.legacy_event_to_api(&json!({"type":"text_delta","text":"Committed"}));
-        state.legacy_event_to_api(&json!({"type":"message_end"}));
-        assert!(
-            state
-                .legacy_event_to_api(&json!({"type":"kv_cache_request"}))
-                .is_empty()
-        );
-        state.legacy_event_to_api(
-            &json!({"type":activity,"text":"thinking","id":"t","name":"read"}),
-        );
-        assert!(
-            state
-                .legacy_event_to_api(&json!({"type":"retry_rollback","attempt":2,"max":3}))
-                .is_empty()
-        );
-    }
-}
-
-#[test]
-fn request_boundary_closes_provider_without_message_end_and_ids_survive_turns() {
-    let mut state = state_with_session();
-    let first = state.legacy_event_to_api(&json!({"type":"text_delta","text":"first"}));
-    assert!(matches!(
-        &state.legacy_event_to_api(&json!({"type":"kv_cache_request"}))[0].event,
-        ApiEvent::TextDone { .. }
-    ));
-    state.legacy_event_to_api(&json!({"type":"done","id":0}));
-    let next = state.legacy_event_to_api(&json!({"type":"text_delta","text":"next turn"}));
-    let ApiEvent::TextDelta { message_id: a, .. } = &first[0].event else {
-        panic!()
-    };
-    let ApiEvent::TextDelta { message_id: b, .. } = &next[0].event else {
-        panic!()
-    };
-    assert_ne!(a, b);
-}
-
-#[test]
-fn late_recovered_suffix_completes_previously_empty_or_unseen_text() {
-    for partial in [false, true] {
-        let mut state = state_with_session();
-        if partial {
-            state.legacy_event_to_api(&json!({"type":"text_delta","text":"to=fun"}));
-        }
-        state.legacy_event_to_api(&json!({"type":"text_replace","text":""}));
-        assert!(
-            state
-                .legacy_event_to_api(&json!({"type":"message_end"}))
-                .is_empty()
-        );
-        let recovered =
-            state.legacy_event_to_api(&json!({"type":"text_replace","text":"Retained suffix"}));
-        assert!(matches!(recovered.as_slice(), [
-            ServerFrame { event: ApiEvent::TextReplace { text, message_id: Some(a), .. }, .. },
-            ServerFrame { event: ApiEvent::TextDone { message_id: Some(b), .. }, .. }
-        ] if text == "Retained suffix" && a == b));
-        assert_eq!(
-            state
-                .legacy_event_to_api(&json!({"type":"tool_start","id":"t","name":"read"}))
-                .len(),
-            1
-        );
-        assert_eq!(
-            state
-                .legacy_event_to_api(&json!({"type":"tool_exec","id":"t","name":"read"}))
-                .len(),
-            1
-        );
-        assert!(
-            state
-                .legacy_event_to_api(&json!({"type":"text_done"}))
-                .is_empty()
-        );
-    }
-}
+#[path = "translate_tests/text_framing_tests.rs"]
+mod text_framing_tests;
 
 fn tool_state() -> BridgeState {
     BridgeState {
@@ -3724,4 +4019,181 @@ fn limited_session_list_always_includes_saved_sessions() {
         .find(|session| session.session_id == "indexed_0")
         .expect("saved session beyond the limit is listed");
     assert_eq!(saved.save_label.as_deref(), Some("old bookmark"));
+}
+
+/// Applet actions and closes forward to the daemon with their payload, and
+/// live applet state reaches clients as a full snapshot.
+#[test]
+fn applet_requests_and_state_translate() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "id": 3, "req": "applet_action", "session_id": "s", "instance": "chart-1",
+        "action": {"action": "select", "args": {"i": 2}}, "state": {"q": "x"}, "source_key": "row",
+    }));
+    match &out[0] {
+        Outbound::Legacy(v) => {
+            assert_eq!(v["type"], "applet_action");
+            assert_eq!(v["instance"], "chart-1");
+            assert_eq!(v["action"]["action"], "select");
+            assert_eq!(v["state"]["q"], "x");
+            assert_eq!(v["source_key"], "row");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    let out = state.api_request_to_legacy(&json!({
+        "id": 4, "req": "close_applet", "session_id": "s", "instance": "chart-1",
+    }));
+    assert!(matches!(&out[0], Outbound::Legacy(v) if v["type"] == "close_applet"));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "applet_state", "session_id": "s", "snapshot": {"instances": []},
+    }));
+    assert!(matches!(
+        &frames[..],
+        [ServerFrame { event: ApiEvent::AppletState { snapshot, .. }, .. }] if snapshot.instances.is_empty()
+    ));
+}
+
+#[test]
+fn untitled_indexed_sessions_are_named_after_their_first_prompt_once() {
+    let home = ScopedJcodeHome::new("first-prompt-title");
+    std::fs::create_dir_all(home.path.join("sessions")).unwrap();
+    std::fs::write(
+        home.path.join("sessions/session_fox_1_aa.json"),
+        json!({
+            "id": "session_fox_1_aa",
+            "title": null,
+            "messages": [
+                {"id": "m0", "role": "user", "content": [{"type": "text", "text": "<system-reminder>\n# Session Context\n</system-reminder>"}]},
+                {"id": "m1", "role": "user", "display_role": "background_task", "content": [{"type": "text", "text": "background done"}]},
+                {"id": "m2", "role": "user", "content": [{"type": "text", "text": "<transcription>\nRename the   sidebar rows\n</transcription>"}]},
+                {"id": "m3", "role": "user", "content": [{"type": "text", "text": "later prompt"}]}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.path.join("sessions/session_owl_2_bb.json"),
+        json!({"id": "session_owl_2_bb", "title": null, "messages": []}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.path.join("sessions/session_owl_2_bb.journal.jsonl"),
+        format!(
+            "{}\n",
+            json!({"meta": {}, "append_messages": [{"id": "j1", "role": "user", "content": [{"type": "text", "text": "Journal prompt"}]}]})
+        ),
+    )
+    .unwrap();
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
+    for (id, at) in [("session_fox_1_aa", 2), ("session_owl_2_bb", 1)] {
+        connection
+            .execute(
+                "INSERT INTO recent_sessions (session_id, updated_at_ms) VALUES (?1, ?2)",
+                params![id, at],
+            )
+            .unwrap();
+    }
+
+    let list = || {
+        let event = only_reply_event(
+            BridgeState::default()
+                .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1, "limit": 10})),
+        );
+        let ApiEvent::Sessions { sessions } = event else {
+            panic!("expected sessions reply, got {event:?}");
+        };
+        sessions
+            .into_iter()
+            .map(|session| (session.session_id, session.title))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let titles = list();
+    assert_eq!(
+        titles["session_fox_1_aa"].as_deref(),
+        Some("Rename the sidebar rows")
+    );
+    assert_eq!(
+        titles["session_owl_2_bb"].as_deref(),
+        Some("Journal prompt")
+    );
+    let cached: String = connection
+        .query_row(
+            "SELECT generated_title FROM recent_sessions WHERE session_id = 'session_fox_1_aa'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cached, "Rename the sidebar rows");
+    // A cached title is served without rescanning the transcript.
+    std::fs::write(
+        home.path.join("sessions/session_fox_1_aa.json"),
+        json!({"id": "session_fox_1_aa", "title": null, "messages": [
+            {"id": "x", "role": "user", "content": [{"type": "text", "text": "different"}]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        list()["session_fox_1_aa"].as_deref(),
+        Some("Rename the sidebar rows")
+    );
+}
+
+#[test]
+fn todo_state_is_served_from_the_session_home_and_acked() {
+    let _lock = crate::translate::jcode_home_test_lock();
+    let home = std::env::temp_dir().join(format!("bridge-todo-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join("todos")).unwrap();
+    std::fs::write(
+        home.join("todos/s1.json"),
+        r#"[{"content":"ship","status":"pending","priority":"high","id":"ship"}]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("todos/s1-gate-observations.json"),
+        r#"[{"kind":"closed_feedback_loop"}]"#,
+    )
+    .unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    unsafe { std::env::set_var("JCODE_HOME", &home) };
+
+    let mut state = state_with_session();
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "get_todo_state", "id": 90, "session_id": "s1"
+    })));
+    let ApiEvent::TodoState {
+        state: snapshot, ..
+    } = event
+    else {
+        panic!("expected todo state, got {event:?}");
+    };
+    assert_eq!(snapshot.todos.len(), 1);
+    assert_eq!(snapshot.gate_observations.len(), 1);
+
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "ack_todo_follow_up", "id": 91, "session_id": "s1",
+        "effects": {"clear_gate_observations": true}
+    })));
+    assert!(matches!(event, ApiEvent::Ok), "{event:?}");
+    assert!(!home.join("todos/s1-gate-observations.json").exists());
+
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "get_todo_state", "id": 92, "session_id": "../escape"
+    })));
+    assert!(matches!(
+        event,
+        ApiEvent::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("JCODE_HOME", value) },
+        None => unsafe { std::env::remove_var("JCODE_HOME") },
+    }
+    let _ = std::fs::remove_dir_all(&home);
 }

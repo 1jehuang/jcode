@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::io::{self, Write};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::auth;
 use crate::provider;
@@ -8,8 +8,7 @@ use crate::provider::Provider;
 use crate::provider_catalog::{
     LoginProviderDescriptor, LoginProviderTarget, OpenAiCompatibleProfile,
     apply_openai_compatible_profile_env, force_apply_openai_compatible_profile_env,
-    is_safe_env_file_name, is_safe_env_key_name, resolve_login_selection,
-    resolve_openai_compatible_profile,
+    resolve_login_selection, resolve_openai_compatible_profile,
 };
 use crate::tool;
 
@@ -108,8 +107,15 @@ pub enum ProviderChoice {
         alias = "meta-ai"
     )]
     MetaMuse,
+    /// Native Muse subscription (experimental opt-in device flow). Distinct
+    /// from `MetaMuse`, which is the pay-as-you-go Model API key path; no local
+    /// Muse installation is required.
+    #[value(name = "muse-subscription", alias = "muse-sub")]
+    MuseSubscription,
     #[value(alias = "celeris-ai", alias = "celeris1", alias = "celeris-1")]
     Celeris,
+    #[value(alias = "venice-ai", alias = "veniceai", alias = "venice.ai")]
+    Venice,
     YoloAuto,
     #[value(alias = "lm-studio")]
     Lmstudio,
@@ -187,7 +193,9 @@ impl ProviderChoice {
             Self::NvidiaNim => "nvidia-nim",
             Self::XiaomiMimo => "xiaomi-mimo",
             Self::MetaMuse => "meta-muse",
+            Self::MuseSubscription => "muse-subscription",
             Self::Celeris => "celeris",
+            Self::Venice => "venice",
             Self::YoloAuto => "yolo-auto",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
@@ -363,8 +371,16 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
         crate::provider_catalog::META_MUSE_LOGIN_PROVIDER,
     ),
     (
+        ProviderChoice::MuseSubscription,
+        crate::provider_catalog::MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
+    ),
+    (
         ProviderChoice::Celeris,
         crate::provider_catalog::CELERIS_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Venice,
+        crate::provider_catalog::VENICE_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::YoloAuto,
@@ -430,6 +446,46 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
 
 pub fn login_provider_choice_mappings() -> &'static [(ProviderChoice, LoginProviderDescriptor)] {
     PROVIDER_CHOICE_LOGIN_PROVIDERS
+}
+
+/// `JCODE_OPENROUTER_MODEL` as set by the user when the process started.
+///
+/// Provider init clears and rewrites the `JCODE_OPENROUTER_*` env slots for
+/// whichever runtime it activates, so by the time the OpenRouter runtime reads
+/// the variable a user-supplied value is already gone. Snapshot it first.
+static USER_OPENROUTER_MODEL: OnceLock<Option<String>> = OnceLock::new();
+
+/// Called once from `startup::run` before any provider init. Entry points
+/// that skip startup (unit tests, embedded flows) never consult the snapshot.
+pub fn capture_user_openrouter_model_env() {
+    let _ = USER_OPENROUTER_MODEL.set(
+        std::env::var("JCODE_OPENROUTER_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    );
+}
+
+fn user_openrouter_model_env() -> Option<&'static str> {
+    USER_OPENROUTER_MODEL.get()?.as_deref()
+}
+
+/// Model to use when the caller passed no `--model`: the user's
+/// `JCODE_OPENROUTER_MODEL`, but only for runtimes that variable targets
+/// (OpenRouter and OpenAI-compatible profiles).
+fn env_model_for_choice(choice: &ProviderChoice) -> Option<&'static str> {
+    env_model_for_choice_from(choice, user_openrouter_model_env())
+}
+
+fn env_model_for_choice_from<'a>(
+    choice: &ProviderChoice,
+    env_model: Option<&'a str>,
+) -> Option<&'a str> {
+    if matches!(choice, ProviderChoice::Openrouter) || profile_for_choice(choice).is_some() {
+        env_model
+    } else {
+        None
+    }
 }
 
 pub fn profile_for_choice(choice: &ProviderChoice) -> Option<OpenAiCompatibleProfile> {
@@ -729,7 +785,9 @@ fn provider_login_hint_for_api_key_env(env_key: &str) -> String {
         .unwrap_or_else(|| "jcode login".to_string())
 }
 
-fn ensure_external_api_key_auth_allowed_for_explicit_choice(env_key: &str) -> Result<()> {
+pub(super) fn ensure_external_api_key_auth_allowed_for_explicit_choice(
+    env_key: &str,
+) -> Result<()> {
     if direct_api_key_configured_for_env(env_key) {
         return Ok(());
     }
@@ -1262,7 +1320,7 @@ fn explicit_credential_mode(choice: &ProviderChoice) -> Option<provider::Credent
     }
 }
 
-fn disable_subscription_runtime_mode() {
+pub(super) fn disable_subscription_runtime_mode() {
     crate::subscription_catalog::clear_runtime_env();
 }
 
@@ -1402,27 +1460,22 @@ pub async fn login_and_bootstrap_provider(
     Ok(runtime)
 }
 
-pub fn save_named_api_key(env_file: &str, key_name: &str, key: &str) -> Result<()> {
-    if !is_safe_env_key_name(key_name) {
-        anyhow::bail!("Invalid API key variable name: {}", key_name);
-    }
-    if !is_safe_env_file_name(env_file) {
-        anyhow::bail!("Invalid env file name: {}", env_file);
-    }
-
-    let config_dir = crate::storage::app_config_dir()?;
-    let file_path = config_dir.join(env_file);
-    crate::storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
-
-    crate::env::set_var(key_name, key);
-    Ok(())
-}
-
 pub async fn init_provider(
     choice: &ProviderChoice,
     model: Option<&str>,
 ) -> Result<Arc<dyn provider::Provider>> {
     init_provider_with_options(choice, model, true, true, false).await
+}
+
+/// Provider init for one-shot `jcode run`. Unlike interactive startup, a
+/// requested model that cannot be applied is an error: silently answering
+/// with a different model is worse than failing for a scripted run.
+pub async fn init_provider_for_run(
+    choice: &ProviderChoice,
+    model: Option<&str>,
+    allow_login_bootstrap: bool,
+) -> Result<Arc<dyn provider::Provider>> {
+    init_provider_with_model_policy(choice, model, false, allow_login_bootstrap, false, true).await
 }
 
 /// A daemon must expose account and sign-in APIs before credentials exist.
@@ -1456,6 +1509,27 @@ async fn init_provider_with_options(
     allow_login_bootstrap: bool,
     allow_deferred_auth: bool,
 ) -> Result<Arc<dyn provider::Provider>> {
+    init_provider_with_model_policy(
+        choice,
+        model,
+        show_init_messages,
+        allow_login_bootstrap,
+        allow_deferred_auth,
+        false,
+    )
+    .await
+}
+
+/// `strict_model`: a requested model that cannot be applied is an error
+/// instead of a warning.
+async fn init_provider_with_model_policy(
+    choice: &ProviderChoice,
+    model: Option<&str>,
+    show_init_messages: bool,
+    allow_login_bootstrap: bool,
+    allow_deferred_auth: bool,
+    strict_model: bool,
+) -> Result<Arc<dyn provider::Provider>> {
     // Provider construction resolves concrete runtimes through the base
     // crate's external-runtime registry (composition-root pattern). The
     // binary's normal path registers them in `startup::run()`, but this
@@ -1464,6 +1538,8 @@ async fn init_provider_with_options(
     // otherwise Auto-init silently loses registry-backed runtimes (e.g. the
     // OpenRouter/OpenAI-compatible factory) and their model-picker routes.
     super::startup::register_external_provider_runtimes();
+
+    let model = model.or_else(|| env_model_for_choice(choice));
 
     if let Ok(profile_name) = std::env::var("JCODE_PROVIDER_PROFILE_NAME")
         && !profile_name.trim().is_empty()
@@ -1613,6 +1689,7 @@ async fn init_provider_with_options(
         | ProviderChoice::XiaomiMimo
         | ProviderChoice::MetaMuse
         | ProviderChoice::Celeris
+        | ProviderChoice::Venice
         | ProviderChoice::YoloAuto
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
@@ -1622,53 +1699,9 @@ async fn init_provider_with_options(
         | ProviderChoice::Orcarouter
         | ProviderChoice::AlibabaCodingPlan
         | ProviderChoice::GeminiApi
+        | ProviderChoice::MuseSubscription
         | ProviderChoice::OpenaiCompatible => {
-            disable_subscription_runtime_mode();
-            let profile = profile_for_choice(choice)
-                .ok_or_else(|| anyhow::anyhow!("missing provider profile for choice"))?;
-            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none() {
-                // An explicit `--provider <compatible>` selection should win over
-                // any stale active-profile marker inherited from a previous
-                // bootstrap/login flow. Named provider profiles still take
-                // precedence when explicitly configured.
-                force_apply_openai_compatible_profile_env(Some(profile));
-            }
-            let mut runtime_model_hint = None;
-            let display_name = if let Ok(named) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
-                if let Some(profile) = crate::config::config().providers.get(&named) {
-                    runtime_model_hint = profile.default_model.clone();
-                }
-                named
-            } else {
-                let resolved = resolve_openai_compatible_profile(profile);
-                if resolved.requires_api_key {
-                    ensure_external_api_key_auth_allowed_for_explicit_choice(
-                        &resolved.api_key_env,
-                    )?;
-                }
-                runtime_model_hint = resolved.default_model.clone();
-                resolved.display_name
-            };
-            init_notice(&format!(
-                "Using {} via OpenAI-compatible API as the initial provider",
-                display_name
-            ));
-            crate::provider::activation::apply_openai_compatible_runtime(runtime_model_hint)?;
-            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
-                let profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")?;
-                let cfg = crate::config::config();
-                let profile = cfg.providers.get(&profile_name).ok_or_else(|| {
-                    anyhow::anyhow!("Unknown provider profile '{}'", profile_name)
-                })?;
-                Arc::new(
-                    jcode_provider_openrouter_runtime::OpenRouterProvider::new_named_openai_compatible(
-                        &profile_name,
-                        profile,
-                    )?,
-                )
-            } else {
-                Arc::new(jcode_provider_openrouter_runtime::OpenRouterProvider::new()?)
-            }
+            super::compatible_runtime::init_compatible_runtime(choice, &init_notice).await?
         }
         ProviderChoice::Antigravity => {
             disable_subscription_runtime_mode();
@@ -1884,6 +1917,9 @@ async fn init_provider_with_options(
 
     if let Some(model_name) = model {
         if let Err(e) = provider.set_model(model_name) {
+            if strict_model {
+                anyhow::bail!("Failed to select model '{model_name}': {e}");
+            }
             init_notice(&format!(
                 "Warning: failed to set model '{}': {}",
                 model_name, e

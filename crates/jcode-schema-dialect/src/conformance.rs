@@ -106,8 +106,39 @@ pub fn must_not_contain_unsupported_constructs(
     spec: &DialectSpec,
 ) -> Vec<ConformanceError> {
     let mut errors = Vec::new();
+    check_root_shape(schema, &mut errors);
     walk(schema, spec, "$", &mut errors);
     errors
+}
+
+/// Function parameters must be a plain object at the root, for every provider:
+/// OpenAI rejects a root carrying `oneOf`/`anyOf`/`allOf`/`enum`/`const`/`not`
+/// ("schema must have type 'object' and not have ... at the top level"), and
+/// Anthropic and OpenRouter reject root combiners too (#495). A root shape
+/// that one provider rejects 400s the whole catalog, so hold every dialect to
+/// the strictest rule.
+fn check_root_shape(schema: &Value, errors: &mut Vec<ConformanceError>) {
+    let Value::Object(map) = schema else {
+        errors.push(ConformanceError {
+            path: "$".to_string(),
+            message: "tool parameters must be a JSON object schema".to_string(),
+        });
+        return;
+    };
+    if map.get("type").and_then(Value::as_str) != Some("object") {
+        errors.push(ConformanceError {
+            path: "$".to_string(),
+            message: "tool parameters must have `type: \"object\"` at the top level".to_string(),
+        });
+    }
+    for key in ["oneOf", "anyOf", "allOf", "enum", "const", "not"] {
+        if map.contains_key(key) {
+            errors.push(ConformanceError {
+                path: "$".to_string(),
+                message: format!("`{key}` is not allowed at the top level of tool parameters"),
+            });
+        }
+    }
 }
 
 fn walk(schema: &Value, spec: &DialectSpec, path: &str, errors: &mut Vec<ConformanceError>) {

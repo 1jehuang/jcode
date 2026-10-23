@@ -1,6 +1,8 @@
 import {
   CONCURRENCY_EVENTS, concurrencyEntries, rawConcurrencyScalar,
 } from "./concurrency.js";
+import { oauthAccount } from "./oauth-account.js";
+import { syncModelPrices } from "./model-pricing.js";
 
 let cachedEventColumns = null;
 let cachedSessionDetailColumns = null;
@@ -14,6 +16,22 @@ let cachedTodoSessionDetailColumns = null;
 // web-only fields live in the web_details table (see migration 0016): the
 // events table sits one column shy of D1's 100-column cap, so wide event
 // shapes go in detail tables per the session_details / turn_details pattern.
+// High-volume raw families that no headline dashboard reads. They live in a
+// second D1 database (binding DB_BULK) so the main database stays well below
+// D1's 10 GB per-database cap. Their rollups (daily_active_users,
+// country_daily) still go to the main DB. Without the binding everything stays
+// in DB, so a missing binding degrades to the old single-database behavior.
+const BULK_EVENTS = ["session_concurrency", "todo_session", "prompt_submitted"];
+
+function bulkEnv(env, event) {
+  if (!env.DB_BULK || !BULK_EVENTS.includes(event)) return env;
+  return { ...env, DB: env.DB_BULK, DB_MAIN: env.DB };
+}
+
+function mainDb(env) {
+  return env.DB_MAIN || env.DB;
+}
+
 const WEB_EVENTS = ["web_pageview", "web_cta_click", "web_vital", "web_error"];
 const INSTALL_FUNNEL_EVENTS = ["install_funnel"];
 
@@ -42,10 +60,16 @@ const CLI_EVENTS = [
   "session_concurrency",
   "discovery",
   "todo_session",
+  "usage_report",
 ];
+
+// Jcode Desktop fleet events: daily active ping, observed version change, and
+// self-update attempt outcome. `version` is the Desktop version.
+const DESKTOP_EVENTS = ["desktop_active", "desktop_upgrade", "desktop_update"];
 
 const KNOWN_EVENTS = [
   ...CLI_EVENTS,
+  ...DESKTOP_EVENTS,
   ...WEB_EVENTS,
   ...INSTALL_FUNNEL_EVENTS,
   ...SUBSCRIPTION_EVENTS,
@@ -86,16 +110,17 @@ const WEB_ALLOWED_ORIGINS = new Set([
 // Emergency prunes use halved retention windows and are rate-limited per
 // isolate.
 // ---------------------------------------------------------------------------
-// Keep the database below the paid plan's first 5 GB of included account-wide
-// storage, leaving 500 MB for the account's other D1 databases and growth while
-// an emergency prune catches up. This is a budget guardrail, not D1's 10 GB
-// per-database hard cap.
-const D1_SOFT_LIMIT_BYTES = 4_500_000_000;
+// Paid D1 storage beyond the included 5 GB is billed pay-as-you-go
+// (~$0.75/GB-month), so the guardrail sits at 8 GB: well below D1's 10 GB
+// per-database hard cap, leaving 2 GB of headroom for an emergency prune to
+// catch up before inserts would start failing.
+const D1_SOFT_LIMIT_BYTES = 8_000_000_000;
 const EMERGENCY_PRUNE_COOLDOWN_MS = 10 * 60 * 1000;
 // Best-effort per-isolate state (resets on isolate recycle, which is fine:
 // the next request re-observes the size from its own insert result).
 let lastObservedDbSizeBytes = 0;
 let lastEmergencyPruneAtMs = 0;
+let lastObservedBulkDbSizeBytes = 0;
 
 // ---------------------------------------------------------------------------
 // Workers Analytics Engine firehose.
@@ -316,10 +341,36 @@ function writeConcurrencyFirehose(env, body) {
   }
 }
 
+// Append-only dedicated usage schema. No existing main firehose slots change.
+// AE is a sampled forensic backup, not a durable ACK or additive rollup.
+export const FIREHOSE_USAGE_SCHEMA = {
+  blobs: ["event", "event_id", "session_id", "id", "version", "os", "arch",
+    "source", "provider", "model", "build_channel", "occurred_at", "country"],
+  doubles: ["input_tokens", "output_tokens", "cache_read_input_tokens",
+    "cache_creation_input_tokens", "total_tokens", "responses", "is_ci", "usage_contract_version"],
+};
+function writeUsageFirehose(env, body) {
+  const sink = env.FIREHOSE_USAGE;
+  if (!sink || typeof sink.writeDataPoint !== "function") return false;
+  try {
+    const blobs = FIREHOSE_USAGE_SCHEMA.blobs.map((key) => String(body[key] ?? ""));
+    const encoder = new TextEncoder();
+    if (encoder.encode(String(body.id)).length > 96
+      || blobs.reduce((n, blob) => n + encoder.encode(blob).length, 0) > 16384) return false;
+    sink.writeDataPoint({ indexes: [String(body.id)], blobs,
+      doubles: FIREHOSE_USAGE_SCHEMA.doubles.map((key) => Number(body[key] ?? 0)) });
+    return true;
+  } catch (err) {
+    console.warn("usage firehose write failed", err?.message || err);
+    return false;
+  }
+}
+
 function writeFirehose(env, body) {
   // Geo is dimensioned separately from every event family, so it is written
   // before the per-family dispatch below (which returns early).
   writeGeoFirehose(env, body);
+  if (body.event === "usage_report") return writeUsageFirehose(env, body);
   if (body.event === "session_concurrency") {
     return writeConcurrencyFirehose(env, body);
   }
@@ -452,6 +503,10 @@ function writeWebFirehose(env, body) {
 
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (url.pathname === "/v1/oauth-account" || url.pathname === "/v1/oauth-account/check") {
+      return oauthAccount(request, env, url.pathname.endsWith("/check"));
+    }
     const cors = corsHeaders(request, env);
     if (request.method === "OPTIONS") {
       return new Response(null, {
@@ -459,14 +514,16 @@ export default {
       });
     }
 
-    const url = new URL(request.url);
-
     // Monitoring endpoint: database size vs the soft limit, so cap pressure
     // is observable before inserts start failing.
     if (request.method === "GET" && url.pathname === "/v1/health") {
       try {
         const probe = await env.DB.prepare("SELECT 1").run();
         observeDbSize(probe);
+        if (env.DB_BULK) {
+          const bulkProbe = await env.DB_BULK.prepare("SELECT 1").run();
+          lastObservedBulkDbSizeBytes = bulkProbe?.meta?.size_after || lastObservedBulkDbSizeBytes;
+        }
       } catch (err) {
         return jsonResponse(
           { ok: false, error: "d1 probe failed", detail: String(err?.message || err) },
@@ -479,6 +536,7 @@ export default {
         db_size_bytes: lastObservedDbSizeBytes,
         db_soft_limit_bytes: D1_SOFT_LIMIT_BYTES,
         over_soft_limit: lastObservedDbSizeBytes >= D1_SOFT_LIMIT_BYTES,
+        bulk_db_size_bytes: env.DB_BULK ? lastObservedBulkDbSizeBytes : null,
         last_emergency_prune_at_ms: lastEmergencyPruneAtMs || null,
       }, 200, cors);
     }
@@ -491,7 +549,8 @@ export default {
       return ingestTranscript(request, env, cors);
     }
 
-    if (url.pathname !== "/v1/event") {
+    const isUsageV2 = url.pathname === "/v2/usage";
+    if (url.pathname !== "/v1/event" && !isUsageV2) {
       return jsonResponse({ error: "Not found" }, 404, cors);
     }
 
@@ -500,6 +559,15 @@ export default {
       body = await request.json();
     } catch {
       return jsonResponse({ error: "Invalid JSON" }, 400, cors);
+    }
+
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return jsonResponse({ error: "Invalid event body" }, 400, cors);
+    }
+    // Reject incompatible clients before normalization or any storage side effects.
+    // This dedicated route lets v2 clients safely retry against older servers (404).
+    if (isUsageV2 && (body.event !== "usage_report" || body.usage_contract_version !== 2)) {
+      return jsonResponse({ error: "Expected usage_report with usage_contract_version 2" }, 400, cors);
     }
 
     // Web beacon events are normalized before the generic required-field
@@ -561,6 +629,13 @@ export default {
       }
     }
 
+    if (body.event === "usage_report") {
+      const problem = normalizeUsageReportEvent(body);
+      if (problem) {
+        return jsonResponse({ error: problem }, 400, cors);
+      }
+    }
+
     // Firehose first: even if D1 is at its size cap, the raw event is
     // recorded in Analytics Engine and the day is reconstructable.
     const firehoseOk = writeFirehose(env, body);
@@ -568,9 +643,10 @@ export default {
     let durableOk = true;
     let concurrencyDurable = null;
     try {
-      await insertEvent(env, body);
+      const storeEnv = bulkEnv(env, body.event);
+      await insertEvent(storeEnv, body);
       if (CONCURRENCY_EVENTS.includes(body.event)) {
-        concurrencyDurable = await insertConcurrencyDetails(env, body);
+        concurrencyDurable = await insertConcurrencyDetails(storeEnv, body);
       }
     } catch (err) {
       durableOk = false;
@@ -598,10 +674,14 @@ export default {
       return jsonResponse({ error: "Concurrency storage unavailable", durable: durableOk,
         concurrency_durable: false, firehose: false }, 503, cors);
     }
+    if (body.event === "usage_report" && !durableOk) {
+      return jsonResponse({ error: "Usage storage unavailable", durable: false, firehose: firehoseOk }, 503, cors);
+    }
     if (!durableOk && !firehoseOk) {
       return jsonResponse({ error: "Internal error" }, 500, cors);
     }
     return jsonResponse({ ok: true, durable: durableOk, firehose: firehoseOk,
+      ...(body.event === "usage_report" ? { id: body.id, event_id: body.event_id } : {}),
       ...(CONCURRENCY_EVENTS.includes(body.event) ? { concurrency_durable: concurrencyDurable === true } : {}),
     }, 200, cors);
   },
@@ -612,8 +692,40 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
+        // Private account data is not covered by ordinary event retention.
+        // Run first so later maintenance failures cannot skip its 90-day expiry.
+        try {
+          for (let batch = 0; batch < 12; batch++) {
+            const result = await env.DB.prepare(`DELETE FROM oauth_accounts WHERE rowid IN (
+              SELECT rowid FROM oauth_accounts WHERE created_at < datetime('now', '-90 days') LIMIT 10000
+            )`).run();
+            if ((result.meta?.changes || 0) < 10000) break;
+          }
+        } catch {
+          console.warn("private OAuth account retention failed");
+        }
+        try {
+          for (let batch = 0; batch < 100; batch++) {
+            const result = await env.DB.prepare(`DELETE FROM usage_report_ledger WHERE receipt_key IN (
+              SELECT receipt_key FROM usage_report_ledger WHERE created_at < unixepoch('now', '-8 days') LIMIT 10000
+            )`).run();
+            if ((result.meta?.changes || 0) < 10000) break;
+          }
+        } catch (err) {
+          console.warn("usage ledger retention failed", err?.message || err);
+        }
         await repairDailyActivityYesterday(env);
+        // Price any model label first seen recently, so new models (e.g.
+        // claude-opus-5-5) are not silently valued at $0 in spend dashboards.
+        try {
+          await syncModelPrices(env);
+        } catch (err) {
+          console.warn("model price sync failed", err?.message || err);
+        }
         await pruneOldEvents(env);
+        if (env.DB_BULK) {
+          await pruneOldEvents({ ...env, DB: env.DB_BULK, DB_MAIN: env.DB });
+        }
         // If the normal prune did not free enough headroom, escalate with the
         // emergency (halved) retention windows instead of waiting for inserts
         // to start failing mid-day.
@@ -894,6 +1006,7 @@ const RETENTION_DAYS = {
   todo_session: 365,
   prompt_submitted: 30,
   telemetry_opt_out: 365,
+  desktop_update: 365,
 };
 
 const PRUNE_BATCH_LIMIT = 10000;
@@ -951,6 +1064,18 @@ async function pruneOldEvents(env, options = {}) {
           console.warn(`install_details prune failed for ${eventType}`, err?.message || err);
         }
       }
+      if (eventType === "desktop_update") {
+        try {
+          await env.DB.prepare(
+            `DELETE FROM desktop_update_details WHERE event_id IN (
+               SELECT event_id FROM events
+               WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
+               LIMIT ?)`
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+        } catch (err) {
+          console.warn(`desktop_update_details prune failed`, err?.message || err);
+        }
+      }
       if (eventType === "todo_session") {
         try {
           await env.DB.prepare(
@@ -983,7 +1108,7 @@ async function pruneOldEvents(env, options = {}) {
              WHERE event = ? AND created_at < datetime('now', ?)
              LIMIT ?)`
         ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
-        observeDbSize(result);
+        if (!env.DB_MAIN) observeDbSize(result);
         const changes = result?.meta?.changes ?? result?.changes ?? 0;
         // Empty event families must not consume the deletion budget, or adding
         // a family permanently starves later families of retention checks.
@@ -1016,6 +1141,15 @@ async function insertConcurrencyDetails(env, body) {
 }
 
 async function insertEvent(env, body) {
+  // usage_report is high volume (one per provider response). It is kept in
+  // the firehose for per-session detail and rolled up here; no raw events row.
+  if (body.event === "usage_report") {
+    await recordDailyModelUsage(env, body);
+    // Receipt insert and rollup trigger commit together. Ancillary country
+    // writes cannot turn a committed usage receipt into a failed ACK.
+    return;
+  }
+
   const columns = await getEventColumns(env);
   const sessionDetailColumns = await getSessionDetailColumns(env);
   const turnDetailColumns = await getTurnDetailColumns(env);
@@ -1139,6 +1273,31 @@ async function insertEvent(env, body) {
       ["from_version", body.from_version || null],
       ...common,
     ].filter(([name]) => columns.has(name)));
+  }
+
+  if (DESKTOP_EVENTS.includes(body.event)) {
+    const inserted = await insertEventRow(env, body, [
+      ["telemetry_id", body.id],
+      ["event", body.event],
+      ["version", body.version],
+      ["os", body.os],
+      ["arch", body.arch],
+      ["from_version", body.event === "desktop_active" ? null : desktopToken(body.from_version, /[^0-9A-Za-z.+_-]/g)],
+      ...common,
+    ].filter(([name]) => columns.has(name)));
+    if (inserted && body.event === "desktop_update" && body.event_id) {
+      try {
+        await insertDynamic(env, "desktop_update_details", [
+          ["event_id", body.event_id],
+          ["install_kind", desktopToken(body.install_kind)],
+          ["update_outcome", desktopToken(body.update_outcome)],
+          ["update_failure_stage", desktopToken(body.update_failure_stage)],
+        ]);
+      } catch (err) {
+        console.warn("desktop_update_details insert failed", err?.message || err);
+      }
+    }
+    return inserted;
   }
 
   if (body.event === "auth_success") {
@@ -1474,7 +1633,7 @@ async function recordDailyActivity(env, body) {
   const sessionCrashCount = body.event === "session_crash" ? 1 : 0;
 
   try {
-    await env.DB.prepare(`
+    await mainDb(env).prepare(`
       INSERT INTO daily_active_users (
         activity_date,
         telemetry_id,
@@ -1535,7 +1694,7 @@ async function recordCountryDaily(env, body) {
   }
   const activityDate = new Date().toISOString().slice(0, 10);
   try {
-    await env.DB.prepare(`
+    await mainDb(env).prepare(`
       INSERT INTO country_daily (activity_date, country, event, is_ci, event_count)
       VALUES (?, ?, ?, ?, 1)
       ON CONFLICT(activity_date, country, event, is_ci) DO UPDATE SET
@@ -1685,6 +1844,19 @@ function commonEventEntries(body, columns) {
     values.push(["ran_from_cargo", boolToInt(body.ran_from_cargo)]);
   }
   return values;
+}
+
+// Desktop sends short tokens only. Re-sanitize server-side so a buggy or
+// hostile client cannot store messages or paths: lowercase [a-z0-9_] (or the
+// given disallowed-char pattern for versions), max 64 chars, null if empty.
+function desktopToken(value, disallowed = null) {
+  if (value == null) return null;
+  let text = String(value).trim();
+  text = disallowed
+    ? text.replace(disallowed, "")
+    : text.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  text = text.slice(0, 64);
+  return text || null;
 }
 
 async function getEventColumns(env) {
@@ -2115,12 +2287,119 @@ async function insertDynamic(env, table, entries) {
   const sql = `INSERT OR IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
   const values = entries.map(([, value]) => value);
   const result = await env.DB.prepare(sql).bind(...values).run();
-  observeDbSize(result);
+  if (env.DB_MAIN) {
+    lastObservedBulkDbSizeBytes = result?.meta?.size_after || lastObservedBulkDbSizeBytes;
+  } else {
+    observeDbSize(result);
+  }
   return result;
 }
 
 function boolToInt(value) {
   return value ? 1 : 0;
+}
+
+const USAGE_REPORT_SOURCES = new Set(["agent", "compaction", "sidecar"]);
+const USAGE_TOKEN_FIELDS = [
+  "input_tokens",
+  "output_tokens",
+  "cache_read_input_tokens",
+  "cache_creation_input_tokens",
+  "total_tokens",
+];
+// One provider response cannot plausibly exceed this; rejects garbage that
+// would otherwise poison the spend rollup.
+const MAX_USAGE_TOKENS_PER_REPORT = 50_000_000;
+
+function normalizeUsageLabel(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().slice(0, 120);
+}
+
+// Validates legacy native buckets separately from canonical disjoint v2.
+// Dedicated FIREHOSE_USAGE preserves all buckets and the contract version.
+export function normalizeUsageReportEvent(body) {
+  if (typeof body.id !== "string" || !body.id.trim() || new TextEncoder().encode(body.id).length > 96) return "Invalid usage_report id";
+  for (const field of ["provider", "model", "build_channel"]) {
+    if (body[field] != null && (typeof body[field] !== "string" || body[field].trim().length > 120)) return `Invalid usage_report ${field}`;
+  }
+  body.usage_contract_version ??= 1;
+  if (![1, 2].includes(body.usage_contract_version)) return "Invalid usage_report usage_contract_version";
+  if (body.usage_contract_version === 2 && body.occurred_at == null) return "Missing usage_report occurred_at";
+  if (typeof body.event_id !== "string" || !body.event_id.trim() || body.event_id.length > 120) return "Invalid usage_report event_id";
+  if (body.is_ci != null && typeof body.is_ci !== "boolean") return "Invalid usage_report is_ci";
+  body.is_ci ??= false;
+  body.build_channel = normalizeUsageLabel(body.build_channel);
+  if (body.occurred_at != null) {
+    const value = body.occurred_at;
+    const timestamp = typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) ? Date.parse(value) : NaN;
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== value.slice(0, 10)
+      || timestamp < Date.now() - 7 * 86400000 || timestamp > Date.now() + 300000) {
+      return "Invalid or expired usage_report occurred_at";
+    }
+    body.occurred_at = new Date(timestamp).toISOString();
+  }
+  if (!USAGE_REPORT_SOURCES.has(body.source)) {
+    return "Invalid usage_report source";
+  }
+  body.provider = normalizeUsageLabel(body.provider);
+  body.model = normalizeUsageLabel(body.model);
+  if (!body.model) {
+    return "Missing usage_report model";
+  }
+  const suppliedTotal = body.total_tokens;
+  for (const field of USAGE_TOKEN_FIELDS) {
+    const value = body[field] ?? 0;
+    if (!Number.isInteger(value) || value < 0 || value > MAX_USAGE_TOKENS_PER_REPORT) {
+      return `Invalid usage_report ${field}`;
+    }
+    body[field] = value;
+  }
+  if (body.usage_contract_version === 2) {
+    const total = body.input_tokens + body.output_tokens + body.cache_read_input_tokens + body.cache_creation_input_tokens;
+    if (total > MAX_USAGE_TOKENS_PER_REPORT || (suppliedTotal != null && suppliedTotal !== total)) return "Invalid usage_report total_tokens";
+    body.total_tokens = total;
+  }
+  const responses = body.responses ?? 1;
+  if (!Number.isInteger(responses) || responses < 1 || responses > 10_000) {
+    return "Invalid usage_report responses";
+  }
+  body.responses = responses;
+  body.provider_end = body.provider;
+  body.model_end = body.model;
+  body.step = body.source;
+  return null;
+}
+
+async function recordDailyModelUsage(env, body) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([body.id, body.event_id])));
+  const receiptKey = digest;
+  const usageDate = (body.occurred_at || new Date().toISOString()).slice(0, 10);
+  await env.DB.prepare(`
+    INSERT INTO usage_report_ledger (
+      usage_date, source, provider, model, build_channel, is_ci, responses,
+      input_tokens, output_tokens, cache_read_input_tokens,
+      cache_creation_input_tokens, total_tokens, receipt_key, usage_contract_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(receipt_key) DO NOTHING
+  `).bind(
+    usageDate,
+    body.source,
+    body.provider || "",
+    body.model,
+    body.build_channel || "",
+    boolToInt(body.is_ci),
+    body.responses,
+    body.input_tokens,
+    body.output_tokens,
+    body.cache_read_input_tokens,
+    body.cache_creation_input_tokens,
+    body.total_tokens,
+    receiptKey,
+    body.usage_contract_version,
+  ).run();
 }
 
 function jsonResponse(data, status = 200, cors = null) {

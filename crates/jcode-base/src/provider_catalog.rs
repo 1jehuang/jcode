@@ -1,7 +1,7 @@
 pub use jcode_provider_env::{
     load_api_key_from_env_or_config, load_env_value_from_config_file,
     load_env_value_from_env_or_config, register_api_key_fallback_resolver,
-    save_env_value_to_env_file,
+    save_env_value_to_env_file, save_named_api_key,
 };
 pub use jcode_provider_metadata::*;
 use std::collections::{HashMap, HashSet};
@@ -9,6 +9,12 @@ use std::collections::{HashMap, HashSet};
 pub const OPENAI_COMPAT_LOCAL_ENABLED_ENV: &str = "JCODE_OPENAI_COMPAT_LOCAL_ENABLED";
 pub const MINIMAX_CHINA_API_BASE: &str = "https://api.minimaxi.com/v1";
 pub const MINIMAX_CHINA_SETUP_URL: &str = "https://platform.minimaxi.com/docs/llms.txt";
+
+mod profile_credentials;
+pub use profile_credentials::{
+    load_openai_compatible_profile_api_key, load_runtime_api_key,
+    openai_compatible_profile_is_configured,
+};
 
 pub fn api_base_uses_localhost(raw: &str) -> bool {
     let Ok(parsed) = url::Url::parse(raw) else {
@@ -31,6 +37,30 @@ pub fn resolve_openai_compatible_profile(
 }
 
 pub fn resolve_openai_compatible_profile_with_api_key_hint(
+    profile: OpenAiCompatibleProfile,
+    api_key_hint: Option<&str>,
+) -> ResolvedOpenAiCompatibleProfile {
+    let mut resolved = resolve_openai_compatible_profile_endpoint(profile, api_key_hint);
+    // Never silently promote a native subscription login into a Contributor
+    // model, which has different content-use implications.
+    if profile.id != OPENAI_COMPAT_PROFILE.id
+        && profile.id != "muse-subscription"
+        && let Some(newest_model) =
+            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
+    {
+        resolved.default_model = Some(newest_model);
+    }
+    resolved
+}
+
+/// Resolve a profile's endpoint and credential bindings (api base, key env,
+/// env file, `requires_api_key`) without picking a default model.
+///
+/// Choosing the default model reads the profile's cached model catalog from
+/// disk and ranks it, which costs milliseconds per profile. Credential checks
+/// (auth status, which runs on the TUI's first frame across every profile)
+/// never look at the model, so they use this cheaper path.
+fn resolve_openai_compatible_profile_endpoint(
     profile: OpenAiCompatibleProfile,
     api_key_hint: Option<&str>,
 ) -> ResolvedOpenAiCompatibleProfile {
@@ -58,11 +88,6 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     apply_profile_key_based_endpoint_overrides(profile, &mut resolved, api_key_hint);
 
     if profile.id != OPENAI_COMPAT_PROFILE.id {
-        if let Some(newest_model) =
-            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
-        {
-            resolved.default_model = Some(newest_model);
-        }
         return resolved;
     }
 
@@ -126,7 +151,51 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
 ) -> Option<String> {
     openai_compatible_profile_by_id(profile_id)?;
     let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)?;
+    // Ranking is a pure function of the profile, its API base, and the cached
+    // catalog, but costs ~8ms for OpenRouter's catalog. Every provider fork
+    // (each client reconnect) resolves it, so remember the answer for this
+    // exact catalog content. The key hashes the ranked inputs (ids and release
+    // times), so two different catalogs never share an entry even if written
+    // within the same second; the hash is ~100x cheaper than the ranking.
+    type Key = (String, String, Option<String>, u64);
+    static MEMO: std::sync::LazyLock<std::sync::Mutex<HashMap<Key, Option<String>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let content_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for model in &cache.models {
+            model.id.hash(&mut hasher);
+            model.created.hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+    let key: Key = (
+        profile_id.to_string(),
+        resolved.api_base.clone(),
+        cache.source_api_base.clone(),
+        content_hash,
+    );
+    if let Some(hit) = MEMO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return hit.clone();
+    }
+    let ranked = rank_newest_released_model(profile_id, resolved, cache);
+    let mut memo = MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if memo.len() > 64 {
+        memo.clear();
+    }
+    memo.insert(key, ranked.clone());
+    ranked
+}
 
+fn rank_newest_released_model(
+    profile_id: &str,
+    resolved: &ResolvedOpenAiCompatibleProfile,
+    cache: jcode_provider_openrouter::DiskCache,
+) -> Option<String> {
     let source_matches = cache
         .source_api_base
         .as_deref()
@@ -134,6 +203,22 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
         == normalize_api_base(&resolved.api_base);
     if !source_matches {
         return None;
+    }
+
+    // Proxies with a curated flagship order (OpenRouter carries Claude/GPT
+    // under vendor prefixes) rank by quality first. Plain recency picks
+    // whatever shipped last; live, that put OpenRouter on
+    // `mistralai/mistral-large-4-0` over `anthropic/claude-opus-5.5`.
+    let chat_ids: Vec<&str> = cache
+        .models
+        .iter()
+        .map(|model| model.id.trim())
+        .filter(|id| !id.is_empty() && crate::provider::is_listable_model_name(id))
+        .collect();
+    if let Some(flagship) =
+        crate::auth::lifecycle::ranked_flagship_for_provider(profile_id, &chat_ids)
+    {
+        return Some(flagship);
     }
 
     cache
@@ -678,6 +763,7 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
     let model = model.trim().to_ascii_lowercase();
 
     match profile_id.as_str() {
+        "muse-subscription" if model == "muse-wonder-1.0" => Some(1_048_576),
         "conifer" => conifer_context_limit(&model)
             .or_else(|| jcode_provider_core::models::open_weight_family_context_limit(&model)),
         // The selected upstream model may vary. Use Jcode's conservative
@@ -1142,34 +1228,6 @@ fn parse_bool_like(value: &str) -> bool {
     )
 }
 
-pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile) -> bool {
-    // When a named config profile (`[providers.<name>]`, selected via
-    // `--provider-profile`) is active, its credentials live under the runtime
-    // env vars set by `apply_named_provider_profile_env`, not the built-in
-    // `openai-compatible.env`. Honor those first so auth-test does not report a
-    // false `not_configured` for a correctly-configured named profile (#402).
-    if let Some(configured) = active_named_provider_profile_is_configured() {
-        return configured;
-    }
-
-    let resolved = resolve_openai_compatible_profile(profile);
-    if load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file).is_some() {
-        return true;
-    }
-
-    if resolved.requires_api_key {
-        return false;
-    }
-
-    if profile.id == OPENAI_COMPAT_PROFILE.id && api_base_uses_localhost(&resolved.api_base) {
-        return true;
-    }
-
-    load_env_value_from_env_or_config(OPENAI_COMPAT_LOCAL_ENABLED_ENV, &resolved.env_file)
-        .map(|value| parse_bool_like(&value))
-        .unwrap_or(false)
-}
-
 /// Resolve the active named provider profile's credential env var + env file,
 /// as set by [`apply_named_provider_profile_env`], if one is active.
 ///
@@ -1275,3 +1333,7 @@ fn dedup_sources(sources: Vec<(String, String)>) -> Vec<(String, String)> {
 #[cfg(test)]
 #[path = "provider_catalog_tests.rs"]
 mod provider_catalog_tests;
+
+#[cfg(test)]
+#[path = "provider_catalog_muse_tests.rs"]
+mod provider_catalog_muse_tests;

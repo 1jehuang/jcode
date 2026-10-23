@@ -52,10 +52,16 @@ or switch your main coding model.
 
 - `tab_id` and a nonempty `goal` are required. Frame 0 is the default.
   `window_id`, when supplied, is checked against the selected tab.
-- `max_steps` defaults to 12 and must be 1 through 30. The controller has a
-  180-second wall-clock budget. `timeout_ms` controls individual operations,
+- `max_steps` defaults to 40 and must be 1 through 100. The controller has a
+  600-second wall-clock budget. `timeout_ms` controls individual operations,
   defaults to 20,000, and is clamped to 1 through 60,000 milliseconds and the
-  remaining total budget.
+  remaining total budget. Read-only observation reconnect retries have an
+  additional eight-second cap (or the smaller `timeout_ms`). Post-action
+  navigation settling also retains its internal eight-second cap. A larger
+  `timeout_ms` does not extend these caps. If reconnecting fails, handback
+  preserves the last connection error. Blank or restricted pages may have no
+  content script: navigate to a supported page before handing off. Only a
+  dispatched action failure carries the in-flight action warning.
 - `confidence_threshold` defaults to 0.8. The transport validates the typed
   choice, offered IDs, probability distribution, and confidence. It uses the
   lower of the selected probability and reported confidence.

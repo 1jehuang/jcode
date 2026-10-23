@@ -174,6 +174,66 @@ pub(super) async fn handle_notify_session(
     }
 }
 
+/// A user pressed something in an agent applet: store its state, publish, then
+/// resolve a waiting `applet` tool call or wake the agent like a notification.
+pub(super) async fn handle_applet_action(
+    id: u64,
+    session_id: String,
+    instance: String,
+    action: jcode_applet_types::Action,
+    state: serde_json::Value,
+    source_key: Option<String>,
+    ctx: NotifySessionContext<'_>,
+) {
+    let stored = match crate::applets::set_state(&session_id, &instance, state) {
+        Ok(stored) => stored,
+        Err(error) => {
+            let _ = ctx.client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    let (snapshot, inst) = stored;
+    crate::tool::applet::publish(&session_id, snapshot);
+    let message = crate::tool::applet::format_action_message(
+        &instance,
+        &inst.document.title,
+        &action,
+        &inst.document.state,
+        source_key.as_deref(),
+    );
+    if crate::tool::applet::deliver_to_waiter(&session_id, &instance, message.clone()) {
+        let _ = ctx.client_event_tx.send(ServerEvent::Done { id });
+        return;
+    }
+    handle_notify_session(id, session_id, message, ctx).await;
+}
+
+/// The user closed an agent applet. No agent wake.
+pub(super) fn handle_close_applet(
+    id: u64,
+    session_id: String,
+    instance: String,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    match crate::applets::close(&session_id, &instance) {
+        Ok((snapshot, _)) => {
+            crate::tool::applet::publish(&session_id, snapshot);
+            let _ = client_event_tx.send(ServerEvent::Done { id });
+        }
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+        }
+    }
+}
+
 pub(super) fn handle_input_shell(
     id: u64,
     command: String,
@@ -183,7 +243,7 @@ pub(super) fn handle_input_shell(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let cwd = {
             let agent_guard = agent.lock().await;
             agent_guard.working_dir().map(|dir| dir.to_string())
@@ -228,6 +288,40 @@ pub(super) fn handle_input_shell(
     });
 }
 
+/// Routing for future workers is metadata, so it can be updated during a turn.
+pub(super) async fn set_session_agent_model(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    target: &str,
+    model: Option<String>,
+) -> anyhow::Result<crate::session::AgentModelOverrides> {
+    if let Ok(mut guard) = agent.try_lock() {
+        guard.set_agent_model_override(target, model)?;
+        Ok(guard.session_for_split().agent_model_overrides.clone())
+    } else {
+        let mut session = Session::load_startup_stub(session_id)?;
+        session.set_agent_model_override(target, model)?;
+        Ok(session.agent_model_overrides)
+    }
+}
+
+/// Save a worker-model default in the server's own configuration, so remote
+/// clients change the default that server-side workers actually use.
+pub(super) async fn set_global_agent_model(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    target: &str,
+    model: Option<String>,
+) -> anyhow::Result<crate::session::AgentModelOverrides> {
+    crate::config::Config::set_agent_model_default(target, model.as_deref())?;
+    // Report the session's current overrides so the client view stays exact.
+    if let Ok(guard) = agent.try_lock() {
+        Ok(guard.session_for_split().agent_model_overrides.clone())
+    } else {
+        Ok(Session::load_startup_stub(session_id)?.agent_model_overrides)
+    }
+}
+
 pub(super) async fn handle_set_subagent_model(
     id: u64,
     model: Option<String>,
@@ -261,7 +355,7 @@ pub(super) fn handle_run_subagent(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let description = derive_subagent_description(&prompt);
         let tool_call_id = crate::id::new_id("call");
         let tool_name = "subagent".to_string();
@@ -327,13 +421,16 @@ pub(super) fn handle_run_subagent(
 
         let started = Instant::now();
         let tool_name_for_exec = tool_name.clone();
-        let result = match tokio::spawn(async move {
+        let result = match crate::runtime_activity::spawn(async move {
             registry.execute(&tool_name_for_exec, tool_input, ctx).await
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+        }) {
+            Some(handle) => match handle.await {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+            },
+            None => Err(anyhow::anyhow!(
+                "Tool task was not admitted because the runtime is shutting down"
+            )),
         };
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
@@ -545,6 +642,75 @@ pub(super) async fn handle_set_feature(
     }
 }
 
+/// Bookmark or unbookmark the session. A save label is the name the user chose,
+/// so it doubles as the session title and is announced like a rename.
+pub(super) async fn handle_set_session_saved(
+    id: u64,
+    saved: bool,
+    label: Option<String>,
+    agent: &Arc<Mutex<Agent>>,
+    client_session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let result = agent.lock().await.set_session_saved(saved, label.clone());
+    if let Err(error) = result {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: crate::util::format_error_chain(&error),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    crate::session_list_cache::invalidate();
+    let label = label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+    if saved && label.is_some() {
+        let (session_id, display_title) = {
+            let agent = agent.lock().await;
+            (
+                agent.session_id().to_string(),
+                agent.session_display_title_or_name(),
+            )
+        };
+        broadcast_session_renamed(
+            swarm_members,
+            client_session_id,
+            client_event_tx,
+            ServerEvent::SessionRenamed {
+                session_id,
+                title: label.map(ToOwned::to_owned),
+                display_title,
+            },
+        )
+        .await;
+    }
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+async fn broadcast_session_renamed(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_session_id: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event: ServerEvent,
+) -> usize {
+    let ServerEvent::SessionRenamed { session_id, .. } = &event else {
+        return 0;
+    };
+    let renamed_session_id = session_id.clone();
+    let mut delivered =
+        fanout_session_event(swarm_members, &renamed_session_id, event.clone()).await;
+    if renamed_session_id != client_session_id {
+        delivered += fanout_session_event(swarm_members, client_session_id, event.clone()).await;
+    }
+    if delivered == 0 {
+        let _ = client_event_tx.send(event);
+    }
+    delivered
+}
+
 pub(super) async fn handle_rename_session(
     id: u64,
     title: Option<String>,
@@ -606,14 +772,8 @@ pub(super) async fn handle_rename_session(
         title: normalized_title,
         display_title,
     };
-    let mut delivered =
-        fanout_session_event(swarm_members, &renamed_session_id, event.clone()).await;
-    if renamed_session_id != client_session_id {
-        delivered += fanout_session_event(swarm_members, client_session_id, event.clone()).await;
-    }
-    if delivered == 0 {
-        let _ = client_event_tx.send(event);
-    }
+    let delivered =
+        broadcast_session_renamed(swarm_members, client_session_id, client_event_tx, event).await;
     let _ = client_event_tx.send(ServerEvent::Done { id });
     crate::logging::event_info(
         "SESSION_LIFECYCLE",
@@ -682,6 +842,11 @@ fn clone_split_session(
     child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
+    // Keep the same provider account. Replayed provider-native blocks (Anthropic
+    // web search `encrypted_content`) are bound to the account that produced
+    // them, and another account rejects the whole request with a 400.
+    child.provider_key = parent.provider_key.clone();
+    child.route_api_method = parent.route_api_method.clone();
     child.status = crate::session::SessionStatus::Closed;
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
@@ -1072,7 +1237,7 @@ pub(super) fn handle_compact(
 ) {
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         let session_id = agent_guard.session_id().to_string();
         let (message, success) = agent_guard.request_manual_compaction();

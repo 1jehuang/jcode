@@ -54,6 +54,11 @@ pub const OPENAI: DialectSpec = DialectSpec {
         "uuid",
     ],
     transforms: DialectTransforms {
+        // OpenAI rejects function parameters whose root has
+        // `oneOf`/`anyOf`/`allOf`/`enum`/`const`/`not` ("schema must have type
+        // 'object' and not have ... at the top level"), observed on the swarm
+        // tool's spawn/non-spawn branches.
+        flatten_top_level_combiners: true,
         one_of_as_any_of: true,
         // OpenAI accepts `allOf` but does not intersect its branches the way
         // the spec requires, so a schema whose properties live only in `allOf`

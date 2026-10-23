@@ -583,48 +583,6 @@ fn test_scroll_down_past_bottom_does_not_accumulate_phantom_offset() {
 }
 
 #[test]
-fn test_overscroll_requires_gesture_starting_at_bottom() {
-    // Overscroll must only reveal when the downward gesture *began* while the
-    // view was already pinned to the bottom. A gesture that starts mid-
-    // transcript and carries the view into the bottom (with leftover momentum
-    // continuing past it) must not pop the elastic line.
-    let _render_lock = scroll_render_test_lock();
-    let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 12);
-    // Exercise the elastic reveal explicitly (the default pins the line on).
-    app.overscroll_status_mode = crate::config::OverscrollStatusMode::Overscroll;
-    render_and_snap(&app, &mut terminal);
-    let rendered_max = crate::tui::ui::last_max_scroll();
-    assert!(rendered_max > 2, "expected scrollable chat content");
-
-    // Start a gesture partway up the transcript.
-    app.scroll_offset = 2;
-    app.auto_scroll_paused = true;
-
-    // One continuous gesture (no pause between ticks): rides into the bottom
-    // and keeps going. Momentum past the bottom must be swallowed silently.
-    // The tick budget scales with the rendered height: process-global render
-    // state (mermaid, perf tier) can legitimately change the transcript
-    // extent between isolated and full-suite runs.
-    for _ in 0..rendered_max + 10 {
-        app.scroll_down(1);
-    }
-    assert!(!app.auto_scroll_paused, "gesture should reach the bottom");
-    assert!(
-        !app.chat_overscroll_active(),
-        "momentum carrying into the bottom must not reveal the overscroll line"
-    );
-
-    // A fresh gesture that starts at the bottom (after a pause) does reveal it.
-    app.chat_scroll_down_last =
-        Some(Instant::now() - App::OVERSCROLL_GESTURE_GAP - std::time::Duration::from_millis(50));
-    app.scroll_down(1);
-    assert!(
-        app.chat_overscroll_active(),
-        "a new gesture starting at the bottom should reveal the overscroll line"
-    );
-}
-
-#[test]
 fn test_scroll_acceleration_multiplier_scales_with_flick_speed() {
     use std::time::Duration;
     // A fast flick (short gap between wheel events) gets a subtle 2x boost; a
@@ -1518,136 +1476,6 @@ fn repro_scroll_held_across_reasoning_close_and_answer() {
 }
 
 
-/// Regression for the overscroll flicker (revealing the elastic status line
-/// must not re-layout the transcript).
-///
-/// When the transcript height sat exactly at the fits/overflows boundary, the
-/// one-row overscroll reveal flipped the `overflows` decision: the native
-/// scrollbar appeared, the whole transcript re-wrapped one column narrower,
-/// and every visible line shifted. On rebound it flipped back (or worse,
-/// stayed latched because the narrower wrap produced more lines). On screen
-/// this read as a full-screen flicker whenever overscroll was activated.
-///
-/// The scrollbar/overflow decision must therefore ignore the transient
-/// overscroll row: for every content height around the boundary, the
-/// transcript region rendered during the dwell must be identical to the frame
-/// before the reveal, and the frame after the rebound must equal the frame
-/// before the reveal exactly.
-#[test]
-fn overscroll_reveal_does_not_relayout_transcript() {
-    let _lock = scroll_render_test_lock();
-
-    for pad in 4..30usize {
-        let (mut app, mut terminal) = create_scroll_test_app(100, 24, 0, pad);
-        app.chat_native_scrollbar = true;
-        app.context_info = crate::prompt::ContextInfo {
-            total_chars: 40_000,
-            ..Default::default()
-        };
-        app.context_limit = 200_000;
-
-        let before = render_and_snap(&app, &mut terminal);
-        let max_before = crate::tui::ui::last_max_scroll();
-
-        // Wheel-down while pinned at the bottom: registers an overscroll tick
-        // and reveals the status line for the dwell window.
-        app.handle_mouse_event(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 10,
-            row: 5,
-            modifiers: KeyModifiers::empty(),
-        });
-        assert!(
-            app.chat_overscroll_active(),
-            "pad={pad}: wheel-down at the bottom should register an overscroll"
-        );
-        let during = render_and_snap(&app, &mut terminal);
-        let max_during = crate::tui::ui::last_max_scroll();
-
-        // The reveal may slide the transcript up by at most the one row the
-        // elastic line claims (the intended pull-to-reveal). It must not jump
-        // further, and it must never re-wrap: every transcript row shown
-        // during the dwell must be a row that already existed before the
-        // reveal (a re-wrap breaks lines at a different column, producing
-        // brand-new row strings, which is the full-screen flicker).
-        assert!(
-            max_during <= max_before + 1,
-            "pad={pad}: reveal moved the viewport by more than the elastic \
-             row (max {max_before} -> {max_during})"
-        );
-        let before_rows: Vec<&str> = before.lines().collect();
-        let during_rows: Vec<&str> = during.lines().collect();
-        // A re-wrap breaks lines at a different column, producing brand-new
-        // row strings. Compare the transcript body rows (the "Intro line"
-        // filler) as an ordered sequence: they may slide up by the one
-        // elastic row, but their content must be byte-identical. Header rows
-        // composite with the fixed-position context widget overlay and the
-        // bottom rows (idle hint, input, elastic line) legitimately change,
-        // so only body rows are compared.
-        let body = |rows: &[&str]| -> Vec<String> {
-            rows.iter()
-                .filter(|row| row.contains("quick brown fox"))
-                .map(|row| {
-                    // Drop the native scrollbar column: its thumb glyph
-                    // legitimately moves with the one-row elastic slide.
-                    let mut normalized = row
-                        .trim_end()
-                        .trim_end_matches(['│', '╷', '╵', '•'])
-                        .trim_end()
-                        .to_string();
-                    // These fixture rows have a known logical end. Keep every
-                    // transcript byte through it, then discard only the blank
-                    // suffix where the compact session-fact stack may render.
-                    // Unlike splitting on arbitrary double spaces, this cannot
-                    // hide indentation or spacing changes in transcript text.
-                    if let Some(end) = normalized.find("dog.") {
-                        normalized.truncate(end + "dog.".len());
-                    }
-                    normalized
-                })
-                .collect()
-        };
-        let body_before = body(&before_rows);
-        let body_during = body(&during_rows);
-        assert!(
-            !body_before.is_empty(),
-            "pad={pad}: expected filler body rows in the pre-reveal frame"
-        );
-        // The intended elastic behavior when the transcript already overflows
-        // is a one-row slide: the top body row scrolls out and every other row
-        // keeps its exact content. A re-wrap instead rewrites every row. So
-        // the dwell body must be a suffix of the pre-reveal body missing at
-        // most one leading row.
-        let dropped = body_before.len().saturating_sub(body_during.len());
-        assert!(
-            dropped <= 1 && body_before[dropped..] == body_during[..],
-            "pad={pad}: transcript body rows re-wrapped while the overscroll \
-             line was revealed (scrollbar/wrap flip):\nbefore:\n{before}\nduring:\n{during}"
-        );
-
-        // After the dwell expires the transcript must return to the exact
-        // pre-overscroll layout: no latched scrollbar, no residual re-wrap.
-        // (The idle status line rotates its own hint content over time, so
-        // only the transcript region is compared, plus the scroll extent.)
-        app.chat_overscroll_last = None;
-        let after = render_and_snap(&app, &mut terminal);
-        let max_after = crate::tui::ui::last_max_scroll();
-        assert_eq!(
-            max_before, max_after,
-            "pad={pad}: the rebound must restore the pre-overscroll scroll \
-             extent (scrollbar/wrap stayed latched)"
-        );
-        let after_rows: Vec<&str> = after.lines().collect();
-        let body_after = body(&after_rows);
-        assert_eq!(
-            body_before, body_after,
-            "pad={pad}: transcript body rows did not return to their \
-             pre-overscroll content after the rebound:\nbefore:\n{before}\nafter:\n{after}"
-        );
-    }
-}
-
-
 /// End-to-end: a swarm notification carrying a sender-provided tldr renders
 /// collapsed (tldr + `▸ expand` badge, body hidden) through a REAL draw, and a
 /// left click on the badge expands it in place (body visible, `▾ collapse`
@@ -1846,4 +1674,48 @@ fn command_palette_open_does_not_move_existing_rows() {
         checked += 1;
     }
     assert!(checked >= 3, "expected transcript rows to sample:\n{before}");
+}
+
+#[test]
+fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    let mut msgs = Vec::new();
+    for i in 1..=4 {
+        msgs.push(DisplayMessage {
+            role: "user".to_string(),
+            content: format!("question number {i}"),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+        msgs.push(DisplayMessage {
+            role: "assistant".to_string(),
+            content: App::build_scroll_test_content(0, 12, None),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+    }
+    app.display_messages = msgs;
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+
+    let backend = ratatui::backend::TestBackend::new(60, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(!before.contains("question number 2"), "{before}");
+
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::ALT).unwrap();
+    let after = render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::ALT).unwrap();
+    assert!(after.contains("question number 2"), "{after}");
+    assert!(after.contains("question number 3"), "{after}");
 }

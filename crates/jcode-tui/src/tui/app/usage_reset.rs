@@ -1,16 +1,50 @@
 //! Session-local confirmation state. Credentials and redemption keys never enter the bus.
+//!
+//! Both OpenAI banked resets and Claude session-limit resets follow the same
+//! contract: a read-only check pins one login, the user reviews it, and only an
+//! explicit `confirm` spends the reset.
 use super::{App, DisplayMessage};
 use crate::tui::TuiState;
-use crate::usage::PendingOpenAiUsageReset;
+use crate::usage::{PendingAnthropicLimitReset, PendingOpenAiUsageReset};
 use tokio::sync::oneshot;
 
-const USAGE: &str = "Usage: /reset usage limits openai [confirm|cancel]";
+const USAGE: &str = "Usage: /reset usage limits <openai|claude> [confirm|cancel]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Provider {
+    OpenAi,
+    Claude,
+}
+
+impl Provider {
+    fn name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Claude => "Claude",
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::OpenAi => "/reset usage limits openai",
+            Self::Claude => "/reset usage limits claude",
+        }
+    }
+
+    fn reset_noun(self) -> &'static str {
+        match self {
+            Self::OpenAi => "usage reset",
+            Self::Claude => "session-limit reset",
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
-    Prepare,
-    Confirm,
-    Cancel,
+    /// `None` means bare `/reset`: pick the provider of the active login.
+    Prepare(Option<Provider>),
+    Confirm(Provider),
+    Cancel(Provider),
     Invalid,
 }
 
@@ -19,34 +53,90 @@ fn parse(input: &str) -> Option<Action> {
     if words.first().copied() != Some("/reset") {
         return None;
     }
+    let provider = |word: &str| match word.to_ascii_lowercase().as_str() {
+        "openai" | "codex" | "chatgpt" => Some(Provider::OpenAi),
+        "claude" | "anthropic" => Some(Provider::Claude),
+        _ => None,
+    };
     Some(match words.as_slice() {
         // The command palette offers /reset itself. It must open the read-only
         // review, not leave the user in a usage/confirm-without-pending loop.
-        ["/reset"] => Action::Prepare,
-        ["/reset", "usage", "limits", "openai"] => Action::Prepare,
-        ["/reset", "usage", "limits", "openai", "confirm"] => Action::Confirm,
-        ["/reset", "usage", "limits", "openai", "cancel"] => Action::Cancel,
+        ["/reset"] => Action::Prepare(None),
+        ["/reset", "usage", "limits", name] => match provider(name) {
+            Some(provider) => Action::Prepare(Some(provider)),
+            None => Action::Invalid,
+        },
+        ["/reset", "usage", "limits", name, "confirm"] => match provider(name) {
+            Some(provider) => Action::Confirm(provider),
+            None => Action::Invalid,
+        },
+        ["/reset", "usage", "limits", name, "cancel"] => match provider(name) {
+            Some(provider) => Action::Cancel(provider),
+            None => Action::Invalid,
+        },
         _ => Action::Invalid,
     })
 }
 
+/// A prepared, account-pinned redemption. Holds credentials, so it never
+/// leaves this module.
+#[derive(Clone, Debug)]
+pub(super) enum Pending {
+    OpenAi(Box<PendingOpenAiUsageReset>),
+    Claude(PendingAnthropicLimitReset),
+}
+
+impl Pending {
+    fn account_label(&self) -> Option<&str> {
+        match self {
+            Self::OpenAi(pending) => pending.account_label(),
+            Self::Claude(pending) => pending.account_label(),
+        }
+    }
+
+    fn confirmation_message(&self) -> String {
+        match self {
+            Self::OpenAi(pending) => pending.confirmation_message(),
+            Self::Claude(pending) => claude_confirmation_message(pending),
+        }
+    }
+}
+
+fn claude_confirmation_message(pending: &PendingAnthropicLimitReset) -> String {
+    let mut message = format!("Claude account: {}", pending.account_display());
+    for line in pending.confirmation_details() {
+        message.push('\n');
+        message.push_str(&line);
+    }
+    let command = Provider::Claude.command();
+    message.push_str(&format!(
+        "\nThis spends this week's session-limit reset and cannot be undone. It does not buy credits or raise your plan limits.\nConfirm: {command} confirm\nCancel: {command} cancel"
+    ));
+    message
+}
+
 #[derive(Debug)]
 enum Reply<P> {
-    Prepared(anyhow::Result<Option<P>>),
+    /// `Err(message)` means nothing can be claimed right now. Nothing changed.
+    Prepared(anyhow::Result<Result<P, String>>),
     Redeemed(anyhow::Result<String>),
 }
 
 #[derive(Debug)]
-pub(super) struct ResetState<P = PendingOpenAiUsageReset> {
+pub(super) struct ResetState<P = Pending> {
     pending: Option<P>,
+    /// Provider of the pending confirmation or the operation in flight.
+    provider: Provider,
     receiver: Option<oneshot::Receiver<Reply<P>>>,
     redeeming: bool,
     cancelled: bool,
     redeem_account: Option<String>,
     pub(super) refresh_usage: bool,
+    /// A request rejection outranks a usage endpoint still reporting headroom.
+    pub(super) openai_quota_rejected: bool,
     quota_refresh: Option<oneshot::Receiver<()>>,
     // Outer Some means invalidation is needed, inner None means the default account.
-    pub(super) invalidate_account: Option<Option<String>>,
+    pub(super) invalidate_account: Option<(Provider, Option<String>)>,
     pub(super) invalidate_requests: std::collections::HashMap<u64, Option<std::time::Instant>>,
 }
 
@@ -54,11 +144,13 @@ impl<P> Default for ResetState<P> {
     fn default() -> Self {
         Self {
             pending: None,
+            provider: Provider::OpenAi,
             receiver: None,
             redeeming: false,
             cancelled: false,
             redeem_account: None,
             refresh_usage: false,
+            openai_quota_rejected: false,
             quota_refresh: None,
             invalidate_account: None,
             invalidate_requests: Default::default(),
@@ -67,28 +159,46 @@ impl<P> Default for ResetState<P> {
 }
 
 impl<P> ResetState<P> {
+    pub(super) fn is_running(&self) -> bool {
+        self.receiver.is_some() || self.quota_refresh.is_some()
+    }
+
     fn finish(&mut self, reply: Reply<P>) -> String {
         self.receiver = None;
         self.redeeming = false;
+        let name = self.provider.name();
+        let noun = self.provider.reset_noun();
         match reply {
-            Reply::Prepared(Ok(pending)) => {
+            Reply::Prepared(Ok(result)) => {
                 if self.cancelled {
-                    return "OpenAI usage reset preparation cancelled.".into();
+                    return format!("{name} {noun} preparation cancelled.");
                 }
-                self.pending = pending;
-                "No banked OpenAI usage resets are available. No limits were changed.".into()
+                match result {
+                    Ok(pending) => {
+                        self.pending = Some(pending);
+                        format!("{name} {noun} is ready for review.")
+                    }
+                    Err(message) => {
+                        self.pending = None;
+                        format!("{message} No limits were changed.")
+                    }
+                }
             }
-            Reply::Prepared(Err(error)) => format!("Could not prepare OpenAI usage reset: {error}"),
+            Reply::Prepared(Err(error)) => format!("Could not prepare {name} {noun}: {error}"),
             Reply::Redeemed(Ok(message)) => {
                 self.pending = None;
                 message
             }
             Reply::Redeemed(Err(error)) => format!(
-                "OpenAI reset result is uncertain: {error}\n{}",
+                "{name} reset result is uncertain: {error}\n{}",
                 if self.pending.is_some() {
-                    "The same reset is still pending. Retry /reset usage limits openai confirm to reuse the same request, or cancel explicitly."
+                    format!(
+                        "The same reset is still pending. Retry {} confirm to reuse the same request, or cancel explicitly.",
+                        self.provider.command()
+                    )
                 } else {
                     "The pending reset was cancelled. Check /usage before preparing another reset."
+                        .to_string()
                 }
             ),
         }
@@ -110,74 +220,185 @@ fn is_hard_openai_quota_error(error: &str) -> bool {
     .any(|marker| error.contains(marker))
 }
 
+async fn prepare(provider: Provider) -> anyhow::Result<Result<Pending, String>> {
+    match provider {
+        Provider::OpenAi => Ok(crate::usage::prepare_openai_usage_reset()
+            .await?
+            .map(|pending| Pending::OpenAi(Box::new(pending)))
+            .ok_or_else(|| "No banked OpenAI usage resets are available.".to_string())),
+        Provider::Claude => Ok(crate::usage::prepare_anthropic_limit_reset(
+            crate::auth::claude::active_account_label(),
+        )
+        .await?
+        .map(Pending::Claude)
+        .map_err(|unavailable| unavailable.message())),
+    }
+}
+
+async fn redeem(pending: &Pending) -> anyhow::Result<String> {
+    match pending {
+        Pending::OpenAi(pending) => crate::usage::consume_openai_usage_reset(pending)
+            .await
+            .map(|outcome| outcome.message()),
+        Pending::Claude(pending) => crate::usage::consume_anthropic_limit_reset(pending)
+            .await
+            .map(|outcome| outcome.message()),
+    }
+}
+
 impl App {
     pub(super) fn refresh_openai_usage_after_quota_error(&mut self, error: &str) {
         if !is_hard_openai_quota_error(error)
-            || crate::tui::is_ssh_remote()
             || self.info_widget_data().auth_method
                 != crate::tui::info_widget::AuthMethod::OpenAIOAuth
-            || self.usage_reset.quota_refresh.is_some()
         {
+            return;
+        }
+        self.usage_reset.openai_quota_rejected = true;
+        if crate::tui::is_ssh_remote() || self.usage_reset.quota_refresh.is_some() {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let account = crate::auth::codex::active_account_label();
+        let email = self.openai_widget_account_email();
         let (sender, receiver) = oneshot::channel();
         self.usage_reset.quota_refresh = Some(receiver);
         runtime.spawn(async move {
-            // This invalidates quota snapshots only, never account cooldowns.
-            crate::usage::invalidate_openai_usage_cache(account.as_deref()).await;
+            // Refresh only a uniquely identified session account. The global
+            // active login may belong to an entirely different session.
+            if let Some(email) = email {
+                let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
+                let mut matches = accounts.iter().filter(|account| {
+                    account.email.as_deref().is_some_and(|candidate| {
+                        candidate.trim().eq_ignore_ascii_case(email.trim())
+                    })
+                });
+                if let Some(account) = matches.next()
+                    && matches.next().is_none()
+                {
+                    // Quota snapshots only, never provider cooldowns.
+                    crate::usage::invalidate_openai_usage_cache(Some(&account.label)).await;
+                }
+            }
             let _ = sender.send(());
         });
+    }
+
+    /// Bare `/reset` targets the provider of the active login. Claude logins
+    /// get the session-limit reset, everything else keeps the OpenAI default.
+    fn default_reset_provider(&self) -> Provider {
+        match self.info_widget_data().auth_method {
+            crate::tui::info_widget::AuthMethod::AnthropicOAuth => Provider::Claude,
+            _ => Provider::OpenAi,
+        }
     }
 
     pub(super) fn handle_usage_reset_command(&mut self, input: &str) -> bool {
         let Some(action) = parse(input) else {
             return false;
         };
-        let message = match action {
-            Action::Invalid => USAGE.to_string(),
-            Action::Cancel if self.usage_reset.redeeming => {
-                "The confirmed reset is already in flight and cannot be cancelled. Wait for its result before cancelling the pending confirmation.".into()
+        let action = match action {
+            Action::Prepare(None) => {
+                // A pending review or in-flight check stays the target of a bare /reset.
+                let provider =
+                    if self.usage_reset.pending.is_some() || self.usage_reset.receiver.is_some() {
+                        self.usage_reset.provider
+                    } else {
+                        self.default_reset_provider()
+                    };
+                Action::Prepare(Some(provider))
             }
-            Action::Cancel => {
+            action => action,
+        };
+        let current = self.usage_reset.provider;
+        let busy = self.usage_reset.receiver.is_some();
+        let has_pending = self.usage_reset.pending.is_some();
+        let message = match action {
+            // Bare /reset is resolved to a provider above.
+            Action::Invalid | Action::Prepare(None) => USAGE.to_string(),
+            Action::Cancel(provider) if self.usage_reset.redeeming => format!(
+                "The confirmed {} reset is already in flight and cannot be cancelled. Wait for its result before cancelling the pending confirmation.",
+                if provider == current {
+                    provider.name()
+                } else {
+                    current.name()
+                }
+            ),
+            Action::Cancel(provider) if (has_pending || busy) && provider != current => format!(
+                "No {} reset is pending. The pending {} reset is unchanged.",
+                provider.name(),
+                current.name()
+            ),
+            Action::Cancel(provider) => {
                 self.usage_reset.pending = None;
                 self.usage_reset.cancelled = true;
-                "OpenAI usage reset confirmation cleared. This does not undo any reset already requested. Check /usage before preparing another reset.".into()
+                format!(
+                    "{} {} confirmation cleared. This does not undo any reset already requested. Check /usage before preparing another reset.",
+                    provider.name(),
+                    provider.reset_noun()
+                )
             }
-            Action::Prepare if self.usage_reset.pending.is_some() => {
-                self.usage_reset.pending.as_ref().unwrap().confirmation_message()
-            }
-            _ if self.usage_reset.receiver.is_some() => {
-                "An OpenAI usage reset operation is already in flight. Please wait.".into()
-            }
-            Action::Confirm if self.usage_reset.pending.is_none() => {
-                "No OpenAI reset is pending. First run /reset usage limits openai and review the confirmation.".into()
-            }
-            Action::Prepare | Action::Confirm => {
+            Action::Prepare(Some(provider)) if has_pending && provider == current => self
+                .usage_reset
+                .pending
+                .as_ref()
+                .unwrap()
+                .confirmation_message(),
+            _ if busy => format!(
+                "A {} reset operation is already in flight. Please wait.",
+                current.name()
+            ),
+            Action::Prepare(Some(provider)) if has_pending => format!(
+                "A {} reset is still pending review. Run {} cancel before checking {} resets.",
+                current.name(),
+                current.command(),
+                provider.name()
+            ),
+            Action::Confirm(provider) if !has_pending || provider != current => format!(
+                "No {} reset is pending. First run {} and review the confirmation.",
+                provider.name(),
+                provider.command()
+            ),
+            Action::Prepare(Some(provider)) | Action::Confirm(provider) => {
                 let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-                    self.push_display_message(DisplayMessage::error("OpenAI usage reset requires an active async runtime."));
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "{} {} requires an active async runtime.",
+                        provider.name(),
+                        provider.reset_noun()
+                    )));
                     return true;
                 };
                 let (sender, receiver) = oneshot::channel();
+                self.usage_reset.provider = provider;
                 self.usage_reset.receiver = Some(receiver);
                 self.usage_reset.cancelled = false;
                 let pending = self.usage_reset.pending.clone();
-                let redeeming = action == Action::Confirm;
+                let redeeming = matches!(action, Action::Confirm(_));
                 self.usage_reset.redeeming = redeeming;
-                self.usage_reset.redeem_account = pending.as_ref().and_then(|pending| pending.account_label().map(str::to_owned));
+                self.usage_reset.redeem_account = pending
+                    .as_ref()
+                    .and_then(|pending| pending.account_label().map(str::to_owned));
                 runtime.spawn(async move {
                     let reply = if let Some(pending) = pending {
-                        Reply::Redeemed(crate::usage::consume_openai_usage_reset(&pending).await.map(|outcome| outcome.message()))
+                        Reply::Redeemed(redeem(&pending).await)
                     } else {
-                        Reply::Prepared(crate::usage::prepare_openai_usage_reset().await)
+                        Reply::Prepared(prepare(provider).await)
                     };
                     let _ = sender.send(reply);
                 });
-                if redeeming { "Requesting the confirmed OpenAI usage reset...".into() }
-                else { "Checking available banked OpenAI usage resets (read-only)...".into() }
+                match (redeeming, provider) {
+                    (true, provider) => {
+                        format!("Requesting the confirmed {} reset...", provider.name())
+                    }
+                    (false, Provider::OpenAi) => {
+                        "Checking available banked OpenAI usage resets (read-only)...".into()
+                    }
+                    (false, Provider::Claude) => {
+                        "Checking the Claude session-limit reset for this login (read-only)..."
+                            .into()
+                    }
+                }
             }
         };
         self.push_display_message(DisplayMessage::system(message));
@@ -191,8 +412,9 @@ impl App {
                 Err(oneshot::error::TryRecvError::Empty)
             )
         {
+            // Only the cached snapshot is refreshed. Never pop an unrequested
+            // usage card into the transcript after a quota error.
             self.usage_reset.quota_refresh = None;
-            self.usage_reset.refresh_usage = true;
         }
         // A report already in flight may have read pre-reset state. Queue a fresh
         // report after it completes instead of silently dropping the refresh.
@@ -217,7 +439,10 @@ impl App {
         };
         let redeemed = matches!(reply, Reply::Redeemed(_));
         if redeemed && self.is_remote {
-            self.usage_reset.invalidate_account = Some(self.usage_reset.redeem_account.take());
+            self.usage_reset.invalidate_account = Some((
+                self.usage_reset.provider,
+                self.usage_reset.redeem_account.take(),
+            ));
         }
         let message = self.usage_reset.finish(reply);
         let message = if !redeemed {
@@ -246,28 +471,85 @@ mod tests {
     fn usage_reset_parser_claims_malformed_commands() {
         for input in [
             "/reset usage",
-            "/reset usage limits claude",
+            "/reset usage limits gemini",
             "/reset usage limits openai confirm extra",
+            "/reset usage limits claude now",
         ] {
             assert_eq!(parse(input), Some(Action::Invalid));
         }
-        assert_eq!(parse("/reset"), Some(Action::Prepare));
-        assert_eq!(parse("/reset usage limits openai"), Some(Action::Prepare));
+        assert_eq!(parse("/reset"), Some(Action::Prepare(None)));
+        assert_eq!(
+            parse("/reset usage limits openai"),
+            Some(Action::Prepare(Some(Provider::OpenAi)))
+        );
         assert_eq!(
             parse("/reset usage limits openai confirm"),
-            Some(Action::Confirm)
+            Some(Action::Confirm(Provider::OpenAi))
         );
         assert_eq!(
             parse("/reset usage limits openai cancel"),
-            Some(Action::Cancel)
+            Some(Action::Cancel(Provider::OpenAi))
+        );
+        assert_eq!(
+            parse("/reset usage limits claude"),
+            Some(Action::Prepare(Some(Provider::Claude)))
+        );
+        assert_eq!(
+            parse("/reset usage limits Anthropic confirm"),
+            Some(Action::Confirm(Provider::Claude))
+        );
+        assert_eq!(
+            parse("/reset usage limits claude cancel"),
+            Some(Action::Cancel(Provider::Claude))
         );
         assert_eq!(parse("/resetting"), None);
     }
 
     #[test]
+    fn claude_confirm_requires_a_claude_review_not_an_openai_one() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        assert!(app.handle_usage_reset_command("/reset usage limits claude confirm"));
+        assert!(app.usage_reset.receiver.is_none());
+        let last = &app.display_messages.last().unwrap().content;
+        assert!(last.contains("No Claude reset is pending"), "{last}");
+        assert!(last.contains("/reset usage limits claude"), "{last}");
+    }
+
+    #[test]
+    fn unavailable_claude_reset_is_reported_without_pending_state() {
+        let mut state = ResetState::<String> {
+            provider: Provider::Claude,
+            ..Default::default()
+        };
+        let message = state.finish(Reply::Prepared(Ok(Err(
+            "A session-limit reset isn't available right now.".into(),
+        ))));
+        assert!(state.pending.is_none());
+        assert!(message.contains("isn't available"));
+        assert!(message.contains("No limits were changed"));
+    }
+
+    #[test]
+    fn claude_uncertain_result_points_at_the_claude_retry_command() {
+        let mut state = ResetState::<String> {
+            provider: Provider::Claude,
+            pending: Some("pinned".into()),
+            ..Default::default()
+        };
+        let message = state.finish(Reply::Redeemed(Err(anyhow::anyhow!("timeout"))));
+        assert_eq!(state.pending.as_deref(), Some("pinned"));
+        assert!(
+            message.contains("/reset usage limits claude confirm"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn usage_reset_uncertain_result_preserves_exact_pending_request() {
-        let mut state = ResetState::<String>::default();
-        state.pending = Some("same-account-credit-and-uuid".into());
+        let mut state = ResetState::<String> {
+            pending: Some("same-account-credit-and-uuid".into()),
+            ..Default::default()
+        };
         state.finish(Reply::Redeemed(Err(anyhow::anyhow!("timeout"))));
         assert_eq!(
             state.pending.as_deref(),
@@ -279,9 +561,11 @@ mod tests {
 
     #[test]
     fn usage_reset_cancelled_prepare_cannot_restore_pending() {
-        let mut state = ResetState::<String>::default();
-        state.cancelled = true;
-        state.finish(Reply::Prepared(Ok(Some("discarded".into()))));
+        let mut state = ResetState::<String> {
+            cancelled: true,
+            ..Default::default()
+        };
+        state.finish(Reply::Prepared(Ok(Ok("discarded".into()))));
         assert!(state.pending.is_none());
         assert!(state.receiver.is_none());
     }
@@ -329,7 +613,9 @@ mod tests {
                 .contains("already in flight")
         );
         app.input = "unfinished user draft".into();
-        sender.send(Reply::Prepared(Ok(None))).unwrap();
+        sender
+            .send(Reply::Prepared(Ok(Err("none".into()))))
+            .unwrap();
         assert!(app.poll_usage_reset());
         assert_eq!(app.input, "unfinished user draft");
         assert!(app.usage_reset.pending.is_none());
@@ -392,7 +678,7 @@ mod tests {
         assert!(app.accept_selected_command_suggestion());
         assert_eq!(app.input, "/reset");
         assert!(!app.accept_selected_command_suggestion());
-        assert_eq!(parse(&app.input), Some(Action::Prepare));
+        assert_eq!(parse(&app.input), Some(Action::Prepare(None)));
         // Without a runtime this exercises dispatch without any network I/O.
         assert!(super::super::commands_dispatch::dispatch_local_command(
             &mut app, "/reset"
@@ -414,7 +700,10 @@ mod tests {
         for input in ["/reset usage limits openai", "/reset usage limits openai "] {
             app.input = input.into();
             assert!(!app.accept_selected_command_suggestion());
-            assert_eq!(parse(&app.input), Some(Action::Prepare));
+            assert_eq!(
+                parse(&app.input),
+                Some(Action::Prepare(Some(Provider::OpenAi)))
+            );
         }
     }
 
@@ -432,6 +721,146 @@ mod tests {
         assert!(!is_hard_openai_quota_error("429 too many requests"));
         assert!(!is_hard_openai_quota_error("tokens per minute rate limit"));
         assert!(!is_hard_openai_quota_error("TPM quota exceeded"));
+    }
+
+    fn openai_oauth_app() -> App {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".into());
+        app.remote_provider_model = Some("gpt-5.4".into());
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+        app
+    }
+
+    #[test]
+    fn quota_rejection_overrides_widget_even_without_runtime_or_usage_snapshot() {
+        let mut app = openai_oauth_app();
+        app.refresh_openai_usage_after_quota_error("usage_limit_reached");
+        assert!(app.usage_reset.openai_quota_rejected);
+        let data = app.info_widget_data();
+        let usage = data.usage_info.as_ref().unwrap();
+        assert!(usage.limit_reached);
+        assert!(data.has_data_for(crate::tui::info_widget::WidgetKind::UsageLimits));
+        assert!(app.usage_reset.quota_refresh.is_none());
+    }
+
+    #[test]
+    fn transient_rate_limit_and_api_key_quota_do_not_block_subscription_widget() {
+        let mut app = openai_oauth_app();
+        app.refresh_openai_usage_after_quota_error("429 too many requests");
+        assert!(!app.usage_reset.openai_quota_rejected);
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+        app.refresh_openai_usage_after_quota_error("insufficient_quota");
+        assert!(!app.usage_reset.openai_quota_rejected);
+        assert!(!app.info_widget_data().usage_info.unwrap().limit_reached);
+    }
+
+    #[test]
+    fn successful_answer_clears_observed_quota_rejection() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut app = openai_oauth_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.refresh_openai_usage_after_quota_error("usage_limit_reached");
+        app.append_streaming_text("Synthetic status text");
+        assert!(app.usage_reset.openai_quota_rejected);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::TextDelta {
+                text: "Request now succeeds".into(),
+            },
+            &mut remote,
+        );
+        assert!(!app.usage_reset.openai_quota_rejected);
+        assert!(!app.info_widget_data().usage_info.unwrap().limit_reached);
+    }
+
+    #[test]
+    fn remote_widget_without_selected_identity_does_not_borrow_global_quota() {
+        let app = openai_oauth_app();
+        assert!(app.openai_widget_account_email().is_none());
+        let usage = app.info_widget_data().usage_info.unwrap();
+        assert!(!usage.available);
+        assert!(usage.primary_limit_label.is_none());
+        assert!(usage.secondary_limit_label.is_none());
+    }
+
+    #[test]
+    fn quota_rejection_survives_route_replay_and_failed_switch_but_not_new_route() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut app = openai_oauth_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.refresh_openai_usage_after_quota_error("usage_limit_reached");
+        for (model, error, rejected) in [
+            ("gpt-5.4", None, true),
+            ("gpt-5.5", Some("switch failed"), true),
+            ("gpt-5.5", None, false),
+        ] {
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ModelChanged {
+                    id: 0,
+                    model: model.into(),
+                    provider_name: Some("OpenAI".into()),
+                    error: error.map(str::to_string),
+                    provider_oauth_email: None,
+                    provider_oauth_account_label: None,
+                    resolved_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+                    reasoning_effort: None,
+                    context_window: None,
+                },
+                &mut remote,
+            );
+            assert_eq!(app.usage_reset.openai_quota_rejected, rejected);
+        }
+    }
+
+    #[test]
+    fn redeemed_claude_reset_invalidates_daemon_claude_state_for_pinned_account() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = BufReader::new(reader);
+
+            // Simulate a confirmed Claude claim pinned to a stored login.
+            let (sender, receiver) = oneshot::channel();
+            app.usage_reset.provider = Provider::Claude;
+            app.usage_reset.receiver = Some(receiver);
+            app.usage_reset.redeeming = true;
+            app.usage_reset.redeem_account = Some("work".into());
+            sender
+                .send(Reply::Redeemed(Ok("Claude session limit reset.".into())))
+                .unwrap();
+
+            crate::tui::app::remote::handle_tick(&mut app, &mut remote).await;
+            assert!(app.usage_reset.invalidate_account.is_none());
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("invalidation request sent")
+            .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(value["type"], "invalidate_anthropic_usage", "{line}");
+            assert_eq!(value["account_label"], "work");
+            let id = value["id"].as_u64().unwrap();
+            assert!(app.usage_reset.invalidate_requests.contains_key(&id));
+
+            // The daemon acknowledgement refreshes usage and never ends a turn.
+            app.is_processing = true;
+            assert!(
+                app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote)
+            );
+            assert!(app.is_processing);
+            assert!(app.usage_reset.invalidate_requests.is_empty());
+            assert!(app.usage_reset.refresh_usage);
+        });
     }
 
     #[test]

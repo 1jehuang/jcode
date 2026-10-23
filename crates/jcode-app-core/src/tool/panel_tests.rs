@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 use crate::side_panel::SidePanelSnapshot;
 
@@ -11,6 +12,23 @@ fn context(dir: &std::path::Path, session: &str) -> ToolContext {
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
     }
+}
+
+#[tokio::test]
+async fn panel_visibility_follows_implementation_not_registry_name() {
+    let registry = super::super::Registry::empty();
+    registry
+        .register(
+            "legacy_alias".into(),
+            std::sync::Arc::new(super::super::side_panel::SidePanelTool::new()),
+        )
+        .await;
+    registry
+        .register("side_panel".into(), std::sync::Arc::new(PanelTool::new()))
+        .await;
+    let definitions = registry.definitions(None).await;
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].name, "side_panel");
 }
 
 #[tokio::test]
@@ -36,12 +54,33 @@ async fn panel_registered_lifecycle_and_validation() {
     assert!(registry.tools.read().await.contains_key("side_panel"));
     assert!(registry.tools.read().await.contains_key("panel"));
     let definitions = registry.definitions(None).await;
+    assert!(!definitions.iter().any(|d| d.name == "side_panel"));
+    let allowed = ["panel".to_string(), "side_panel".to_string()]
+        .into_iter()
+        .collect();
+    let allowed_definitions = registry.definitions(Some(&allowed)).await;
+    assert_eq!(allowed_definitions.len(), 1);
+    assert_eq!(allowed_definitions[0].name, "panel");
+    assert!(
+        !registry
+            .definitions_for_session("panel-test")
+            .await
+            .iter()
+            .any(|d| d.name == "side_panel")
+    );
     let definition = definitions
         .iter()
         .find(|d| d.name == "panel")
         .expect("model-visible panel definition");
     assert!(definition.description.contains("desktop panels"));
     let mut events = crate::bus::Bus::global().subscribe();
+    // Another session's event may arrive before this test's panel write.
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::SidePanelUpdated(
+        crate::bus::SidePanelUpdated {
+            session_id: "other-panel-test".into(),
+            snapshot: SidePanelSnapshot::default(),
+        },
+    ));
     let first = registry
         .execute(
             "panel",
@@ -55,9 +94,14 @@ async fn panel_registered_lifecycle_and_validation() {
     assert!(first.output.contains(&format!(
         "panel_id: {id}\nidentity: side-panel://panel-test/{id}"
     )));
-    assert!(
-        matches!(events.try_recv().unwrap(), crate::bus::BusEvent::SidePanelUpdated(update) if update.snapshot == first_state)
-    );
+    // The bus is process-global: concurrent tests publish on it too, so search, don't take the head.
+    let mut saw_first = false;
+    while let Ok(event) = events.try_recv() {
+        if let crate::bus::BusEvent::SidePanelUpdated(update) = event {
+            saw_first |= update.snapshot == first_state;
+        }
+    }
+    assert!(saw_first, "the first panel write must publish its snapshot");
     let second = registry
         .execute(
             "panel",

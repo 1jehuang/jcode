@@ -8,6 +8,33 @@ pub(super) const OBSERVE_PAGE_ID: &str = "observe";
 const OBSERVE_PAGE_TITLE: &str = "Observe";
 
 impl App {
+    /// Absolute paths the agent edited this session, for the Changes widget.
+    /// Derived from the transcript's edit-style tool calls so it also covers
+    /// resumed and remote sessions; recomputed only when messages change.
+    pub(super) fn agent_edited_paths(
+        &self,
+    ) -> std::sync::Arc<std::collections::HashSet<std::path::PathBuf>> {
+        let version = self.display_messages_version;
+        if let Some((cached_version, set)) = self.agent_edited_cache.borrow().as_ref()
+            && *cached_version == version
+        {
+            return set.clone();
+        }
+        let working_dir = self.session.working_dir.as_deref();
+        let set: std::collections::HashSet<std::path::PathBuf> = self
+            .display_messages
+            .iter()
+            .filter_map(|m| m.tool_data.as_ref())
+            .flat_map(|tool| {
+                crate::tui::info_widget::edited_paths_from_tool_call(&tool.name, &tool.input)
+            })
+            .map(|p| crate::tui::info_widget::resolve_edited_path(&p, working_dir))
+            .collect();
+        let set = std::sync::Arc::new(set);
+        *self.agent_edited_cache.borrow_mut() = Some((version, set.clone()));
+        set
+    }
+
     pub(super) fn observe_mode_enabled(&self) -> bool {
         self.observe_mode_enabled
     }
@@ -17,6 +44,10 @@ impl App {
     }
 
     pub(super) fn set_observe_mode_enabled(&mut self, enabled: bool, focus: bool) {
+        if enabled && focus {
+            self.side_panel_user_hidden = false;
+            self.side_panel_explicit_hidden = false;
+        }
         self.observe_mode_enabled = enabled;
         let mut snapshot = self.snapshot_without_observe();
         if enabled {
@@ -63,7 +94,7 @@ impl App {
     /// React to a completed tool by forcing the info-widget caches it may have
     /// dirtied to refetch on the next frame, instead of waiting out their TTLs.
     ///
-    /// The info widget's git-status and todos panels are stale-while-revalidate
+    /// The info widget's git-status panel is stale-while-revalidate
     /// caches (5s / 1s TTL). The agent's own tools are exactly what mutate those
     /// underlying sources, so without an explicit nudge the widget would show the
     /// repo/todo state from *before* the tool ran for a full TTL. This keeps the

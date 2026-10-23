@@ -7,9 +7,8 @@ use std::path::PathBuf;
 pub const MAX_SWARM_COMPLETION_REPORT_CHARS: usize = 4000;
 pub const SWARM_COMPLETION_REPORT_MARKER: &str = "SWARM COMPLETION REPORT REQUIRED";
 
-/// Message/report bodies longer than this require a sender-provided `tldr`
-/// so receiving UIs can render them collapsed to one line with an expand
-/// control instead of dumping the full body into the transcript.
+/// Message/report bodies longer than this get a derived preview when the sender
+/// omits `tldr`, so receiving UIs can still collapse them with an expand control.
 pub const SWARM_TLDR_REQUIRED_OVER_CHARS: usize = 240;
 
 /// Recommended upper bound for a sender-provided `tldr`, not a hard limit.
@@ -19,13 +18,13 @@ pub const MAX_SWARM_TLDR_CHARS: usize = 200;
 /// Validate a sender-provided `tldr` against the message body it summarizes.
 ///
 /// Returns the normalized (trimmed, whitespace-collapsed) tldr when present,
-/// `Ok(None)` when the body is short enough to not need one, and a
-/// human/model-actionable error when a long body is missing a tldr.
-/// Overlong summaries are preserved rather than rejecting the message.
+/// `Ok(None)` when the body is short enough to not need one, and a derived
+/// preview when a long body is missing a tldr. Missing or overlong summaries
+/// must never block delivery. The result signature is retained for compatibility.
 pub fn validate_swarm_tldr(
     tldr: Option<&str>,
     body: &str,
-    context: &str,
+    _context: &str,
 ) -> Result<Option<String>, String> {
     let normalized = tldr
         .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -37,12 +36,8 @@ pub fn validate_swarm_tldr(
 
     let body_chars = body.chars().count();
     if body_chars > SWARM_TLDR_REQUIRED_OVER_CHARS {
-        return Err(format!(
-            "'tldr' is required for {context} because the body is {body_chars} chars \
-             (over {SWARM_TLDR_REQUIRED_OVER_CHARS}). Add a one-line 'tldr' (under \
-             {MAX_SWARM_TLDR_CHARS} chars) summarizing it; recipients see the tldr \
-             collapsed with an expand control."
-        ));
+        let preview = truncate_detail(body, MAX_SWARM_TLDR_CHARS);
+        return Ok((!preview.is_empty()).then_some(preview));
     }
 
     Ok(None)
@@ -367,130 +362,6 @@ Do not send a separate DM for the final report unless you need interactive coord
     out
 }
 
-/// Idempotency marker for [`append_deep_node_instructions`].
-pub const SWARM_DEEP_NODE_MARKER: &str = "DEEP TASK GRAPH NODE";
-
-/// Append the deep-mode execution contract to a task-graph node assignment.
-///
-/// Deep mode's comprehensiveness is structural: it only materializes when every
-/// worker knows it can decompose its node into parallel children and must close
-/// its node with a typed artifact. A freshly spawned worker has none of that
-/// context (the seeding session's `swarm-deep` directive is not inherited), so
-/// without this the budget goes unused: workers grind through nodes serially
-/// and auto-complete without artifacts, silently downgrading deep mode to
-/// light. This directive travels with the assignment itself, so it reaches
-/// every worker at any spawn depth. Idempotent via [`SWARM_DEEP_NODE_MARKER`].
-pub fn append_deep_node_instructions(message: &str, node_id: &str) -> String {
-    if message.contains(SWARM_DEEP_NODE_MARKER) {
-        return message.to_string();
-    }
-
-    let explicitly_non_expandable = message
-        .to_ascii_lowercase()
-        .contains("do not expand this node");
-
-    let mut out = message.trim_end().to_string();
-    if !out.is_empty() {
-        out.push_str("\n\n");
-    }
-    out.push_str("<system-reminder>\n");
-    out.push_str(SWARM_DEEP_NODE_MARKER);
-    if explicitly_non_expandable {
-        out.push_str(&format!(
-            "\nYou are executing node '{node_id}' of a deep task graph. The planner explicitly marked this node as bounded and non-expandable. Do NOT call expand_node, even if the node contains multiple concerns. Execute the assigned scope atomically, then call the swarm tool with action=\"complete_node\", node_id=\"{node_id}\", and a typed artifact containing findings, evidence (file:line refs), validation, open_questions, a REQUIRED confidence (low, medium, or high), and an honest what_i_did_not_check list. A turn that ends without complete_node gets re-queued and may fail.\n"
-        ));
-        out.push_str("</system-reminder>");
-        return out;
-    }
-    out.push_str(&format!(
-        "\nYou are executing node '{node_id}' of a deep task graph with a configurable parallel agent \
-budget (32 live workers by default, with a hard maximum of {MAX_SWARM_MEMBERS}; use available \
-parallelism deliberately, but do not spawn redundant agents). \
-Choose one of exactly two finishes for this node:\n\
-1. Decompose for parallelism: if this node contains more than one independently checkable \
-concern, do NOT work through it serially. Call the swarm tool with action=\"expand_node\", \
-node_id=\"{node_id}\", and MANY independent children (add depends_on edges only for real data \
-dependencies, so the ready set stays wide). Then finish your turn; the children fan out to \
-parallel agents and you will be re-woken to synthesize their results.\n\
-2. Execute atomically: do the work, then call the swarm tool with action=\"complete_node\", \
-node_id=\"{node_id}\", and a typed artifact: findings, evidence (file:line refs), validation, \
-open_questions, a REQUIRED confidence (low, medium, or high; report low honestly, it routes \
-follow-up work to shore up your scope instead of counting against you), and an honest \
-what_i_did_not_check (the critique gate turns those into new nodes, so listing them is how \
-coverage grows).\n\
-These are the ONLY two ways this node can close: a turn that ends without expand_node or \
-complete_node gets the node re-queued to a fresh agent, and a repeat fails it.\n"
-    ));
-    out.push_str("</system-reminder>");
-    out
-}
-
-/// Append the deep-mode gate contract to a critique/verify gate assignment.
-///
-/// Gates are the adversarial half of deep mode: they exist to spend budget on
-/// gaps. A gate that just rubber-stamps its parent wastes the swarm's capacity,
-/// so the directive names the two legal finishes (`inject_gap` with new nodes,
-/// or `complete_node` when genuinely clean) and reminds the gate to mine the
-/// children's `what_i_did_not_check` lists. `audited_ids` is the gate's audit
-/// scope: the server rejects a pass whose artifact does not account for each of
-/// these ids by name (enumerated accounting is what separates an audit from a
-/// rubber stamp), so the directive lists them up front. `low_confidence_siblings`
-/// are completed scope nodes whose artifacts self-reported low confidence: the
-/// strictest debts, named as priority probe targets. Shares the idempotency
-/// marker with [`append_deep_node_instructions`] since a single assignment gets
-/// exactly one deep directive.
-pub fn append_deep_gate_instructions(
-    message: &str,
-    gate_id: &str,
-    audited_ids: &[String],
-    low_confidence_siblings: &[String],
-) -> String {
-    if message.contains(SWARM_DEEP_NODE_MARKER) {
-        return message.to_string();
-    }
-
-    let mut out = message.trim_end().to_string();
-    if !out.is_empty() {
-        out.push_str("\n\n");
-    }
-    out.push_str("<system-reminder>\n");
-    out.push_str(SWARM_DEEP_NODE_MARKER);
-    out.push_str(&format!(
-        "\nYou are executing critique/verify gate '{gate_id}' of a deep task graph. Your job is \
-to find gaps, not to pass work through. Read every audited artifact, especially each \
-what_i_did_not_check list, and probe them. Finish in one of exactly two ways:\n\
-1. Gaps or failures found: call the swarm tool with action=\"inject_gap\", \
-gate_id=\"{gate_id}\", and one new node per gap (they run in parallel and you re-run \
-afterwards). The parent cannot close until they drain, so be thorough now. Injecting nodes \
-is SUCCESS for a gate, not failure: a growing graph is the system working.\n\
-2. Genuinely clean: call the swarm tool with action=\"complete_node\", node_id=\"{gate_id}\", \
-and an artifact whose findings account for EVERY node you audited BY ID with what you \
-checked and why no gaps remain. The server rejects a pass whose findings/open_questions \
-do not name each audited node id.\n"
-    ));
-    if !audited_ids.is_empty() {
-        out.push_str(&format!(
-            "AUDIT SCOPE: you are auditing node(s) [{}]. A passing artifact must address each \
-of these ids explicitly.\n",
-            audited_ids.join(", ")
-        ));
-    }
-    if !low_confidence_siblings.is_empty() {
-        out.push_str(&format!(
-            "PRIORITY: sibling node(s) [{}] completed with LOW confidence. The server will \
-REJECT your pass unless you either inject follow-up nodes that shore up that work, or name \
-each of those ids in your artifact findings with why the low confidence is acceptable. \
-Injecting follow-ups adds breadth but does not erase the record: when you re-run after they \
-drain, your passing artifact must STILL name each low-confidence id (e.g. 'X was shored up \
-by Y').\n",
-            low_confidence_siblings.join(", ")
-        ));
-    }
-    out.push_str("Do not pass the gate without doing one of these.\n");
-    out.push_str("</system-reminder>");
-    out
-}
-
 pub fn format_structured_completion_report(
     message: &str,
     validation: Option<&str>,
@@ -635,11 +506,41 @@ mod tests {
     }
 
     #[test]
-    fn validate_swarm_tldr_requires_tldr_for_long_body() {
-        let body = "x".repeat(SWARM_TLDR_REQUIRED_OVER_CHARS + 1);
-        let err = validate_swarm_tldr(None, &body, "this DM").unwrap_err();
-        assert!(err.contains("'tldr' is required"), "{err}");
-        assert!(err.contains("this DM"), "{err}");
+    fn validate_swarm_tldr_derives_preview_for_long_body() {
+        for length in [241, 244, 4000] {
+            let body = "界".repeat(length);
+            for context in [
+                "this DM",
+                "this message",
+                "this broadcast",
+                "this channel message",
+                "this report",
+            ] {
+                let preview = validate_swarm_tldr(None, &body, context).unwrap().unwrap();
+                assert_eq!(
+                    preview,
+                    format!("{}...", "界".repeat(MAX_SWARM_TLDR_CHARS - 3))
+                );
+                assert_eq!(body.chars().count(), length);
+            }
+        }
+    }
+
+    #[test]
+    fn validate_swarm_tldr_fallback_collapses_whitespace() {
+        let body = format!("  hello\n\tworld{}", " ".repeat(240));
+        assert_eq!(
+            validate_swarm_tldr(None, &body, "this DM"),
+            Ok(Some("hello world".into()))
+        );
+        assert_eq!(
+            validate_swarm_tldr(None, &" ".repeat(241), "this DM"),
+            Ok(None)
+        );
+        assert_eq!(
+            validate_swarm_tldr(None, &"界".repeat(240), "this DM"),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -677,7 +578,10 @@ mod tests {
     #[test]
     fn validate_swarm_tldr_blank_tldr_counts_as_missing() {
         let body = "x".repeat(SWARM_TLDR_REQUIRED_OVER_CHARS + 1);
-        assert!(validate_swarm_tldr(Some("   "), &body, "this DM").is_err());
+        assert_eq!(
+            validate_swarm_tldr(Some(" \n\t "), &body, "this DM"),
+            validate_swarm_tldr(None, &body, "this DM")
+        );
         assert_eq!(
             validate_swarm_tldr(Some("   "), "short", "this DM"),
             Ok(None)
@@ -703,74 +607,6 @@ mod tests {
             append_swarm_completion_report_instructions(&with_instructions),
             with_instructions
         );
-    }
-
-    #[test]
-    fn deep_node_instructions_carry_expand_and_artifact_contract() {
-        let out = append_deep_node_instructions("Investigate the parser", "explore.parser");
-        assert!(out.starts_with("Investigate the parser"));
-        assert!(out.contains(SWARM_DEEP_NODE_MARKER));
-        // The two legal finishes must both name the node id explicitly.
-        assert!(out.contains("action=\"expand_node\", node_id=\"explore.parser\""));
-        assert!(out.contains("action=\"complete_node\", node_id=\"explore.parser\""));
-        // The budget is advertised so workers know fan-out is expected.
-        assert!(out.contains(&MAX_SWARM_MEMBERS.to_string()));
-        assert!(out.contains("what_i_did_not_check"));
-        // Idempotent: re-appending (even with a different id) is a no-op.
-        assert_eq!(append_deep_node_instructions(&out, "other"), out);
-    }
-
-    #[test]
-    fn deep_node_instructions_honor_explicit_non_expansion_marker() {
-        let out = append_deep_node_instructions(
-            "Audit the bounded surface. Do not expand this node.",
-            "audit.bounded",
-        );
-
-        assert!(out.contains("bounded and non-expandable"));
-        assert!(out.contains("Do NOT call expand_node"));
-        assert!(!out.contains("action=\"expand_node\""));
-        assert!(out.contains("action=\"complete_node\", node_id=\"audit.bounded\""));
-        assert!(out.contains("what_i_did_not_check"));
-    }
-
-    #[test]
-    fn deep_gate_instructions_carry_inject_gap_contract() {
-        let out = append_deep_gate_instructions("Critique the work", "root::gate", &[], &[]);
-        assert!(out.contains(SWARM_DEEP_NODE_MARKER));
-        assert!(out.contains("action=\"inject_gap\", gate_id=\"root::gate\""));
-        assert!(out.contains("action=\"complete_node\", node_id=\"root::gate\""));
-        assert!(out.contains("what_i_did_not_check"));
-        // No audit scope / low-confidence siblings: no callouts.
-        assert!(!out.contains("AUDIT SCOPE"));
-        assert!(!out.contains("PRIORITY"));
-        // Shares the marker with the node directive: one deep directive per assignment.
-        assert_eq!(
-            append_deep_gate_instructions(&out, "root::gate", &[], &[]),
-            out
-        );
-        assert_eq!(append_deep_node_instructions(&out, "root::gate"), out);
-    }
-
-    #[test]
-    fn deep_gate_instructions_enumerate_audit_scope() {
-        let scope = vec!["root.a".to_string(), "root.b".to_string()];
-        let out = append_deep_gate_instructions("Critique the work", "root::gate", &scope, &[]);
-        assert!(out.contains("AUDIT SCOPE"));
-        assert!(out.contains("root.a, root.b"));
-        // The coverage contract is stated: each id must be addressed.
-        assert!(out.contains("address each"));
-    }
-
-    #[test]
-    fn deep_gate_instructions_name_low_confidence_probe_targets() {
-        let shaky = vec!["root.shaky".to_string(), "root.wobble".to_string()];
-        let out = append_deep_gate_instructions("Critique the work", "root::gate", &shaky, &shaky);
-        assert!(out.contains("PRIORITY"));
-        assert!(out.contains("root.shaky, root.wobble"));
-        assert!(out.contains("LOW confidence"));
-        // The enforcement is explained: pass is rejected unless addressed.
-        assert!(out.contains("REJECT"));
     }
 
     #[test]

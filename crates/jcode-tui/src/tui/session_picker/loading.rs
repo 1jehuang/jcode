@@ -26,6 +26,11 @@ use super::{ResumeTarget, SessionSource};
 #[cfg(test)]
 const TRANSCRIPT_SEARCH_CHUNK_BYTES: usize = 64 * 1024;
 
+/// Maximum number of trailing transcript messages loaded into the `/resume`
+/// preview. Large enough that the preview scrolls back through a long session
+/// like the live chat does, while bounding the one-off render on selection.
+pub(super) const PREVIEW_MESSAGE_LIMIT: usize = 400;
+
 fn session_scan_limit() -> usize {
     std::env::var("JCODE_SESSION_PICKER_MAX_SESSIONS")
         .ok()
@@ -146,6 +151,12 @@ struct SessionListCacheEntry {
     sessions: Vec<SessionInfo>,
 }
 
+#[derive(Default)]
+struct SessionListCacheState {
+    generation: u64,
+    entry: Option<SessionListCacheEntry>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct GroupedSessionListDiskCache {
     version: u32,
@@ -166,14 +177,40 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
-fn session_list_cache() -> &'static Mutex<Option<SessionListCacheEntry>> {
-    static CACHE: OnceLock<Mutex<Option<SessionListCacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+fn session_list_cache() -> &'static Mutex<SessionListCacheState> {
+    static CACHE: OnceLock<Mutex<SessionListCacheState>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SessionListCacheState::default()))
 }
 
 pub fn invalidate_session_list_cache() {
-    if let Ok(mut cache) = session_list_cache().lock() {
-        *cache = None;
+    if let Ok(mut state) = session_list_cache().lock() {
+        state.generation = state.generation.wrapping_add(1);
+        state.entry = None;
+    }
+}
+
+#[cfg(test)]
+type PublishHook = Box<dyn Fn() + Send>;
+
+#[cfg(test)]
+fn before_session_list_cache_publish_hook() -> &'static Mutex<Option<PublishHook>> {
+    static HOOK: OnceLock<Mutex<Option<PublishHook>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn run_before_session_list_cache_publish_hook() {
+    if let Ok(hook) = before_session_list_cache_publish_hook().lock()
+        && let Some(hook) = hook.as_ref()
+    {
+        hook();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_before_session_list_cache_publish_hook(hook: Option<Box<dyn Fn() + Send>>) {
+    if let Ok(mut slot) = before_session_list_cache_publish_hook().lock() {
+        *slot = hook;
     }
 }
 
@@ -757,7 +794,7 @@ fn collect_recent_files_recursive(root: &Path, extension: &str, limit: usize) ->
 ///
 /// 512 KiB comfortably covers far more than 20 messages for normal transcripts
 /// while bounding the worst case.
-const EXTERNAL_PREVIEW_TAIL_BYTES: u64 = 512 * 1024;
+const EXTERNAL_PREVIEW_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Read the trailing portion of a file as UTF-8 text, capped at
 /// [`EXTERNAL_PREVIEW_TAIL_BYTES`]. When the file is larger than the cap we seek
@@ -790,8 +827,8 @@ fn push_preview_message(preview: &mut Vec<PreviewMessage>, role: &str, content: 
         tool_data: None,
         timestamp: None,
     });
-    if preview.len() > 20 {
-        let drop_count = preview.len().saturating_sub(20);
+    if preview.len() > PREVIEW_MESSAGE_LIMIT {
+        let drop_count = preview.len().saturating_sub(PREVIEW_MESSAGE_LIMIT);
         preview.drain(0..drop_count);
     }
 }
@@ -1612,11 +1649,23 @@ fn load_session_summary(path: &Path) -> Result<SessionSummary> {
 }
 
 pub(super) fn build_messages_preview(session: &Session) -> Vec<PreviewMessage> {
-    session::render_messages(session)
+    build_messages_preview_with_offset(session).0
+}
+
+/// Trailing preview messages plus the number of user prompts dropped from the
+/// head, so the preview can number prompts globally like the live chat.
+pub(super) fn build_messages_preview_with_offset(
+    session: &Session,
+) -> (Vec<PreviewMessage>, usize) {
+    let rendered = session::render_messages(session);
+    let skip = rendered.len().saturating_sub(PREVIEW_MESSAGE_LIMIT);
+    let hidden_prompts = rendered[..skip]
+        .iter()
+        .filter(|msg| msg.role == "user" && !msg.content.trim().is_empty())
+        .count();
+    let preview = rendered
         .into_iter()
-        .rev()
-        .take(20)
-        .rev()
+        .skip(skip)
         .map(|msg| PreviewMessage {
             role: msg.role,
             content: msg.content,
@@ -1624,7 +1673,8 @@ pub(super) fn build_messages_preview(session: &Session) -> Vec<PreviewMessage> {
             tool_data: msg.tool_data,
             timestamp: None,
         })
-        .collect()
+        .collect();
+    (preview, hidden_prompts)
 }
 
 pub(super) fn crashed_sessions_from_all_sessions(
@@ -1769,19 +1819,28 @@ fn parse_jcode_session_info(
 }
 
 pub fn load_sessions() -> Result<Vec<SessionInfo>> {
+    load_sessions_inner(false)
+}
+
+fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
     let want_external = include_external_sessions();
 
-    if let Ok(cache) = session_list_cache().lock()
-        && let Some(entry) = cache.as_ref()
-        && entry.sessions_dir == sessions_dir
-        && entry.scan_limit == scan_limit
-        && entry.external_sessions == want_external
-        && entry.loaded_at.elapsed() <= SESSION_LIST_CACHE_TTL
-    {
-        return Ok(entry.sessions.clone());
-    }
+    let cache_generation = if let Ok(state) = session_list_cache().lock() {
+        if !bypass_cache
+            && let Some(entry) = state.entry.as_ref()
+            && entry.sessions_dir == sessions_dir
+            && entry.scan_limit == scan_limit
+            && entry.external_sessions == want_external
+            && entry.loaded_at.elapsed() <= SESSION_LIST_CACHE_TTL
+        {
+            return Ok(entry.sessions.clone());
+        }
+        state.generation
+    } else {
+        0
+    };
 
     let candidates = if sessions_dir.exists() {
         // Keep startup responsive by avoiding `session_has_history` here. That helper parses
@@ -1887,8 +1946,13 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
 
     sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
 
-    if let Ok(mut cache) = session_list_cache().lock() {
-        *cache = Some(SessionListCacheEntry {
+    #[cfg(test)]
+    run_before_session_list_cache_publish_hook();
+
+    if let Ok(mut state) = session_list_cache().lock()
+        && state.generation == cache_generation
+    {
+        state.entry = Some(SessionListCacheEntry {
             loaded_at: Instant::now(),
             sessions_dir,
             scan_limit,

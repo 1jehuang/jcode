@@ -478,6 +478,9 @@ pub fn parse_openai_response_event(
     };
 
     match event.kind.as_str() {
+        "response.created" => {
+            return event.response.as_ref().and_then(extract_service_tier);
+        }
         "response.output_text.delta" => {
             if let Some(delta) = event.delta {
                 *saw_text_delta = true;
@@ -601,6 +604,9 @@ pub fn parse_openai_response_event(
             return pending.pop_front();
         }
         "response.completed" => {
+            if let Some(tier) = event.response.as_ref().and_then(extract_service_tier) {
+                pending.push_back(tier);
+            }
             let stop_reason = event
                 .response
                 .as_ref()
@@ -629,6 +635,14 @@ pub fn parse_openai_response_event(
     }
 
     None
+}
+
+fn extract_service_tier(response: &Value) -> Option<StreamEvent> {
+    let tier = response.get("service_tier")?.as_str()?.trim();
+    (!tier.is_empty()).then(|| StreamEvent::ServiceTier {
+        tier: tier.to_string(),
+        requested: None,
+    })
 }
 
 fn extract_last_assistant_message_phase(response: &Value) -> Option<String> {
@@ -730,11 +744,17 @@ pub fn handle_openai_output_item(
                 return Some(event);
             }
         }
+        "web_search_call" => {
+            // Hosted web search already ran on OpenAI's side. Keep the item
+            // verbatim so it is replayed in later requests.
+            return Some(StreamEvent::ProviderNative {
+                provider: jcode_message_types::provider_native::PROVIDER_NATIVE_OPENAI.to_string(),
+                item,
+            });
+        }
         "message" => {
-            if *saw_text_delta {
-                return None;
-            }
             let mut text = String::new();
+            let mut rendered = String::new();
             if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
                 for entry in content {
                     let entry_type = entry.get("type").and_then(|v| v.as_str());
@@ -742,10 +762,22 @@ pub fn handle_openai_output_item(
                         && let Some(t) = entry.get("text").and_then(|v| v.as_str())
                     {
                         text.push_str(t);
+                        rendered.push_str(&crate::citations::render_annotated_text(
+                            t,
+                            entry.get("annotations"),
+                        ));
                     }
                 }
             }
-            return stream_text_or_recovered_tool_call(&text, pending);
+            if *saw_text_delta {
+                // URL annotations arrive after raw deltas. Correct only this
+                // completed message, before TextDone closes its render frame.
+                return (rendered != text).then_some(StreamEvent::TextSuffixReplace {
+                    old_text: text,
+                    new_text: rendered,
+                });
+            }
+            return stream_text_or_recovered_tool_call(&rendered, pending);
         }
         "reasoning" => {
             let id = item
@@ -995,7 +1027,8 @@ fn extract_input_token_detail(usage: &Value, field: &str) -> Option<u64> {
         .find_map(|key| usage.get(key)?.get(field)?.as_u64())
 }
 
-fn extract_usage_from_response(response: &Value) -> Option<StreamEvent> {
+/// Extract provider counters without converting inclusive OpenAI input totals.
+pub fn extract_usage_from_response(response: &Value) -> Option<StreamEvent> {
     let usage = response.get("usage")?;
     let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
     let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());
@@ -1049,284 +1082,16 @@ impl Stream for OpenAIResponsesStream {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn usage_preserves_inclusive_input_and_optional_cache_details() {
-        for (usage, expected_read, expected_write) in [
-            (
-                serde_json::json!({"input_tokens_details": {
-                    "cached_tokens": 12000, "cache_write_tokens": 3000
-                }}),
-                Some(12000),
-                Some(3000),
-            ),
-            (
-                serde_json::json!({"input_tokens_details": {
-                    "cached_tokens": 0, "cache_write_tokens": 15000
-                }}),
-                Some(0),
-                Some(15000),
-            ),
-            (
-                serde_json::json!({"input_tokens_details": {"cached_tokens": 12000}}),
-                Some(12000),
-                None,
-            ),
-            (serde_json::json!({}), None, None),
-            (
-                serde_json::json!({"input_tokens_details": null}),
-                None,
-                None,
-            ),
-            (
-                serde_json::json!({"input_tokens_details": {
-                    "cached_tokens": -1, "cache_write_tokens": "3000"
-                }}),
-                None,
-                None,
-            ),
-            (
-                serde_json::json!({"prompt_tokens_details": {
-                    "cached_tokens": 12000, "cache_write_tokens": 3000
-                }}),
-                Some(12000),
-                Some(3000),
-            ),
-            (
-                serde_json::json!({
-                    "input_tokens_details": {"cached_tokens": null},
-                    "prompt_tokens_details": {
-                        "cached_tokens": 12000, "cache_write_tokens": 3000
-                    }
-                }),
-                Some(12000),
-                Some(3000),
-            ),
-            (
-                serde_json::json!({
-                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
-                    "prompt_tokens_details": {
-                        "cached_tokens": 12000, "cache_write_tokens": 3000
-                    }
-                }),
-                Some(0),
-                Some(0),
-            ),
-        ] {
-            let mut usage = usage;
-            usage["input_tokens"] = serde_json::json!(15000);
-            usage["output_tokens"] = serde_json::json!(200);
-            let response = serde_json::json!({"usage": usage});
-            let Some(StreamEvent::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_input_tokens,
-                cache_creation_input_tokens,
-            }) = extract_usage_from_response(&response)
-            else {
-                panic!("missing usage for {response}");
-            };
-            assert_eq!(input_tokens, Some(15000), "{response}");
-            assert_eq!(output_tokens, Some(200), "{response}");
-            assert_eq!(cache_read_input_tokens, expected_read, "{response}");
-            assert_eq!(cache_creation_input_tokens, expected_write, "{response}");
-        }
-    }
-
-    #[test]
-    fn terminal_responses_emit_cache_write_only_usage_before_message_end() {
-        for kind in ["response.completed", "response.incomplete"] {
-            let frame = serde_json::json!({
-                "type": kind,
-                "response": {"usage": {"input_tokens_details": {"cache_write_tokens": 1024}}}
-            });
-            let mut pending = VecDeque::new();
-            let event = parse_openai_response_event(
-                &frame.to_string(),
-                &mut false,
-                &mut false,
-                &mut HashMap::new(),
-                &mut HashSet::new(),
-                &mut pending,
-            );
-            assert!(matches!(
-                event,
-                Some(StreamEvent::TokenUsage {
-                    input_tokens: None,
-                    output_tokens: None,
-                    cache_read_input_tokens: None,
-                    cache_creation_input_tokens: Some(1024),
-                })
-            ));
-            assert!(matches!(
-                pending.pop_front(),
-                Some(StreamEvent::MessageEnd { .. })
-            ));
-            assert!(pending.is_empty());
-        }
-    }
-
-    #[test]
-    fn missing_usage_does_not_report_a_cache_miss() {
-        for response in [
-            serde_json::json!({}),
-            serde_json::json!({"usage": null}),
-            serde_json::json!({"usage": {}}),
-            serde_json::json!({"usage": {"input_tokens_details": {}}}),
-        ] {
-            assert!(extract_usage_from_response(&response).is_none());
-        }
-    }
-
-    #[test]
-    fn structured_stream_read_error_is_extracted_and_classified_as_transient() {
-        let error = serde_json::json!({
-            "type": "upstream_error",
-            "code": "stream_read_error"
-        });
-
-        let (message, retry_after) = extract_error_with_retry(&None, &Some(error));
-
-        assert_eq!(
-            message,
-            "upstream_error (stream_read_error): OpenAI response stream error (unknown)"
-        );
-        assert_eq!(retry_after, None);
-        assert!(jcode_provider_core::is_transient_transport_error(&message));
-    }
-
-    #[test]
-    fn parse_text_wrapped_tool_call_rejects_non_object_json() {
-        let text = "prefix to=functions.read [1,2,3]";
-        let parsed = parse_text_wrapped_tool_call(text);
-        assert!(parsed.is_none());
-    }
-
-    #[test]
-    fn parse_openai_response_event_ignores_malformed_json_chunks() {
-        let mut saw_text_delta = false;
-        let mut saw_thinking_delta = false;
-        let mut streaming_tool_calls = HashMap::new();
-        let mut completed_tool_items = HashSet::new();
-        let mut pending = VecDeque::new();
-
-        let event = parse_openai_response_event(
-            "{not-json}",
-            &mut saw_text_delta,
-            &mut saw_thinking_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        );
-
-        assert!(event.is_none());
-        assert!(!saw_text_delta);
-        assert!(streaming_tool_calls.is_empty());
-        assert!(completed_tool_items.is_empty());
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn response_completed_emits_message_end_even_when_payload_mentions_fallback() {
-        // Regression: when the model edits source that mentions the websocket
-        // fallback phrase, that text rides along inside structured events. A
-        // `response.completed` frame containing the phrase must still produce a
-        // MessageEnd, otherwise the stream "ends before the completion marker".
-        let mut saw_text_delta = false;
-        let mut saw_thinking_delta = false;
-        let mut streaming_tool_calls = HashMap::new();
-        let mut completed_tool_items = HashSet::new();
-        let mut pending = VecDeque::new();
-
-        let payload = serde_json::json!({
-            "type": "response.completed",
-            "response": {
-                "status": "completed",
-                "output": [{
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{
-                        "type": "output_text",
-                        "text": "falling back from websockets to https transport"
-                    }]
-                }]
-            }
-        })
-        .to_string();
-
-        let event = parse_openai_response_event(
-            &payload,
-            &mut saw_text_delta,
-            &mut saw_thinking_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        );
-
-        assert!(
-            matches!(event, Some(StreamEvent::MessageEnd { .. })),
-            "expected MessageEnd, got {event:?}"
-        );
-    }
-
-    #[test]
-    fn function_call_arguments_with_fallback_phrase_still_emit_tool_call() {
-        let mut saw_text_delta = false;
-        let mut saw_thinking_delta = false;
-        let mut streaming_tool_calls = HashMap::new();
-        let mut completed_tool_items = HashSet::new();
-        let mut pending = VecDeque::new();
-
-        let payload = serde_json::json!({
-            "type": "response.function_call_arguments.done",
-            "item_id": "fc_1",
-            "call_id": "call_1",
-            "name": "bash",
-            "arguments": "{\"command\":\"echo falling back from websockets to https transport\"}"
-        })
-        .to_string();
-
-        let event = parse_openai_response_event(
-            &payload,
-            &mut saw_text_delta,
-            &mut saw_thinking_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        );
-
-        assert!(
-            matches!(event, Some(StreamEvent::ToolUseStart { .. })),
-            "expected ToolUseStart, got {event:?}"
-        );
-    }
-
-    #[test]
-    fn plain_text_fallback_notice_is_still_dropped() {
-        let mut saw_text_delta = false;
-        let mut saw_thinking_delta = false;
-        let mut streaming_tool_calls = HashMap::new();
-        let mut completed_tool_items = HashSet::new();
-        let mut pending = VecDeque::new();
-
-        let event = parse_openai_response_event(
-            "falling back from websockets to https transport",
-            &mut saw_text_delta,
-            &mut saw_thinking_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        );
-
-        assert!(event.is_none());
-    }
-}
+#[path = "stream_tests.rs"]
+mod tests;
 
 #[cfg(test)]
 #[path = "stream_tool_tests.rs"]
 mod stream_tool_tests;
+
+#[cfg(test)]
+#[path = "stream_citation_tests.rs"]
+mod stream_citation_tests;
 
 #[cfg(test)]
 mod text_framing_tests {
@@ -1365,5 +1130,33 @@ mod text_framing_tests {
             StreamEvent::TextDone, StreamEvent::TextDelta(c), StreamEvent::TextDone,
             StreamEvent::MessageEnd { .. }
         ] if a == "The cause is " && b == "the retry loop." && c == "Second message"));
+    }
+
+    #[test]
+    fn web_search_call_item_is_emitted_verbatim() {
+        let item = serde_json::json!({
+            "type": "web_search_call", "id": "ws_1", "status": "completed",
+            "action": {"type": "search", "query": "jcode"}
+        });
+        let mut pending = VecDeque::new();
+        let event = parse_openai_response_event(
+            &serde_json::json!({"type": "response.output_item.done", "item": item}).to_string(),
+            &mut false,
+            &mut false,
+            &mut HashMap::new(),
+            &mut HashSet::new(),
+            &mut pending,
+        );
+        match event {
+            Some(StreamEvent::ProviderNative {
+                provider,
+                item: got,
+            }) => {
+                assert_eq!(provider, "openai");
+                assert_eq!(got, item);
+            }
+            other => panic!("expected provider-native item, got {other:?}"),
+        }
+        assert!(pending.is_empty());
     }
 }

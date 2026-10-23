@@ -116,6 +116,13 @@ pub(crate) fn config(session: &str) -> Option<SessionToolConfig> {
         .map(|o| o.config.clone())
 }
 
+/// These owner-scoped callbacks and tool restrictions are intentionally not
+/// persisted. An automatic upgrade must not silently discard or broaden them.
+pub(crate) fn has_runtime_overlays() -> bool {
+    let state = STATE.read().unwrap_or_else(|e| e.into_inner());
+    !state.overlays.is_empty() || !state.pending.is_empty()
+}
+
 pub(crate) fn custom(session: &str, name: &str) -> bool {
     config(session).is_some_and(|c| c.custom.iter().any(|t| t.name == name))
 }
@@ -132,6 +139,7 @@ pub(crate) fn apply_definitions(
                 name: custom.name,
                 description: custom.description,
                 input_schema: custom.parameters,
+                defer_loading: false,
             });
         }
         tools.retain(|t| !tool_name_is_disabled(&disabled, &t.name));

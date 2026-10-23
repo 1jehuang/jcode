@@ -1,0 +1,20 @@
+{
+  "version": "0.90.0",
+  "date": "2026-10-01",
+  "title": "Provider-native web search",
+  "highlights": [
+    "Web search now uses your model provider's own server-side search (Anthropic and OpenAI) by default instead of scraping from your machine, shown as regular web search rows live and on resume (thanks @johnnyfish)"
+  ],
+  "improvements": [
+    "Set websearch.prefer_native = false or JCODE_WEBSEARCH_PREFER_NATIVE=0 to keep using local search engines",
+    "Provider-side search follows each session's allowed and disabled tool policy",
+    "SDK apps that register their own websearch tool keep it instead of having it replaced by provider search",
+    "Installing a skill mid-session no longer invalidates the prompt cache, so the next turn stays fast and cheap",
+    "When switching providers, earlier native search results are summarized clearly so the model does not retract correct answers"
+  ],
+  "fixes": [
+    "OpenAI login validation no longer hangs when the account hits a usage limit",
+    "Retrying a turn no longer leaves web search rows from the aborted attempt",
+    "Interrupted Anthropic turns that used native search no longer risk a request error on the next message"
+  ]
+}

@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 //! Memory tool for storing and recalling information across sessions
 
 use super::{Tool, ToolContext, ToolOutput};

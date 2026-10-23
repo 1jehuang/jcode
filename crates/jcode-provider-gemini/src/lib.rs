@@ -4,8 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
-pub const DEFAULT_MODEL: &str = "gemini-2.5-pro";
+// Non-dated server-side alias: always resolves to the newest stable pro
+// model, so the default can never go stale or 404 into a downgrade chain
+// (2026-09-19: a transient NOT_FOUND on gemini-3.1-pro-preview silently
+// pinned every session to gemini-2.5-pro for days).
+pub const DEFAULT_MODEL: &str = "gemini-pro-latest";
 pub const AVAILABLE_MODELS: &[&str] = &[
+    "gemini-pro-latest",
+    "gemini-flash-latest",
     "gemini-3.1-pro-preview",
     "gemini-3-pro-preview",
     "gemini-3-flash-preview",
@@ -16,6 +22,7 @@ pub const AVAILABLE_MODELS: &[&str] = &[
     "gemini-1.5-flash",
 ];
 pub const FALLBACK_MODELS: &[&str] = &[
+    "gemini-pro-latest",
     "gemini-3.1-pro-preview",
     "gemini-3-pro-preview",
     "gemini-2.5-pro",
@@ -401,7 +408,9 @@ pub fn build_contents_with_signature_policy(
                             ..Default::default()
                         });
                     }
-                    ContentBlock::OpenAICompaction { .. } => {}
+                    ContentBlock::OpenAICompaction { .. }
+                    | ContentBlock::ToolReference { .. }
+                    | ContentBlock::ProviderNative { .. } => {}
                 }
             }
             if parts.is_empty() {
@@ -534,9 +543,32 @@ pub struct GeminiUsageMetadata {
     #[serde(default)]
     pub prompt_token_count: Option<u64>,
     #[serde(default)]
+    pub tool_use_prompt_token_count: Option<u64>,
+    #[serde(default)]
     pub candidates_token_count: Option<u64>,
     #[serde(default)]
+    pub thoughts_token_count: Option<u64>,
+    #[serde(default)]
     pub cached_content_token_count: Option<u64>,
+}
+
+impl GeminiUsageMetadata {
+    /// Tool-use prompts are input tokens, separate from the ordinary prompt.
+    pub fn input_token_count(&self) -> Option<u64> {
+        match (self.prompt_token_count, self.tool_use_prompt_token_count) {
+            (Some(prompt), Some(tool_use)) => Some(prompt.saturating_add(tool_use)),
+            (prompt, tool_use) => prompt.or(tool_use),
+        }
+    }
+
+    /// Billable output includes candidates and thinking tokens.
+    /// Do not infer output from totalTokenCount, which includes tool-use prompts.
+    pub fn output_token_count(&self) -> Option<u64> {
+        match (self.candidates_token_count, self.thoughts_token_count) {
+            (Some(candidates), Some(thoughts)) => Some(candidates.saturating_add(thoughts)),
+            (candidates, thoughts) => candidates.or(thoughts),
+        }
+    }
 }
 
 pub fn gemini_fallback_models(current_model: &str) -> Vec<&'static str> {
@@ -693,6 +725,88 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn response_usage_counts_tool_use_prompts_without_inventing_input() {
+        for (metadata, expected) in [
+            (json!({}), None),
+            (json!({"totalTokenCount": 99}), None),
+            (
+                json!({"promptTokenCount": null, "toolUsePromptTokenCount": null}),
+                None,
+            ),
+            (json!({"promptTokenCount": 0}), Some(0)),
+            (json!({"toolUsePromptTokenCount": 0}), Some(0)),
+            (json!({"promptTokenCount": 10}), Some(10)),
+            (json!({"toolUsePromptTokenCount": 90}), Some(90)),
+            (
+                json!({"promptTokenCount": 10, "toolUsePromptTokenCount": 90, "cachedContentTokenCount": 4}),
+                Some(100),
+            ),
+            (
+                json!({"promptTokenCount": u64::MAX, "toolUsePromptTokenCount": 1}),
+                Some(u64::MAX),
+            ),
+        ] {
+            let response: VertexGenerateContentResponse = serde_json::from_value(json!({
+                "usageMetadata": metadata
+            }))
+            .unwrap();
+            let usage = response.usage_metadata.unwrap();
+            assert_eq!(usage.input_token_count(), expected, "{metadata}");
+            assert_eq!(
+                usage.cached_content_token_count,
+                metadata["cachedContentTokenCount"].as_u64()
+            );
+        }
+    }
+
+    #[test]
+    fn response_usage_counts_thinking_without_inventing_output() {
+        for (metadata, expected) in [
+            (json!({"thoughtsTokenCount": 13}), Some(13)),
+            (
+                json!({"candidatesTokenCount": 7, "thoughtsTokenCount": 13}),
+                Some(20),
+            ),
+            (json!({"candidatesTokenCount": 7}), Some(7)),
+            (json!({}), None),
+            (
+                json!({"candidatesTokenCount": null, "thoughtsTokenCount": null}),
+                None,
+            ),
+            (json!({"thoughtsTokenCount": 0}), Some(0)),
+            (json!({"candidatesTokenCount": 0}), Some(0)),
+            (
+                json!({"candidatesTokenCount": 0, "thoughtsTokenCount": 0}),
+                Some(0),
+            ),
+            (
+                json!({"candidatesTokenCount": u64::MAX, "thoughtsTokenCount": 1}),
+                Some(u64::MAX),
+            ),
+            (
+                json!({"promptTokenCount": 10, "totalTokenCount": 100, "toolUsePromptTokenCount": 90}),
+                None,
+            ),
+            (
+                json!({"candidatesTokenCount": 7, "thoughtsTokenCount": 13, "totalTokenCount": 120, "toolUsePromptTokenCount": 90}),
+                Some(20),
+            ),
+        ] {
+            let response: VertexGenerateContentResponse = serde_json::from_value(json!({
+                "usageMetadata": metadata
+            }))
+            .unwrap();
+            assert_eq!(
+                response.usage_metadata.unwrap().output_token_count(),
+                expected,
+                "{metadata}"
+            );
+        }
+        let response: VertexGenerateContentResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(response.usage_metadata.is_none());
+    }
+
+    #[test]
     fn compatible_schema_strips_nested_property_names() {
         let schema = json!({
             "type": "object",
@@ -719,6 +833,7 @@ mod tests {
         assert_eq!(
             gemini_fallback_models("gemini-2.5-flash"),
             vec![
+                "gemini-pro-latest",
                 "gemini-3.1-pro-preview",
                 "gemini-3-pro-preview",
                 "gemini-2.5-pro",

@@ -21,7 +21,8 @@ fn novita_login_saves_private_key_and_rejects_empty_replacement() {
         .join(profile.env_file);
     let saved = std::fs::read_to_string(&path).unwrap();
     assert!(saved.contains("NOVITA_API_KEY=novita_test_key"));
-    assert_eq!(std::env::var("NOVITA_API_KEY").unwrap(), "novita_test_key");
+    // File only (#1386): the key must not be copied into the process env.
+    assert_eq!(std::env::var_os("NOVITA_API_KEY"), prev_key);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -65,6 +66,10 @@ fn scriptable_resume_command_matches_input_kind() {
     assert_eq!(
         scriptable_resume_command("copilot", "complete", None),
         "jcode login --provider copilot --complete"
+    );
+    assert_eq!(
+        scriptable_resume_command("muse-subscription", "complete", None),
+        "jcode login --provider muse-subscription --complete"
     );
 }
 
@@ -194,6 +199,10 @@ fn scoped_pending_paths_validate_ids_and_preserve_legacy_layout() {
         pending_login_path_in(dir, "openai", Some("flow_A-1")).unwrap(),
         dir.join("flows/flow_A-1/openai.json")
     );
+    assert_eq!(
+        pending_login_path_in(dir, "muse-subscription", None).unwrap(),
+        dir.join("muse-subscription.json")
+    );
     for id in [
         "",
         "..",
@@ -214,6 +223,7 @@ fn scoped_pending_paths_validate_ids_and_preserve_legacy_layout() {
         ("openai", "callback_url"),
         ("gemini", "auth_code"),
         ("copilot", "complete"),
+        ("muse-subscription", "complete"),
         ("claude", "auth_code_or_callback_url"),
     ] {
         let command = scriptable_resume_command(provider, kind, Some("flow_A-1"));
@@ -405,4 +415,373 @@ fn scoped_concurrent_begin_and_cancel_never_resurrect_pending_state() {
         assert!(!path.exists(), "cancelled pending state resurrected");
         assert!(persist_pending_login(&path, &scoped_test_record(), true).is_err());
     }
+}
+
+#[tokio::test]
+async fn complete_saved_muse_subscription_login_uses_code_only_path() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var(auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+
+    let path = pending_login_path("muse-subscription", Some("flow-muse")).expect("pending path");
+    let record = PendingScriptableLoginRecord {
+        expires_at_ms: current_time_ms() + 60_000,
+        login: PendingScriptableLogin::MuseSubscription {
+            device_code: "muse-device-code-test-123".to_string(),
+            // Empty user code and verification URI: previously caused
+            // "Muse device challenge carries an empty user code" before any network call.
+            user_code: String::new(),
+            verification_uri: String::new(),
+            interval: 1,
+        },
+    };
+    persist_pending_login(&path, &record, true).expect("persist pending login");
+
+    let captured_device_code = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured_device_code_clone = captured_device_code.clone();
+    let _poll_guard = device_login::set_test_poll_override(move |code, _interval| {
+        *captured_device_code_clone.lock().unwrap() = Some(code.to_string());
+        Ok(auth::muse::PollOutcome::Approved(
+            auth::muse::MuseCredentials {
+                api_key: "muse_test_api_key".to_string(),
+                access_token: "muse_test_access_token".to_string(),
+                base_url: "https://api.meta.ai/v1".to_string(),
+                user_email: Some("user@example.com".to_string()),
+                user_full_name: Some("Test User".to_string()),
+                is_subs_active: true,
+                minted_at_ms: 1000,
+                subs_usage: None,
+            },
+        ))
+    });
+
+    let options = LoginOptions {
+        flow_id: Some("flow-muse".to_string()),
+        complete: true,
+        json: true,
+        ..LoginOptions::default()
+    };
+    let outcome = complete_scriptable_muse_subscription_login("muse-subscription", &options)
+        .await
+        .expect("completing saved muse subscription login must succeed");
+
+    assert_eq!(outcome, LoginFlowOutcome::Completed);
+    assert_eq!(
+        captured_device_code.lock().unwrap().as_deref(),
+        Some("muse-device-code-test-123")
+    );
+    assert!(
+        !path.exists(),
+        "pending file should be cleared on completion"
+    );
+
+    let credentials = auth::muse::load_credentials().expect("credentials must be saved");
+    assert_eq!(credentials.api_key, "muse_test_api_key");
+    assert_eq!(credentials.access_token, "muse_test_access_token");
+
+    set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[tokio::test]
+async fn cancelling_muse_subscription_login_during_polling_prevents_credential_persistence() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var(auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+
+    let flow_id = "flow-muse-cancel-race";
+    let path = pending_login_path("muse-subscription", Some(flow_id)).expect("pending path");
+    let record = PendingScriptableLoginRecord {
+        expires_at_ms: current_time_ms() + 60_000,
+        login: PendingScriptableLogin::MuseSubscription {
+            device_code: "muse-device-code-cancel-race".to_string(),
+            user_code: String::new(),
+            verification_uri: String::new(),
+            interval: 1,
+        },
+    };
+    persist_pending_login(&path, &record, true).expect("persist pending login");
+
+    let path_clone = path.clone();
+    let _poll_guard = device_login::set_test_poll_override(move |_code, _interval| {
+        // Simulate a concurrent cancellation during polling.
+        cancel_scoped_pending_login(&path_clone).expect("cancel scoped pending login must succeed");
+        Ok(auth::muse::PollOutcome::Approved(
+            auth::muse::MuseCredentials {
+                api_key: "muse_test_api_key".to_string(),
+                access_token: "muse_test_access_token".to_string(),
+                base_url: "https://api.meta.ai/v1".to_string(),
+                user_email: Some("user@example.com".to_string()),
+                user_full_name: Some("Test User".to_string()),
+                is_subs_active: true,
+                minted_at_ms: 1000,
+                subs_usage: None,
+            },
+        ))
+    });
+
+    let options = LoginOptions {
+        flow_id: Some(flow_id.to_string()),
+        complete: true,
+        json: true,
+        ..LoginOptions::default()
+    };
+    let outcome = complete_scriptable_muse_subscription_login("muse-subscription", &options).await;
+    let error = outcome.expect_err("cancelled completion must return an error");
+    assert!(
+        error.to_string().contains("cancelled"),
+        "error must indicate cancellation: {error}"
+    );
+
+    let creds_path = auth::muse::credentials_path().expect("credentials path");
+    assert!(
+        !creds_path.exists(),
+        "credentials file must not be created when flow was cancelled"
+    );
+    assert!(
+        auth::muse::load_credentials().is_err(),
+        "credentials must not be loadable"
+    );
+
+    set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[tokio::test]
+async fn replacing_muse_subscription_login_during_polling_prevents_credential_persistence() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var(auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+
+    let flow_id = "flow-muse-replace-race";
+    let path = pending_login_path("muse-subscription", Some(flow_id)).expect("pending path");
+    let record = PendingScriptableLoginRecord {
+        expires_at_ms: current_time_ms() + 60_000,
+        login: PendingScriptableLogin::MuseSubscription {
+            device_code: "muse-device-code-old".to_string(),
+            user_code: String::new(),
+            verification_uri: String::new(),
+            interval: 1,
+        },
+    };
+    persist_pending_login(&path, &record, true).expect("persist pending login");
+
+    let path_clone = path.clone();
+    let _poll_guard = device_login::set_test_poll_override(move |_code, _interval| {
+        let new_record = PendingScriptableLoginRecord {
+            expires_at_ms: current_time_ms() + 60_000,
+            login: PendingScriptableLogin::MuseSubscription {
+                device_code: "muse-device-code-new".to_string(),
+                user_code: String::new(),
+                verification_uri: String::new(),
+                interval: 1,
+            },
+        };
+        persist_pending_login(&path_clone, &new_record, true).expect("persist replacement login");
+        Ok(auth::muse::PollOutcome::Approved(
+            auth::muse::MuseCredentials {
+                api_key: "muse_test_api_key".to_string(),
+                access_token: "muse_test_access_token".to_string(),
+                base_url: "https://api.meta.ai/v1".to_string(),
+                user_email: Some("user@example.com".to_string()),
+                user_full_name: Some("Test User".to_string()),
+                is_subs_active: true,
+                minted_at_ms: 1000,
+                subs_usage: None,
+            },
+        ))
+    });
+
+    let options = LoginOptions {
+        flow_id: Some(flow_id.to_string()),
+        complete: true,
+        json: true,
+        ..LoginOptions::default()
+    };
+    let outcome = complete_scriptable_muse_subscription_login("muse-subscription", &options).await;
+    let error = outcome.expect_err("replaced completion must return an error");
+    assert!(
+        error.to_string().contains("cancelled"),
+        "error must indicate flow invalidation: {error}"
+    );
+
+    let creds_path = auth::muse::credentials_path().expect("credentials path");
+    assert!(
+        !creds_path.exists(),
+        "credentials file must not be created when flow was replaced"
+    );
+
+    set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[tokio::test]
+async fn complete_scriptable_muse_subscription_login_fails_if_already_cancelled() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var(auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+
+    let flow_id = "flow-muse-pre-cancelled";
+    let path = pending_login_path("muse-subscription", Some(flow_id)).expect("pending path");
+    let record = PendingScriptableLoginRecord {
+        expires_at_ms: current_time_ms() + 60_000,
+        login: PendingScriptableLogin::MuseSubscription {
+            device_code: "muse-device-code-pre".to_string(),
+            user_code: String::new(),
+            verification_uri: String::new(),
+            interval: 1,
+        },
+    };
+    persist_pending_login(&path, &record, true).expect("persist pending login");
+    cancel_scoped_pending_login(&path).expect("cancel scoped pending login must succeed");
+
+    let options = LoginOptions {
+        flow_id: Some(flow_id.to_string()),
+        complete: true,
+        json: true,
+        ..LoginOptions::default()
+    };
+    let outcome = complete_scriptable_muse_subscription_login("muse-subscription", &options).await;
+    let error = outcome.expect_err("completing an already cancelled flow must fail");
+    assert!(
+        error.to_string().contains("cancelled"),
+        "error must indicate cancellation: {error}"
+    );
+
+    set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[tokio::test]
+async fn muse_device_login_slow_down_accumulates_delay_code_only() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);
+    crate::env::set_var(auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+
+    let poll_intervals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let poll_intervals_clone = poll_intervals.clone();
+
+    let _poll_guard = device_login::set_test_poll_override(move |_code, interval| {
+        poll_intervals_clone.lock().unwrap().push(interval);
+        match interval {
+            1 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 6 }),
+            6 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 11 }),
+            11 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 16 }),
+            16 => Ok(auth::muse::PollOutcome::Approved(
+                auth::muse::MuseCredentials {
+                    api_key: "api-key".to_string(),
+                    access_token: "token".to_string(),
+                    base_url: "https://api.meta.ai/v1".to_string(),
+                    user_email: None,
+                    user_full_name: None,
+                    is_subs_active: true,
+                    minted_at_ms: 1000,
+                    subs_usage: None,
+                },
+            )),
+            other => panic!("unexpected interval: {other}"),
+        }
+    });
+
+    let sleep_delays = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sleep_delays_clone = sleep_delays.clone();
+    let _sleep_guard = device_login::set_test_sleep_override(move |delay| {
+        sleep_delays_clone.lock().unwrap().push(delay.as_secs());
+    });
+
+    let client = reqwest::Client::new();
+    let creds = device_login::poll_muse_subscription_until_decided_by_code(&client, "test-code", 1)
+        .await
+        .expect("poll must succeed after slowdowns");
+    assert_eq!(creds.api_key, "api-key");
+
+    let intervals = poll_intervals.lock().unwrap().clone();
+    let delays = sleep_delays.lock().unwrap().clone();
+
+    // Intervals passed into poll increase on each slowdown: 1, 6, 11, 16.
+    assert_eq!(intervals, vec![1, 6, 11, 16]);
+    // Delays slept between attempts strictly increase: 6, 11, 16.
+    assert_eq!(delays, vec![6, 11, 16]);
+    assert!(delays.windows(2).all(|w| w[0] < w[1]));
+
+    set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
+}
+
+#[tokio::test]
+async fn muse_device_login_slow_down_accumulates_delay_challenge_loop() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);
+    crate::env::set_var(auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+
+    let poll_intervals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let poll_intervals_clone = poll_intervals.clone();
+
+    let _poll_guard = device_login::set_test_poll_challenge_override(move |challenge| {
+        poll_intervals_clone
+            .lock()
+            .unwrap()
+            .push(challenge.interval);
+        match challenge.interval {
+            1 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 6 }),
+            6 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 11 }),
+            11 => Ok(auth::muse::PollOutcome::SlowDown { retry_after: 16 }),
+            16 => Ok(auth::muse::PollOutcome::Approved(
+                auth::muse::MuseCredentials {
+                    api_key: "api-key".to_string(),
+                    access_token: "token".to_string(),
+                    base_url: "https://api.meta.ai/v1".to_string(),
+                    user_email: None,
+                    user_full_name: None,
+                    is_subs_active: true,
+                    minted_at_ms: 1000,
+                    subs_usage: None,
+                },
+            )),
+            other => panic!("unexpected challenge interval: {other}"),
+        }
+    });
+
+    let sleep_delays = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sleep_delays_clone = sleep_delays.clone();
+    let _sleep_guard = device_login::set_test_sleep_override(move |delay| {
+        sleep_delays_clone.lock().unwrap().push(delay.as_secs());
+    });
+
+    let challenge = auth::muse::DeviceChallenge {
+        device_code: "code".to_string(),
+        user_code: "USER-1234".to_string(),
+        verification_uri: "https://auth.meta.com".to_string(),
+        verification_uri_complete: None,
+        expires_in: 1800,
+        interval: 1,
+    };
+
+    let client = reqwest::Client::new();
+    let creds = device_login::poll_muse_subscription_until_decided(&client, &challenge)
+        .await
+        .expect("poll must succeed after slowdowns");
+    assert_eq!(creds.api_key, "api-key");
+
+    let intervals = poll_intervals.lock().unwrap().clone();
+    let delays = sleep_delays.lock().unwrap().clone();
+
+    // Challenge interval increases on each slowdown: 1, 6, 11, 16.
+    assert_eq!(intervals, vec![1, 6, 11, 16]);
+    // Delays slept between attempts strictly increase: 6, 11, 16.
+    assert_eq!(delays, vec![6, 11, 16]);
+    assert!(delays.windows(2).all(|w| w[0] < w[1]));
+
+    set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
 }

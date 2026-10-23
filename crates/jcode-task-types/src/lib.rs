@@ -438,7 +438,8 @@ pub struct TodoItem {
     /// Optional group label. Todos that share a group are displayed together
     /// under a single header. Use one group per coherent goal; when work is
     /// steered into a new area, start a new group instead of renaming.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also accepted as `lane`: the lane this todo belongs to.
+    #[serde(default, alias = "lane", skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     /// Forward-looking evidence state that this todo can be completed
     /// correctly. Legacy sessions stored a 0-100 score; numbers map onto the
@@ -460,6 +461,56 @@ pub struct TodoItem {
     pub blocked_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
+    /// Optional execution stage. Stages run in order: stage 2 starts only
+    /// after every todo in stage 1 is done. Inside a stage, todos that share a
+    /// `group` form one lane that runs in list order, and different lanes run
+    /// in parallel. `None` means "sequential in list order". Deliberately a
+    /// plain number instead of id-based dependencies so a model cannot create
+    /// cycles or dangling references. Older sessions stored this as `wave`.
+    #[serde(
+        default,
+        alias = "wave",
+        alias = "phase",
+        deserialize_with = "deserialize_optional_stage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stage: Option<u32>,
+    /// Optional longer brief: file paths, acceptance criteria, context. Never
+    /// drawn on the todo card (which shows only the short `content` title),
+    /// but appended to a swarm worker's assignment so short titles do not
+    /// starve workers of context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+/// Accept `2`, `2.0`, `"2"`, `"stage 2"`, `""`, or `null` for a todo stage.
+/// Zero and unparseable values read as absent rather than failing the whole
+/// todo write, so a sloppy stage can never cost the model its plan.
+fn deserialize_optional_stage<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| parse_stage_value(&value)))
+}
+
+pub fn parse_stage_value(value: &serde_json::Value) -> Option<u32> {
+    let stage = match value {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f.round() as u64)),
+        serde_json::Value::String(s) => {
+            let digits: String = s
+                .trim()
+                .trim_start_matches(|c: char| !c.is_ascii_digit())
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            digits.parse::<u64>().ok()
+        }
+        _ => None,
+    }?;
+    u32::try_from(stage).ok().filter(|stage| *stage > 0)
 }
 
 /// Plan-level understanding of what the user actually wants, covering the

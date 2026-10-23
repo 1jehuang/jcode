@@ -103,6 +103,10 @@ impl App {
     }
 
     pub(super) fn build_turn_footer(&self, duration: Option<f32>) -> Option<String> {
+        if self.streaming.streaming_usage_call_reset_pending {
+            return duration
+                .map(|secs| Message::format_duration((secs.max(0.0) * 1000.0).round() as u64));
+        }
         let mut parts = Vec::new();
         if let Some(secs) = duration {
             let duration_ms = (secs.max(0.0) * 1000.0).round() as u64;
@@ -133,6 +137,9 @@ impl App {
     }
 
     pub(super) fn has_streaming_footer_stats(&self) -> bool {
+        if self.streaming.streaming_usage_call_reset_pending {
+            return false;
+        }
         self.streaming.streaming_input_tokens > 0
             || self.streaming.streaming_output_tokens > 0
             || self.streaming.streaming_cache_read_tokens.is_some()
@@ -144,22 +151,24 @@ impl App {
         self.log_cache_miss_if_unexpected();
         self.record_completed_stream_cache_usage();
 
-        self.last_api_completed = Some(Instant::now());
-        self.last_api_completed_provider = Some(<Self as TuiState>::provider_name(self));
-        self.last_api_completed_model = Some(<Self as TuiState>::provider_model(self));
-        self.last_turn_input_tokens = {
-            // Effective prompt size (input + cache read + creation): for
-            // split-accounting providers bare input is only the uncached
-            // remainder, and this figure feeds the cache countdown/cold
-            // indicators as "what gets resent".
-            let input = crate::tui::info_widget::effective_prompt_tokens(
-                &self.kv_cache_provider_name(),
-                self.streaming.streaming_input_tokens,
-                self.streaming.streaming_cache_read_tokens.unwrap_or(0),
-                self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
-            );
-            if input > 0 { Some(input) } else { None }
-        };
+        if !self.streaming.streaming_usage_call_reset_pending {
+            self.last_api_completed = Some(Instant::now());
+            self.last_api_completed_provider = Some(<Self as TuiState>::provider_name(self));
+            self.last_api_completed_model = Some(<Self as TuiState>::provider_model(self));
+            self.last_turn_input_tokens = {
+                // Effective prompt size (input + cache read + creation): for
+                // split-accounting providers bare input is only the uncached
+                // remainder, and this figure feeds the cache countdown/cold
+                // indicators as "what gets resent".
+                let input = crate::tui::info_widget::effective_prompt_tokens(
+                    &self.kv_cache_provider_name(),
+                    self.streaming.streaming_input_tokens,
+                    self.streaming.streaming_cache_read_tokens.unwrap_or(0),
+                    self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
+                );
+                if input > 0 { Some(input) } else { None }
+            };
+        }
 
         if let Some(footer) = self.build_turn_footer(duration) {
             self.push_display_message(DisplayMessage {
@@ -176,6 +185,9 @@ impl App {
 
     /// Log detailed info when an unexpected cache miss occurs (cache write on turn 3+)
     pub(super) fn log_cache_miss_if_unexpected(&self) {
+        if self.streaming.streaming_usage_call_reset_pending {
+            return;
+        }
         let user_turn_count = self
             .display_messages
             .iter()
@@ -356,14 +368,27 @@ impl App {
         self.mcp_server_names.clone()
     }
 
+    /// Wrapped row index where each user prompt starts, from the frame the
+    /// renderer last drew.
+    ///
+    /// Prompt-jump used to read a separately maintained copy of these starts,
+    /// but that copy was written from exactly this vector every frame, so it is
+    /// the same data kept twice.
+    fn prompt_row_starts(&self) -> Vec<usize> {
+        crate::tui::ui::last_chat_frame()
+            .map(|frame| frame.wrapped_user_prompt_starts.clone())
+            .unwrap_or_default()
+    }
+
     /// Scroll to the previous user prompt (scroll up - earlier in conversation)
     pub fn scroll_to_prev_prompt(&mut self) {
-        let positions = ui::last_user_prompt_positions();
+        let positions = self.prompt_row_starts();
         if positions.is_empty() {
             return;
         }
-        // An explicit jump should win over a still-settling history prepend.
+        // An explicit jump should win over a still-settling anchor.
         self.pending_history_anchor = None;
+        self.pending_resize_anchor = None;
 
         let current = self.scroll_offset;
 
@@ -403,11 +428,12 @@ impl App {
 
     /// Scroll to the next user prompt (scroll down - later in conversation)
     pub fn scroll_to_next_prompt(&mut self) {
-        let positions = ui::last_user_prompt_positions();
+        let positions = self.prompt_row_starts();
         if positions.is_empty() || !self.auto_scroll_paused {
             return;
         }
         self.pending_history_anchor = None;
+        self.pending_resize_anchor = None;
 
         let current = self.scroll_offset;
 
@@ -428,13 +454,14 @@ impl App {
     /// positioning the prompt at the top of the viewport.
     pub(super) fn scroll_to_recent_prompt_rank(&mut self, rank: usize) {
         let rank = rank.max(1);
-        let positions = ui::last_user_prompt_positions();
+        let positions = self.prompt_row_starts();
         let max_scroll = ui::last_max_scroll();
 
         if positions.is_empty() {
             return;
         }
         self.pending_history_anchor = None;
+        self.pending_resize_anchor = None;
 
         // positions are in document order (top to bottom), we want most-recent first
         let target_idx = positions.len().saturating_sub(rank);

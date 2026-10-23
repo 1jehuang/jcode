@@ -120,6 +120,11 @@ pub struct SetupHintsState {
     /// small number of spaced repetitions.
     #[serde(default)]
     pub cli_launch_hint_shown_count: HashMap<String, u64>,
+    /// Set once the first-run onboarding start choice ("Find bugs in my most
+    /// active repo" / "Start a new session") has been shown. Onboarding never
+    /// auto-starts again after this.
+    #[serde(default)]
+    pub onboarding_start_choice_shown: bool,
 }
 
 /// Serde default helper: fields documented as "true by default".
@@ -149,6 +154,7 @@ impl Default for SetupHintsState {
             launch_hotkey_usage: HashMap::new(),
             cli_launch_hint_last_shown: HashMap::new(),
             cli_launch_hint_shown_count: HashMap::new(),
+            onboarding_start_choice_shown: false,
         }
     }
 }
@@ -320,12 +326,39 @@ fn load_launch_hotkeys_config() -> jcode_config_types::LaunchHotkeysConfig {
         return Default::default();
     };
     let path = dir.join("config.toml");
+    // Startup calls this several times (hotkey notice, resolve, install
+    // checks), each a full TOML parse of config.toml. Memoize on the file's
+    // path, mtime and length so edits are still picked up immediately.
+    type Key = (
+        std::path::PathBuf,
+        Option<std::time::SystemTime>,
+        Option<u64>,
+    );
+    static MEMO: std::sync::Mutex<Option<(Key, jcode_config_types::LaunchHotkeysConfig)>> =
+        std::sync::Mutex::new(None);
+    let metadata = std::fs::metadata(&path).ok();
+    let key: Key = (
+        path.clone(),
+        metadata.as_ref().and_then(|meta| meta.modified().ok()),
+        metadata.as_ref().map(std::fs::Metadata::len),
+    );
+    if !cfg!(test)
+        && let Ok(guard) = MEMO.lock()
+        && let Some((cached_key, config)) = guard.as_ref()
+        && *cached_key == key
+    {
+        return config.clone();
+    }
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Default::default();
     };
-    toml::from_str::<Wrapper>(&text)
+    let config = toml::from_str::<Wrapper>(&text)
         .map(|w| w.launch_hotkeys)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Ok(mut guard) = MEMO.lock() {
+        *guard = Some((key, config.clone()));
+    }
+    config
 }
 
 /// Record the directories the global launch hotkeys should reopen.
@@ -703,7 +736,7 @@ pub fn run_setup_hotkey(
                     "    \x1b[1mCmd+Shift+'\x1b[0m new jcode self-dev session (last jcode repo)"
                 );
                 install_cli_launch_hints_notice();
-                return Ok(());
+                Ok(())
             }
             Err(e) => {
                 eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);
@@ -1331,7 +1364,7 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
 
     #[cfg(target_os = "macos")]
     {
-        if state.launch_count % 3 != 0 {
+        if !state.launch_count.is_multiple_of(3) {
             return startup_hints;
         }
 
@@ -1350,7 +1383,7 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
             return nudge_macos_ghostty(&mut state);
         }
 
-        return startup_hints;
+        startup_hints
     }
 
     #[cfg(windows)]
@@ -1435,12 +1468,14 @@ fn detect_linux_compositor() -> Option<linux_env::LinuxCompositor> {
 
 /// Path to the niri config file, honoring `$XDG_CONFIG_HOME`.
 #[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn niri_config_path() -> Option<PathBuf> {
     Some(xdg_config_home()?.join("niri").join("config.kdl"))
 }
 
 /// `$XDG_CONFIG_HOME`, defaulting to `~/.config`.
 #[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn xdg_config_home() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -1565,6 +1600,7 @@ fn linux_hotkey_setup_action(
 /// Pick a terminal emulator to launch jcode in on Linux. Honors `$TERMINAL`,
 /// otherwise probes common emulators on `PATH`, falling back to `kitty`.
 #[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_launch_terminal() -> String {
     if let Ok(t) = std::env::var("TERMINAL")
         && !t.trim().is_empty()
@@ -1589,6 +1625,7 @@ fn linux_launch_terminal() -> String {
 
 /// Whether `name` resolves to an executable on `$PATH`.
 #[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn binary_on_path(name: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
@@ -1602,6 +1639,7 @@ fn binary_on_path(name: &str) -> bool {
 /// Resolve the configured launch hotkeys into concrete Linux hotkeys, with each
 /// directory sentinel expanded to a real path.
 #[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn resolve_linux_hotkeys() -> Vec<linux_niri::NiriHotkey> {
     let config = load_launch_hotkeys_config();
     let exe_path = std::env::current_exe()
@@ -2438,7 +2476,7 @@ pub fn run_setup_launcher() -> Result<()> {
                 eprintln!(
                     "  Launch Jcode from the Jcode Desktop app, a terminal, or the Cmd+; hotkey."
                 );
-                return Ok(());
+                Ok(())
             }
             Err(e) => {
                 eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);

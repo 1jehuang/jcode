@@ -2,6 +2,24 @@
 // unknown-chord near-miss suggestions, driven through App::handle_key.
 
 #[test]
+fn reset_hint_expires_without_rearming_on_poll() {
+    use crate::tui::TuiState as _;
+    let app = create_test_app();
+    assert!(app.reset_hint_visible("work:2"));
+    *app.reset_hint_seen.borrow_mut() =
+        Some(("work:2".into(), Instant::now() - Duration::from_secs(14)));
+    assert!(app.reset_hint_visible("work:2"));
+    println!("RESET TIMER: visible at 14s");
+    *app.reset_hint_seen.borrow_mut() =
+        Some(("work:2".into(), Instant::now() - Duration::from_secs(15)));
+    assert!(!app.reset_hint_visible("work:2"));
+    assert!(!app.reset_hint_visible("work:2"));
+    println!("RESET TIMER: hidden at 15s and stays hidden on subsequent poll");
+    assert!(app.reset_hint_visible("work:3"));
+    assert!(app.reset_hint_visible("personal:3"));
+}
+
+#[test]
 fn unknown_ctrl_chord_sets_hotkey_feedback_with_suggestion() {
     let mut app = create_test_app();
     assert!(app.hotkey_feedback.is_none());
@@ -17,7 +35,12 @@ fn unknown_ctrl_chord_sets_hotkey_feedback_with_suggestion() {
         .expect("unknown chord should set feedback");
     assert!(message.contains("Ctrl+M"), "{message}");
     assert!(message.contains("isn't bound"), "{message}");
-    assert!(message.contains("Alt+M"), "{message}");
+    // The suggestion renders the platform chord via alt_chord (Option symbol
+    // on macOS, Alt elsewhere); assert that instead of hardcoded "Alt+M".
+    assert!(
+        message.contains(&jcode_tui_core::keybind::alt_chord("M")),
+        "{message}"
+    );
     assert!(message.contains("side panel"), "{message}");
 
     // The renderer consumes the trait accessor; it must surface the same text

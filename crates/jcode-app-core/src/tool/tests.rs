@@ -8,6 +8,24 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::ffi::OsString;
 
+#[test]
+fn base_tools_do_not_expose_invalid_reporting_tool() {
+    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
+    let tools = Registry::base_tools(&skills);
+    assert!(!tools.contains_key("invalid"));
+    assert!(tools.contains_key("bash"));
+}
+
+#[test]
+fn base_tools_exclude_replace_and_keep_other_editing_tools() {
+    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
+    let tools = Registry::base_tools(&skills);
+    assert!(!tools.contains_key("replace"));
+    for name in ["edit", "write", "apply_patch"] {
+        assert!(tools.contains_key(name), "missing editing tool: {name}");
+    }
+}
+
 struct TestHomeGuard {
     previous: Option<OsString>,
 }
@@ -79,6 +97,54 @@ async fn register_empty_mcp_tools(registry: &Registry, working_dir: &std::path::
             Some(working_dir.to_path_buf()),
         )
         .await;
+}
+
+#[tokio::test]
+async fn mcp_list_remains_available_while_background_connect_is_handshaking() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+    let _home_guard = TestHomeGuard::new(home.path());
+    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
+
+    std::fs::write(
+        home.path().join("mcp.json"),
+        r#"{
+            "mcpServers": {
+                "slow": {
+                    "command": "/bin/sh",
+                    "args": ["-c", "sleep 2"],
+                    "timeout_secs": 86400
+                }
+            }
+        }"#,
+    )
+    .expect("write slow MCP config");
+
+    let registry = Registry::empty();
+    registry
+        .register_mcp_tools_for_dir(None, None, None, Some(working_dir.path().to_path_buf()))
+        .await;
+
+    // Let the background connection task acquire its read guard and enter the
+    // slow initialize handshake before asking the management tool to list.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        registry.execute(
+            "mcp",
+            serde_json::json!({"action": "list"}),
+            mcp_test_context(working_dir.path()),
+        ),
+    )
+    .await
+    .expect("mcp list must not wait for a slow background handshake")
+    .expect("mcp list should succeed");
+
+    assert!(
+        output.output.contains("slow"),
+        "unexpected output: {}",
+        output.output
+    );
 }
 
 #[tokio::test]
@@ -257,6 +323,19 @@ async fn test_discover_tools_not_registered_when_sponsors_disabled() {
             "integration_tools must not be registered when sponsors are disabled"
         );
     }
+}
+
+#[tokio::test]
+async fn directory_listings_use_bash_instead_of_a_dedicated_tool() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let names = registry.tool_names().await;
+
+    assert!(names.iter().any(|name| name == "bash"));
+    assert!(!names.iter().any(|name| name == "ls"));
+    let definitions = registry.definitions(None).await;
+    assert!(definitions.iter().any(|tool| tool.name == "bash"));
+    assert!(!definitions.iter().any(|tool| tool.name == "ls"));
 }
 
 #[tokio::test]
@@ -634,7 +713,21 @@ async fn tool_descriptions_stay_under_token_cap() {
     // batch_tests::description_includes_parallel_tool_call_example).
     // browser carries the status-first and handoff-by-default routing policy
     // (e1576e9e3 and earlier), pinned by browser_tests.
-    const EXEMPT: &[&str] = &["integration_tools", "swarm", "batch", "browser"];
+    // todo carries a deliberate "use it very often" directive requested by the
+    // user, so planning happens proactively rather than only when prompted.
+    // applet carries the whole view-node vocabulary inline, since the model has
+    // no other way to learn which node types and props the host renders.
+    // codemode documents its sandbox API; compile_remote a credit/consent notice.
+    const EXEMPT: &[&str] = &[
+        "integration_tools",
+        "swarm",
+        "batch",
+        "browser",
+        "todo",
+        "applet",
+        "codemode",
+        "compile_remote",
+    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -694,10 +787,17 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // The feedback-loop relevance rubric defines every enum state inline
     // (abb0baabc, d21916db5) and todo::tests pins each concept, so it is
     // deliberately longer than the cap.
-    const EXEMPT: &[(&str, &str)] = &[(
-        "todo",
-        "$.properties.goals.items.properties.feedback_loop_relevance",
-    )];
+    // applet placement lists every shorthand so the model can pick a surface
+    // without a round trip. desktop_selfdev action carries a safety warning:
+    // killing the harness bridge by hand strands the calling session.
+    const EXEMPT: &[(&str, &str)] = &[
+        (
+            "todo",
+            "$.properties.goals.items.properties.feedback_loop_relevance",
+        ),
+        ("applet", "$.properties.placement"),
+        ("desktop_selfdev", "$.properties.action"),
+    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -1775,7 +1875,9 @@ fn the_dialect_sweep_catches_the_issue_754_schema() {
 async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode() {
     /// Built-ins that legitimately cannot be strict. Verified against master
     /// before the #711/#713 eligibility changes, so this is pre-existing.
-    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser", "swarm"];
+    // applet and swarm used to be ineligible only because of a root combiner;
+    // root combiners are now flattened (OpenAI rejects them outright).
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -1808,3 +1910,67 @@ mod mcp_collision;
 
 #[path = "tests/sdk.rs"]
 mod sdk_tests;
+
+#[test]
+fn touched_paths_include_patch_headers_and_path_keys() {
+    let ctx = mcp_test_context(std::path::Path::new("/work"));
+    let input = serde_json::json!({
+        "file_path": "notes.md",
+        "patch_text": "*** Begin Patch\n*** Update File: docs/a.md\n@@\n-x\n+y\n*** Add File: /abs/b.txt\n+hi\n*** Update File: notes.md\n*** End Patch",
+    });
+    let paths: Vec<String> = Registry::touched_paths(&input, &ctx)
+        .into_iter()
+        .map(|(key, path)| format!("{key}:{}", path.display()))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "file_path:/work/notes.md",
+            "patch:/work/docs/a.md",
+            "patch:/abs/b.txt",
+        ]
+    );
+
+    let diff = "--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n--- /dev/null\n+++ b/new.md\n";
+    assert_eq!(Registry::patch_paths(diff), vec!["src/x.rs", "new.md"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env_lock = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("prose.md");
+    std::fs::write(&target, "hello\n").expect("write target");
+    let script = dir.path().join("feedback.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ninput=$(cat)\necho \"call=$JCODE_HOOK_TOOL_CALL_ID tool=$JCODE_HOOK_TOOL_NAME\"\necho \"paths=$JCODE_HOOK_TOUCHED_PATHS\"\ncase \"$input\" in *prose.md*) echo stdin-ok ;; esac\nexit 1\n",
+    )
+    .expect("write script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let previous = std::env::var_os("JCODE_HOOK_POST_TOOL_FEEDBACK");
+    crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+
+    let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
+    let mut ctx = mcp_test_context(dir.path());
+    ctx.tool_call_id = "call_feedback".to_string();
+    let result = registry
+        .execute("read", serde_json::json!({"file_path": "prose.md"}), ctx)
+        .await;
+
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", value),
+        None => crate::env::remove_var("JCODE_HOOK_POST_TOOL_FEEDBACK"),
+    }
+    let output = result.expect("read should succeed").output;
+    assert!(output.contains("hello"), "{output}");
+    assert!(output.contains("[post_tool_feedback]"), "{output}");
+    assert!(output.contains("call=call_feedback tool=read"), "{output}");
+    assert!(
+        output.contains(&format!("paths={}", target.display())),
+        "{output}"
+    );
+    assert!(output.contains("stdin-ok"), "{output}");
+}

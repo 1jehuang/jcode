@@ -1,8 +1,12 @@
 # Swarm Architecture
 
-Status: Largely implemented (see `SWARM_TASK_GRAPH.md` for the DAG-first model
-that supersedes the agent-first framing here; its staged comm migration is in
-progress)
+Status: Largely implemented.
+
+Swarm mode (`/effort swarm`) does not change the system prompt. It appends
+"Use swarms to get things done in parallel." to each user message and runs the
+root at the configured `agents.swarm_root_effort`. The former deep task-graph
+mode (`swarm-deep`, critique/verify gates, `task_graph`/`expand_node`/
+`complete_node`/`inject_gap`) has been removed.
 
 This document captures the swarm coordination design. It describes how agents
 coordinate, plan, communicate, and integrate work with optional git worktrees.
@@ -19,17 +23,12 @@ coordinate, plan, communicate, and integrate work with optional git worktrees.
 
 ## Roles
 
-### Mode-gated spawning
+### Root-only spawning
 
-Normal ad hoc swarms and light-swarm mode are one-level fan-out: only the root
-session may spawn agents. Workers report their result to the root and cannot
-create another generation. This keeps opportunistic swarm use bounded by
-construction.
-
-Recursive spawning is reserved for roots running in `swarm-deep` mode. Their
-descendants may spawn children at arbitrary depth, subject to the configurable
-live-worker budget and the absolute swarm member cap. The root session that first
-spawns in a repo is depth 0.
+Swarms are one-level fan-out: only the root session may spawn agents. Workers
+report their result to the root and cannot create another generation. This
+keeps swarm use bounded by construction. The root session that first spawns in
+a repo is depth 0.
 
 The spawn/parent edge is encoded by `report_back_to_session_id`: a child spawned
 by `P` reports back to `P`. Walking that chain reconstructs ancestry and depth,
@@ -47,8 +46,7 @@ report-back coherent across member churn.
 The single per-swarm "coordinator" slot still exists, but only for shared,
 swarm-level plan operations (propose/approve/assign/task-control on the one
 shared plan). Only a root session claims that slot, and only when it is empty or
-stale. Authorized deep descendants do not claim or disturb this slot when they
-spawn.
+stale.
 
 Nested owners coordinate their own subtree through spawn prompts, direct
 messages, and stop, not through the shared plan. Plan/task operations
@@ -82,9 +80,8 @@ concurrently would make the shared plan incoherent.
 - Propose plan updates when they discover issues or new requirements.
 - Coordinate directly with other agents via DM or channels.
 - Emit lifecycle events when they start, finish, or stop unexpectedly.
-- In a deep swarm, may spawn child agents and stop any agent in the subtree they
-  spawned. In light and ad hoc swarms, workers cannot spawn. Stopping agents
-  outside their own subtree still requires `force=true`.
+- Cannot spawn agents. Stopping agents outside their own subtree requires
+  `force=true`.
 
 ## Agent Lifecycle States
 
@@ -199,12 +196,26 @@ resolution. The system supports:
 - Direct messages (DMs) - the preferred exception channel
 - Subtree broadcast (reaches only the sender's spawned subtree; the swarm
   coordinator keeps whole-swarm reach as an escape hatch)
-- Topic channels (group chats) - discouraged; prefer DMs and task-graph artifacts
+- Topic channels (group chats) - discouraged; prefer DMs
 - Shared context keys (set/read/append) - discouraged; prefer the repo and
   typed node artifacts. Share notifications are subtree-scoped like broadcasts.
 - Channel discovery and member inspection
 
 All agents can send DMs and subtree broadcasts.
+
+### Swarm labels and cross-swarm DMs
+
+Each swarm can carry a short, human-readable label (`set_swarm_label`), unique
+case-insensitively across swarms and persisted in
+`~/.jcode/state/swarm-labels.json`. `list_swarms` returns the live swarm
+directory: id, label, coordinator, member count, and which swarm is yours.
+
+Cross-swarm communication is DM-only. `dm` (or `message`) with
+`to_swarm=<label or id>` delivers to `to_session` inside that swarm, or to the
+swarm's coordinator when `to_session` is omitted. The recipient sees
+`Cross-swarm DM from <name> (swarm '<label>')` plus reply instructions.
+Broadcasts, channels, and shared context never cross swarm boundaries, so one
+swarm cannot flood another.
 
 All inter-agent communication is delivered as notifications (DMs, channel messages,
 broadcasts, plan updates, intent notices, and lifecycle events). Notifications are

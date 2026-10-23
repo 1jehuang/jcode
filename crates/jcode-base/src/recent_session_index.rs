@@ -29,6 +29,12 @@ impl RecentSessionMetadata {
         self.custom_title
             .as_deref()
             .and_then(non_empty)
+            .or_else(|| {
+                // Bookmarks labelled before labels doubled as titles.
+                self.saved
+                    .then(|| self.save_label.as_deref().and_then(non_empty))
+                    .flatten()
+            })
             .or_else(|| self.todo_title.as_deref().and_then(non_empty))
             .or_else(|| self.generated_title.as_deref().and_then(non_empty))
     }
@@ -39,8 +45,39 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn open() -> Result<Connection> {
+/// One schema-initialized connection per (process, database path), shared by
+/// every caller. Opening a fresh connection per upsert re-ran the schema DDL
+/// and migrations (write transactions) on every session save, so a reload
+/// storm's ~40 concurrent saves serialized on SQLite's write lock and each
+/// waited out the 2s busy timeout ("database is locked"). Sharing the
+/// connection serializes writers in-process instead, where each write is a
+/// sub-millisecond upsert.
+struct SharedConnection {
+    path: std::path::PathBuf,
+    connection: Connection,
+}
+
+static SHARED: std::sync::Mutex<Option<SharedConnection>> = std::sync::Mutex::new(None);
+
+fn with_connection<R>(f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
     let path = crate::storage::jcode_dir()?.join("session-metadata-v1.sqlite3");
+    let mut guard = SHARED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // JCODE_HOME can change (tests); reopen when the path moves.
+    match guard.as_ref() {
+        Some(shared) if shared.path == path => f(&shared.connection),
+        _ => {
+            let shared = guard.insert(SharedConnection {
+                connection: open_at(&path)?,
+                path,
+            });
+            f(&shared.connection)
+        }
+    }
+}
+
+fn open_at(path: &std::path::Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(2))?;
     connection.execute_batch(
@@ -69,7 +106,10 @@ fn open() -> Result<Connection> {
 }
 
 pub fn recent(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
-    let connection = open()?;
+    with_connection(|connection| recent_with(connection, limit))
+}
+
+fn recent_with(connection: &Connection, limit: usize) -> Result<Vec<RecentSessionMetadata>> {
     let mut statement = connection.prepare(
         "SELECT session_id, working_dir, generated_title, custom_title,
                 todo_title, saved, updated_at_ms, last_active_at_ms, save_label
@@ -111,7 +151,11 @@ pub fn upsert_session(session: &Session) -> Result<()> {
 }
 
 pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
-    open()?.execute(
+    with_connection(|connection| upsert_with(connection, entry))
+}
+
+fn upsert_with(connection: &Connection, entry: &RecentSessionMetadata) -> Result<()> {
+    connection.execute(
         "INSERT INTO recent_sessions (
              session_id, working_dir, generated_title, custom_title, todo_title,
              saved, updated_at_ms, last_active_at_ms, save_label
@@ -142,7 +186,10 @@ pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
 
 /// Refresh only the derived title after the todo or plan file changes.
 pub fn refresh_todo_title(session_id: &str) -> Result<()> {
-    let connection = open()?;
+    with_connection(|connection| refresh_todo_title_with(connection, session_id))
+}
+
+fn refresh_todo_title_with(connection: &Connection, session_id: &str) -> Result<()> {
     let exists = connection
         .query_row(
             "SELECT 1 FROM recent_sessions WHERE session_id = ?1",
@@ -180,5 +227,26 @@ mod tests {
         assert_eq!(entry.display_title(), Some("Todo goal"));
         entry.custom_title = Some("Renamed".into());
         assert_eq!(entry.display_title(), Some("Renamed"));
+    }
+
+    #[test]
+    fn display_title_prefers_save_label_over_derived_titles() {
+        let mut entry = RecentSessionMetadata {
+            session_id: "session_test".into(),
+            working_dir: None,
+            generated_title: Some("Generated".into()),
+            custom_title: None,
+            todo_title: Some("Todo goal".into()),
+            saved: true,
+            save_label: Some("yc mcp".into()),
+            updated_at_ms: 1,
+            last_active_at_ms: None,
+        };
+        assert_eq!(entry.display_title(), Some("yc mcp"));
+        entry.custom_title = Some("Renamed".into());
+        assert_eq!(entry.display_title(), Some("Renamed"));
+        entry.custom_title = None;
+        entry.saved = false;
+        assert_eq!(entry.display_title(), Some("Todo goal"));
     }
 }

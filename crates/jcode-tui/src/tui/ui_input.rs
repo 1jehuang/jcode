@@ -1,3 +1,7 @@
+#[path = "ui_input/command_suggestions.rs"]
+mod command_suggestions;
+use command_suggestions::*;
+
 use super::inline_interactive_ui::format_elapsed;
 use super::selection_highlight::highlight_line_selection;
 use super::tools_ui::{get_tool_activity_detail, summarize_batch_running_tools_compact};
@@ -253,71 +257,6 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
     frame.render_widget(Paragraph::new(lines), rect);
 }
 
-fn command_suggestion_lines(
-    app: &dyn TuiState,
-    suggestions: &[(String, &'static str)],
-) -> Vec<Line<'static>> {
-    // Highlight the characters of each command that the typed query matched.
-    // We only highlight the command token itself (the part before the first
-    // space), matched against the corresponding leading token of the input.
-    let needle = command_suggestion_needle(app.input());
-    let highlight = |cmd: &str, base: Style| -> Vec<Span<'static>> {
-        highlight_command_spans(cmd, needle.as_deref(), base)
-    };
-
-    let mut lines = Vec::new();
-    if suggestions.len() == 1 {
-        let (cmd, desc) = &suggestions[0];
-        let base = Style::default().fg(rgb(255, 213, 128));
-        let mut spans = highlight(cmd, base);
-        spans.push(Span::styled(format!("  {}", desc), base));
-        lines.push(Line::from(spans));
-    } else if !suggestions.is_empty() {
-        let selected = app
-            .command_suggestion_selected()
-            .min(suggestions.len().saturating_sub(1));
-        let window_start = command_suggestion_window_start(selected, suggestions.len());
-        let limited: Vec<_> = suggestions
-            .iter()
-            .skip(window_start)
-            .take(app::COMMAND_SUGGESTION_VISIBLE_LIMIT)
-            .collect();
-        let window_end = window_start + limited.len();
-        let more_count = suggestions.len().saturating_sub(window_end);
-        let selected_visible = selected.saturating_sub(window_start);
-
-        for (i, (cmd, desc)) in limited.iter().enumerate() {
-            let is_selected = i == selected_visible;
-            let description_style = if is_selected {
-                Style::default().fg(rgb(255, 213, 128))
-            } else {
-                Style::default().fg(dim_color())
-            };
-            let command_style = if is_selected {
-                Style::default().fg(rgb(255, 213, 128))
-            } else {
-                Style::default().fg(rgb(128, 203, 196))
-            };
-            let mut spans = highlight(cmd, command_style);
-            spans.push(Span::styled(format!("  {}", desc), description_style));
-            if i == 0 && window_start > 0 {
-                spans.push(Span::styled(
-                    format!("  ↑{}", window_start),
-                    Style::default().fg(dim_color()),
-                ));
-            }
-            if i + 1 == limited.len() && more_count > 0 {
-                spans.push(Span::styled(
-                    format!("  +{} more", more_count),
-                    Style::default().fg(dim_color()),
-                ));
-            }
-            lines.push(Line::from(spans));
-        }
-    }
-    lines
-}
-
 /// Extract the slash-command portion of the typed input that should be matched
 /// against suggestion command tokens for highlighting purposes.
 fn command_suggestion_needle(input: &str) -> Option<String> {
@@ -326,49 +265,6 @@ fn command_suggestion_needle(input: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
-}
-
-/// Build spans for a suggestion command, recoloring the characters that the
-/// fuzzy matcher aligned with the typed query. Falls back to a single
-/// unhighlighted span when there is nothing (useful) to highlight.
-fn highlight_command_spans(cmd: &str, needle: Option<&str>, base: Style) -> Vec<Span<'static>> {
-    let positions: Vec<usize> = match needle {
-        Some(n) if !n.is_empty() && n != "/" => crate::tui::fuzzy::fuzzy_match_positions(n, cmd),
-        _ => Vec::new(),
-    };
-    if positions.is_empty() {
-        return vec![Span::styled(cmd.to_string(), base)];
-    }
-
-    // Recolor (rather than underline) the matched characters so they stay in
-    // the command palette's own hue: matched chars are a brighter version of
-    // the line's base color, while unmatched chars are dimmed so the match
-    // visually pops.
-    let highlight_style = base
-        .fg(brighten_command_color(base.fg))
-        .add_modifier(Modifier::BOLD);
-    let rest_style = base.fg(dim_command_color(base.fg));
-    let chars: Vec<char> = cmd.chars().collect();
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut run_start = 0usize;
-    let mut run_is_match = !chars.is_empty() && positions.contains(&0);
-    for i in 1..=chars.len() {
-        let cur_is_match = i < chars.len() && positions.contains(&i);
-        if cur_is_match != run_is_match || i == chars.len() {
-            let chunk: String = chars[run_start..i].iter().collect();
-            spans.push(Span::styled(
-                chunk,
-                if run_is_match {
-                    highlight_style
-                } else {
-                    rest_style
-                },
-            ));
-            run_start = i;
-            run_is_match = cur_is_match;
-        }
-    }
-    spans
 }
 
 /// Blend a palette color toward white to emphasize a matched character while
@@ -392,6 +288,9 @@ pub(crate) fn dim_command_color(color: Option<Color>) -> Color {
 }
 
 pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
+    if app.login_input_hint().is_some() {
+        return 1;
+    }
     // Command suggestions render as an overlay (see
     // `draw_command_suggestions_overlay`) and intentionally reserve no layout
     // height: opening the palette must not move the transcript or footer.
@@ -413,6 +312,9 @@ pub(super) fn send_mode_reserved_width(app: &dyn TuiState) -> usize {
 }
 
 pub(super) fn input_prompt(app: &dyn TuiState) -> (&'static str, Color) {
+    if app.login_input_hint().is_some() {
+        return (" login> ", accent_color());
+    }
     let mode = composer_mode(app.input(), app.is_remote_mode());
     if mode.is_shell() {
         ("$ ", shell_mode_color())
@@ -471,7 +373,10 @@ pub(super) fn pending_prompt_count(app: &dyn TuiState) -> usize {
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
-    app.queued_messages().len() + pending_count + if interleave { 1 } else { 0 }
+    app.queued_messages().len()
+        + app.queued_commands().len()
+        + pending_count
+        + if interleave { 1 } else { 0 }
 }
 
 pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
@@ -496,6 +401,13 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
             ));
         }
     }
+    for msg in app.queued_commands() {
+        let normalized = normalize_repaint_sensitive_notice_text(msg);
+        previews.push(format!(
+            "⏳ {}",
+            normalized.chars().take(100).collect::<String>()
+        ));
+    }
     for msg in app.queued_messages() {
         let normalized = normalize_repaint_sensitive_notice_text(msg);
         previews.push(format!(
@@ -519,6 +431,9 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
         {
             items.push((QueuedMsgType::Interleave, msg));
         }
+    }
+    for msg in app.queued_commands() {
+        items.push((QueuedMsgType::Queued, msg.as_str()));
     }
     for msg in app.queued_messages() {
         items.push((QueuedMsgType::Queued, msg.as_str()));
@@ -772,6 +687,15 @@ fn append_batch_progress_spans(
 }
 
 pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
+    if app.status_notice().as_deref() == Some(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT) {
+        crate::tui::app::oauth_telemetry::note_status_render(area);
+        frame.render_widget(
+            Paragraph::new(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT)
+                .style(Style::default().fg(accent_color())),
+            area,
+        );
+        return;
+    }
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
     let (cache_read, cache_creation) = app.streaming_cache_tokens();
@@ -1138,6 +1062,35 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
+    fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
+        let text =
+            |spans: &[Span<'static>]| spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let facts = OverscrollFacts {
+            machine: Some("jcode-cloud".into()),
+            dir: Some("~/jcode".into()),
+            branch: None,
+            git: None,
+            context: None,
+            auth: None,
+            provider: None,
+            model: Some("Opus".into()),
+            effort: None,
+        };
+        let (wide, _) = overscroll_fit_facts(&facts, 80);
+        assert_eq!(text(&wide), "☁ jcode-cloud:~/jcode Opus");
+        let (narrow, fit) = overscroll_fit_facts(&facts, 14);
+        assert!(fit);
+        assert_eq!(text(&narrow), "☁ ~/jcode Opus");
+        let (tiny, _) = overscroll_fit_facts(&facts, 12);
+        assert_eq!(text(&tiny), "☁ jcode Opus");
+        let local = OverscrollFacts {
+            machine: None,
+            ..facts
+        };
+        let (spans, _) = overscroll_fit_facts(&local, 80);
+        assert!(!text(&spans).contains('☁'));
+    }
+    #[test]
     fn reset_status_hint_requires_openai_oauth_and_fresh_exhausted_account() {
         use crate::tui::info_widget::AuthMethod;
         let mut usage = crate::usage::OpenAIUsageData {
@@ -1152,10 +1105,7 @@ mod tests {
         };
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
-            Some(
-                "2 resets available · expiry unknown (2 resets) · /reset usage limits openai"
-                    .to_owned()
-            )
+            Some("2 resets available · expiry unknown · /reset".to_owned())
         );
         for auth in [
             AuthMethod::OpenAIApiKey,
@@ -1208,14 +1158,17 @@ mod tests {
         };
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
-            "4 resets available · expires 2099-05-01 00:30 UTC, expires 2099-06-01 00:00 UTC, expiry unknown (2 resets) · /reset usage limits openai"
+            format!(
+                "4 resets available · expires in {} · /reset",
+                crate::usage::format_reset_time("2099-05-01T00:30:00Z")
+            )
         );
         let credits = usage.openai_reset_credits.as_mut().unwrap();
         credits.available_count = 1;
         credits.available_expirations = vec![None];
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
-            "1 reset available · expiry unknown (1 reset) · /reset usage limits openai"
+            "1 reset available · expiry unknown · /reset"
         );
         usage.openai_reset_credits.as_mut().unwrap().available_count = 0;
         assert!(openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).is_none());
@@ -1223,12 +1176,10 @@ mod tests {
 
     #[test]
     fn swarm_effort_model_status_uses_shared_label() {
-        for mode in ["swarm", "swarm-deep"] {
-            assert_eq!(
-                overscroll_short_reasoning(mode),
-                Some(crate::tui::app::effort_display_label(mode))
-            );
-        }
+        assert_eq!(
+            overscroll_short_reasoning("swarm"),
+            Some(crate::tui::app::effort_display_label("swarm"))
+        );
         assert_eq!(overscroll_short_reasoning(" high "), Some("high"));
         assert_eq!(overscroll_short_reasoning(" "), None);
     }
@@ -1269,177 +1220,6 @@ mod tests {
         assert_eq!(visual_line_move(input, input.len(), 10, -1), Some(2));
         // From far along row 0, down clamps to the end of the short row.
         assert_eq!(visual_line_move(input, 8, 10, 1), Some(input.len()));
-    }
-
-    #[test]
-    fn right_fact_stack_shifts_up_as_a_unit_when_bottom_row_is_occupied() {
-        let area = Rect::new(0, 0, 40, 5);
-        let mut buffer = ratatui::buffer::Buffer::empty(area);
-        for x in 12..40 {
-            buffer[(x, 4)].set_symbol("x");
-        }
-        let lines = ["oauth", "model", "dir", "context"]
-            .into_iter()
-            .map(|text| RightFactLine::new(vec![Span::raw(text)]).expect("fact line"))
-            .collect();
-
-        let placements = right_fact_placements(
-            &buffer,
-            lines,
-            0,
-            5,
-            0,
-            40,
-            Rect::new(0, 0, 40, 3),
-            false,
-            None,
-        );
-        let rows = placements
-            .iter()
-            .map(|placement| placement.area.y)
-            .collect::<Vec<_>>();
-        assert_eq!(rows, vec![0, 1, 2, 3]);
-        assert!(placements.iter().all(|placement| placement.area.y != 4));
-    }
-
-    #[test]
-    fn right_fact_stack_never_leaves_an_occupied_row_between_facts() {
-        let area = Rect::new(0, 0, 40, 7);
-        let mut buffer = ratatui::buffer::Buffer::empty(area);
-        buffer[(39, 4)].set_symbol("x");
-        let lines = ["oauth", "model", "dir", "context"]
-            .into_iter()
-            .map(|text| RightFactLine::new(vec![Span::raw(text)]).expect("fact line"))
-            .collect();
-
-        let placements = right_fact_placements(
-            &buffer,
-            lines,
-            0,
-            7,
-            0,
-            40,
-            Rect::new(0, 0, 40, 5),
-            false,
-            None,
-        );
-        let rows = placements
-            .iter()
-            .map(|placement| placement.area.y)
-            .collect::<Vec<_>>();
-        assert_eq!(rows, vec![0, 1, 2, 3]);
-        assert_eq!(
-            placements
-                .iter()
-                .map(|placement| placement.line.spans[0].content.as_ref())
-                .collect::<Vec<_>>(),
-            vec!["oauth", "model", "dir", "context"]
-        );
-    }
-
-    #[test]
-    fn right_fact_stack_collision_state_space_is_contiguous_or_hidden() {
-        const HEIGHT: u16 = 8;
-        const STACK_HEIGHT: u16 = 4;
-
-        for occupied_mask in 0_u16..(1 << HEIGHT) {
-            let area = Rect::new(0, 0, 40, HEIGHT);
-            let mut buffer = ratatui::buffer::Buffer::empty(area);
-            for row in 0..HEIGHT {
-                if occupied_mask & (1 << row) != 0 {
-                    buffer[(39, row)].set_symbol("x");
-                }
-            }
-            let lines = ["oauth", "model", "dir", "context"]
-                .into_iter()
-                .map(|text| RightFactLine::new(vec![Span::raw(text)]).expect("fact line"))
-                .collect();
-
-            let placements = right_fact_placements(
-                &buffer,
-                lines,
-                0,
-                HEIGHT,
-                0,
-                40,
-                Rect::new(0, 0, 40, HEIGHT),
-                false,
-                None,
-            );
-            let expected_top = (0..=HEIGHT - STACK_HEIGHT).rev().find(|&start| {
-                (start..start + STACK_HEIGHT).all(|row| occupied_mask & (1 << row) == 0)
-            });
-
-            match expected_top {
-                Some(start) => {
-                    assert_eq!(
-                        placements.len(),
-                        STACK_HEIGHT as usize,
-                        "mask {occupied_mask:08b}"
-                    );
-                    assert_eq!(
-                        placements
-                            .iter()
-                            .map(|placement| placement.area.y)
-                            .collect::<Vec<_>>(),
-                        (start..start + STACK_HEIGHT).collect::<Vec<_>>(),
-                        "mask {occupied_mask:08b}"
-                    );
-                    assert_eq!(
-                        placements
-                            .iter()
-                            .map(|placement| placement.line.spans[0].content.as_ref())
-                            .collect::<Vec<_>>(),
-                        vec!["oauth", "model", "dir", "context"],
-                        "mask {occupied_mask:08b}"
-                    );
-                }
-                None => assert!(placements.is_empty(), "mask {occupied_mask:08b}"),
-            }
-        }
-    }
-
-    #[test]
-    fn right_fact_stack_treats_styled_blank_cells_as_occupied() {
-        let area = Rect::new(0, 0, 32, 2);
-        let mut buffer = ratatui::buffer::Buffer::empty(area);
-        for x in 12..32 {
-            buffer[(x, 1)].set_bg(Color::Blue);
-        }
-        let line = RightFactLine::new(vec![Span::raw("context")]).expect("fact line");
-        let placements = right_fact_placements(
-            &buffer,
-            vec![line],
-            0,
-            2,
-            0,
-            32,
-            Rect::new(0, 0, 32, 1),
-            false,
-            None,
-        );
-        assert_eq!(placements.len(), 1);
-        assert_eq!(placements[0].area.y, 0);
-    }
-
-    #[test]
-    fn right_fact_stack_never_draws_over_the_input_cursor() {
-        let area = Rect::new(0, 0, 32, 2);
-        let buffer = ratatui::buffer::Buffer::empty(area);
-        let line = RightFactLine::new(vec![Span::raw("context")]).expect("fact line");
-        let placements = right_fact_placements(
-            &buffer,
-            vec![line],
-            0,
-            2,
-            0,
-            32,
-            Rect::new(0, 0, 32, 1),
-            false,
-            Some(Position::new(28, 1)),
-        );
-        assert_eq!(placements.len(), 1);
-        assert_eq!(placements[0].area.y, 0);
     }
 
     #[test]
@@ -1824,6 +1604,15 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
         }
     };
 
+    if let Some((recording, text)) = app.voice_input_status() {
+        let color = if recording {
+            rgb(255, 110, 110)
+        } else {
+            rgb(140, 200, 255)
+        };
+        spans.push(Span::styled(text, Style::default().fg(color).bold()));
+    }
+
     if let Some(selection) = app.copy_selection_status() {
         let pane_label = selection.pane.label();
         let label = if selection.has_action {
@@ -2031,8 +1820,7 @@ pub(crate) fn openai_reset_status_hint(
     let credits = usage.openai_reset_credits.as_ref()?;
     let count = credits.available_count;
     let noun = if count == 1 { "reset" } else { "resets" };
-    let mut details = Vec::new();
-    let mut unknown = count;
+    let mut expiries = Vec::new();
     for expiry in credits
         .available_expirations
         .iter()
@@ -2042,25 +1830,19 @@ pub(crate) fn openai_reset_status_hint(
             .as_deref()
             .and_then(|expiry| chrono::DateTime::parse_from_rfc3339(expiry).ok())
         {
-            details.push(format!(
-                "expires {}",
-                expiry
-                    .with_timezone(&chrono::Utc)
-                    .format("%Y-%m-%d %H:%M UTC")
-            ));
-            unknown -= 1;
+            expiries.push(expiry);
         }
     }
-    if unknown > 0 {
-        details.push(format!(
-            "expiry unknown ({unknown} {})",
-            if unknown == 1 { "reset" } else { "resets" }
-        ));
-    }
-    Some(format!(
-        "{count} {noun} available · {} · /reset usage limits openai",
-        details.join(", ")
-    ))
+    let detail = expiries.into_iter().min().map_or_else(
+        || "expiry unknown".to_string(),
+        |expiry| {
+            format!(
+                "expires in {}",
+                crate::usage::format_reset_time(&expiry.to_rfc3339())
+            )
+        },
+    );
+    Some(format!("{count} {noun} available · {detail} · /reset"))
 }
 
 fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
@@ -2069,12 +1851,8 @@ fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         return Vec::new();
     }
     let line = Line::from(spans);
-    // Keep existing one-line notices unchanged, but never clip reset expiries.
-    let lines = if app.openai_reset_hint().is_some() {
-        super::markdown::wrap_line(line, usize::from(width))
-    } else {
-        vec![line]
-    };
+    // Notifications must never occupy a second row on narrow terminals.
+    let lines = vec![line];
     lines
         .into_iter()
         .map(|line| {
@@ -2102,20 +1880,14 @@ pub(super) fn draw_notification(frame: &mut Frame, app: &dyn TuiState, area: Rec
     frame.render_widget(Paragraph::new(notification_lines(app, area.width)), area);
 }
 
-/// Draw the elastic overscroll status line, revealed below the input when the
-/// user scrolls past the bottom of the transcript. Shows model, provider,
-/// access method, reasoning level, and context usage percentage, with a live
-/// `(overscroll x.x)` countdown pinned to the right so users can see the line
-/// is temporary and rebounds away on its own.
+/// Draw the session status line, pinned directly below the input. Shows the
+/// directory, branch, git status, context usage, access method, provider, and
+/// model, compacting facts step by step as the terminal narrows.
 pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if area.height == 0 || area.width == 0 {
         return;
     }
     let data = app.info_widget_data();
-
-    // The countdown is the priority affordance: it explains the line exists and
-    // is going away. Build it first so it always gets space on the right edge.
-    let countdown_secs: Option<f32> = app.chat_overscroll_remaining().map(|secs| secs.max(0.0));
 
     let model = data
         .model
@@ -2128,6 +1900,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| app.provider_name());
     let facts = OverscrollFacts {
+        machine: crate::tui::ssh_remote_host(),
         dir: app.working_dir().and_then(|d| overscroll_dir_label(&d)),
         branch: overscroll_git_branch(&data),
         git: data.git_info.clone(),
@@ -2144,78 +1917,26 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
             .map(str::to_string),
     };
 
-    let total_width = area.width as usize;
     let alignment = if app.centered_mode() {
         Alignment::Center
     } else {
         Alignment::Right
     };
-
-    // Pinned mode (no countdown): the info line owns the whole row.
-    let Some(secs) = countdown_secs else {
-        let (spans, _) = overscroll_fit_facts(&facts, total_width);
-        if spans.is_empty() {
-            return;
-        }
-        let line = Line::from(spans).alignment(alignment);
-        frame.render_widget(Paragraph::new(line), area);
-        return;
-    };
-
-    // Elastic mode: reserve the countdown on the right. Prefer the full
-    // "(overscroll x.x)" label, but fall back to a compact "(x.x)" when the
-    // facts would otherwise need to be cut.
-    let countdown_style = Style::default().fg(rgb(150, 150, 165)).italic();
-    let full_countdown = format!("(overscroll {:.1})", secs);
-    let compact_countdown = format!("({:.1})", secs);
-    let fit_with = |label: &str| {
-        let right_w = label.chars().count();
-        let left_w = total_width.saturating_sub(right_w + 1);
-        (overscroll_fit_facts(&facts, left_w), right_w)
-    };
-    let ((spans, fits), right_w, label) = {
-        let (fit, w) = fit_with(&full_countdown);
-        if fit.1 {
-            (fit, w, full_countdown)
-        } else {
-            let (fit, w) = fit_with(&compact_countdown);
-            (fit, w, compact_countdown)
-        }
-    };
-    let _ = fits;
-
-    if total_width <= right_w + 1 {
-        let countdown_line = Line::from(overscroll_truncate_spans(
-            vec![Span::styled(label, countdown_style)],
-            total_width,
-        ))
-        .alignment(Alignment::Right);
-        frame.render_widget(Paragraph::new(countdown_line), area);
+    let (spans, _) = overscroll_fit_facts(&facts, area.width as usize);
+    if spans.is_empty() {
         return;
     }
-
-    let right_w = right_w as u16;
-    let left_w = area.width.saturating_sub(right_w);
-    let left_area = Rect {
-        width: left_w.saturating_sub(1),
-        ..area
-    };
-    let right_area = Rect {
-        x: area.x + left_w,
-        width: right_w,
-        ..area
-    };
-    if !spans.is_empty() {
-        let info_line = Line::from(spans).alignment(alignment);
-        frame.render_widget(Paragraph::new(info_line), left_area);
-    }
-    let countdown_line =
-        Line::from(vec![Span::styled(label, countdown_style)]).alignment(Alignment::Right);
-    frame.render_widget(Paragraph::new(countdown_line), right_area);
+    let line = Line::from(spans).alignment(alignment);
+    frame.render_widget(Paragraph::new(line), area);
 }
+
+/// Model name color on the overscroll status line.
+const OVERSCROLL_MODEL_PINK: Color = Color::Rgb(255, 135, 200);
 
 /// Raw facts for the overscroll status line, before width fitting.
 struct OverscrollFacts {
+    /// Remote machine this session runs on (cloud VM or SSH host).
+    machine: Option<String>,
     dir: Option<String>,
     branch: Option<String>,
     git: Option<crate::tui::info_widget::GitInfo>,
@@ -2230,6 +1951,7 @@ struct OverscrollFacts {
 /// compact, and the last level of each optional fact hides it.
 #[derive(Clone, Copy, Default)]
 struct OverscrollLevels {
+    machine: u8,
     dir: u8,
     branch: u8,
     git: u8,
@@ -2237,7 +1959,6 @@ struct OverscrollLevels {
     auth: u8,
     provider: u8,
     model: u8,
-    tight_separators: bool,
 }
 
 /// Compaction ladder, applied one step at a time until the line fits.
@@ -2248,17 +1969,17 @@ struct OverscrollLevels {
 /// only shortened, so the line always answers "where am I, what am I running,
 /// how full is the context".
 const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
-    |l| l.auth = 1,                // hide auth ("OAuth"/"API key")
-    |l| l.git = 1,                 // "~3 +1 ?2 ↑1" -> "±6 ↑1"
-    |l| l.context = 1,             // "74k/256k ▰▰▰▱▱▱▱▱▱▱ 29%" -> "▰▱▱▱ 29%"
-    |l| l.branch = 1,              // long branch -> 12 chars
-    |l| l.provider = 1,            // hide provider
-    |l| l.context = 2,             // "▰▱▱▱ 29%" -> "29%"
-    |l| l.git = 2,                 // hide git status
-    |l| l.branch = 2,              // hide branch
-    |l| l.tight_separators = true, // " · " -> " "
-    |l| l.model = 1,               // drop reasoning effort
-    |l| l.dir = 1,                 // "~/…/jcode" -> "jcode"
+    |l| l.auth = 1,     // hide auth ("OAuth"/"API key")
+    |l| l.git = 1,      // "~3 +1 ?2 ↑1" -> "±6 ↑1"
+    |l| l.context = 1,  // "74k/256k ▰▰▰▱▱▱▱▱▱▱ 29%" -> "▰▱▱▱ 29%"
+    |l| l.branch = 1,   // long branch -> 12 chars
+    |l| l.provider = 1, // hide provider
+    |l| l.context = 2,  // "▰▱▱▱ 29%" -> "29%"
+    |l| l.git = 2,      // hide git status
+    |l| l.branch = 2,   // hide branch
+    |l| l.model = 1,    // drop reasoning effort
+    |l| l.machine = 1,  // "☁ jcode-cloud:" -> "☁ "
+    |l| l.dir = 1,      // "~/…/jcode" -> "jcode"
 ];
 
 fn overscroll_fact_spans(
@@ -2267,6 +1988,24 @@ fn overscroll_fact_spans(
 ) -> Vec<Vec<Span<'static>>> {
     let muted = Style::default().fg(rgb(140, 140, 150));
     let mut out: Vec<Vec<Span<'static>>> = Vec::new();
+
+    let machine_spans = |levels: OverscrollLevels| -> Vec<Span<'static>> {
+        let Some(machine) = &facts.machine else {
+            return Vec::new();
+        };
+        let cloud = Style::default().fg(rgb(170, 200, 255));
+        let mut spans = vec![Span::styled("☁ ", cloud)];
+        if levels.machine == 0 {
+            spans.push(Span::styled(
+                overscroll_truncate_label(machine, 24),
+                cloud.bold(),
+            ));
+            if facts.dir.is_some() {
+                spans.push(Span::styled(":", muted));
+            }
+        }
+        spans
+    };
 
     if let Some(dir) = &facts.dir {
         let label = if levels.dir == 0 {
@@ -2277,10 +2016,14 @@ fn overscroll_fact_spans(
                 .unwrap_or(dir)
                 .to_string()
         };
-        out.push(vec![
-            Span::styled(" ", Style::default().fg(rgb(140, 180, 255))),
-            Span::styled(label, muted),
-        ]);
+        let mut group = machine_spans(levels);
+        if group.is_empty() {
+            group.push(Span::styled(" ", Style::default().fg(rgb(140, 180, 255))));
+        }
+        group.push(Span::styled(label, muted));
+        out.push(group);
+    } else if facts.machine.is_some() {
+        out.push(machine_spans(levels));
     }
 
     if let Some(branch) = &facts.branch {
@@ -2358,7 +2101,7 @@ fn overscroll_fact_spans(
     if let Some(model) = &facts.model {
         let mut group = vec![Span::styled(
             model.clone(),
-            Style::default().fg(rgb(190, 190, 200)).bold(),
+            Style::default().fg(OVERSCROLL_MODEL_PINK).bold(),
         )];
         if levels.model == 0
             && let Some(effort) = &facts.effort
@@ -2376,14 +2119,10 @@ fn overscroll_fact_spans(
 fn overscroll_fit_facts(facts: &OverscrollFacts, max_width: usize) -> (Vec<Span<'static>>, bool) {
     use unicode_width::UnicodeWidthStr;
     let render = |levels: OverscrollLevels| {
-        let sep_text = if levels.tight_separators { " " } else { " · " };
         let mut out: Vec<Span<'static>> = Vec::new();
         for group in overscroll_fact_spans(facts, levels) {
             if !out.is_empty() {
-                out.push(Span::styled(
-                    sep_text,
-                    Style::default().fg(rgb(100, 100, 110)),
-                ));
+                out.push(Span::raw(" "));
             }
             out.extend(group);
         }
@@ -2586,7 +2325,7 @@ fn overscroll_short_reasoning(effort: &str) -> Option<&str> {
         return None;
     }
     Some(match effort {
-        "swarm" | "swarm-deep" => crate::tui::app::effort_display_label(effort),
+        "swarm" => crate::tui::app::effort_display_label(effort),
         "max" => "max",
         "xhigh" => "xhigh",
         "high" => "high",
@@ -2669,307 +2408,6 @@ fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'
 /// compact when the directory and model need the space.
 const OVERSCROLL_CONTEXT_CELLS_FULL: usize = 10;
 const OVERSCROLL_CONTEXT_CELLS_COMPACT: usize = 4;
-const RIGHT_FACT_CONTEXT_CELLS: usize = 6;
-const RIGHT_FACT_GAP: u16 = 2;
-const RIGHT_FACT_PAD: u16 = 1;
-const RIGHT_FACT_TRANSCRIPT_ROWS: u16 = 4;
-
-fn right_fact_neutral_style() -> Style {
-    Style::default().fg(rgb(140, 140, 150))
-}
-
-#[derive(Clone)]
-struct RightFactLine {
-    spans: Vec<Span<'static>>,
-    width: u16,
-}
-
-impl RightFactLine {
-    fn new(spans: Vec<Span<'static>>) -> Option<Self> {
-        use unicode_width::UnicodeWidthStr;
-        let width: usize = spans.iter().map(|span| span.content.width()).sum();
-        let width = u16::try_from(width).ok()?;
-        (width > 0).then_some(Self { spans, width })
-    }
-}
-
-#[derive(Clone)]
-struct RightFactPlacement {
-    line: RightFactLine,
-    area: Rect,
-}
-
-/// Draw session facts as a bottom-anchored stack in otherwise unused cells on
-/// the right side of the composer chrome. When chrome rows are occupied, the
-/// stack may climb into at most the last few transcript rows, but only where
-/// the final rendered buffer has a genuinely blank suffix. It never reflows or
-/// overwrites transcript, status, notification, inline UI, or input content.
-pub(super) fn draw_right_fact_stack(
-    frame: &mut Frame,
-    app: &dyn TuiState,
-    messages_area: Rect,
-    input_area: Rect,
-    transcript_scrollbar_visible: bool,
-    input_cursor: Option<Position>,
-) {
-    // The legacy overscroll row owns these same facts while it is visible.
-    // Standing down here avoids duplicates and keeps its elastic reveal from
-    // changing transcript-tail overlays mid-gesture. Users with overscroll off
-    // get the compact stack continuously.
-    if app.chat_overscroll_active() || input_area.width == 0 || input_area.height == 0 {
-        return;
-    }
-
-    let lines = right_fact_lines(app);
-    if lines.is_empty() {
-        return;
-    }
-
-    // Never composite into a live transcript while a turn is processing. Its
-    // tail changes every frame, so even collision-safe facts could appear to
-    // jump as streaming rows arrive. Chrome rows remain available.
-    let transcript_rows = if app.auto_scroll_paused() || app.is_processing() {
-        0
-    } else {
-        RIGHT_FACT_TRANSCRIPT_ROWS.min(messages_area.height)
-    };
-    let top = messages_area.bottom().saturating_sub(transcript_rows);
-    let bottom = input_area.bottom();
-    if top >= bottom {
-        return;
-    }
-
-    let placements = {
-        let buffer = frame.buffer_mut();
-        right_fact_placements(
-            buffer,
-            lines,
-            top,
-            bottom,
-            input_area.x,
-            input_area.right(),
-            messages_area,
-            transcript_scrollbar_visible,
-            input_cursor,
-        )
-    };
-
-    for placement in placements {
-        frame.render_widget(
-            Paragraph::new(Line::from(placement.line.spans)),
-            placement.area,
-        );
-    }
-}
-
-/// Build fact rows in their visual top-to-bottom order: provider/auth, model,
-/// directory, then context usage. Placement walks this list in reverse so the
-/// context row is anchored nearest the input whenever space permits.
-fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
-    let data = app.info_widget_data();
-    let sep = || Span::styled(" · ", right_fact_neutral_style());
-    let mut lines = Vec::with_capacity(4);
-
-    let mut access = Vec::new();
-    let provider = data
-        .provider_name
-        .clone()
-        .filter(|provider| !provider.trim().is_empty())
-        .unwrap_or_else(|| app.provider_name());
-    if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
-        access.push(Span::styled(
-            overscroll_provider_display(&provider),
-            right_fact_neutral_style(),
-        ));
-    }
-    if let Some((label, _)) = overscroll_auth_label(data.auth_method) {
-        if !access.is_empty() {
-            access.push(sep());
-        }
-        access.push(Span::styled(label.to_string(), right_fact_neutral_style()));
-    }
-    if let Some(line) = RightFactLine::new(access) {
-        lines.push(line);
-    }
-
-    let model = data
-        .model
-        .clone()
-        .filter(|model| !model.trim().is_empty())
-        .unwrap_or_else(|| app.provider_model());
-    if !model.is_empty() && !overscroll_is_placeholder(&model) {
-        let mut spans = vec![Span::styled(
-            session_facts::pretty_model(&model),
-            right_fact_neutral_style(),
-        )];
-        if let Some(effort) = data
-            .reasoning_effort
-            .as_deref()
-            .and_then(overscroll_short_reasoning)
-        {
-            spans.push(Span::styled(
-                format!(" {effort}"),
-                right_fact_neutral_style(),
-            ));
-        }
-        if let Some(line) = RightFactLine::new(spans) {
-            lines.push(line);
-        }
-    }
-
-    if let Some(dir) = app
-        .working_dir()
-        .and_then(|path| overscroll_dir_label(&path))
-    {
-        let mut spans = vec![Span::styled(dir, right_fact_neutral_style())];
-        if let Some(branch) = overscroll_git_branch(&data) {
-            spans.push(Span::styled(
-                format!("  {branch}"),
-                right_fact_neutral_style(),
-            ));
-        }
-        if let Some(line) = RightFactLine::new(spans) {
-            lines.push(line);
-        }
-    }
-
-    if let Some((used, limit)) = overscroll_context_usage(&data) {
-        let mut spans = vec![Span::styled(
-            format!(
-                "{}/{} ",
-                overscroll_format_tokens(used),
-                overscroll_format_tokens(limit)
-            ),
-            right_fact_neutral_style(),
-        )];
-        spans.extend(overscroll_context_bar(
-            used,
-            limit,
-            RIGHT_FACT_CONTEXT_CELLS,
-        ));
-        if let Some(line) = RightFactLine::new(spans) {
-            lines.push(line);
-        }
-    }
-
-    lines
-}
-
-#[allow(clippy::too_many_arguments)]
-fn right_fact_placements(
-    buffer: &ratatui::buffer::Buffer,
-    lines: Vec<RightFactLine>,
-    top: u16,
-    bottom: u16,
-    left: u16,
-    right: u16,
-    messages_area: Rect,
-    transcript_scrollbar_visible: bool,
-    protected_position: Option<Position>,
-) -> Vec<RightFactPlacement> {
-    if top >= bottom || left >= right || lines.is_empty() {
-        return Vec::new();
-    }
-
-    let Ok(block_height) = u16::try_from(lines.len()) else {
-        return Vec::new();
-    };
-    if bottom.saturating_sub(top) < block_height {
-        return Vec::new();
-    }
-
-    // Facts are one visual object. Probe complete consecutive blocks from the
-    // bottom upward; if any row collides, move the entire stack rather than
-    // skipping that row and letting unrelated content split the facts apart.
-    let mut block_bottom = bottom;
-    loop {
-        let Some(block_top) = block_bottom.checked_sub(block_height) else {
-            return Vec::new();
-        };
-        if block_top < top {
-            return Vec::new();
-        }
-
-        let areas = lines
-            .iter()
-            .enumerate()
-            .map(|(index, line)| {
-                let row = block_top + index as u16;
-                right_fact_area_on_row(
-                    buffer,
-                    line,
-                    row,
-                    left,
-                    right,
-                    messages_area,
-                    transcript_scrollbar_visible,
-                    protected_position,
-                )
-            })
-            .collect::<Option<Vec<_>>>();
-        if let Some(areas) = areas {
-            return lines
-                .into_iter()
-                .zip(areas)
-                .map(|(line, area)| RightFactPlacement { line, area })
-                .collect();
-        }
-
-        if block_top == top {
-            return Vec::new();
-        }
-        block_bottom = block_bottom.saturating_sub(1);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn right_fact_area_on_row(
-    buffer: &ratatui::buffer::Buffer,
-    line: &RightFactLine,
-    row: u16,
-    left: u16,
-    right: u16,
-    messages_area: Rect,
-    transcript_scrollbar_visible: bool,
-    protected_position: Option<Position>,
-) -> Option<Rect> {
-    let row_right =
-        if transcript_scrollbar_visible && row >= messages_area.y && row < messages_area.bottom() {
-            right.saturating_sub(1)
-        } else {
-            right
-        };
-
-    let required = line
-        .width
-        .saturating_add(RIGHT_FACT_GAP)
-        .saturating_add(RIGHT_FACT_PAD);
-    if row_right.saturating_sub(left) < required {
-        return None;
-    }
-
-    let fact_right = row_right.saturating_sub(RIGHT_FACT_PAD);
-    let fact_left = fact_right.saturating_sub(line.width);
-    let probe_left = fact_left.saturating_sub(RIGHT_FACT_GAP);
-    if probe_left < left
-        || !(probe_left..row_right).all(|x| {
-            protected_position != Some(Position::new(x, row))
-                && right_fact_cell_is_blank(&buffer[(x, row)])
-        })
-    {
-        return None;
-    }
-
-    Some(Rect::new(fact_left, row, line.width, 1))
-}
-
-fn right_fact_cell_is_blank(cell: &ratatui::buffer::Cell) -> bool {
-    cell.symbol().trim().is_empty()
-        && cell.bg == Color::Reset
-        && cell.modifier.is_empty()
-        && !cell.skip
-}
-
 pub(super) fn draw_input(
     frame: &mut Frame,
     app: &dyn TuiState,
@@ -3009,7 +2447,14 @@ pub(super) fn draw_input(
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
-    if has_suggestions {
+    if let Some(hint) = app.login_input_hint() {
+        hint_shown = true;
+        hint_line = Some(hint.to_string());
+        lines.push(Line::from(Span::styled(
+            hint,
+            Style::default().fg(accent_color()),
+        )));
+    } else if has_suggestions {
         // Overlay pass owns the palette rows; no inline hint line competes
         // with it.
     } else if let Some(shell_hint) = shell_mode_hint(mode) {

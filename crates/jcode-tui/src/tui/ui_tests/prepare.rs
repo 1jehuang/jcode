@@ -47,6 +47,8 @@ fn chat_swarm_member(session_id: &str) -> crate::protocol::SwarmMemberStatus {
             auth_method: Some("OAuth".to_string()),
             effort: Some("high".to_string()),
             elapsed_secs: Some(18),
+            activity_age_secs: None,
+            ..Default::default()
         },
     }
 }
@@ -536,6 +538,7 @@ fn test_prepare_messages_centered_live_batch_rows_keep_dedicated_padding_span() 
 
 #[test]
 fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
+    let _lock = viewport_snapshot_test_lock();
     let state = TestState {
         display_messages: vec![DisplayMessage {
             role: "user".to_string(),
@@ -589,6 +592,9 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
         ..Default::default()
     };
 
+    // The Updates box lists recent commit subjects ("… PR #1440"); they trip the #N check below.
+    let _fixture =
+        crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
     let prepared = prepare::prepare_messages(&state, 100, 30);
     let rendered: Vec<String> = prepared
         .materialize_all_lines()
@@ -1296,4 +1302,107 @@ fn test_prepare_messages_renders_anchored_reasoning_message_in_flow() {
         "sentinel must be stripped: {:?}",
         joined[reasoning_idx]
     );
+}
+
+#[test]
+fn test_prepare_messages_restored_history_matches_live_tool_rows() {
+    // History restore populates assistant `tool_calls`; live turns do not.
+    // The prepared transcript must be identical so a reload never adds a
+    // purple `tool: bash` summary above the real tool rows.
+    let tool_row = DisplayMessage {
+        role: "tool".to_string(),
+        content: "ok".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(ToolCall {
+            id: "call-bash-restore".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "git status"}),
+            intent: Some("Check repo state".to_string()),
+            thought_signature: None,
+        }),
+    };
+    let assistant = |tool_calls: Vec<String>| DisplayMessage {
+        role: "assistant".to_string(),
+        content: "Checking the repo.".to_string(),
+        tool_calls,
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    };
+    let render = |messages: Vec<DisplayMessage>| {
+        let state = TestState {
+            display_messages: messages,
+            ..Default::default()
+        };
+        prepare::prepare_messages(&state, 110, 30)
+            .materialize_all_lines()
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+    };
+    let live = render(vec![assistant(Vec::new()), tool_row.clone()]);
+    let restored = render(vec![assistant(vec!["bash".to_string()]), tool_row]);
+    assert!(
+        restored.iter().all(|line| !line.contains("tool: ")),
+        "restored={restored:#?}"
+    );
+    assert!(
+        restored
+            .iter()
+            .any(|line| line.contains("bash · Check repo state")),
+        "restored={restored:#?}"
+    );
+    assert_eq!(live, restored);
+}
+
+#[test]
+fn test_prepare_messages_keeps_multiline_error_rows() {
+    let state = TestState {
+        display_messages: vec![DisplayMessage::error(
+            "/cloud failed. Nothing moved.\n\nError: remote failed\nCaused by:\n    host down",
+        )],
+        ..Default::default()
+    };
+    let rendered = prepare::prepare_messages(&state, 110, 30)
+        .materialize_all_lines()
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>();
+    let all = rendered.join("\n");
+    let first = rendered
+        .iter()
+        .position(|line| line.contains("✗ /cloud failed. Nothing moved."))
+        .unwrap_or_else(|| panic!("missing headline: {all}"));
+    let error = rendered
+        .iter()
+        .position(|line| line.contains("Error: remote failed"))
+        .unwrap_or_else(|| panic!("missing error row: {all}"));
+    let cause = rendered
+        .iter()
+        .position(|line| line.contains("    host down"))
+        .unwrap_or_else(|| panic!("missing cause row: {all}"));
+    assert!(first < error && error < cause, "rows collapsed: {all}");
+    assert!(!rendered[first].contains("Error:"), "rows collapsed: {all}");
+}
+
+#[test]
+fn cloud_failure_reason_is_visible_in_rendered_chat() {
+    for width in [40, 100] {
+        let state = TestState {
+            display_messages: vec![DisplayMessage::error(
+                "/cloud failed. Reason: Unreturned cloud changes would be overwritten. Recover the earlier session first.\n\nError: remote receive failed",
+            )],
+            ..Default::default()
+        };
+        let rendered = prepare::prepare_messages(&state, width, 40)
+            .materialize_all_lines()
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Reason:"), "{rendered}");
+        assert!(rendered.contains("session first."), "{rendered}");
+    }
 }

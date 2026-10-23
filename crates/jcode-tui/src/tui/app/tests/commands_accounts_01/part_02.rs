@@ -123,7 +123,13 @@ fn test_alignment_status_shows_current_and_saved_defaults() {
         );
         assert!(last.content.contains("Saved default: left-aligned."));
         assert!(last.content.contains("/alignment centered"));
-        assert!(last.content.contains("Alt+C"));
+        // The keycap hint is platform-dependent: the message renders the
+        // platform chord via alt_chord (Option symbol on macOS, Alt elsewhere),
+        // so assert exactly that instead of a hardcoded "Alt+C" that fails on
+        // macOS builds while passing on the upstream Linux CI.
+        assert!(last
+            .content
+            .contains(&jcode_tui_core::keybind::alt_chord("C")));
     });
 }
 
@@ -233,13 +239,14 @@ fn test_subscription_command_shows_jcode_status_scaffold() {
     assert!(msg.content.contains("monthly spending limit"));
     assert!(msg.content.contains("progressively larger tranches"));
     assert!(msg.content.contains("/login jcode"));
-    assert!(msg.content.contains("Claude Opus 4.8"));
-    assert!(msg.content.contains("GPT-5.5"));
-    assert!(msg.content.contains("Claude Fable 5"));
-    assert!(msg.content.contains("GPT-5.6 Sol"));
+    assert!(msg.content.contains("Claude Opus 5.5"));
+    assert!(msg.content.contains("Claude Sonnet 5.5"));
+    assert!(msg.content.contains("Claude Haiku 5.5"));
+    assert!(msg.content.contains("GPT-6.1 Sol"));
     assert!(!msg.content.contains("$10/mo"));
     assert!(!msg.content.contains("usable inference budget"));
-    assert!(!msg.content.contains("Claude Fable 5 - claude-fable-5 [Ultra]"));
+    assert!(!msg.content.contains("Claude Opus 4.8"));
+    assert!(!msg.content.contains("GPT-5.5"));
 }
 
 #[test]

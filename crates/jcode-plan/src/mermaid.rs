@@ -167,8 +167,8 @@ pub fn swarm_plan_mermaid(items: &[PlanItem]) -> Option<String> {
         };
         let class = class_of(&item.id, &item.status);
         let label = node_label(item, class);
-        // Gate nodes (deep-mode critique/verify gates use `<parent>::gate`
-        // ids) render as hexagons so they stand out from normal tasks.
+        // Items with `<parent>::gate` ids (from older plans) render as
+        // hexagons so they stand out from normal tasks.
         if item.id.ends_with("::gate") {
             out.push_str(&format!("    {id}{{{{\"{label}\"}}}}:::{class}\n"));
         } else {

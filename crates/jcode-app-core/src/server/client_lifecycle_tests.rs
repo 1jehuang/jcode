@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 use crate::message::{ContentBlock, Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -16,6 +17,51 @@ struct IsolatedReloadRecoveryEnv {
     prev_runtime: Option<std::ffi::OsString>,
     _home: tempfile::TempDir,
     _runtime: tempfile::TempDir,
+}
+
+#[test]
+fn cancel_soft_interrupts_by_id_reports_each_requested_id_exactly_once() {
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(
+        "session_cancel_by_id_test",
+        Arc::clone(&queue),
+        InterruptSignal::new(),
+    );
+    let user = SoftInterruptSource::User;
+    for (content, id) in [
+        ("a", Some("f1")),
+        ("b", None),
+        ("c", Some("f2")),
+        ("d", Some("f3")),
+    ] {
+        assert!(control.queue_soft_interrupt_with_id(
+            content.into(),
+            Vec::new(),
+            false,
+            user,
+            id.map(str::to_string),
+        ));
+    }
+    assert_eq!(control.pending_soft_interrupt_count(), 4);
+
+    let requested: Vec<String> = ["f3", "gone", "f1", "f3"].map(String::from).to_vec();
+    let (cancelled, not_queued) = control.cancel_soft_interrupts_by_id(&requested);
+    assert_eq!(cancelled, vec!["f3".to_string(), "f1".to_string()]);
+    assert_eq!(not_queued, vec!["gone".to_string()]);
+
+    let remaining: Vec<String> = queue
+        .lock()
+        .expect("queue lock")
+        .iter()
+        .map(|message| message.content.clone())
+        .collect();
+    assert_eq!(remaining, vec!["b".to_string(), "c".to_string()]);
+
+    // Once drained (injected), the same id can no longer be cancelled.
+    queue.lock().expect("queue lock").clear();
+    let (cancelled, not_queued) = control.cancel_soft_interrupts_by_id(&["f2".to_string()]);
+    assert!(cancelled.is_empty());
+    assert_eq!(not_queued, vec!["f2".to_string()]);
 }
 
 #[tokio::test]
@@ -804,12 +850,15 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
     Request::Subscribe {
         system_prompt: None,
         supports_pdf_panels: false,
+        supports_user_response: false,
+        supports_server_failover: false,
         id: 1,
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
         target_session_id: None,
         client_instance_id: None,
         client_has_local_history: false,
+        history_base: None,
         allow_session_takeover: false,
         crash_on_disconnect: false,
         continue_on_disconnect: false,
@@ -954,6 +1003,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 images: Vec::new(),
                 system_reminder: None,
                 active_skill: None,
+                server_failover: false,
             },
             "session_guard",
             &mut ProcessingState {
@@ -1055,6 +1105,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             images: Vec::new(),
             system_reminder: None,
             active_skill: None,
+            server_failover: false,
         },
         session_id,
         &mut ProcessingState {
@@ -1129,6 +1180,270 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
     }
 }
 
+#[tokio::test]
+async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_terminal_then_message";
+    let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
+    session.model = Some("complete-immediately".into());
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel();
+    let (request_tx, mut request_rx) = mpsc::unbounded_channel();
+    let connections = Arc::new(RwLock::new(HashMap::new()));
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms = Arc::new(RwLock::new(HashMap::new()));
+    let history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_tx, _) = broadcast::channel(8);
+    let swarm = SwarmStatusRefs {
+        members: &members,
+        swarms_by_id: &swarms,
+        event_history: &history,
+        event_counter: &counter,
+        event_tx: &swarm_tx,
+    };
+    let mut processing = false;
+    let mut message_id = None;
+    let mut processing_session = None;
+    let mut task = None;
+    let mut state = ProcessingState {
+        client_is_processing: &mut processing,
+        message_id: &mut message_id,
+        session_id: &mut processing_session,
+        task: &mut task,
+    };
+
+    for (id, content) in [(1, "first turn"), (2, "acceptance back on laptop")] {
+        request_tx
+            .send(ProcessingMessage {
+                id,
+                content: content.into(),
+                images: Vec::new(),
+                system_reminder: None,
+                active_skill: None,
+                server_failover: false,
+            })
+            .unwrap();
+        // Force the real actor's worst-case ordering: after Done, both input
+        // and completion are ready, but biased select chooses input first.
+        let message = tokio::select! {
+            biased;
+            message = request_rx.recv() => message.unwrap(),
+            _ = done_rx.recv() => panic!("input must win the biased select"),
+        };
+        if id == 2 {
+            assert!(
+                *state.client_is_processing,
+                "old local state is still busy after Done"
+            );
+            assert_eq!(*state.message_id, Some(1));
+        }
+        reconcile_processing_completions(
+            None,
+            &mut done_rx,
+            &mut state,
+            "connection",
+            &connections,
+            &swarm,
+        )
+        .await;
+        assert!(!*state.client_is_processing);
+        assert!(state.message_id.is_none());
+        assert!(state.session_id.is_none());
+        assert!(state.task.is_none());
+        start_processing_message(
+            message,
+            session_id,
+            &mut state,
+            &agent,
+            &event_tx,
+            &done_tx,
+            Vec::new(),
+            &swarm,
+        )
+        .await;
+        assert!(*state.client_is_processing);
+        assert_eq!(*state.message_id, Some(id));
+
+        if id == 2 {
+            // Delayed duplicates, including errors, must not clear the new
+            // turn's handle or session and must not emit duplicate terminals.
+            done_tx.send((1, Ok(()), None)).unwrap();
+            done_tx
+                .send((1, Err(anyhow::anyhow!("late error")), None))
+                .unwrap();
+            reconcile_processing_completions(
+                None,
+                &mut done_rx,
+                &mut state,
+                "connection",
+                &connections,
+                &swarm,
+            )
+            .await;
+            assert!(*state.client_is_processing);
+            assert_eq!(*state.message_id, Some(2));
+            assert_eq!(state.session_id.as_deref(), Some(session_id));
+            assert!(state.task.is_some());
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match event_rx.recv().await.unwrap() {
+                    ServerEvent::Done { id: done_id } => {
+                        assert_eq!(done_id, id, "no duplicate terminal from the previous turn");
+                        break;
+                    }
+                    ServerEvent::Error { message, .. } => {
+                        panic!("new turn was rejected: {message}")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("each prompt must reach the provider and complete");
+        // Deliberately do not poll completion here. The next Message must
+        // reconcile it, rather than becoming a lost interleave.
+    }
+    reconcile_processing_completions(
+        None,
+        &mut done_rx,
+        &mut state,
+        "connection",
+        &connections,
+        &swarm,
+    )
+    .await;
+    assert!(!*state.client_is_processing);
+    let persisted = crate::session::Session::load(session_id).unwrap();
+    for expected in ["first turn", "acceptance back on laptop"] {
+        assert!(
+            persisted.messages.iter().any(|message| {
+                message.content.iter().any(
+                    |block| matches!(block, ContentBlock::Text { text, .. } if text == expected),
+                )
+            }),
+            "prompt must be persisted as a real model turn: {expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    for failed in [false, true] {
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut task = Some(tokio::spawn(async move {
+            let result = if failed {
+                Err(anyhow::anyhow!("terminal test error"))
+            } else {
+                Ok(())
+            };
+            done_tx.send((7, result, None)).unwrap();
+            // Deterministically simulate preemption between the two sends.
+            release_rx.await.unwrap();
+            let terminal = if failed {
+                ServerEvent::Error {
+                    id: 7,
+                    message: "terminal test error".into(),
+                    retry_after_secs: Some(3),
+                }
+            } else {
+                ServerEvent::Done { id: 7 }
+            };
+            event_tx.send(terminal).unwrap();
+        }));
+        let completion = done_rx.recv().await.unwrap();
+        let mut processing = true;
+        let mut message_id = Some(7);
+        let mut session_id = Some("session_terminal_enqueue_gap".to_string());
+        let mut state = ProcessingState {
+            client_is_processing: &mut processing,
+            message_id: &mut message_id,
+            session_id: &mut session_id,
+            task: &mut task,
+        };
+        let (disconnect_tx, _) = mpsc::unbounded_channel();
+        let connections = Arc::new(RwLock::new(HashMap::from([(
+            "connection".into(),
+            ClientConnectionInfo {
+                client_id: "connection".into(),
+                session_id: "session_terminal_enqueue_gap".into(),
+                client_instance_id: None,
+                debug_client_id: None,
+                connected_at: Instant::now(),
+                last_seen: Instant::now(),
+                is_processing: true,
+                current_tool_name: Some("old tool".into()),
+                terminal_env: Vec::new(),
+                disconnect_tx,
+            },
+        )])));
+        let members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms = Arc::new(RwLock::new(HashMap::new()));
+        let history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_tx, _) = broadcast::channel(8);
+        let swarm = SwarmStatusRefs {
+            members: &members,
+            swarms_by_id: &swarms,
+            event_history: &history,
+            event_counter: &counter,
+            event_tx: &swarm_tx,
+        };
+        {
+            let reconcile = reconcile_processing_completions(
+                Some(completion),
+                &mut done_rx,
+                &mut state,
+                "connection",
+                &connections,
+                &swarm,
+            );
+            tokio::pin!(reconcile);
+            assert!(
+                futures::poll!(&mut reconcile).is_pending(),
+                "must not retire before terminal enqueue"
+            );
+            assert!(event_rx.try_recv().is_err());
+            release_tx.send(()).unwrap();
+            reconcile.await;
+        }
+        assert!(!*state.client_is_processing);
+        assert!(state.message_id.is_none());
+        assert!(state.session_id.is_none());
+        assert!(state.task.is_none());
+        let connections = connections.read().await;
+        assert!(!connections["connection"].is_processing);
+        assert!(connections["connection"].current_tool_name.is_none());
+        let terminal = event_rx
+            .try_recv()
+            .expect("terminal is queued before new turn can start");
+        if failed {
+            assert!(matches!(
+                terminal,
+                ServerEvent::Error {
+                    id: 7,
+                    retry_after_secs: Some(3),
+                    ..
+                }
+            ));
+        } else {
+            assert!(matches!(terminal, ServerEvent::Done { id: 7 }));
+        }
+        assert!(event_rx.try_recv().is_err(), "one terminal event only");
+    }
+}
+
 #[test]
 fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Result<()> {
     let _lock = crate::storage::lock_test_env();
@@ -1180,6 +1495,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: None,
+                server_failover: false,
             },
             session_id,
             &mut ProcessingState {
@@ -1280,6 +1596,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     images: Vec::new(),
                     system_reminder: None,
                     active_skill: None,
+                    server_failover: false,
                 },
                 session_id,
                 &mut ProcessingState {
@@ -1489,7 +1806,7 @@ impl Provider for SdkCallbackProvider {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "read");
         assert_eq!(tools[0].description, "SDK read callback");
-        let events = if self.calls.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
+        let events = if self.calls.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
             vec![
                 StreamEvent::ToolUseStart {
                     id: "model-call".into(),
@@ -1519,11 +1836,67 @@ impl Provider for SdkCallbackProvider {
     }
 }
 
+#[derive(Clone, Default)]
+struct TerminalSocketProvider {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    first_started: Arc<tokio::sync::Notify>,
+    finish_first: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Provider for TerminalSocketProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.first_started.notify_one();
+            self.finish_first.notified().await;
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::TextDelta("completed".into())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "terminal-socket-test"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn terminal_done_then_immediate_message_socket_dispatches_next_turn() {
+    sdk_socket_workflow(false, true).await;
+}
+
 #[tokio::test]
 async fn sdk_socket_configure_list_callback_and_busy_rejection() {
+    sdk_socket_workflow(false, false).await;
+}
+
+#[tokio::test]
+async fn user_response_socket_registration_follows_explicit_capability() {
+    sdk_socket_workflow(true, false).await;
+}
+
+async fn sdk_socket_workflow(response_only: bool, terminal_race: bool) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
-    let provider_template: Arc<dyn Provider> = Arc::new(SdkCallbackProvider::default());
+    let terminal_provider = TerminalSocketProvider::default();
+    let provider_template: Arc<dyn Provider> = if terminal_race {
+        Arc::new(terminal_provider.clone())
+    } else {
+        Arc::new(SdkCallbackProvider::default())
+    };
 
     let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
     let global_session_id = Arc::new(RwLock::new(String::new()));
@@ -1620,6 +1993,105 @@ async fn sdk_socket_configure_list_callback_and_busy_rejection() {
         matches!(e, ServerEvent::Done { id: 1 })
     })
     .await;
+    if terminal_race {
+        send(
+            &mut client_writer,
+            json!({"type":"message","id":2,"content":"first turn"}),
+        )
+        .await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            terminal_provider.first_started.notified(),
+        )
+        .await
+        .unwrap();
+        // Park the actor inside GetState, independently of the processing task
+        // and event fanout. Its Ack proves it has already selected this request.
+        let sessions_guard = sessions.write().await;
+        send(&mut client_writer, json!({"type":"state","id":3})).await;
+        until(&mut client_reader, |e| {
+            matches!(e, ServerEvent::Ack { id: 3 })
+        })
+        .await;
+        terminal_provider.finish_first.notify_one();
+        until(&mut client_reader, |e| {
+            matches!(e, ServerEvent::Done { id: 2 })
+        })
+        .await;
+        // Queue input while the actor cannot consume completion. On release,
+        // both channels are ready and biased select must choose Message first.
+        send(
+            &mut client_writer,
+            json!({"type":"message","id":4,"content":"acceptance back on laptop"}),
+        )
+        .await;
+        drop(sessions_guard);
+        let terminal = until(&mut client_reader, |e| {
+            matches!(
+                e,
+                ServerEvent::Done { id: 4 } | ServerEvent::Error { id: 4, .. }
+            )
+        })
+        .await;
+        assert!(
+            matches!(terminal, ServerEvent::Done { id: 4 }),
+            "next prompt must reach model: {terminal:?}"
+        );
+        assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 2);
+        sessions.write().await.clear();
+        drop(client_writer);
+        drop(client_reader);
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        return;
+    }
+    if response_only {
+        // Exercise actual Desktop/TUI Subscribe snapshots, including disabling
+        // the tool again on a repeated subscription rather than retaining it.
+        for (index, capability) in [false, true, false].into_iter().enumerate() {
+            let id = 100 + index as u64 * 2;
+            send(
+                &mut client_writer,
+                json!({
+                    "type": "subscribe",
+                    "id": id,
+                    "working_dir": home._home.path(),
+                    "supports_pdf_panels": true,
+                    "supports_user_response": capability,
+                }),
+            )
+            .await;
+            until(
+                &mut client_reader,
+                |e| matches!(e, ServerEvent::Done { id: done } if *done == id),
+            )
+            .await;
+            send(&mut client_writer, json!({"type":"list_tools","id":id + 1})).await;
+            let ServerEvent::Tools { tools, .. } = until(
+                &mut client_reader,
+                |e| matches!(e, ServerEvent::Tools { id: listed, .. } if *listed == id + 1),
+            )
+            .await
+            else {
+                panic!("expected tool list")
+            };
+            assert_eq!(tools.iter().any(|t| t.name == "user_response"), capability);
+        }
+        // This test exercises catalog gating, not the 30-second retention of
+        // idle unsaved sessions. Remove the isolated fixture before detaching.
+        sessions.write().await.clear();
+        drop(client_writer);
+        drop(client_reader);
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        return;
+    }
     send(&mut client_writer, json!({"type":"configure_tools","id":2,"tools":{"enabled":[],"custom":[{"name":"read","description":"SDK read callback","parameters":{"type":"object"}}]}})).await;
     let configured = until(&mut client_reader, |e| {
         matches!(
@@ -1738,7 +2210,11 @@ async fn sdk_socket_configure_list_callback_and_busy_rejection() {
     let mut other_session =
         crate::session::Session::create_with_id("sdk_other_session".into(), None, None);
     other_session.working_dir = Some(home._home.path().to_string_lossy().into_owned());
+    // An existing session, not an empty panel: empty untitled sessions are
+    // never written to disk and get a 30s reconnect grace on disconnect.
+    other_session.title = Some("sdk other session".into());
     other_session.save().unwrap();
+    assert!(crate::session::session_exists("sdk_other_session"));
     let other_registry = Registry::new(provider_template.clone()).await;
     sessions.write().await.insert(
         "sdk_other_session".into(),
@@ -1825,323 +2301,5 @@ async fn sdk_socket_configure_list_callback_and_busy_rejection() {
         .unwrap();
 }
 
-#[test]
-fn subscribe_system_prompt_is_creation_only_and_preserves_empty() {
-    for prompt in [None, Some("custom system prompt"), Some("")] {
-        assert_eq!(new_session_system_prompt(true, None, prompt), prompt);
-        assert_eq!(new_session_system_prompt(false, None, prompt), None);
-        assert_eq!(
-            new_session_system_prompt(true, Some("existing"), prompt),
-            None
-        );
-        assert_eq!(
-            new_session_system_prompt(false, Some("existing"), prompt),
-            None
-        );
-    }
-}
-
-#[derive(Clone)]
-struct SystemPromptCaptureProvider(Arc<std::sync::Mutex<Vec<String>>>);
-
-#[async_trait]
-impl Provider for SystemPromptCaptureProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        self.0.lock().unwrap().push(system.to_string());
-        Ok(Box::pin(stream::iter(vec![
-            Ok(StreamEvent::TextDelta("ok".into())),
-            Ok(StreamEvent::MessageEnd { stop_reason: None }),
-        ])))
-    }
-    fn name(&self) -> &str {
-        "prompt-capture"
-    }
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(self.clone())
-    }
-}
-
-#[tokio::test]
-async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
-    let _lock = crate::storage::lock_test_env();
-    let home = IsolatedReloadRecoveryEnv::new();
-    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let provider_template: Arc<dyn Provider> =
-        Arc::new(SystemPromptCaptureProvider(captured.clone()));
-
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
-    let global_session_id = Arc::new(RwLock::new(String::new()));
-    let client_count = Arc::new(RwLock::new(0usize));
-    let client_connections = Arc::new(RwLock::new(HashMap::new()));
-    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
-    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
-    let shared_context = Arc::new(RwLock::new(HashMap::new()));
-    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
-    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
-    let file_touch = FileTouchService::new();
-    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
-    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
-    let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
-    let (_debug_response_tx, _) = broadcast::channel(8);
-    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
-    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let (swarm_event_tx, _) = broadcast::channel(8);
-    let (_global_event_tx, _) = broadcast::channel(8);
-    let global_is_processing = Arc::new(RwLock::new(false));
-    let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
-    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
-    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
-
-    let connect = || {
-        let (server_stream, client_stream) = crate::transport::Stream::pair().expect("socket pair");
-        let server_task = tokio::spawn(handle_client(
-            server_stream,
-            Arc::clone(&sessions),
-            _global_event_tx.clone(),
-            provider_template.clone(),
-            global_is_processing.clone(),
-            global_session_id.clone(),
-            client_count.clone(),
-            Arc::clone(&client_connections),
-            swarm_members.clone(),
-            swarms_by_id.clone(),
-            shared_context.clone(),
-            swarm_plans.clone(),
-            swarm_coordinators.clone(),
-            file_touch.clone(),
-            channel_subscriptions.clone(),
-            channel_subscriptions_by_session.clone(),
-            client_debug_state.clone(),
-            _debug_response_tx.clone(),
-            event_history.clone(),
-            event_counter.clone(),
-            swarm_event_tx.clone(),
-            "jcode-test".to_string(),
-            "🧪".to_string(),
-            mcp_pool.clone(),
-            shutdown_signals.clone(),
-            soft_interrupt_queues.clone(),
-            AwaitMembersRuntime::default(),
-            SwarmMutationRuntime::default(),
-        ));
-        (server_task, client_stream)
-    };
-    let (server_task, client_stream) = connect();
-
-    let (client_reader, mut client_writer) = client_stream.into_split();
-    let mut client_reader = BufReader::new(client_reader);
-
-    async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
-        writer
-            .write_all(format!("{value}\n").as_bytes())
-            .await
-            .unwrap();
-    }
-    async fn until(
-        reader: &mut BufReader<crate::transport::ReadHalf>,
-        predicate: impl Fn(&ServerEvent) -> bool,
-    ) -> ServerEvent {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let mut line = String::new();
-                assert!(reader.read_line(&mut line).await.unwrap() > 0);
-                let event: ServerEvent = serde_json::from_str(&line).unwrap();
-                assert!(
-                    !matches!(event, ServerEvent::Error { .. }),
-                    "unexpected server error: {event:?}"
-                );
-                if predicate(&event) {
-                    return event;
-                }
-            }
-        })
-        .await
-        .expect("daemon event timeout")
-    }
-    use serde_json::json;
-
-    for prompt in ["SDK custom system prompt", ""] {
-        // A fresh connection creates a session and persists its explicit prompt
-        // before acknowledging Subscribe, even with no conversation messages.
-        let (owner_task, owner_stream) = connect();
-        let (owner_reader, mut owner_writer) = owner_stream.into_split();
-        let mut owner_reader = BufReader::new(owner_reader);
-        send(
-            &mut owner_writer,
-            json!({"type":"subscribe","id":101,
-            "working_dir":home._home.path(),"system_prompt":prompt}),
-        )
-        .await;
-        until(&mut owner_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 101 })
-        })
-        .await;
-        send(
-            &mut owner_writer,
-            serde_json::to_value(Request::GetState { id: 102 }).unwrap(),
-        )
-        .await;
-        let ServerEvent::State {
-            session_id: parent_id,
-            ..
-        } = until(&mut owner_reader, |e| {
-            matches!(e, ServerEvent::State { id: 102, .. })
-        })
-        .await
-        else {
-            unreachable!()
-        };
-        let saved = crate::session::Session::load(&parent_id).unwrap();
-        assert_eq!(saved.system_prompt.as_deref(), Some(prompt));
-        assert_eq!(saved.visible_conversation_message_count(), 0);
-
-        // Repeated Subscribe cannot mutate even the current owner's prompt.
-        send(
-            &mut owner_writer,
-            json!({"type":"subscribe","id":103,
-            "working_dir":home._home.path(),"system_prompt":"replacement forbidden"}),
-        )
-        .await;
-        until(&mut owner_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 103 })
-        })
-        .await;
-        assert_eq!(
-            crate::session::Session::load(&parent_id)
-                .unwrap()
-                .system_prompt
-                .as_deref(),
-            Some(prompt)
-        );
-
-        // An attaching observer likewise cannot replace another session's prompt.
-        send(
-            &mut client_writer,
-            json!({"type":"subscribe","id":104,
-            "target_session_id":parent_id,"system_prompt":"attachment forbidden"}),
-        )
-        .await;
-        until(&mut client_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 104 })
-        })
-        .await;
-        send(
-            &mut owner_writer,
-            json!({"type":"message","id":105,"content":"hello"}),
-        )
-        .await;
-        until(&mut owner_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 105 })
-        })
-        .await;
-        assert_eq!(
-            captured.lock().unwrap().last().map(String::as_str),
-            Some(prompt)
-        );
-
-        send(&mut owner_writer, json!({"type":"split","id":106})).await;
-        let ServerEvent::SplitResponse {
-            new_session_id: child_id,
-            ..
-        } = until(&mut owner_reader, |e| {
-            matches!(e, ServerEvent::SplitResponse { id: 106, .. })
-        })
-        .await
-        else {
-            unreachable!()
-        };
-        assert_eq!(
-            crate::session::Session::load(&child_id)
-                .unwrap()
-                .system_prompt
-                .as_deref(),
-            Some(prompt)
-        );
-        // This attachment restores a persisted fork, rather than a live Agent.
-        send(
-            &mut client_writer,
-            json!({"type":"subscribe","id":107,
-            "target_session_id":child_id,"system_prompt":"fork replacement forbidden"}),
-        )
-        .await;
-        until(&mut client_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 107 })
-        })
-        .await;
-        send(
-            &mut client_writer,
-            json!({"type":"message","id":108,"content":"fork hello"}),
-        )
-        .await;
-        until(&mut client_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 108 })
-        })
-        .await;
-        assert_eq!(
-            captured.lock().unwrap().last().map(String::as_str),
-            Some(prompt)
-        );
-
-        send(&mut owner_writer, json!({"type":"clear","id":109})).await;
-        until(&mut owner_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 109 })
-        })
-        .await;
-        send(
-            &mut owner_writer,
-            json!({"type":"message","id":110,"content":"new session"}),
-        )
-        .await;
-        until(&mut owner_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 110 })
-        })
-        .await;
-        assert_ne!(
-            captured.lock().unwrap().last().map(String::as_str),
-            Some(prompt)
-        );
-        send(
-            &mut owner_writer,
-            json!({"type":"resume_session","id":111,"session_id":parent_id}),
-        )
-        .await;
-        until(&mut owner_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 111 })
-        })
-        .await;
-        send(
-            &mut owner_writer,
-            json!({"type":"message","id":112,"content":"resumed hello"}),
-        )
-        .await;
-        until(&mut owner_reader, |e| {
-            matches!(e, ServerEvent::Done { id: 112 })
-        })
-        .await;
-        assert_eq!(
-            captured.lock().unwrap().last().map(String::as_str),
-            Some(prompt)
-        );
-
-        drop(owner_writer);
-        drop(owner_reader);
-        tokio::time::timeout(Duration::from_secs(5), owner_task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-    }
-    drop(client_writer);
-    drop(client_reader);
-    tokio::time::timeout(Duration::from_secs(5), server_task)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-}
+#[path = "client_lifecycle_tests/system_prompt.rs"]
+mod system_prompt;

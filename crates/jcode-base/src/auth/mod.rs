@@ -1,3 +1,4 @@
+pub mod account_pool;
 pub mod account_store;
 pub mod active_method;
 pub mod antigravity;
@@ -17,10 +18,13 @@ pub mod grok_build;
 pub mod integration;
 pub mod lifecycle;
 pub mod login_diagnostics;
-pub mod login_flows;
+pub mod login_ui;
+pub mod muse;
 pub mod oauth;
 pub(crate) mod refresh_coordinator;
 pub mod refresh_state;
+pub mod router_transfer;
+mod status_detail;
 mod status_types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_sandbox;
@@ -136,8 +140,8 @@ fn browser_unusable_here() -> bool {
 }
 
 /// True when the current process is a Rust test binary (`cargo test` /
-/// `cargo nextest`). Test binaries always run from `target/**/deps/`, a
-/// location no installed or self-dev jcode binary ever runs from.
+/// `cargo nextest`). Cargo places hashed test executables in `deps/` beneath
+/// its build directory, which can be relocated with `CARGO_TARGET_DIR`.
 ///
 /// Used to keep tests from opening real browser windows (OAuth login pages,
 /// files) on the developer's desktop: many login/onboarding flows are
@@ -152,12 +156,29 @@ pub fn running_in_test_harness() -> bool {
         }
         std::env::current_exe()
             .ok()
-            .map(|exe| {
-                let path = exe.to_string_lossy().replace('\\', "/");
-                path.contains("/target/") && path.contains("/deps/")
-            })
+            .map(|exe| is_test_harness_path(&exe.to_string_lossy()))
             .unwrap_or(false)
     })
+}
+
+fn is_test_harness_path(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    // Preserve detection for the default target tree, including custom runners.
+    if path.contains("/target/") && path.contains("/deps/") {
+        return true;
+    }
+    let mut components = path.rsplit('/');
+    let Some(filename) = components.next() else {
+        return false;
+    };
+    if components.next() != Some("deps") {
+        return false;
+    }
+    let stem = filename.strip_suffix(".exe").unwrap_or(filename);
+    let Some((name, hash)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !name.is_empty() && hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -315,12 +336,43 @@ impl AuthStatus {
             return status.clone();
         }
 
+        // Single-flight: a startup prewarm (see `prewarm_fast_in_background`)
+        // may already be probing. Wait for it and reuse its snapshot instead of
+        // running a second identical probe in parallel on the frame thread.
+        static PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _probe_guard = PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Ok(cache) = AUTH_STATUS_FAST_CACHE.read()
+            && let Some((ref status, ref when, ref cached_home)) = *cache
+            && when.elapsed().as_secs() < AUTH_STATUS_FAST_CACHE_TTL_SECS
+            && *cached_home == home_key
+        {
+            return status.clone();
+        }
+
         let status = Self::check_uncached_fast();
         if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
             *cache = Some((status.clone(), Instant::now(), home_key));
         }
 
         status
+    }
+
+    /// Start the fast auth probe on a background thread so the first TUI
+    /// frame finds a warm snapshot instead of paying ~5-10ms of credential
+    /// file reads inline. Safe to call any time: [`Self::check_fast`] is
+    /// single-flight, so a caller that races the prewarm waits for it rather
+    /// than probing twice.
+    pub fn prewarm_fast_in_background() {
+        if running_in_test_harness() {
+            return;
+        }
+        let _ = std::thread::Builder::new()
+            .name("auth-prewarm".into())
+            .spawn(|| {
+                let _ = Self::check_fast();
+            });
     }
 
     /// Non-blocking auth snapshot for per-frame render paths (the TUI header).
@@ -548,152 +600,6 @@ impl AuthStatus {
         }
     }
 
-    pub fn method_detail_for_provider(&self, provider: LoginProviderDescriptor) -> String {
-        match provider.target {
-            crate::provider_catalog::LoginProviderTarget::AutoImport => {
-                if Self::has_any_untrusted_external_auth() {
-                    "Existing external logins detected".to_string()
-                } else {
-                    "No importable external logins found".to_string()
-                }
-            }
-            crate::provider_catalog::LoginProviderTarget::Jcode => {
-                if self.state_for_provider(provider) == AuthState::Available {
-                    if crate::subscription_catalog::has_router_base() {
-                        format!(
-                            "API key (`{}`) + router base",
-                            crate::subscription_catalog::JCODE_API_KEY_ENV
-                        )
-                    } else {
-                        format!(
-                            "API key (`{}`), router base pending",
-                            crate::subscription_catalog::JCODE_API_KEY_ENV
-                        )
-                    }
-                } else {
-                    "not configured".to_string()
-                }
-            }
-            crate::provider_catalog::LoginProviderTarget::OpenRouter => {
-                if self.state_for_provider(provider) == AuthState::Available {
-                    "API key (`OPENROUTER_API_KEY`)".to_string()
-                } else {
-                    "not configured".to_string()
-                }
-            }
-            crate::provider_catalog::LoginProviderTarget::OpenAiApiKey => {
-                if self.state_for_provider(provider) == AuthState::Available {
-                    "API key (`OPENAI_API_KEY`)".to_string()
-                } else {
-                    "not configured".to_string()
-                }
-            }
-            crate::provider_catalog::LoginProviderTarget::ClaudeApiKey => {
-                if self.state_for_provider(provider) == AuthState::Available {
-                    "API key (`ANTHROPIC_API_KEY`)".to_string()
-                } else {
-                    "not configured".to_string()
-                }
-            }
-            crate::provider_catalog::LoginProviderTarget::Bedrock => {
-                if self.state_for_provider(provider) == AuthState::Available {
-                    if crate::provider::bedrock::BedrockProvider::configured_bearer_token()
-                        .is_some()
-                    {
-                        "Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`)".to_string()
-                    } else {
-                        "AWS credential chain".to_string()
-                    }
-                } else {
-                    "not configured".to_string()
-                }
-            }
-            crate::provider_catalog::LoginProviderTarget::GrokBuild => {
-                if self.grok_build == AuthState::Available {
-                    "Grok CLI subscription login (xAI OIDC, auto-refreshed)".to_string()
-                } else {
-                    "not configured (run `jcode login --provider grok-build`)".to_string()
-                }
-            }
-            crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
-                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                if self.state_for_provider(provider) == AuthState::Available {
-                    if resolved.requires_api_key {
-                        format!("API key (`{}`)", resolved.api_key_env)
-                    } else if crate::provider_catalog::load_api_key_from_env_or_config(
-                        &resolved.api_key_env,
-                        &resolved.env_file,
-                    )
-                    .is_some()
-                    {
-                        format!(
-                            "local endpoint (`{}`) + optional API key (`{}`)",
-                            resolved.api_base, resolved.api_key_env
-                        )
-                    } else {
-                        format!("local endpoint (`{}`)", resolved.api_base)
-                    }
-                } else {
-                    "not configured".to_string()
-                }
-            }
-            _ => match provider.auth_state_key {
-                // The `claude` login provider is the OAuth/subscription path;
-                // the API key reports through the separate `anthropic-api`
-                // provider (handled above via `LoginProviderTarget::ClaudeApiKey`).
-                // Describe the OAuth credential alone so the two rows never
-                // blur together as "OAuth + API key".
-                LoginProviderAuthStateKey::Anthropic => {
-                    let detail = match self.anthropic.oauth_state {
-                        AuthState::Available => "OAuth",
-                        AuthState::Expired => "OAuth (expired)",
-                        AuthState::NotConfigured => "not configured",
-                    };
-
-                    let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
-                    if accounts.len() > 1 {
-                        let active = crate::auth::claude::active_account_label()
-                            .unwrap_or_else(|| "?".to_string());
-                        format!(
-                            "{detail} ({} accounts, active: `{}`)",
-                            accounts.len(),
-                            active
-                        )
-                    } else if accounts.len() == 1 {
-                        format!("{detail} (account: `{}`)", accounts[0].label)
-                    } else {
-                        detail.to_string()
-                    }
-                }
-                // Same split for OpenAI: this is the ChatGPT/Codex OAuth login;
-                // `openai-api` (handled above) owns the API-key answer.
-                LoginProviderAuthStateKey::OpenAi => {
-                    let detail = match self.openai_oauth_state {
-                        AuthState::Available => "OAuth",
-                        AuthState::Expired => "OAuth (expired)",
-                        AuthState::NotConfigured => "not configured",
-                    };
-
-                    let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
-                    if accounts.len() > 1 {
-                        let active = crate::auth::codex::active_account_label()
-                            .unwrap_or_else(|| "?".to_string());
-                        format!(
-                            "{detail} ({} accounts, active: `{}`)",
-                            accounts.len(),
-                            active
-                        )
-                    } else if accounts.len() == 1 {
-                        format!("{detail} (account: `{}`)", accounts[0].label)
-                    } else {
-                        detail.to_string()
-                    }
-                }
-                _ => provider.auth_status_method.to_string(),
-            },
-        }
-    }
-
     pub fn assessment_for_provider(
         &self,
         provider: LoginProviderDescriptor,
@@ -854,6 +760,21 @@ impl AuthStatus {
                 AuthRefreshSupport::Automatic,
                 AuthValidationMethod::PresenceCheck,
             ),
+            crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile)
+                if profile.id == "muse-subscription" =>
+            {
+                (
+                    if state == AuthState::Available {
+                        AuthCredentialSource::JcodeManagedFile
+                    } else {
+                        AuthCredentialSource::None
+                    },
+                    "Jcode-managed Muse device login, separate from Muse CLI and pay-as-you-go keys".to_string(),
+                    AuthExpiryConfidence::Unknown,
+                    AuthRefreshSupport::Conditional,
+                    AuthValidationMethod::PresenceCheck,
+                )
+            }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 // Prefer the active named config profile's credential location
                 // (set via `--provider-profile`) over the built-in profile env

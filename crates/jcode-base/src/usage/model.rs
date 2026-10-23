@@ -1,5 +1,8 @@
 use super::display::{format_reset_time, usage_reset_passed};
-use super::{CACHE_DURATION, ERROR_BACKOFF, RATE_LIMIT_BACKOFF};
+use super::{
+    ANTHROPIC_CACHE_DURATION, CACHE_DURATION, ERROR_BACKOFF, RATE_LIMIT_BACKOFF,
+    TRANSPORT_ERROR_BACKOFF, TRANSPORT_ERROR_PREFIX,
+};
 use serde::Deserialize;
 use std::time::Instant;
 
@@ -24,6 +27,29 @@ pub(super) fn mask_email(email: &str) -> String {
     };
 
     format!("{}@{}", masked_local, domain)
+}
+
+/// Normalize a provider-supplied reset timestamp to RFC3339. Values arrive as
+/// RFC3339 strings or epoch numbers (seconds, or milliseconds when too large
+/// for seconds); protobuf int64 fields JSON-encode as decimal strings, so
+/// strings are tried as numbers first. Non-positive epochs mean "unknown".
+pub(super) fn reset_timestamp_from_json_value(value: &serde_json::Value) -> Option<String> {
+    let epoch = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse::<f64>().ok()));
+    if let Some(epoch) = epoch {
+        if !epoch.is_finite() || epoch <= 0.0 {
+            return None;
+        }
+        let secs = if epoch > 1.0e12 {
+            epoch / 1000.0
+        } else {
+            epoch
+        };
+        let dt = chrono::DateTime::from_timestamp(secs as i64, 0)?;
+        return Some(dt.to_rfc3339());
+    }
+    value.as_str().map(|text| text.to_string())
 }
 
 pub(super) fn openai_provider_display_name(
@@ -64,6 +90,10 @@ pub struct UsageData {
     pub extra_usage_enabled: bool,
     /// Last fetch time
     pub fetched_at: Option<Instant>,
+    /// Last successful provider fetch, retained when a later fetch fails.
+    pub last_success_at: Option<Instant>,
+    /// Earliest next Anthropic probe, independent of quota window resets.
+    pub refresh_after: Option<Instant>,
     /// Last error (if any)
     pub last_error: Option<String>,
 }
@@ -74,10 +104,14 @@ impl UsageData {
     /// callers use catalog ids such as `claude-fable-5`, so compare normalized
     /// model families rather than requiring the strings to be identical.
     pub fn model_scoped_exhausted(&self, model: &str) -> bool {
+        if self.last_error.is_some() {
+            return false;
+        }
         let model = model.to_ascii_lowercase();
         self.model_scoped.iter().any(|window| {
             let scope = window.model_name.to_ascii_lowercase();
             window.utilization >= 0.99
+                && !usage_reset_passed([window.resets_at.as_deref()])
                 && ((model.contains("fable") && scope.contains("fable"))
                     || (model.contains("opus") && scope.contains("opus"))
                     || (model.contains("sonnet") && scope.contains("sonnet"))
@@ -87,6 +121,20 @@ impl UsageData {
 
     /// Check if data is stale and should be refreshed
     pub fn is_stale(&self) -> bool {
+        if let Some(deadline) = self.refresh_after {
+            return Instant::now() >= deadline;
+        }
+        // A last-good window can roll over while a failed probe is backing
+        // off. Its old reset must not schedule another refresh every frame.
+        // display_snapshot still clears rolled-over limits independently.
+        if self.last_error.is_some() {
+            let ttl = if self.is_rate_limited() {
+                RATE_LIMIT_BACKOFF
+            } else {
+                ERROR_BACKOFF
+            };
+            return self.fetched_at.is_none_or(|at| at.elapsed() > ttl);
+        }
         if usage_reset_passed([
             self.five_hour_resets_at.as_deref(),
             self.seven_day_resets_at.as_deref(),
@@ -98,19 +146,8 @@ impl UsageData {
             return true;
         }
 
-        match self.fetched_at {
-            Some(t) => {
-                let ttl = if self.is_rate_limited() {
-                    RATE_LIMIT_BACKOFF
-                } else if self.last_error.is_some() {
-                    ERROR_BACKOFF
-                } else {
-                    CACHE_DURATION
-                };
-                t.elapsed() > ttl
-            }
-            None => true,
-        }
+        self.fetched_at
+            .is_none_or(|at| at.elapsed() > ANTHROPIC_CACHE_DURATION)
     }
 
     /// Check if the last error was a rate limit (429)
@@ -295,6 +332,8 @@ impl OpenAIUsageData {
             Some(t) => {
                 let ttl = if self.is_rate_limited() {
                     RATE_LIMIT_BACKOFF
+                } else if self.is_transport_error() {
+                    TRANSPORT_ERROR_BACKOFF
                 } else if self.last_error.is_some() {
                     ERROR_BACKOFF
                 } else {
@@ -311,6 +350,13 @@ impl OpenAIUsageData {
             .as_ref()
             .map(|e| e.contains("429") || e.contains("rate limit") || e.contains("Rate limited"))
             .unwrap_or(false)
+    }
+
+    /// The request never received an HTTP response (DNS, connect, TLS, reset).
+    pub(crate) fn is_transport_error(&self) -> bool {
+        self.last_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with(TRANSPORT_ERROR_PREFIX))
     }
 
     pub fn has_limits(&self) -> bool {

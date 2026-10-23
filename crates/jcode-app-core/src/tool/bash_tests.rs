@@ -7,6 +7,24 @@ use crate::tool::bash::{
 use serde_json::json;
 use tokio::sync::mpsc;
 
+#[cfg(not(windows))]
+#[test]
+fn bash_definition_prefers_repository_search_tools() {
+    let definition = BashTool::new().to_definition();
+    assert_eq!(definition.name, "bash");
+    assert!(
+        definition
+            .description
+            .contains("prefer agentgrep or rg over grep -r")
+    );
+    assert!(
+        definition
+            .description
+            .contains("hidden and ignored files by default, not all untracked files")
+    );
+    assert!(definition.description.contains("--hidden --no-ignore"));
+}
+
 #[test]
 fn bash_optional_nulls_use_omitted_defaults() {
     let omitted: BashInput = serde_json::from_value(json!({"command": "printf ok"})).unwrap();
@@ -519,83 +537,31 @@ async fn test_stderr_captured_with_stdin() {
     );
 }
 
-#[test]
-fn test_parse_progress_marker_handles_percent_payloads() {
-    let progress = parse_progress_marker(
-        r#"JCODE_PROGRESS {"percent":25,"message":"Downloading dependencies"}"#,
-    )
-    .expect("marker should parse");
-
-    assert_eq!(progress.percent, Some(25.0));
-    assert_eq!(
-        progress.message.as_deref(),
-        Some("Downloading dependencies")
+#[tokio::test]
+async fn unanswered_stdin_request_closes_stdin_instead_of_hanging() {
+    // Client receives the request but never answers, like the TUI does.
+    let (tx, mut rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+    let held = tokio::spawn(async move {
+        let mut pending = Vec::new();
+        while let Some(req) = rx.recv().await {
+            pending.push(req);
+        }
+    });
+    let tool = BashTool::new();
+    let input = json!({"command": "cat; echo got_eof", "timeout": 20000});
+    let started = std::time::Instant::now();
+    let result = tool.execute(input, make_ctx(Some(tx))).await.unwrap();
+    assert!(result.output.contains("got_eof"), "{}", result.output);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
     );
-    assert_eq!(progress.kind, BackgroundTaskProgressKind::Determinate);
-    assert_eq!(progress.source, BackgroundTaskProgressSource::Reported);
+    held.abort();
 }
 
-#[test]
-fn test_parse_heuristic_progress_handles_ratio_output() {
-    let progress = parse_heuristic_progress("Running test 3/10 tests")
-        .expect("heuristic parser should not fail")
-        .expect("heuristic ratio progress should parse");
-
-    assert_eq!(progress.current, Some(3));
-    assert_eq!(progress.total, Some(10));
-    assert_eq!(progress.percent, Some(30.0));
-    assert_eq!(progress.unit.as_deref(), Some("tests"));
-    assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
-}
-
-#[test]
-fn test_parse_heuristic_progress_handles_percent_output() {
-    let progress = parse_heuristic_progress("download progress 42% complete")
-        .expect("heuristic parser should not fail")
-        .expect("heuristic percent progress should parse");
-
-    assert_eq!(progress.percent, Some(42.0));
-    assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
-    assert_eq!(
-        progress.message.as_deref(),
-        Some("download progress 42% complete")
-    );
-}
-
-#[test]
-fn test_parse_heuristic_progress_handles_phase_output() {
-    let progress = parse_heuristic_progress("Compiling jcode v0.10.2")
-        .expect("heuristic parser should not fail")
-        .expect("phase progress should parse");
-
-    assert_eq!(progress.kind, BackgroundTaskProgressKind::Indeterminate);
-    assert_eq!(progress.percent, None);
-    assert_eq!(progress.message.as_deref(), Some("Compiling jcode v0.10.2"));
-    assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
-}
-
-#[test]
-fn test_parse_heuristic_progress_handles_of_output() {
-    let progress = parse_heuristic_progress("Downloaded 3 of 12 crates")
-        .expect("heuristic parser should not fail")
-        .expect("heuristic of progress should parse");
-
-    assert_eq!(progress.current, Some(3));
-    assert_eq!(progress.total, Some(12));
-    assert_eq!(progress.percent, Some(25.0));
-    assert_eq!(progress.unit.as_deref(), Some("crates"));
-}
-
-#[test]
-fn test_parse_heuristic_progress_handles_byte_ratio_output() {
-    let progress = parse_heuristic_progress("Downloaded 1.5/3.0 GiB")
-        .expect("heuristic parser should not fail")
-        .expect("heuristic byte ratio progress should parse");
-
-    assert_eq!(progress.percent, Some(50.0));
-    assert_eq!(progress.unit.as_deref(), Some("gib"));
-    assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
-}
+#[path = "bash_tests/progress_parsing.rs"]
+mod progress_parsing;
 
 #[tokio::test]
 async fn test_background_command_progress_marker_updates_status_and_stays_out_of_output() {

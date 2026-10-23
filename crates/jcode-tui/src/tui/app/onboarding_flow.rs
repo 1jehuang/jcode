@@ -49,65 +49,68 @@ impl ExternalCli {
     }
 }
 
-/// Which telemetry level the "Telemetry settings" page has highlighted.
-///
-/// The page is a three-way choice rather than a yes/no so the middle ground
-/// (usage stats without prompt content) is reachable without hunting through
-/// config. Order matches the on-screen order, most sharing first.
+/// State of the "Telemetry settings" page: a "Continue" button on top
+/// (focused by default) followed by one checkbox per telemetry category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TelemetryLevel {
-    /// Usage stats plus prompt/transcript content.
-    Everything,
-    /// Usage stats and crash reports only (no prompts or transcripts).
-    NoContent,
-    /// Nothing at all.
-    Nothing,
+pub(crate) struct TelemetrySettings {
+    /// 0 = the Continue button, 1.. = category rows in
+    /// [`crate::telemetry::TelemetryCategory::ALL`] order.
+    pub(crate) cursor: usize,
+    pub(crate) checked: [bool; 6],
 }
 
-impl TelemetryLevel {
-    /// The on-screen order, most sharing first.
-    pub(crate) const ORDER: [TelemetryLevel; 3] = [
-        TelemetryLevel::Everything,
-        TelemetryLevel::NoContent,
-        TelemetryLevel::Nothing,
-    ];
+impl TelemetrySettings {
+    pub(crate) const ROWS: usize = 1 + 6;
 
-    /// The level currently persisted on this machine.
+    /// Open with the persisted choices, Continue focused.
     pub(crate) fn current() -> Self {
-        if !crate::telemetry::is_enabled() {
-            TelemetryLevel::Nothing
-        } else if crate::telemetry::content_sharing_enabled() {
-            TelemetryLevel::Everything
+        Self {
+            cursor: 0,
+            checked: crate::telemetry::category_settings(),
+        }
+    }
+
+    pub(crate) fn step(&mut self, forward: bool) {
+        self.cursor = if forward {
+            (self.cursor + 1) % Self::ROWS
         } else {
-            TelemetryLevel::NoContent
+            (self.cursor + Self::ROWS - 1) % Self::ROWS
+        };
+    }
+
+    /// Toggle the focused checkbox. Returns false on the Continue row.
+    pub(crate) fn toggle(&mut self) -> bool {
+        match self.cursor.checked_sub(1) {
+            Some(i) => {
+                self.checked[i] = !self.checked[i];
+                true
+            }
+            None => false,
         }
     }
 
-    /// Persist this level (usage opt-out marker + content-sharing marker).
-    pub(crate) fn persist(self) {
-        match self {
-            TelemetryLevel::Everything => {
-                crate::telemetry::set_usage_telemetry_enabled(true);
-                crate::telemetry::set_content_sharing_enabled(true);
-            }
-            TelemetryLevel::NoContent => {
-                crate::telemetry::set_usage_telemetry_enabled(true);
-                crate::telemetry::set_content_sharing_enabled(false);
-            }
-            TelemetryLevel::Nothing => {
-                crate::telemetry::set_content_sharing_enabled(false);
-                crate::telemetry::set_usage_telemetry_enabled(false);
-            }
-        }
+    pub(crate) fn set_all(&mut self, on: bool) {
+        self.checked = [on; 6];
     }
 
-    /// Short status-line label for the chosen level.
-    pub(crate) fn status_label(self) -> &'static str {
-        match self {
-            TelemetryLevel::Everything => "Telemetry: sending everything, thank you",
-            TelemetryLevel::NoContent => "Telemetry: usage and crashes only",
-            TelemetryLevel::Nothing => "Telemetry: off",
-        }
+    pub(crate) fn persist(&self) {
+        crate::telemetry::set_category_settings(self.checked);
+    }
+
+    pub(crate) fn status_label(&self) -> String {
+        status_label_for(self.checked)
+    }
+}
+
+/// Short status-line summary of a set of category choices.
+pub(crate) fn status_label_for(checked: [bool; 6]) -> String {
+    let on = checked.iter().filter(|c| **c).count();
+    if on == 0 {
+        "Telemetry: off".to_string()
+    } else if on == checked.len() {
+        "Telemetry: sharing everything, thank you".to_string()
+    } else {
+        format!("Telemetry: {on} of {} categories on", checked.len())
     }
 }
 
@@ -144,7 +147,7 @@ pub(crate) struct ImportReview {
     pub(crate) summary_pill: SummaryPill,
     /// `Some` while the "Telemetry settings" sub-page is open, holding the
     /// highlighted level. Committing or pressing Esc returns to the summary.
-    pub(crate) telemetry: Option<TelemetryLevel>,
+    pub(crate) telemetry: Option<TelemetrySettings>,
     /// When the screen was first shown, for the single decision countdown.
     pub(crate) shown_at: Instant,
 }
@@ -152,10 +155,8 @@ pub(crate) struct ImportReview {
 /// The actions on the import summary screen, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SummaryPill {
-    /// Import every detected login and move on.
+    /// Import every detected login and move on (default).
     Continue,
-    /// Skip importing and sign in with a Jcode subscription instead (default).
-    Subscription,
     /// Open the per-login checkbox list to import fewer logins.
     ImportLess,
     /// Open the telemetry settings sub-page.
@@ -163,9 +164,8 @@ pub(crate) enum SummaryPill {
 }
 
 impl SummaryPill {
-    const ORDER: [SummaryPill; 4] = [
+    const ORDER: [SummaryPill; 3] = [
         SummaryPill::Continue,
-        SummaryPill::Subscription,
         SummaryPill::ImportLess,
         SummaryPill::Telemetry,
     ];
@@ -188,7 +188,7 @@ impl SummaryPill {
 
 impl ImportReview {
     /// Create a review for the given candidates with every login pre-checked,
-    /// starting on the summary screen with the Jcode subscription preselected.
+    /// starting on the summary screen with Import preselected.
     /// Returns `None` if there are no candidates.
     pub(crate) fn new(
         candidates: Vec<crate::external_auth::ExternalAuthReviewCandidate>,
@@ -201,9 +201,9 @@ impl ImportReview {
             candidates,
             checked,
             cursor: 0,
-            continue_focused: false,
+            continue_focused: true,
             choosing: false,
-            summary_pill: SummaryPill::Subscription,
+            summary_pill: SummaryPill::Continue,
             telemetry: None,
             shown_at: Instant::now(),
         })
@@ -218,29 +218,16 @@ impl ImportReview {
         self.telemetry = None;
     }
 
-    /// Open the telemetry settings sub-page, highlighting "Send everything" so
-    /// the most helpful option is the default commit.
+    /// Open the telemetry settings sub-page with the persisted choices and
+    /// the Continue button focused.
     pub(crate) fn open_telemetry(&mut self) {
-        self.telemetry = Some(TelemetryLevel::Everything);
+        self.telemetry = Some(TelemetrySettings::current());
     }
 
     /// Close the telemetry sub-page and return to the summary screen with the
     /// "Telemetry settings" pill still focused.
     pub(crate) fn close_telemetry(&mut self) {
         self.telemetry = None;
-    }
-
-    /// Move the telemetry highlight. No-op unless the sub-page is open.
-    pub(crate) fn telemetry_step(&mut self, forward: bool) {
-        let Some(level) = self.telemetry else { return };
-        let order = TelemetryLevel::ORDER;
-        let i = order.iter().position(|&l| l == level).unwrap_or(0);
-        let next = if forward {
-            (i + 1) % order.len()
-        } else {
-            (i + order.len() - 1) % order.len()
-        };
-        self.telemetry = Some(order[next]);
     }
 
     /// Move the summary pill focus. Keeps `continue_focused` in sync so the
@@ -250,8 +237,9 @@ impl ImportReview {
         self.continue_focused = self.summary_pill == SummaryPill::Continue;
     }
 
-    /// Focus a specific summary pill (used by the onboarding simulator to land
-    /// directly on a given screen state).
+    /// Focus a specific summary pill (used by tests to land directly on a
+    /// given screen state).
+    #[cfg(test)]
     pub(crate) fn focus_summary_pill(&mut self, pill: SummaryPill) {
         self.summary_pill = pill;
         self.continue_focused = pill == SummaryPill::Continue;
@@ -370,10 +358,10 @@ impl ImportReview {
     }
 
     /// Whether the decision countdown has elapsed. Paused while the telemetry
-    /// settings sub-page is open so the screen never commits the import out
-    /// from under a user who is reading it.
+    /// settings sub-page or the per-login "Import less" list is open, so the
+    /// screen never commits the import out from under a user who is choosing.
     pub(crate) fn timed_out(&self) -> bool {
-        self.telemetry.is_none() && self.shown_at.elapsed() >= DECISION_TIMEOUT
+        self.telemetry.is_none() && !self.choosing && self.shown_at.elapsed() >= DECISION_TIMEOUT
     }
 }
 
@@ -418,7 +406,10 @@ pub(crate) enum OnboardingPhase {
     },
     /// Action-only picker offering the suggested review or a blank new session.
     StartChoice { shown_at: Instant },
-    /// Existing prompt-suggestion cards (resting / "No" state).
+    /// Legacy prompt-suggestion cards state. The live flow no longer enters it
+    /// (it lands on the regular new-session screen instead), but replay, golden
+    /// and onboarding-graph fixtures still exercise it.
+    #[cfg_attr(not(test), allow(dead_code))]
     Suggestions,
     /// Flow finished; nothing onboarding-specific to render.
     Done,

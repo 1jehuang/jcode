@@ -4,7 +4,7 @@ use crate::tui::info_widget::InfoWidgetData;
 /// Build widget data that yields a stable overview widget (model + queue line etc).
 fn sample_data() -> InfoWidgetData {
     InfoWidgetData {
-        model: Some("gpt-test".to_string()),
+        session_name: Some("sauropod".to_string()),
         queue_mode: Some(true),
         ..Default::default()
     }
@@ -16,34 +16,8 @@ fn sample_data() -> InfoWidgetData {
 fn rich_data() -> InfoWidgetData {
     use crate::tui::info_widget::{BackgroundInfo, UsageInfo, UsageProvider};
     InfoWidgetData {
-        model: Some("gpt-test".to_string()),
+        session_name: Some("sauropod".to_string()),
         queue_mode: Some(true),
-        todos: vec![
-            crate::todo::TodoItem {
-                group: None,
-                content: "first task".to_string(),
-                status: "in_progress".to_string(),
-                priority: "high".to_string(),
-                id: "t1".to_string(),
-                blocked_by: Vec::new(),
-                assigned_to: None,
-                confidence: None,
-                completion_confidence: None,
-                confidence_history: Vec::new(),
-            },
-            crate::todo::TodoItem {
-                group: None,
-                content: "second task".to_string(),
-                status: "pending".to_string(),
-                priority: "medium".to_string(),
-                id: "t2".to_string(),
-                blocked_by: Vec::new(),
-                assigned_to: None,
-                confidence: None,
-                completion_confidence: None,
-                confidence_history: Vec::new(),
-            },
-        ],
         background_info: Some(BackgroundInfo {
             running_count: 2,
             running_tasks: vec!["bash".to_string(), "task".to_string()],

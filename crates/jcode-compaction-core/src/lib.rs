@@ -168,8 +168,36 @@ pub fn build_compaction_conversation_text(
             Role::Assistant => "Assistant",
         };
         conversation_text.push_str(&format!("**{}:**\n", role_str));
+        // Provider-native search call inputs, so a result can name its query.
+        let mut native_call_inputs: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
         for block in &msg.content {
             match block {
+                ContentBlock::ProviderNative { provider, item } => {
+                    use jcode_message_types::provider_native;
+                    let Some(display) = provider_native::provider_native_display(provider, item)
+                    else {
+                        continue;
+                    };
+                    if display.output.is_none() {
+                        if let Some(input) = display.input {
+                            native_call_inputs.insert(display.id, input);
+                        }
+                        continue;
+                    }
+                    if let Some(text) = provider_native::provider_native_text_fallback(
+                        provider,
+                        item,
+                        native_call_inputs.get(&display.id),
+                    ) {
+                        let truncated = if text.len() > 500 {
+                            format!("{}... (truncated)", truncate_str_boundary(&text, 500))
+                        } else {
+                            text
+                        };
+                        conversation_text.push_str(&format!("[Result: {}]\n", truncated));
+                    }
+                }
                 ContentBlock::Text { text, .. } => {
                     conversation_text.push_str(text);
                     conversation_text.push('\n');
@@ -188,7 +216,8 @@ pub fn build_compaction_conversation_text(
                 ContentBlock::Reasoning { .. }
                 | ContentBlock::ReasoningTrace { .. }
                 | ContentBlock::AnthropicThinking { .. }
-                | ContentBlock::OpenAIReasoning { .. } => {}
+                | ContentBlock::OpenAIReasoning { .. }
+                | ContentBlock::ToolReference { .. } => {}
                 ContentBlock::Image { .. } => conversation_text.push_str("[Image]\n"),
                 ContentBlock::OpenAICompaction { .. } => {
                     conversation_text.push_str("[OpenAI native compaction]\n")
@@ -324,6 +353,12 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
             // compactions.
             ContentBlock::Image { .. } => IMAGE_TOKEN_COST * CHARS_PER_TOKEN,
             ContentBlock::OpenAICompaction { encrypted_content } => encrypted_content.len(),
+            // The provider expands a reference into the full definition, but
+            // that definition is already accounted for by the tool catalog.
+            ContentBlock::ToolReference { tool_name, .. } => tool_name.len() + 20,
+            // Search results are billed as input tokens on replay; the raw JSON
+            // (mostly encrypted page content) is a reasonable size proxy.
+            ContentBlock::ProviderNative { item, .. } => item.to_string().len(),
         })
         .sum()
 }
@@ -383,6 +418,34 @@ pub fn effective_context_tokens_from_usage(
         input_tokens
             .saturating_add(cache_read)
             .saturating_add(cache_creation)
+    } else {
+        input_tokens
+    }
+}
+
+/// Previously reusable cache boundary, not the full context size. With split
+/// accounting the uncached input tail was never written and cannot be expected
+/// as a cache read on the next request. Cache creations, however, are reusable.
+pub fn reusable_cache_tokens_from_usage(
+    provider_name: &str,
+    input_tokens: u64,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+) -> u64 {
+    let effective = effective_context_tokens_from_usage(
+        provider_name,
+        input_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+    );
+    let provider = provider_name.to_lowercase();
+    if provider.contains("openai") || provider.contains("codex") {
+        return input_tokens;
+    }
+    if provider.contains("anthropic") || provider.contains("claude") || effective > input_tokens {
+        cache_read_input_tokens
+            .unwrap_or(0)
+            .saturating_add(cache_creation_input_tokens.unwrap_or(0))
     } else {
         input_tokens
     }
@@ -595,6 +658,53 @@ pub fn emergency_truncate_large_payloads(
     truncated
 }
 
+/// Whether a provider error is a deterministic rejection of an inline image
+/// (a 400 `invalid_request_error` naming an image block: unsupported
+/// `media_type`, undecodable data, dimension or animation limits). The same
+/// history would be rejected on every retry, so the agent strips images and
+/// retries once instead of leaving the session permanently broken (#1712).
+pub fn is_image_rejection_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if is_request_payload_too_large_error(&lower) {
+        return false;
+    }
+    let names_image_block = lower.contains(".image.source")
+        || lower.contains(".image.")
+        || lower.contains("image.source")
+        || lower.contains("could not process image")
+        || lower.contains("invalid image")
+        || lower.contains("unsupported image")
+        || lower.contains("image_parse_error")
+        || lower.contains("invalid_image");
+    let is_client_rejection = lower.contains("invalid_request_error")
+        || lower.contains("invalid_image")
+        || lower.contains("image_parse_error")
+        || contains_independent_status_code(&lower, "400");
+    names_image_block && is_client_rejection
+}
+
+/// Replace every inline image with a short text note. Used after a provider
+/// rejected an image so the retried request carries none. Returns the number
+/// of images replaced.
+pub fn strip_all_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+    let mut stripped = 0;
+    for content in contents.iter_mut() {
+        for block in content.iter_mut() {
+            if let ContentBlock::Image { media_type, .. } = block {
+                let media_type = media_type.clone();
+                *block = ContentBlock::Text {
+                    text: format!(
+                        "[Image omitted: the provider rejected an image in this conversation (media_type={media_type}). Re-open or re-screenshot it in PNG/JPEG if visual details are needed.]"
+                    ),
+                    cache_control: None,
+                };
+                stripped += 1;
+            }
+        }
+    }
+    stripped
+}
+
 /// Whether a provider error indicates the *serialized request body* was too
 /// large (HTTP 413), as distinct from exceeding the model's token context
 /// window. Anthropic surfaces this as `request_too_large` / "Request exceeds the
@@ -693,6 +803,87 @@ pub fn strip_large_images_in_contents(
     stripped
 }
 
+/// Inline tool-result images (computer-use and browser screenshots) are decayed
+/// once the transcript holds more than this many of them. See
+/// [`decay_old_tool_images_in_contents`].
+pub const TOOL_IMAGE_DECAY_TRIGGER_COUNT: usize = 12;
+
+/// Inline tool-result images are also decayed once their combined base64
+/// payload exceeds this many characters.
+pub const TOOL_IMAGE_DECAY_TRIGGER_CHARS: usize = 48 * 1024 * 1024;
+
+/// After decay, at most this many of the newest tool-result images keep their
+/// inline data. The gap to the trigger count is hysteresis: decay rewrites
+/// older messages (invalidating provider prompt caches and forcing a full
+/// snapshot write), so it only runs every few screenshots instead of on each.
+pub const TOOL_IMAGE_DECAY_KEEP_COUNT: usize = 6;
+
+/// After decay, the retained tool-result images fit within this many base64
+/// characters, except that the newest image is always kept regardless of size.
+pub const TOOL_IMAGE_DECAY_KEEP_CHARS: usize = 24 * 1024 * 1024;
+
+/// Bound the inline image payload that tool results (screenshots from the
+/// computer and browser tools) accumulate in a transcript.
+///
+/// Only images in messages that carry a `ToolResult` are considered, so images
+/// the user pasted are untouched. Nothing happens until the tool images exceed
+/// [`TOOL_IMAGE_DECAY_TRIGGER_COUNT`] or [`TOOL_IMAGE_DECAY_TRIGGER_CHARS`].
+/// Then every tool image except the newest [`TOOL_IMAGE_DECAY_KEEP_COUNT`]
+/// (that also fit within [`TOOL_IMAGE_DECAY_KEEP_CHARS`]) is replaced with a
+/// short text marker. The newest image always survives so the model still sees
+/// the screenshot it just asked for.
+///
+/// Returns the number of images replaced.
+pub fn decay_old_tool_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+    let mut images: Vec<(usize, usize, usize)> = Vec::new();
+    let mut total: usize = 0;
+    for (ci, content) in contents.iter().enumerate() {
+        if !content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        {
+            continue;
+        }
+        for (bi, block) in content.iter().enumerate() {
+            if let ContentBlock::Image { data, .. } = block {
+                images.push((ci, bi, data.len()));
+                total = total.saturating_add(data.len());
+            }
+        }
+    }
+
+    if images.len() <= TOOL_IMAGE_DECAY_TRIGGER_COUNT && total <= TOOL_IMAGE_DECAY_TRIGGER_CHARS {
+        return 0;
+    }
+
+    let mut kept_count = 0usize;
+    let mut kept_chars = 0usize;
+    let mut stripped = 0usize;
+    for (ci, bi, payload_len) in images.into_iter().rev() {
+        let keep = kept_count == 0
+            || (kept_count < TOOL_IMAGE_DECAY_KEEP_COUNT
+                && kept_chars.saturating_add(payload_len) <= TOOL_IMAGE_DECAY_KEEP_CHARS);
+        if keep {
+            kept_count += 1;
+            kept_chars = kept_chars.saturating_add(payload_len);
+            continue;
+        }
+        let block = &mut contents[ci][bi];
+        if let ContentBlock::Image { media_type, data } = block {
+            let text = format!(
+                "[Older tool screenshot omitted from history to bound transcript size: media_type={media_type}, original_base64_chars={}. Rely on adjacent tool text, or take a new screenshot if visual details are needed.]",
+                data.len()
+            );
+            *block = ContentBlock::Text {
+                text,
+                cache_control: None,
+            };
+            stripped += 1;
+        }
+    }
+    stripped
+}
+
 pub fn emergency_truncated_tool_result(content: &str, max_chars: usize) -> String {
     let original_len = content.len();
     let keep_head = max_chars / 2;
@@ -720,6 +911,57 @@ pub fn tail_str_boundary(value: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reusable_cache_boundary_excludes_only_split_uncached_tail() {
+        for provider in ["Claude", "anthropic", "unknown"] {
+            assert_eq!(
+                reusable_cache_tokens_from_usage(provider, 2_482, Some(615_629), Some(1_375)),
+                617_004
+            );
+        }
+        for provider in ["openai", "openai-api", "codex"] {
+            assert_eq!(
+                reusable_cache_tokens_from_usage(provider, 619_486, Some(615_629), Some(1_375)),
+                619_486
+            );
+        }
+        assert_eq!(
+            reusable_cache_tokens_from_usage("Claude", 2_482, Some(0), Some(0)),
+            0
+        );
+        assert_eq!(
+            reusable_cache_tokens_from_usage("Claude", 0, Some(615_629), Some(1_375)),
+            617_004
+        );
+    }
+
+    #[test]
+    fn compaction_text_keeps_native_search_query_and_urls() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ProviderNative {
+                    provider: "anthropic".to_string(),
+                    item: serde_json::json!({"type": "server_tool_use", "id": "srvtoolu_1",
+                        "name": "web_search", "input": {"query": "rust news"}}),
+                },
+                ContentBlock::ProviderNative {
+                    provider: "anthropic".to_string(),
+                    item: serde_json::json!({"type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_1", "content": [{"type": "web_search_result",
+                        "url": "https://blog.rust-lang.org/", "title": "Rust Blog",
+                        "encrypted_content": "ENC"}]}),
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+        let text = build_compaction_conversation_text(&messages, None);
+        assert!(text.contains("rust news"), "{text}");
+        assert!(text.contains("https://blog.rust-lang.org/"), "{text}");
+        assert!(!text.contains("ENC"), "{text}");
+    }
 
     #[test]
     fn effective_context_split_accounting_adds_cache_counters() {
@@ -967,6 +1209,21 @@ mod tests {
 
     #[test]
     fn detects_request_payload_too_large_errors() {
+        // Image rejections are a different class.
+        assert!(is_image_rejection_error(
+            "Anthropic API error (400 Bad Request): {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"messages.720.content.0.tool_result.content.1.image.source.base64.media_type: Input should be 'image/jpeg', 'image/png', 'image/gif' or 'image/webp'\"}}"
+        ));
+        assert!(is_image_rejection_error(
+            "400 invalid_request_error: messages.3.content.1.image.source.base64: Could not process image"
+        ));
+        assert!(!is_image_rejection_error(
+            "Anthropic API error (413 Payload Too Large): image too big request_too_large"
+        ));
+        assert!(!is_image_rejection_error(
+            "400 invalid_request_error: messages.5: `tool_use` ids were found without `tool_result` blocks"
+        ));
+        assert!(!is_image_rejection_error("rate limit exceeded"));
+
         assert!(is_request_payload_too_large_error(
             "Anthropic API error (413 Payload Too Large): {\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum size\"}}"
         ));
@@ -1021,6 +1278,100 @@ mod tests {
         }
     }
 
+    fn tool_image_msg(data_len: usize) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call".to_string(),
+                    content: "Captured main display".to_string(),
+                    is_error: None,
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "a".repeat(data_len),
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }
+    }
+
+    fn decay(messages: &mut [Message]) -> usize {
+        let mut contents: Vec<&mut Vec<ContentBlock>> =
+            messages.iter_mut().map(|m| &mut m.content).collect();
+        decay_old_tool_images_in_contents(&mut contents)
+    }
+
+    fn is_image(message: &Message) -> bool {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image { .. }))
+    }
+
+    #[test]
+    fn tool_image_decay_waits_for_trigger_then_keeps_newest() {
+        let mut messages: Vec<Message> = (0..TOOL_IMAGE_DECAY_TRIGGER_COUNT)
+            .map(|_| tool_image_msg(10))
+            .collect();
+        assert_eq!(
+            decay(&mut messages),
+            0,
+            "at the trigger count nothing decays"
+        );
+
+        messages.push(tool_image_msg(10));
+        let total = messages.len();
+        assert_eq!(decay(&mut messages), total - TOOL_IMAGE_DECAY_KEEP_COUNT);
+        for (index, message) in messages.iter().enumerate() {
+            assert_eq!(
+                is_image(message),
+                index >= total - TOOL_IMAGE_DECAY_KEEP_COUNT
+            );
+            // The tool_result itself is preserved for tool_use pairing.
+            assert!(matches!(
+                message.content[0],
+                ContentBlock::ToolResult { .. }
+            ));
+        }
+        let ContentBlock::Text { text, .. } = &messages[0].content[1] else {
+            panic!("decayed image must become a text marker");
+        };
+        assert!(text.contains("Older tool screenshot omitted"));
+        assert!(text.contains("original_base64_chars=10"));
+        // Stable after decay: nothing more to do until the trigger is hit again.
+        assert_eq!(decay(&mut messages), 0);
+    }
+
+    #[test]
+    fn tool_image_decay_bounds_bytes_but_keeps_newest_huge_image() {
+        let huge = TOOL_IMAGE_DECAY_KEEP_CHARS + 1;
+        let mut messages = vec![
+            tool_image_msg(huge),
+            tool_image_msg(huge),
+            tool_image_msg(huge),
+        ];
+        assert_eq!(decay(&mut messages), 2);
+        assert!(!is_image(&messages[0]));
+        assert!(!is_image(&messages[1]));
+        assert!(
+            is_image(&messages[2]),
+            "newest screenshot must still be sent"
+        );
+    }
+
+    #[test]
+    fn tool_image_decay_ignores_user_pasted_images() {
+        let mut messages = vec![image_msg(10)];
+        messages.extend((0..TOOL_IMAGE_DECAY_TRIGGER_COUNT + 5).map(|_| tool_image_msg(10)));
+        decay(&mut messages);
+        assert!(
+            is_image(&messages[0]),
+            "user images are not tool screenshots"
+        );
+    }
+
     #[test]
     fn strip_large_images_noop_when_under_budget() {
         let mut messages = vec![image_msg(500), image_msg(500)];
@@ -1038,5 +1389,35 @@ mod tests {
         let stripped = emergency_strip_large_images(&mut messages, 2000);
         assert_eq!(stripped, 1);
         assert!(matches!(messages[0].content[0], ContentBlock::Text { .. }));
+    }
+}
+
+#[cfg(test)]
+mod image_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn strip_all_images_replaces_every_image_with_a_note() {
+        let mut a = vec![
+            ContentBlock::Text {
+                text: "keep".into(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/bmp".into(),
+                data: "Qk0=".into(),
+            },
+        ];
+        let mut b = vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "iVBO".into(),
+        }];
+        let mut contents = vec![&mut a, &mut b];
+        assert_eq!(strip_all_images_in_contents(&mut contents), 2);
+        assert!(matches!(&a[0], ContentBlock::Text { text, .. } if text == "keep"));
+        assert!(
+            matches!(&a[1], ContentBlock::Text { text, .. } if text.contains("media_type=image/bmp"))
+        );
+        assert!(matches!(&b[0], ContentBlock::Text { .. }));
     }
 }
