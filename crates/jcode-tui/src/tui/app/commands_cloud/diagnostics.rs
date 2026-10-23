@@ -159,14 +159,25 @@ pub(super) fn record_cloud_problem(
     if cfg!(test) {
         return;
     }
-    let Ok(dir) = crate::storage::logs_dir() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
     let tail: String = {
         let chars: Vec<char> = stderr.trim().chars().collect();
         chars[chars.len().saturating_sub(4000)..].iter().collect()
     };
+    crate::logging::warn(&format!(
+        "cloud problem: {command} failed: {}",
+        tail.lines().last().unwrap_or("")
+    ));
+    let dir = match crate::storage::logs_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            crate::logging::warn(&format!("Cannot locate cloud problem log directory: {err}"));
+            return;
+        }
+    };
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        crate::logging::warn(&format!("Cannot create cloud problem log directory: {err}"));
+        return;
+    }
     let record = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "version": env!("CARGO_PKG_VERSION"),
@@ -175,15 +186,18 @@ pub(super) fn record_cloud_problem(
         "exit_code": exit,
         "stderr": tail,
     });
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(dir.join("cloud-problems.jsonl"))
     {
-        let _ = writeln!(file, "{record}");
+        Ok(mut file) => {
+            if let Err(err) = writeln!(file, "{record}") {
+                crate::logging::warn(&format!("Cannot append cloud problem log record: {err}"));
+            }
+        }
+        Err(err) => {
+            crate::logging::warn(&format!("Cannot open cloud problem log: {err}"));
+        }
     }
-    crate::logging::warn(&format!(
-        "cloud problem: {command} failed: {}",
-        tail.lines().last().unwrap_or("")
-    ));
 }
