@@ -173,6 +173,8 @@ fn render_batch_tool_message_shows_nested_gmail_draft_card() {
             intent: None,
             thought_signature: None,
         }),
+        tool_duration_ms: None,
+        timestamp: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);

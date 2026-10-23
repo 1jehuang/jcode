@@ -3692,6 +3692,7 @@ fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
                 intent: intent.map(str::to_string),
                 thought_signature: None,
             }),
+            timestamp: None,
         };
 
         let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Inline);

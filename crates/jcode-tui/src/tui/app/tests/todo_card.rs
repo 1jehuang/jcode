@@ -726,6 +726,8 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
         duration_secs: None,
         title: None,
         tool_data: None,
+        tool_duration_ms: None,
+        timestamp: None,
     }];
     app.bump_display_messages_version();
     app.status = ProcessingStatus::Idle;

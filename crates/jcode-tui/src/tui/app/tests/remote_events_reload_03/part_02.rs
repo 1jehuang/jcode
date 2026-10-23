@@ -634,6 +634,8 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
         content: "new since reload".to_string(),
         tool_calls: None,
         tool_data: None,
+        timestamp: None,
+        tool_duration_ms: None,
     }];
     let mut event = delta_history_event("ses_delta", tail, Some(2));
     if let crate::protocol::ServerEvent::History {

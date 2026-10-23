@@ -1695,6 +1695,8 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
+            timestamp: None,
         });
         msgs.push(DisplayMessage {
             role: "assistant".to_string(),
@@ -1703,6 +1705,8 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
+            timestamp: None,
         });
     }
     app.display_messages = msgs;

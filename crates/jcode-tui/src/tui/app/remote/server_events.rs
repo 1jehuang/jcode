@@ -1858,6 +1858,8 @@ pub(in crate::tui::app) fn handle_server_event(
                             content: msg.content,
                             tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
                             tool_data: msg.tool_data,
+                            timestamp: msg.timestamp,
+                            tool_duration_ms: msg.tool_duration_ms,
                         }),
                 );
                 messages.extend(tail);

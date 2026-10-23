@@ -1098,6 +1098,8 @@ impl App {
                                                 duration_secs: None,
                                                 title: None,
                                                 tool_data: Some(tool_call),
+                                                tool_duration_ms: None,
+                                                timestamp: None,
                                             });
                                             self.status = ProcessingStatus::Streaming;
                                         }
