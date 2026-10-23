@@ -417,7 +417,7 @@ fn summarize_swarm_tool_action(tool: &ToolCall, bounded: &dyn Fn(usize) -> usize
     truncate_end_display(summary.as_str(), bounded(42))
 }
 
-fn truncate_path_display(path: &str, max_width: usize) -> String {
+pub(super) fn truncate_path_display(path: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(path) <= max_width {
         return path.to_string();
     }

@@ -3981,6 +3981,45 @@ fn render_discovery_card(
     Some(content)
 }
 
+/// Fit diff chrome to one row, preserving the filename before path prefixes.
+fn inline_diff_header(
+    prefix: &str,
+    counts: Option<(usize, usize)>,
+    file_path: Option<&str>,
+    width: usize,
+) -> Line<'static> {
+    let dim = Style::default().fg(dim_color());
+    let mut header = vec![Span::styled(format!("{prefix} diff"), dim)];
+    if let Some((additions, deletions)) =
+        counts.filter(|&(additions, deletions)| additions > 0 || deletions > 0)
+    {
+        header.extend([
+            Span::styled(" · ", dim),
+            Span::styled(
+                format!("+{additions}"),
+                Style::default().fg(diff_add_color()),
+            ),
+            Span::styled(" ", dim),
+            Span::styled(
+                format!("-{deletions}"),
+                Style::default().fg(diff_del_color()),
+            ),
+        ]);
+    }
+    let mut header = Line::from(header);
+    if let Some(path) = file_path {
+        let path_width = width.saturating_sub(header.width().saturating_add(3));
+        if path_width > 0 {
+            header.spans.push(Span::styled(
+                format!(" · {}", tools_ui::truncate_path_display(path, path_width)),
+                dim,
+            ));
+        }
+    }
+    super::truncate_line_with_ellipsis_to_width(&header, width)
+        .alignment(ratatui::layout::Alignment::Left)
+}
+
 pub(crate) fn render_tool_message(
     msg: &DisplayMessage,
     width: u16,
@@ -4502,39 +4541,12 @@ pub(crate) fn render_tool_message(
         let diff_file_path =
             |line: &ParsedDiffLine| line.file_path.clone().or_else(|| file_path_for_ext.clone());
         let first_file_path = display_lines.first().and_then(|line| diff_file_path(line));
-        let diff_header = |prefix: &str, file_path: Option<&str>| match file_path {
-            Some(path) => format!("{pad_str}{prefix} diff · {path}"),
-            None => format!("{pad_str}{prefix} diff"),
-        };
-
-        let mut header = vec![Span::styled(
-            format!("{pad_str}╭─ diff"),
-            Style::default().fg(dim_color()),
-        )];
-        if additions > 0 || deletions > 0 {
-            header.extend([
-                Span::styled(" · ", Style::default().fg(dim_color())),
-                Span::styled(
-                    format!("+{additions}"),
-                    Style::default().fg(diff_add_color()),
-                ),
-                Span::styled(" ", Style::default().fg(dim_color())),
-                Span::styled(
-                    format!("-{deletions}"),
-                    Style::default().fg(diff_del_color()),
-                ),
-            ]);
-        }
-        if let Some(path) = first_file_path.as_deref() {
-            header.push(Span::styled(
-                format!(" · {path}"),
-                Style::default().fg(dim_color()),
-            ));
-        }
-        lines.push(
-            super::truncate_line_with_ellipsis_to_width(&Line::from(header), width as usize)
-                .alignment(ratatui::layout::Alignment::Left),
-        );
+        lines.push(inline_diff_header(
+            "╭─",
+            Some((additions, deletions)),
+            first_file_path.as_deref(),
+            row_width,
+        ));
 
         let mut shown_truncation = false;
         let mut previous_file_path = first_file_path;
@@ -4554,13 +4566,12 @@ pub(crate) fn render_tool_message(
 
             let current_file_path = diff_file_path(line);
             if i > 0 && current_file_path != previous_file_path {
-                lines.push(
-                    Line::from(Span::styled(
-                        diff_header("├─", current_file_path.as_deref()),
-                        Style::default().fg(dim_color()),
-                    ))
-                    .alignment(ratatui::layout::Alignment::Left),
-                );
+                lines.push(inline_diff_header(
+                    "├─",
+                    None,
+                    current_file_path.as_deref(),
+                    row_width,
+                ));
             }
             previous_file_path = current_file_path.clone();
 

@@ -1,6 +1,85 @@
 use super::*;
 
 #[test]
+fn inline_diff_header_compacts_directories_before_filename() {
+    let path = "/home/user/project/crates/very_long_directory/src/important_file.rs";
+    let line = inline_diff_header("╭─", Some((23, 4)), Some(path), 48);
+    let text = extract_line_text(&line);
+    assert!(text.starts_with("╭─ diff · +23 -4 · "), "{text}");
+    assert!(text.ends_with("important_file.rs"), "{text}");
+    assert!(text.contains('…'), "{text}");
+    assert!(line.width() <= 48);
+    assert!(
+        line.spans
+            .iter()
+            .any(|span| span.content == "+23" && span.style.fg == Some(diff_add_color()))
+    );
+}
+
+#[test]
+fn inline_diff_headers_fit_all_cell_budgets() {
+    for path in [
+        "/home/user/a/very/long/path/to/source.rs",
+        "C:\\Users\\user\\project\\very_long_directory\\source.rs",
+        "/目录/很长的目录/另一个目录/主文件.rs",
+        "/very/long/path/a_filename_too_long_for_the_remaining_space.rs",
+    ] {
+        for width in 0..100 {
+            for (prefix, counts) in [("╭─", Some((123, 45))), ("├─", None)] {
+                let line = inline_diff_header(prefix, counts, Some(path), width);
+                assert!(line.width() <= width, "width={width}, line={line:?}");
+                if width >= 64 {
+                    assert!(extract_line_text(&line).ends_with(".rs"), "{line:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn render_tool_message_compacts_every_multi_file_diff_header() {
+    let first = "/home/user/project/very_long_directory/nested/first.rs";
+    let second = "/home/user/project/another_very_long_directory/nested/second.rs";
+    let msg = DisplayMessage {
+        role: "tool".into(),
+        content: "Updated 2 files".into(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "compact_multi_file_headers".into(),
+            name: "apply_patch".into(),
+            input: serde_json::json!({"patch_text": format!(
+                "*** Begin Patch\n*** Update File: {first}\n@@\n-old\n+new\n*** Update File: {second}\n@@\n-old\n+new\n*** End Patch\n"
+            )}),
+            intent: None,
+            thought_signature: None,
+        }),
+    };
+    for width in [40, 72, 120] {
+        for mode in [
+            crate::config::DiffDisplayMode::Inline,
+            crate::config::DiffDisplayMode::FullInline,
+        ] {
+            let lines = render_tool_message(&msg, width, mode);
+            let headers: Vec<_> = lines
+                .iter()
+                .filter(|line| {
+                    let text = extract_line_text(line);
+                    text.trim_start().starts_with("╭─ diff")
+                        || text.trim_start().starts_with("├─ diff")
+                })
+                .collect();
+            assert_eq!(headers.len(), 2, "{lines:?}");
+            for (header, filename) in headers.iter().zip(["first.rs", "second.rs"]) {
+                assert!(header.width() <= width as usize, "{header:?}");
+                assert!(extract_line_text(header).ends_with(filename), "{header:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn oauth_login_progress_renderer_keeps_short_link_and_hides_full_details() {
     let url =
         "https://example.invalid/authorize?state=private-state&code_challenge=private-challenge";
