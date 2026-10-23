@@ -85,8 +85,20 @@ fn assistant_rewind_translation_keeps_kind_and_completion_correlation() {
     };
     assert_eq!(rewind["checkpoint_id"], "assistant-cp");
     let history = state.legacy_event_to_api(&json!({"type": "history", "id": rewind["id"], "session_id": "s1", "messages": [{"role": "assistant", "content": "assistant answer"}]}));
+    // History also hydrates side-panel and applet snapshots. Those stream
+    // frames must not consume the pending rewind completion either.
+    let history_frame = history
+        .iter()
+        .find(|frame| matches!(&frame.event, ApiEvent::History { .. }))
+        .expect("expected streamed History before rewind completion");
     assert!(
-        matches!(&history[..], [ServerFrame { reply_to: None, event: ApiEvent::History { messages, .. }, .. }] if messages.len() == 1 && messages[0].role == "assistant")
+        matches!(history_frame, ServerFrame { reply_to: None, event: ApiEvent::History { session_id, messages, .. }, .. }
+            if session_id == "s1" && messages.len() == 1 && messages[0].role == "assistant" && messages[0].content == "assistant answer"),
+        "unexpected streamed History: {history_frame:?}"
+    );
+    assert!(
+        history.iter().all(|frame| frame.reply_to.is_none()),
+        "History and auxiliary snapshots must not complete the rewind request: {history:?}"
     );
     let result = json!({"target_kind": "assistant_message", "mode": "conversation_only", "prompt": "", "removed_messages": 2, "restored_files": 0});
     let complete = json!({"type": "rewind_complete", "id": rewind["id"], "session_id": "s1", "result": result.clone()});
