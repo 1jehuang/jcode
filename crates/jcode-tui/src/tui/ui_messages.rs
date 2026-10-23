@@ -2856,7 +2856,7 @@ pub(crate) fn render_background_task_message(
         let timing = Line::from(Span::styled(format!(" · {timing}"), muted));
         header = super::truncate_line_preserving_suffix_to_width(&header, &timing, row_width);
         let reason = Line::from(vec![
-            Span::styled("  ╰ ", muted),
+            Span::styled("  ╰─", muted),
             Span::styled(detail, muted),
         ]);
         let mut lines = vec![
@@ -4176,7 +4176,7 @@ fn render_tool_failure_reason(content: &str, width: usize, indent: usize) -> Lin
     let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
     super::truncate_line_with_ellipsis_to_width(
         &Line::from(Span::styled(
-            format!("{}╰ {}", " ".repeat(indent), summary),
+            format!("{}╰─{}", " ".repeat(indent), summary),
             Style::default().fg(dim_color()),
         )),
         width,

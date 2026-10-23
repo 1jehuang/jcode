@@ -889,7 +889,7 @@ fn render_background_task_failure_is_compact() {
         "{plain}"
     );
     assert!(
-        plain.contains("╰ exit 101 · [E0308]: mismatched types"),
+        plain.contains("╰─exit 101 · [E0308]: mismatched types"),
         "{plain}"
     );
     assert!(!plain.contains("remote build"));
@@ -940,7 +940,7 @@ fn render_background_task_failure_without_diagnostic_is_honest() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(plain.contains("✗ bash · took 7.1s"), "{plain}");
-    assert!(plain.contains("╰ exit 1 · no diagnostic captured"));
+    assert!(plain.contains("╰─exit 1 · no diagnostic captured"));
 }
 
 #[test]
@@ -2743,7 +2743,7 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
     assert!(
         extract_line_text(&lines[1])
             .trim_start()
-            .starts_with("╰ command not found")
+            .starts_with("╰─command not found")
     );
     assert!(
         lines[1]
@@ -2835,7 +2835,7 @@ fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
             assert!(
                 extract_line_text(&lines[1])
                     .trim_start()
-                    .starts_with("╰ permission denied")
+                    .starts_with("╰─permission denied")
             );
             assert!(
                 lines[1].spans.iter().all(
@@ -2907,7 +2907,7 @@ fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason()
     assert!(
         extract_line_text(&lines[2])
             .trim_start()
-            .starts_with("╰ permission denied")
+            .starts_with("╰─permission denied")
     );
     assert!(
         lines[2]
@@ -2946,7 +2946,7 @@ fn render_tool_message_batch_level_failure_does_not_invent_successful_children()
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 2);
     assert!(extract_line_text(&lines[0]).contains("✗ batch · Inspect sources"));
-    assert!(extract_line_text(&lines[1]).contains("╰ invalid tool_calls payload"));
+    assert!(extract_line_text(&lines[1]).contains("╰─invalid tool_calls payload"));
 }
 
 #[test]
