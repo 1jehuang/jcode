@@ -58,6 +58,42 @@ pub(crate) fn expand_badge_reserved_width(badge_text: &str) -> usize {
     UnicodeWidthStr::width(format!(" [{}⇧E]{badge_text}", copy_badge_alt_label()).as_str())
 }
 
+fn expand_badge_spans(
+    alt_label: &str,
+    alt_active: bool,
+    shift_active: bool,
+    key_active: bool,
+    expanded: bool,
+) -> [Span<'static>; 7] {
+    let dim = Style::default().fg(dim_color());
+    let modifier = |active| {
+        if active {
+            Style::default().fg(queued_color()).bold()
+        } else {
+            dim
+        }
+    };
+    let key_style = if key_active {
+        Style::default().fg(accent_color()).bold()
+    } else {
+        dim
+    };
+    let (label, label_style) = if expanded {
+        (" ✓ Expanded", Style::default().fg(ai_color()).bold())
+    } else {
+        (" expand", dim)
+    };
+    [
+        Span::styled(" ", dim),
+        Span::styled("[", dim),
+        Span::styled(alt_label.to_owned(), modifier(alt_active)),
+        Span::styled("⇧", modifier(shift_active)),
+        Span::styled("E", key_style),
+        Span::styled("]", dim),
+        Span::styled(label, label_style),
+    ]
+}
+
 fn expand_badge_target_line(active: &ActiveFileDiffContext, inline: bool) -> usize {
     if inline {
         active.end_line.saturating_sub(1).max(active.start_line)
@@ -809,36 +845,14 @@ pub(super) fn draw_messages(
                     *width = (*width).saturating_sub(reserved as u16);
                 }
 
-                let alt_style = if copy_badge_ui.alt_is_active(copy_badge_now) {
-                    Style::default().fg(queued_color()).bold()
-                } else {
-                    Style::default().fg(dim_color())
-                };
-                let shift_style = if copy_badge_ui.shift_is_active(copy_badge_now) {
-                    Style::default().fg(queued_color()).bold()
-                } else {
-                    Style::default().fg(dim_color())
-                };
-                let key_style = if copy_badge_ui.key_is_active('e', copy_badge_now) {
-                    Style::default().fg(accent_color()).bold()
-                } else {
-                    Style::default().fg(dim_color())
-                };
-
                 let badge_start = line.width().saturating_add(1);
-                line.spans.push(Span::raw(" "));
-                line.spans.push(Span::raw("["));
-                line.spans
-                    .push(Span::styled(copy_badge_alt_label(), alt_style));
-                line.spans.push(Span::styled("⇧", shift_style));
-                line.spans.push(Span::styled("E", key_style));
-                line.spans.push(Span::raw("]"));
-                let badge_text_style = if expand_feedback_active {
-                    Style::default().fg(ai_color()).bold()
-                } else {
-                    Style::default().fg(dim_color())
-                };
-                line.spans.push(Span::styled(badge_text, badge_text_style));
+                line.spans.extend(expand_badge_spans(
+                    &copy_badge_alt_label(),
+                    copy_badge_ui.alt_is_active(copy_badge_now),
+                    copy_badge_ui.shift_is_active(copy_badge_now),
+                    copy_badge_ui.key_is_active('e', copy_badge_now),
+                    expand_feedback_active,
+                ));
 
                 let final_width = line.width();
                 let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {

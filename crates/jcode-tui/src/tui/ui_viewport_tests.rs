@@ -174,3 +174,96 @@ fn exact_width_expand_badge_leaves_no_content_or_ellipsis() {
     assert_eq!(line.width(), 0);
     assert!(line.spans.is_empty());
 }
+
+// Chrome must own its visible colors instead of relying on a terminal default.
+// Whitespace can inherit because it does not draw a foreground glyph.
+fn assert_chrome_has_explicit_foregrounds(spans: &[ratatui::text::Span<'_>]) {
+    for span in spans.iter().filter(|span| !span.content.trim().is_empty()) {
+        assert!(
+            span.style
+                .fg
+                .is_some_and(|fg| fg != ratatui::style::Color::Reset),
+            "unstyled UI chrome: {:?}",
+            span.content,
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "unstyled UI chrome")]
+fn chrome_style_guard_rejects_raw_punctuation() {
+    assert_chrome_has_explicit_foregrounds(&[ratatui::text::Span::raw("[")]);
+}
+
+#[test]
+#[should_panic(expected = "unstyled UI chrome")]
+fn chrome_style_guard_rejects_terminal_default_foreground() {
+    assert_chrome_has_explicit_foregrounds(&[ratatui::text::Span::styled(
+        "]",
+        ratatui::style::Style::default().fg(ratatui::style::Color::Reset),
+    )]);
+}
+
+#[test]
+fn expand_badge_all_states_have_explicit_chrome_colors() {
+    for alt_label in ["Alt", "⌥", "Option"] {
+        for state in 0..16 {
+            let alt = state & 1 != 0;
+            let shift = state & 2 != 0;
+            let key = state & 4 != 0;
+            let expanded = state & 8 != 0;
+            let spans = super::expand_badge_spans(alt_label, alt, shift, key, expanded);
+            assert_chrome_has_explicit_foregrounds(&spans);
+            for span in spans
+                .iter()
+                .filter(|span| matches!(span.content.as_ref(), "[" | "]"))
+            {
+                assert_eq!(span.style.fg, Some(super::dim_color()));
+                assert!(
+                    !span
+                        .style
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::BOLD)
+                );
+            }
+            assert_eq!(
+                spans[2].style.fg,
+                Some(if alt {
+                    super::queued_color()
+                } else {
+                    super::dim_color()
+                })
+            );
+            assert_eq!(
+                spans[3].style.fg,
+                Some(if shift {
+                    super::queued_color()
+                } else {
+                    super::dim_color()
+                })
+            );
+            assert_eq!(
+                spans[4].style.fg,
+                Some(if key {
+                    super::accent_color()
+                } else {
+                    super::dim_color()
+                })
+            );
+            assert_eq!(
+                spans[6].style.fg,
+                Some(if expanded {
+                    super::ai_color()
+                } else {
+                    super::dim_color()
+                })
+            );
+            let rendered = spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let suffix = if expanded { " ✓ Expanded" } else { " expand" };
+            assert_eq!(rendered, format!(" [{alt_label}⇧E]{suffix}"));
+        }
+    }
+}

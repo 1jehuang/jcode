@@ -383,6 +383,31 @@ fn test_expand_badge_rendered_shortcut_expands_with_alt_lowercase_event() {
 }
 
 #[test]
+fn test_expand_badge_brackets_match_dim_shortcut_color() {
+    let _render_lock = scroll_render_test_lock();
+    let (app, mut terminal) = make_edit_badge_test_app(20);
+    render_and_snap(&app, &mut terminal);
+    let buf = terminal.backend().buffer();
+    let area = *buf.area();
+    for row in 0..area.height {
+        let line = (0..area.width)
+            .map(|col| buf[(col, row)].symbol())
+            .collect::<String>();
+        if let Some(end) = line.find("⇧E] expand") {
+            let start = line[..end].rfind('[').expect("opening shortcut bracket");
+            let opening = unicode_width::UnicodeWidthStr::width(&line[..start]) as u16;
+            let key = unicode_width::UnicodeWidthStr::width(&line[..end]) as u16 + 1;
+            let closing = key + 1;
+            assert_ne!(buf[(key, row)].fg, ratatui::style::Color::Reset);
+            assert_eq!(buf[(opening, row)].fg, buf[(key, row)].fg);
+            assert_eq!(buf[(closing, row)].fg, buf[(key, row)].fg);
+            return;
+        }
+    }
+    panic!("expand shortcut must be visible");
+}
+
+#[test]
 fn test_clicking_expand_edit_badge_expands_to_full_diff() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = make_edit_badge_test_app(20);
