@@ -1607,9 +1607,8 @@ fn compact_page_height_matches_for_cost_based_usage() {
 
 /// Visual gallery: draws every text widget through the real
 /// `render_single_widget` path. Run with
-/// `cargo test -p jcode-tui --lib widget_gallery -- --ignored --nocapture`.
+/// `justrust test -p jcode-tui --lib widget_gallery -- --nocapture`.
 #[test]
-#[ignore]
 fn widget_gallery() {
     use super::{
         AmbientWidgetData, CompactionInfo, DirtyFile, GitInfo, Side, WidgetPlacement,
@@ -1874,35 +1873,103 @@ fn widget_gallery() {
         WidgetKind::Commits,
         WidgetKind::Overview,
     ];
-    let width = 44u16;
-    for kind in kinds {
-        let cap = if kind == WidgetKind::Overview { 40 } else { 12 };
-        let mut h = calculate_widget_height(kind, &data, width, cap);
-        if h <= 2 {
-            // Ambient/Tips are gated off in layout; draw them anyway.
-            h = 8;
+    for width in [12u16, 24, 44] {
+        for kind in kinds {
+            let cap = if kind == WidgetKind::Overview { 40 } else { 12 };
+            let mut h = calculate_widget_height(kind, &data, width, cap);
+            if h <= 2 {
+                // Ambient/Tips are gated off in layout; draw them anyway.
+                h = 8;
+            }
+            let backend = ratatui::backend::TestBackend::new(width, h);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    let placement = WidgetPlacement {
+                        kind,
+                        rect: f.area(),
+                        side: Side::Left,
+                    };
+                    render_single_widget(f, &placement, &data);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            let bottom = (0..h)
+                .find(|&y| buf[(0, y)].symbol() == "╰")
+                .unwrap_or_else(|| panic!("{kind:?} at width {width} has no bottom border"));
+            let footer: String = (1..width - 1).map(|x| buf[(x, bottom)].symbol()).collect();
+            assert!(
+                footer.chars().any(|ch| ch != '─' && !ch.is_whitespace()),
+                "{kind:?} at width {width} has an empty footer: {footer}"
+            );
+            println!("{kind:?}");
+            for y in 0..h {
+                let row: String = (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect();
+                println!("{}", row.trim_end());
+            }
+            println!();
         }
-        let backend = ratatui::backend::TestBackend::new(width, h);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let placement = WidgetPlacement {
-                    kind,
-                    rect: f.area(),
-                    side: Side::Left,
-                };
-                render_single_widget(f, &placement, &data);
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        println!("{kind:?}");
-        for y in 0..h {
-            let row: String = (0..width)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect();
-            println!("{}", row.trim_end());
+    }
+}
+
+#[test]
+fn special_widgets_have_bottom_border_text() {
+    use super::{CloudProbeState, CloudStatusInfo, Side, WidgetPlacement};
+    use ratatui::{Terminal, backend::TestBackend};
+    let data = InfoWidgetData {
+        workspace_rows: vec![crate::tui::workspace_map::VisibleWorkspaceRow {
+            workspace: 0,
+            is_current: true,
+            focused_index: Some(0),
+            sessions: vec![crate::tui::workspace_map::WorkspaceSessionTile::new("fox")],
+        }],
+        cloud_info: Some(CloudStatusInfo {
+            host: "test-host".into(),
+            remote_dir: "/workspace".into(),
+            local_dir: None,
+            local_is_source: false,
+            started_at: std::time::SystemTime::now(),
+            last_success: None,
+            probe_duration_ms: None,
+            state: CloudProbeState::Loading,
+            machine: None,
+            last_transfer_at: None,
+        }),
+        ..Default::default()
+    };
+    // The diagram branch must retain its footer even while image data is absent.
+    for kind in [
+        WidgetKind::Diagrams,
+        WidgetKind::WorkspaceMap,
+        WidgetKind::CloudVm,
+    ] {
+        for width in [12u16, 24, 44] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal
+                .draw(|f| {
+                    super::render_all(
+                        f,
+                        &[WidgetPlacement {
+                            kind,
+                            rect: f.area(),
+                            side: Side::Right,
+                        }],
+                        &data,
+                    );
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let bottom = (0..12)
+                .find(|&y| buf[(0, y)].symbol() == "╰")
+                .expect("rendered widget must have a bottom border");
+            let footer: String = (1..width - 1).map(|x| buf[(x, bottom)].symbol()).collect();
+            assert!(
+                footer.chars().any(char::is_alphabetic),
+                "{kind:?}: {footer}"
+            );
         }
-        println!();
     }
 }
 

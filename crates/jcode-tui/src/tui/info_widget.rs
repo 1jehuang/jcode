@@ -120,6 +120,28 @@ pub enum WidgetKind {
 }
 
 impl WidgetKind {
+    /// A quiet description for widgets without a more specific footer (such
+    /// as an overflow count, account hint, legend, or page indicator).
+    fn footer_description(self) -> &'static str {
+        match self {
+            Self::Overview => "Session overview",
+            Self::WorkspaceMap => "Workspace layout",
+            Self::MemoryActivity => "Memory activity",
+            Self::SwarmStatus => "Agent sessions",
+            Self::BackgroundTasks => "Background work",
+            Self::Compaction => "Context summary",
+            Self::UsageLimits => "Provider limits",
+            Self::KvCache => "Prompt caching",
+            Self::ModelInfo => "Runtime details",
+            Self::Diagrams => "Latest diagram",
+            Self::AmbientMode => "Scheduled activity",
+            Self::Tips => "Tips & shortcuts",
+            Self::GitStatus => "Working tree",
+            Self::CloudVm => "Remote machine",
+            Self::Commits => "Recent history",
+        }
+    }
+
     /// Priority for display (lower = higher priority)
     pub fn priority(self) -> u8 {
         match self {
@@ -1380,6 +1402,7 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         if data.diagrams.len() > 1 {
             chrome = chrome.title_right(frame::dim(format!("1/{}", data.diagrams.len())));
         }
+        let chrome = chrome.footer_if_empty(frame::dim(placement.kind.footer_description()));
         frame.render_widget(chrome.apply(block, rect.width), rect);
         render_diagrams_widget(frame, inner, data);
         return;
@@ -1397,7 +1420,9 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         if data.workspace_rows.is_empty() || inner.width == 0 || inner.height == 0 {
             return;
         }
-        let chrome = Framed::default().title(frame::label("Workspace"));
+        let chrome = Framed::default()
+            .title(frame::label("Workspace"))
+            .footer_if_empty(frame::dim(placement.kind.footer_description()));
         frame.render_widget(chrome.apply(block, rect.width), rect);
         super::workspace_map_widget::render_workspace_map(
             frame.buffer_mut(),
@@ -1520,7 +1545,7 @@ fn render_overview_framed(data: &InfoWidgetData, inner: Rect) -> Option<Framed> 
         }
         framed = framed.footer_right(Line::from(dots));
     }
-    Some(framed)
+    Some(framed.footer_if_empty(frame::dim(WidgetKind::Overview.footer_description())))
 }
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -1710,7 +1735,9 @@ fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -
         WidgetKind::CloudVm => super::info_widget_cloud::render_cloud_widget(data, inner),
         WidgetKind::Commits => render_commits_widget(data, inner),
     };
-    framed.settle()
+    framed
+        .settle()
+        .footer_if_empty(frame::dim(kind.footer_description()))
 }
 
 fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
