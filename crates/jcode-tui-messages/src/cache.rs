@@ -234,6 +234,7 @@ mod tests {
             show_tool_duration: false,
             show_tool_timestamp: false,
             timestamp_tz: String::new(),
+            latex_rendering: Default::default(),
         };
         let mut stamped = base.clone();
         stamped.show_tool_timestamp = true;
