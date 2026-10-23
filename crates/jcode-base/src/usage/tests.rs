@@ -1047,9 +1047,28 @@ fn jcode_usage_unknown_monthly_budget_is_not_exhausted() {
 }
 
 #[test]
+fn jcode_usage_replaces_subscription_placeholder() {
+    let mut reports = vec![ProviderUsage {
+        provider_name: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+        ..Default::default()
+    }];
+    let report = jcode_usage_report(&jcode_me(100, true));
+    let expected_limits = report.limits.len();
+
+    upsert_provider_usage(&mut reports, report);
+
+    assert_eq!(reports.len(), 1, "subscription must render only one card");
+    assert_eq!(reports[0].limits.len(), expected_limits);
+    assert!(reports[0].extra_info.iter().any(|(key, _)| key == "Plan"));
+}
+
+#[test]
 fn jcode_usage_shows_daily_allowances_without_upsell_when_low() {
     let report = jcode_usage_report(&jcode_me(100, true));
-    assert_eq!(report.provider_name, "Jcode subscription");
+    assert_eq!(
+        report.provider_name,
+        crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+    );
     assert_eq!(report.limits.len(), 2);
     assert_eq!(report.limits[0].name, "Memory recall (daily)");
     assert!((report.limits[0].usage_percent - 10.0).abs() < 0.01);
