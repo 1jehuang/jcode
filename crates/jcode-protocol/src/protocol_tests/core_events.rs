@@ -395,6 +395,7 @@ fn checkpoint_rewind_requests_roundtrip() -> Result<()> {
 #[test]
 fn checkpoint_rewind_events_roundtrip() -> Result<()> {
     let checkpoint = RewindCheckpoint {
+        target_kind: Default::default(),
         id: "checkpoint-stable-id".into(),
         message_index: 8,
         prompt: "Try a different approach\nwith Unicode: 日本語".into(),
@@ -421,6 +422,7 @@ fn checkpoint_rewind_events_roundtrip() -> Result<()> {
     assert_eq!(checkpoints, vec![checkpoint]);
 
     let result = RewindResult {
+        target_kind: Default::default(),
         mode: RewindMode::FilesOnly,
         prompt: "original prompt".into(),
         removed_messages: 0,
@@ -462,6 +464,46 @@ fn test_rename_session_request_roundtrip() -> Result<()> {
         return Err(anyhow!("wrong request type"));
     };
     assert_eq!(title.as_deref(), Some("Release planning"));
+    Ok(())
+}
+
+#[test]
+fn rewind_target_kind_payloads_preserve_legacy_wire_shape() -> Result<()> {
+    for target_kind in [None, Some("assistant_message")] {
+        let mut checkpoint = serde_json::json!({
+            "id": "cp1", "message_index": 2, "prompt": "selected message",
+            "can_restore_files": true, "changed_file_count": 1
+        });
+        let mut result = serde_json::json!({
+            "mode": "conversation_only", "prompt": "", "removed_messages": 2,
+            "restored_files": 0, "images": [["image/png", "aW1hZ2U="]]
+        });
+        if let Some(kind) = target_kind {
+            checkpoint["target_kind"] = kind.into();
+            result["target_kind"] = kind.into();
+        }
+        let expected_kind = if target_kind.is_some() {
+            jcode_session_types::RewindTargetKind::AssistantMessage
+        } else {
+            jcode_session_types::RewindTargetKind::UserPrompt
+        };
+        let decoded_checkpoint: RewindCheckpoint = serde_json::from_value(checkpoint.clone())?;
+        let decoded_result: RewindResult = serde_json::from_value(result.clone())?;
+        assert_eq!(decoded_checkpoint.target_kind, expected_kind);
+        assert_eq!(decoded_result.target_kind, expected_kind);
+        assert_eq!(serde_json::to_value(decoded_checkpoint)?, checkpoint);
+        assert_eq!(serde_json::to_value(decoded_result)?, result);
+        for wire in [
+            serde_json::json!({"type": "rewind_checkpoints", "id": 41, "session_id": "s1", "checkpoints": [checkpoint]}),
+            serde_json::json!({"type": "rewind_complete", "id": 42, "session_id": "s1", "result": result}),
+        ] {
+            let event = parse_event_json(&wire.to_string())?;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&encode_event(&event))?,
+                wire
+            );
+        }
+    }
     Ok(())
 }
 

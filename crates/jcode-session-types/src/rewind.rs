@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Which parts of a session should return to the state before a user prompt.
+/// Which parts of a session should return to the selected rewind boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RewindMode {
@@ -19,15 +19,36 @@ impl RewindMode {
     }
 }
 
-/// A durable checkpoint immediately before a user prompt.
+/// How a selected message determines the rewind boundary and composer behavior.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindTargetKind {
+    /// Remove this input and its future, then restore the input to the editor.
+    #[default]
+    UserPrompt,
+    /// Keep this assistant message, remove its future, and preserve the editor.
+    AssistantMessage,
+}
+
+impl RewindTargetKind {
+    pub fn is_user_prompt(&self) -> bool {
+        matches!(self, Self::UserPrompt)
+    }
+}
+
+/// A conversation target with an optional durable file checkpoint.
 ///
 /// The ID is scoped to its session and stays stable across reloads. Clients
 /// must send the ID back, rather than deriving a target from displayed rows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RewindCheckpoint {
     pub id: String,
-    /// Zero-based stored user-message boundary, not legacy `/rewind N` numbering.
+    #[serde(default, skip_serializing_if = "RewindTargetKind::is_user_prompt")]
+    pub target_kind: RewindTargetKind,
+    /// Exclusive stored boundary, not legacy `/rewind N` numbering. Before the
+    /// original user input, or immediately after the selected assistant message.
     pub message_index: usize,
+    /// Original user prompt or assistant excerpt for the selector.
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
@@ -38,7 +59,10 @@ pub struct RewindCheckpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RewindResult {
     pub mode: RewindMode,
-    /// The original prompt, ready to edit and resend after conversation restore.
+    #[serde(default, skip_serializing_if = "RewindTargetKind::is_user_prompt")]
+    pub target_kind: RewindTargetKind,
+    /// Original user input, ready to edit after conversation restore. Empty for
+    /// assistant targets, which must leave the current composer unchanged.
     pub prompt: String,
     /// Original user attachments as (media type, base64 data), in input order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -72,6 +96,7 @@ mod tests {
             "restored_files": 0,
         });
         let mut result: RewindResult = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(result.target_kind, RewindTargetKind::UserPrompt);
         assert!(result.images.is_empty());
         assert_eq!(serde_json::to_value(&result).unwrap(), legacy);
         result.images = vec![
@@ -87,5 +112,40 @@ mod tests {
             serde_json::from_value::<RewindResult>(value).unwrap(),
             result
         );
+    }
+
+    #[test]
+    fn rewind_target_kinds_preserve_legacy_payloads_and_roundtrip_assistant_targets() {
+        let legacy = serde_json::json!({
+            "id": "message:original-input",
+            "message_index": 0,
+            "prompt": "original input",
+            "can_restore_files": false,
+            "changed_file_count": 0,
+        });
+        let mut checkpoint: RewindCheckpoint = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(checkpoint.target_kind, RewindTargetKind::UserPrompt);
+        assert_eq!(serde_json::to_value(&checkpoint).unwrap(), legacy);
+        checkpoint.id = "assistant:original-reply".into();
+        checkpoint.target_kind = RewindTargetKind::AssistantMessage;
+        checkpoint.message_index = 2;
+        let value = serde_json::to_value(&checkpoint).unwrap();
+        assert_eq!(value["target_kind"], "assistant_message");
+        assert_eq!(
+            serde_json::from_value::<RewindCheckpoint>(value).unwrap(),
+            checkpoint
+        );
+
+        let value = serde_json::json!({
+            "mode": "conversation_only",
+            "target_kind": "assistant_message",
+            "prompt": "",
+            "removed_messages": 2,
+            "restored_files": 0,
+        });
+        let result: RewindResult = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(result.target_kind, RewindTargetKind::AssistantMessage);
+        assert!(result.prompt.is_empty());
+        assert_eq!(serde_json::to_value(result).unwrap(), value);
     }
 }

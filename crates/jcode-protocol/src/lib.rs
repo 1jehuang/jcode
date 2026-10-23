@@ -39,7 +39,9 @@ mod comm_format;
 mod notifications;
 
 pub use comm_format::*;
-pub use jcode_session_types::{RewindCheckpoint, RewindMode, RewindResult, TurnStopReason};
+pub use jcode_session_types::{
+    RewindCheckpoint, RewindMode, RewindResult, RewindTargetKind, TurnStopReason,
+};
 pub use notifications::{FeatureToggle, NotificationType};
 
 use jcode_batch_types::BatchProgress;

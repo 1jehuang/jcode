@@ -12,9 +12,16 @@ export const API_VERSION_MINOR = 13;
 
 export type RewindMode = "conversation_and_files" | "conversation_only" | "files_only";
 
+/** User targets restore before the prompt; assistant targets restore after the message. */
+export type RewindTargetKind = "user_prompt" | "assistant_message";
+
 export interface RewindCheckpoint {
+  /** Omitted means user_prompt. Assistant targets retain the selected assistant message. */
+  target_kind?: RewindTargetKind;
   id: string;
+  /** Stored boundary: before the user prompt or immediately after the assistant message. */
   message_index: number;
+  /** Original user prompt or selected assistant message excerpt. */
   prompt: string;
   timestamp?: string;
   can_restore_files: boolean;
@@ -22,12 +29,15 @@ export interface RewindCheckpoint {
 }
 
 export interface RewindResult {
+  /** Omitted means user_prompt. Assistant restores leave the client's draft untouched. */
+  target_kind?: RewindTargetKind;
   mode: RewindMode;
+  /** User input to restore to the editor. Empty for assistant targets; keep the draft untouched. */
   prompt: string;
   removed_messages: number;
   restored_files: number;
   skipped_files?: string[];
-  /** Original prompt attachments, as [media type, base64 data]. Absent for files-only restores. */
+  /** Original user prompt attachments, as [media type, base64 data]. Absent for files-only and assistant restores. */
   images?: [string, string][];
 }
 

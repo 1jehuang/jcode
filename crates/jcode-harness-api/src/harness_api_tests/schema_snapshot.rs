@@ -22,6 +22,7 @@ fn rewind_checkpoint_frames_roundtrip() {
         ApiEvent::RewindCheckpoints {
             session_id: "s1".into(),
             checkpoints: vec![RewindCheckpoint {
+                target_kind: Default::default(),
                 id: "checkpoint-1".into(),
                 message_index: 2,
                 prompt: "fix it".into(),
@@ -33,6 +34,7 @@ fn rewind_checkpoint_frames_roundtrip() {
         ApiEvent::RewindComplete {
             session_id: "s1".into(),
             result: RewindResult {
+                target_kind: Default::default(),
                 mode: RewindMode::FilesOnly,
                 prompt: "fix it".into(),
                 removed_messages: 0,
@@ -61,6 +63,46 @@ fn create_session_system_prompt_roundtrip_and_legacy_default() {
         let wire = serde_json::to_value(&request).unwrap();
         assert_eq!(wire["system_prompt"], prompt);
         assert_eq!(serde_json::from_value::<ApiRequest>(wire).unwrap(), request);
+    }
+}
+
+#[test]
+fn rewind_target_kind_frames_preserve_legacy_wire_shape() {
+    for target_kind in [None, Some("assistant_message")] {
+        let mut checkpoint = serde_json::json!({
+            "id": "cp1", "message_index": 2, "prompt": "selected message",
+            "can_restore_files": true, "changed_file_count": 1
+        });
+        let mut result = serde_json::json!({
+            "mode": "conversation_only", "prompt": "", "removed_messages": 2,
+            "restored_files": 0, "images": [["image/png", "aW1hZ2U="]]
+        });
+        if let Some(kind) = target_kind {
+            checkpoint["target_kind"] = kind.into();
+            result["target_kind"] = kind.into();
+        }
+        let expected_kind = if target_kind.is_some() {
+            RewindTargetKind::AssistantMessage
+        } else {
+            RewindTargetKind::UserPrompt
+        };
+        for wire in [
+            serde_json::json!({"v": 1, "reply_to": 41, "ev": "rewind_checkpoints", "session_id": "s1", "checkpoints": [checkpoint]}),
+            serde_json::json!({"v": 1, "reply_to": 42, "ev": "rewind_complete", "session_id": "s1", "result": result}),
+        ] {
+            let decoded: ServerFrame = serde_json::from_value(wire.clone()).unwrap();
+            match &decoded.event {
+                ApiEvent::RewindCheckpoints { checkpoints, .. } => {
+                    assert_eq!(checkpoints[0].target_kind, expected_kind);
+                }
+                ApiEvent::RewindComplete { result, .. } => {
+                    assert_eq!(result.target_kind, expected_kind);
+                    assert_eq!(result.images, vec![("image/png".into(), "aW1hZ2U=".into())]);
+                }
+                other => panic!("unexpected rewind event: {other:?}"),
+            }
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+        }
     }
 }
 
