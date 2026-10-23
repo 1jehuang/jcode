@@ -477,6 +477,11 @@ pub fn user_bg() -> Color {
 pub fn input_text() -> Color {
     themed_color(ThemeColor::InputText)
 }
+/// Ready-made style for input text lines, so callers do not each wrap
+/// `input_text()` in a fresh `Style`.
+pub fn input_text_style() -> Style {
+    Style::default().fg(input_text())
+}
 pub fn input_bg() -> Color {
     themed_color(ThemeColor::InputBg)
 }

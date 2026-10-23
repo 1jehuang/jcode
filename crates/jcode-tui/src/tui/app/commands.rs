@@ -3590,7 +3590,7 @@ fn handle_theme_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
-    let rest = trimmed.strip_prefix("/theme").unwrap_or_default().trim();
+    let rest = trimmed.strip_prefix("/theme").unwrap_or("").trim();
 
     if rest.is_empty() || matches!(rest, "show" | "status") {
         let saved = crate::config::Config::load().display.theme;
