@@ -1099,7 +1099,7 @@ fn swarm_widget_renders_member_roles_and_details() {
     let text = lines_text(&super::render_swarm_widget(&data, Rect::new(0, 0, 80, 4)).all_lines());
 
     assert!(text.contains("3s"), "got: {text}");
-    assert!(text.contains("1c"), "got: {text}");
+    assert!(text.contains("1 client"), "got: {text}");
     assert!(text.contains("★"), "got: {text}");
     assert!(
         text.contains("coord running - orchestrating patch"),
@@ -1190,7 +1190,7 @@ fn swarm_widget_caps_member_rows_for_large_swarms() {
     assert_eq!(framed.lines.len(), 3, "expected capped member rows");
     let text = lines_text(&framed.all_lines());
     assert!(text.contains("500s"), "got: {text}");
-    assert!(text.contains("3c"), "got: {text}");
+    assert!(text.contains("3 clients"), "got: {text}");
 }
 
 #[test]
@@ -1902,6 +1902,22 @@ fn widget_gallery() {
                 footer.chars().any(|ch| ch != '─' && !ch.is_whitespace()),
                 "{kind:?} at width {width} has an empty footer: {footer}"
             );
+            for redundant in [
+                "Runtime details",
+                "Session overview",
+                "Working tree",
+                "Recent history",
+                "Provider limits",
+                "Scheduled activity",
+                "Background work",
+                "Agent sessions",
+                "Memory activity",
+            ] {
+                assert!(
+                    !footer.contains(redundant),
+                    "{kind:?} has redundant footer: {footer}"
+                );
+            }
             println!("{kind:?}");
             for y in 0..h {
                 let row: String = (0..width)
@@ -1969,8 +1985,75 @@ fn special_widgets_have_bottom_border_text() {
                 footer.chars().any(char::is_alphabetic),
                 "{kind:?}: {footer}"
             );
+            for redundant in ["Workspace layout", "Remote machine", "Latest diagram"] {
+                assert!(!footer.contains(redundant), "{kind:?}: {footer}");
+            }
         }
     }
+}
+
+#[test]
+fn metadata_footers_add_distinct_compact_facts() {
+    let mut data = InfoWidgetData {
+        observed_context_tokens: Some(25_000),
+        context_limit: Some(100_000),
+        diagrams: vec![super::DiagramInfo {
+            hash: 0,
+            width: 640,
+            height: 480,
+            label: None,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(super::overview_footer(&data), "75K ctx left");
+    assert_eq!(super::diagram_footer(&data), "640×480");
+    data.diagrams.push(data.diagrams[0].clone());
+    assert_eq!(super::diagram_footer(&data), "640×480 · 1/2");
+    data.context_info_stale = true;
+    assert_eq!(super::overview_footer(&data), "context syncing");
+    data.context_info_stale = false;
+    data.observed_context_tokens = Some(110_000);
+    assert_eq!(super::overview_footer(&data), "0 ctx left");
+
+    data.compaction_info = Some(super::CompactionInfo {
+        is_compacting: false,
+        compacted_messages: 20,
+        active_messages: 4,
+        summary_chars: 4_000,
+        mode: "semantic".into(),
+    });
+    let framed = super::render_compaction_widget(&data, Rect::new(0, 0, 40, 6));
+    let body = lines_text_concat(&framed.lines);
+    let footer = lines_text_concat(framed.footer.as_slice());
+    assert!(body.contains("20 old · 4 active"));
+    assert!(footer.contains("tok") && footer.contains("semantic"));
+    assert!(!body.contains("tok") && !body.contains("semantic"));
+    assert!(framed.title_right.is_none());
+}
+
+#[test]
+fn ambient_footer_moves_next_run_out_of_body() {
+    let data = InfoWidgetData {
+        ambient_info: Some(super::AmbientWidgetData {
+            show_widget: true,
+            status: crate::ambient::AmbientStatus::Idle,
+            queue_count: 1,
+            next_queue_preview: Some("check CI".into()),
+            reminder_count: 0,
+            next_reminder_preview: None,
+            last_run_ago: None,
+            last_summary: None,
+            next_wake: Some("in 3m".into()),
+            next_reminder_wake: None,
+            budget_percent: None,
+        }),
+        ..Default::default()
+    };
+    let framed =
+        super::render_widget_content(WidgetKind::AmbientMode, &data, Rect::new(0, 0, 40, 6));
+    assert_eq!(lines_text_concat(framed.footer.as_slice()), "next in 3m");
+    assert!(!lines_text_concat(&framed.lines).contains("3m"));
+    assert_eq!(framed.lines.len(), 1);
 }
 
 #[test]

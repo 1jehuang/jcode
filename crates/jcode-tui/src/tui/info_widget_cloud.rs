@@ -258,13 +258,11 @@ pub(super) fn render_cloud_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
     let probe = info
         .probe_duration_ms
         .map(|v| format!("{v}ms"))
-        .unwrap_or_else(|| "unavailable".into());
+        .unwrap_or_else(|| "n/a".into());
     lines.push(fit(
         Line::from(vec![
             frame::dim("Updated "),
             Span::styled(age, value_style()),
-            frame::dim(" · probe "),
-            Span::styled(probe, value_style()),
         ]),
         w,
     ));
@@ -310,7 +308,9 @@ pub(super) fn render_cloud_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
             .unwrap_or_else(|| "unknown".into()),
         w,
     ));
-    Framed::body(lines).title(frame::label("Cloud VM"))
+    Framed::body(lines)
+        .title(frame::label("Cloud VM"))
+        .footer(frame::dim(format!("probe {probe}")))
 }
 
 #[cfg(test)]
@@ -361,6 +361,26 @@ mod tests {
         assert!(!data.has_data_for(WidgetKind::CloudVm));
         assert!(render_cloud_widget(&data, Rect::default()).is_empty());
         assert!(render_cloud_summary(&data, 60).is_empty());
+    }
+
+    #[test]
+    fn cloud_probe_timing_is_only_in_footer() {
+        let mut data = fixture();
+        let card = render_cloud_widget(&data, Rect::new(0, 0, 40, 20));
+        assert_eq!(card.footer.unwrap().to_string(), "probe 120ms");
+        assert!(
+            card.lines
+                .iter()
+                .all(|line| !line.to_string().contains("probe"))
+        );
+        data.cloud_info.as_mut().unwrap().probe_duration_ms = None;
+        assert_eq!(
+            render_cloud_widget(&data, Rect::new(0, 0, 40, 20))
+                .footer
+                .unwrap()
+                .to_string(),
+            "probe n/a"
+        );
     }
     #[test]
     fn cloud_populated_and_used_convention() {
