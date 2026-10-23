@@ -2790,12 +2790,18 @@ pub(crate) fn render_background_task_message(
         parsed.display_name.as_deref(),
     );
     let is_swarm = parsed.tool_name == "swarm";
-    if is_swarm {
+    if is_swarm && !parsed.status.starts_with('✗') {
         return render_compact_swarm_background_completion(&parsed, width);
     }
     if parsed.status.starts_with('✗') {
         let muted = Style::default().fg(dim_color());
         let failure = Style::default().fg(rgb(220, 100, 100));
+        let block_width = if centered {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let row_width = block_width.saturating_sub(1);
         let timing = msg
             .content
             .lines()
@@ -2843,32 +2849,31 @@ pub(crate) fn render_background_task_message(
             })
             .unwrap_or_else(|| format!("{} · no diagnostic captured", parsed.exit_label));
         let mut header = Line::from(vec![
-            Span::styled("✗ ", failure),
+            Span::styled("  ✗ ", failure),
             Span::styled(
-                if task_label == parsed.tool_name {
-                    parsed.tool_name.clone()
-                } else {
-                    format!("{}  {}", parsed.tool_name, task_label)
-                },
-                Style::default(),
+                tools_ui::resolve_display_tool_name(&parsed.tool_name).to_string(),
+                Style::default().fg(tool_color()),
             ),
         ]);
-        let timing = format!(" · {timing}");
-        header = super::truncate_line_with_ellipsis_to_width(
-            &header,
-            (width as usize).saturating_sub(UnicodeWidthStr::width(timing.as_str())),
-        );
-        header.spans.push(Span::styled(timing, muted));
+        if task_label != parsed.tool_name {
+            header.spans.push(Span::styled(" · ", muted));
+            header.spans.push(Span::styled(
+                task_label.clone(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        let timing = Line::from(Span::styled(format!(" · {timing}"), muted));
+        header = super::truncate_line_preserving_suffix_to_width(&header, &timing, row_width);
         let reason = Line::from(vec![
-            Span::styled("╰─ ", muted),
+            Span::styled("    ╰─ ", muted),
             Span::styled(detail, muted),
         ]);
         let mut lines = vec![
-            super::truncate_line_with_ellipsis_to_width(&header, width as usize),
-            super::truncate_line_with_ellipsis_to_width(&reason, width as usize),
+            header,
+            super::truncate_line_with_ellipsis_to_width(&reason, row_width),
         ];
         if centered {
-            left_pad_lines_for_centered_mode(&mut lines, width);
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
         }
         return lines;
     }
@@ -4099,6 +4104,42 @@ fn inline_diff_header(
         .alignment(ratatui::layout::Alignment::Left)
 }
 
+fn render_tool_failure_reason(content: &str, width: usize, indent: usize) -> Line<'static> {
+    let clean = strip_ansi_escape_sequences(content);
+    let normalized = clean
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("[tool timing:") && !line.starts_with("[tool duration:"))
+        .map(|line| {
+            line.strip_prefix("[stderr] ")
+                .or_else(|| line.strip_prefix("[stdout] "))
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let diagnostic = normalized
+        .lines()
+        .find(|line| line.starts_with("error[") || line.contains("panicked at"));
+    let summary = diagnostic
+        .map(str::to_owned)
+        .or_else(|| tools_ui::concise_tool_error_summary(&normalized))
+        .unwrap_or_else(|| {
+            normalized
+                .lines()
+                .find(|line| !line.is_empty())
+                .unwrap_or("Tool call failed")
+                .to_string()
+        });
+    let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    super::truncate_line_with_ellipsis_to_width(
+        &Line::from(Span::styled(
+            format!("{}╰─ {}", " ".repeat(indent), summary),
+            Style::default().fg(dim_color()),
+        )),
+        width,
+    )
+}
+
 pub(crate) fn render_tool_message(
     msg: &DisplayMessage,
     width: u16,
@@ -4160,7 +4201,7 @@ pub(crate) fn render_tool_message(
         return lines;
     };
 
-    if tools_ui::is_memory_store_tool(tc) && !msg.content.starts_with("Error:") {
+    if tools_ui::is_memory_store_tool(tc) && !tools_ui::tool_output_looks_failed(&msg.content) {
         let content = tc
             .input
             .get("content")
@@ -4198,7 +4239,7 @@ pub(crate) fn render_tool_message(
         return lines;
     }
 
-    if tools_ui::is_memory_recall_tool(tc) && !msg.content.starts_with("Error:") {
+    if tools_ui::is_memory_recall_tool(tc) && !tools_ui::tool_output_looks_failed(&msg.content) {
         let border_style = Style::default().fg(rgb(150, 180, 255));
         let text_style = Style::default().fg(dim_color());
 
@@ -4319,8 +4360,6 @@ pub(crate) fn render_tool_message(
         } else {
             format!("{} calls", counts.total())
         }
-    } else if let Some(error_summary) = tools_ui::concise_tool_error_summary(&msg.content) {
-        error_summary
     } else if tc.name == "subagent" {
         msg.title
             .as_deref()
@@ -4339,7 +4378,7 @@ pub(crate) fn render_tool_message(
     };
     // Edit rows read like every other tool row: the intent. The file path is
     // already shown on the inline diff header right below, so repeating it on
-    // the row is noise. Errors keep their summary so failures stay diagnosable.
+    // the row is noise. Failures keep their call description on the header.
     let edit_path_on_diff_header = is_edit_tool
         && !is_error
         && diff_mode.is_inline()
@@ -4360,9 +4399,7 @@ pub(crate) fn render_tool_message(
             intent.to_string(),
             Style::default().fg(tool_color()),
         ));
-        // Error summaries always render so failures stay diagnosable even
-        // when technical details are hidden.
-        let show_detail = tools_ui::show_tool_call_details() || is_error || is_partial_batch;
+        let show_detail = tools_ui::show_tool_call_details() || is_partial_batch;
         if show_detail && !summary.is_empty() && summary != intent {
             tool_line.push(Span::styled(" · ", Style::default().fg(dim_color())));
             tool_line.push(Span::styled(summary, Style::default().fg(dim_color())));
@@ -4398,6 +4435,13 @@ pub(crate) fn render_tool_message(
     );
     let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
+    if is_error && (tc.name != "batch" || batch_counts.is_none()) {
+        lines.push(render_tool_failure_reason(&msg.content, row_width, 4));
+        if centered {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return lines;
+    }
     if let Some(draft_lines) = render_gmail_draft_card(tc, &msg.content, is_error, row_width) {
         lines.extend(draft_lines);
     }
@@ -4511,6 +4555,17 @@ pub(crate) fn render_tool_message(
                 Some(row_width),
                 sub_result.map(|result| result.content.as_str()),
             ));
+
+            if sub_errored {
+                lines.push(render_tool_failure_reason(
+                    sub_result
+                        .map(|result| result.content.as_str())
+                        .unwrap_or("Error: Tool call failed"),
+                    row_width,
+                    6,
+                ));
+                continue;
+            }
 
             if let Some(result) = sub_result
                 && let Some(mut draft_lines) = render_gmail_draft_card(

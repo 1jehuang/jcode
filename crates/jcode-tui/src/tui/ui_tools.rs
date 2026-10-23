@@ -1632,10 +1632,7 @@ pub(super) fn render_batch_subcall_line(
             UnicodeWidthStr::width(format!(" · {label}").as_str())
         });
     let summary_budget = max_width.map(|w| w.saturating_sub(reserved));
-    let error_summary = output_content.and_then(concise_tool_error_summary);
-    let is_error = error_summary.is_some();
-    let summary = error_summary
-        .unwrap_or_else(|| get_tool_summary_with_budget(tool, bash_max_chars, summary_budget));
+    let summary = get_tool_summary_with_budget(tool, bash_max_chars, summary_budget);
 
     let mut spans = vec![
         Span::styled(format!("    {} ", icon), Style::default().fg(icon_color)),
@@ -1647,9 +1644,7 @@ pub(super) fn render_batch_subcall_line(
             intent.clone(),
             Style::default().fg(tool_color()),
         ));
-        // Error summaries always render so failures stay diagnosable even
-        // when technical details are hidden.
-        let show_detail = show_tool_call_details() || is_error;
+        let show_detail = show_tool_call_details();
         if show_detail && !summary.is_empty() && summary != intent {
             spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
             spans.push(Span::styled(summary, Style::default().fg(dim_color())));

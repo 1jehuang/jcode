@@ -493,8 +493,13 @@ Completed: 2 succeeded, 1 failed"
     assert!(
         rendered
             .iter()
-            .any(|line| line.contains("✗ agentgrep invalid input: missing mode")),
+            .any(|line| line.contains("✗ agentgrep")),
         "failed subcall should be attributed to agentgrep: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("╰─ invalid input: missing mode"))
     );
     assert!(
         rendered
@@ -541,9 +546,16 @@ fn test_render_tool_message_batch_all_failed_marks_all_children_failed() {
     );
     let failed_children = rendered
         .iter()
-        .filter(|line| line.contains("✗ agentgrep invalid input: missing mode"))
+        .filter(|line| line.contains("✗ agentgrep"))
         .count();
     assert_eq!(failed_children, 3, "rendered={rendered:?}");
+    assert_eq!(
+        rendered
+            .iter()
+            .filter(|line| line.contains("╰─ invalid input: missing mode"))
+            .count(),
+        3
+    );
     assert!(
         !rendered
             .iter()

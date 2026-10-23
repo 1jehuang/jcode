@@ -833,7 +833,7 @@ fn render_background_task_failure_is_compact() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        plain.contains("✗ bash  Comparison trace · 2m ago"),
+        plain.contains("✗ bash · Comparison trace · 2m ago"),
         "{plain}"
     );
     assert!(
@@ -841,6 +841,32 @@ fn render_background_task_failure_is_compact() {
         "{plain}"
     );
     assert!(!plain.contains("remote build"));
+    assert_eq!(
+        extract_line_text(&lines[1]).find('╰').unwrap(),
+        extract_line_text(&lines[0]).find('✗').unwrap() + 2
+    );
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content == "bash" && span.style.fg == Some(tool_color()))
+    );
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content.contains('✗') && span.style.fg == Some(rgb(220, 100, 100)))
+    );
+    assert!(
+        lines[1]
+            .spans
+            .iter()
+            .all(|span| span.content.trim().is_empty() || span.style.fg == Some(dim_color()))
+    );
+    assert!(
+        msg.content
+            .contains("bg action=\"output\" task_id=\"bg123\"")
+    );
     for width in [0, 1, 2, 8, 20, 40] {
         let lines =
             render_background_task_message(&msg, width, crate::config::DiffDisplayMode::Off);
@@ -2632,8 +2658,7 @@ fn render_tool_message_hides_technical_preview_by_default() {
     assert_eq!(lines.len(), 1, "Bash output is hidden by default");
 }
 
-/// Even with details off, a failed tool row keeps its error summary so
-/// failures stay diagnosable.
+/// Failures retain their normal header, with diagnostics on a muted second row.
 #[test]
 fn render_tool_message_keeps_error_summary_when_details_hidden() {
     let msg = DisplayMessage {
@@ -2659,7 +2684,20 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
 
     assert!(
         rendered.contains("Run the test suite ·"),
-        "error summary should still render after the intent: {rendered}"
+        "normal intent and token suffix should remain: {rendered}"
+    );
+    assert!(!rendered.contains("command not found"));
+    assert_eq!(lines.len(), 2);
+    assert!(
+        extract_line_text(&lines[1])
+            .trim_start()
+            .starts_with("╰─ error: command not found")
+    );
+    assert!(
+        lines[1]
+            .spans
+            .iter()
+            .all(|span| span.content.trim().is_empty() || span.style.fg == Some(dim_color()))
     );
 }
 
@@ -2688,6 +2726,211 @@ fn render_tool_message_shows_token_badge() {
         .expect("missing token badge");
 
     assert_eq!(badge_span.style.fg, Some(rgb(118, 118, 118)));
+}
+
+#[test]
+fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
+    for (name, input, description) in [
+        (
+            "read",
+            serde_json::json!({"file_path": "src/文件.rs"}),
+            "src/文件.rs",
+        ),
+        (
+            "edit",
+            serde_json::json!({"file_path": "src/文件.rs", "old_string": "old", "new_string": "new"}),
+            "src/文件.rs",
+        ),
+        (
+            "bash",
+            serde_json::json!({"command": "cat 文件.rs"}),
+            "cat 文件.rs",
+        ),
+    ] {
+        for intent in [None, Some("Inspect 文件 e\u{301}")] {
+            let msg = DisplayMessage {
+                role: "tool".to_string(),
+                content: "Error: permission denied 文件\nFull diagnostic retained".to_string(),
+                tool_calls: Vec::new(),
+                duration_secs: None,
+                title: None,
+                tool_data: Some(crate::message::ToolCall {
+                    id: "failure_style".to_string(),
+                    name: name.to_string(),
+                    input: input.clone(),
+                    intent: intent.map(str::to_string),
+                    thought_signature: None,
+                }),
+            };
+            let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Inline);
+            assert_eq!(lines.len(), 2, "{name}");
+            let header = extract_line_text(&lines[0]);
+            assert!(
+                header.trim_start().starts_with(&format!("✗ {name}")),
+                "{header}"
+            );
+            assert!(header.contains(intent.unwrap_or(description)), "{header}");
+            assert!(!header.contains("permission denied"));
+            assert!(lines[0].spans.iter().any(
+                |span| span.content.contains("✗") && span.style.fg == Some(rgb(220, 100, 100))
+            ));
+            assert!(
+                lines[0]
+                    .spans
+                    .iter()
+                    .any(|span| span.content == name && span.style.fg == Some(tool_color()))
+            );
+            assert!(
+                extract_line_text(&lines[1])
+                    .trim_start()
+                    .starts_with("╰─ error: permission denied")
+            );
+            assert!(
+                lines[1].spans.iter().all(
+                    |span| span.content.trim().is_empty() || span.style.fg == Some(dim_color())
+                )
+            );
+            assert!(msg.content.contains("Full diagnostic retained"));
+            for width in [0, 1, 2, 5, 8, 16, 32] {
+                for line in render_tool_message(&msg, width, crate::config::DiffDisplayMode::Inline)
+                {
+                    assert!(
+                        UnicodeWidthStr::width(extract_line_text(&line).as_str()) <= width as usize
+                    );
+                }
+            }
+            let mut successful = msg.clone();
+            successful.content = "ok".to_string();
+            let success_lines =
+                render_tool_message(&successful, 140, crate::config::DiffDisplayMode::Off);
+            assert_eq!(
+                header.find('✗'),
+                extract_line_text(&success_lines[0]).find('✓')
+            );
+            assert_eq!(
+                extract_line_text(&lines[1]).find('╰').unwrap(),
+                header.find('✗').unwrap() + 2
+            );
+            assert!(
+                extract_line_text(&success_lines[0])
+                    .trim_start()
+                    .starts_with(&format!("✓ {name}"))
+            );
+            assert!(
+                !success_lines
+                    .iter()
+                    .any(|line| extract_line_text(line).contains("╰─"))
+            );
+        }
+    }
+}
+
+#[test]
+fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "--- [1] read ---\nError: permission denied 文件\nFull diagnostic\n\n--- [2] bash ---\nok\n\nCompleted: 1 succeeded, 1 failed".to_string(),
+        tool_calls: Vec::new(), duration_secs: None, title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "mixed".to_string(), name: "batch".to_string(),
+            input: serde_json::json!({"tool_calls": [
+                {"tool": "read", "parameters": {"file_path": "文件.rs"}, "intent": "Read 文件"},
+                {"tool": "bash", "parameters": {"command": "true"}, "intent": "Check success"}
+            ]}), intent: None, thought_signature: None,
+        }),
+    };
+    let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 4);
+    assert_eq!(
+        extract_line_text(&lines[2]).find('╰').unwrap(),
+        extract_line_text(&lines[1]).find('✗').unwrap() + 2
+    );
+    assert!(extract_line_text(&lines[0]).contains("⚠ batch"));
+    assert!(
+        extract_line_text(&lines[1])
+            .trim_start()
+            .starts_with("✗ read · Read 文件")
+    );
+    assert!(!extract_line_text(&lines[1]).contains("permission"));
+    assert!(
+        extract_line_text(&lines[2])
+            .trim_start()
+            .starts_with("╰─ error: permission denied")
+    );
+    assert!(
+        lines[2]
+            .spans
+            .iter()
+            .all(|span| span.content.trim().is_empty() || span.style.fg == Some(dim_color()))
+    );
+    assert!(
+        extract_line_text(&lines[3])
+            .trim_start()
+            .starts_with("✓ bash · Check success")
+    );
+    for width in [0, 1, 2, 8, 16, 32] {
+        for line in render_tool_message(&msg, width, crate::config::DiffDisplayMode::Off) {
+            assert!(UnicodeWidthStr::width(extract_line_text(&line).as_str()) <= width as usize);
+        }
+    }
+}
+
+#[test]
+fn render_tool_message_batch_level_failure_does_not_invent_successful_children() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "Error: invalid tool_calls payload".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "invalid_batch".to_string(),
+            name: "batch".to_string(),
+            input: serde_json::json!({"tool_calls": [{"tool": "read"}]}),
+            intent: Some("Inspect sources".to_string()),
+            thought_signature: None,
+        }),
+    };
+    let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 2);
+    assert!(extract_line_text(&lines[0]).contains("✗ batch · Inspect sources"));
+    assert!(extract_line_text(&lines[1]).contains("╰─ error: invalid tool_calls payload"));
+}
+
+#[test]
+fn tool_failure_reason_handles_exit_codes_fallback_and_unicode_widths() {
+    for (content, expected) in [
+        (
+            "details\n--- Command finished with exit code: 17 ---",
+            "exit 17",
+        ),
+        (
+            "[apply_patch] ✗ 文件: Failed to find expected lines\nlarge diff",
+            "Failed to find expected lines",
+        ),
+        (
+            "\u{1b}[31mError: 文件 e\u{301} missing\u{1b}[0m\nmore detail",
+            "error: 文件 e\u{301} missing",
+        ),
+        ("", "Tool call failed"),
+        (
+            "[tool timing: start=2026-10-23T00:00:00Z]\n[stderr] warning: unused variable\n[stderr] error[E0308]: mismatched types\n--- Command finished with exit code: 101 ---",
+            "error[E0308]: mismatched types",
+        ),
+        (
+            "[tool timing: start=2026-10-23T00:00:00Z]\n[stderr] Error: permission denied",
+            "error: permission denied",
+        ),
+    ] {
+        let reason = render_tool_failure_reason(content, 120, 4);
+        let text = extract_line_text(&reason);
+        assert!(text.contains(expected), "{text}");
+        assert!(!text.contains('\u{1b}'));
+        for width in [0, 1, 4, 8, 16, 32] {
+            let line = render_tool_failure_reason(content, width, 4);
+            assert!(UnicodeWidthStr::width(extract_line_text(&line).as_str()) <= width);
+        }
+    }
 }
 
 #[test]
