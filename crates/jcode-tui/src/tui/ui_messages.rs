@@ -4506,7 +4506,7 @@ pub(crate) fn render_tool_message(
 
         lines.push(
             Line::from(Span::styled(
-                diff_header("┌─", first_file_path.as_deref()),
+                diff_header("╭─", first_file_path.as_deref()),
                 Style::default().fg(dim_color()),
             ))
             .alignment(ratatui::layout::Alignment::Left),
@@ -4593,9 +4593,9 @@ pub(crate) fn render_tool_message(
         }
 
         let footer = if total_changes > 0 && truncated {
-            format!("{}└─ (+{} -{} total)", pad_str, additions, deletions)
+            format!("{}╰─ (+{} -{} total)", pad_str, additions, deletions)
         } else {
-            format!("{}└─", pad_str)
+            format!("{}╰─", pad_str)
         };
         lines.push(
             Line::from(Span::styled(footer, Style::default().fg(dim_color())))
