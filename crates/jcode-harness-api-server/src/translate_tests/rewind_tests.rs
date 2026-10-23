@@ -55,3 +55,47 @@ fn rewind_checkpoint_requests_require_the_target_attachment() {
         }
     }
 }
+
+#[test]
+fn assistant_rewind_translation_keeps_kind_and_completion_correlation() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        ..Default::default()
+    };
+    let output = state.api_request_to_legacy(
+        &json!({"id": 21, "req": "list_rewind_checkpoints", "session_id": "s1"}),
+    );
+    let [Outbound::Legacy(list)] = &output[..] else {
+        panic!("expected list request")
+    };
+    let checkpoint = json!({"id": "assistant-cp", "target_kind": "assistant_message", "message_index": 3, "prompt": "assistant answer", "can_restore_files": true, "changed_file_count": 1});
+    let replies = state.legacy_event_to_api(&json!({"type": "rewind_checkpoints", "id": list["id"], "session_id": "s1", "checkpoints": [checkpoint.clone()]}));
+    let [frame] = &replies[..] else {
+        panic!("expected checkpoint list reply")
+    };
+    assert_eq!(frame.reply_to, Some(21));
+    assert_eq!(
+        serde_json::to_value(frame).unwrap()["checkpoints"][0],
+        checkpoint
+    );
+
+    let output = state.api_request_to_legacy(&json!({"id": 22, "req": "rewind_checkpoint", "session_id": "s1", "checkpoint_id": "assistant-cp", "mode": "conversation_only"}));
+    let [Outbound::Legacy(rewind)] = &output[..] else {
+        panic!("expected rewind request")
+    };
+    assert_eq!(rewind["checkpoint_id"], "assistant-cp");
+    let history = state.legacy_event_to_api(&json!({"type": "history", "id": rewind["id"], "session_id": "s1", "messages": [{"role": "assistant", "content": "assistant answer"}]}));
+    assert!(
+        matches!(&history[..], [ServerFrame { reply_to: None, event: ApiEvent::History { messages, .. }, .. }] if messages.len() == 1 && messages[0].role == "assistant")
+    );
+    let result = json!({"target_kind": "assistant_message", "mode": "conversation_only", "prompt": "", "removed_messages": 2, "restored_files": 0});
+    let complete = json!({"type": "rewind_complete", "id": rewind["id"], "session_id": "s1", "result": result.clone()});
+    let replies = state.legacy_event_to_api(&complete);
+    let [frame] = &replies[..] else {
+        panic!("expected typed completion reply")
+    };
+    assert_eq!(frame.reply_to, Some(22));
+    assert!(matches!(&frame.event, ApiEvent::RewindComplete { .. }));
+    assert_eq!(serde_json::to_value(frame).unwrap()["result"], result);
+    assert!(state.legacy_event_to_api(&complete).is_empty());
+}

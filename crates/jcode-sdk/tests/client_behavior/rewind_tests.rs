@@ -2,8 +2,18 @@ use super::*;
 
 #[test]
 fn rewind_checkpoint_helpers_wait_for_completion_after_history() {
-    use jcode_sdk::{RewindCheckpoint, RewindMode, RewindResult};
+    check_rewind_checkpoint_transport(Default::default());
+}
+
+#[test]
+fn assistant_rewind_helpers_wait_for_completion_after_history() {
+    check_rewind_checkpoint_transport(jcode_sdk::RewindTargetKind::AssistantMessage);
+}
+
+fn check_rewind_checkpoint_transport(target_kind: jcode_sdk::RewindTargetKind) {
+    use jcode_sdk::{RewindCheckpoint, RewindMode, RewindResult, RewindTargetKind};
     let checkpoint = RewindCheckpoint {
+        target_kind,
         id: "cp1".into(),
         message_index: 0,
         prompt: "original".into(),
@@ -11,6 +21,17 @@ fn rewind_checkpoint_helpers_wait_for_completion_after_history() {
         can_restore_files: true,
         changed_file_count: 1,
     };
+    let prompt = if target_kind == RewindTargetKind::AssistantMessage {
+        ""
+    } else {
+        "original"
+    };
+    let images = if target_kind == RewindTargetKind::AssistantMessage {
+        vec![]
+    } else {
+        vec![("image/png".into(), "aW1hZ2UtYnl0ZXM=".into())]
+    };
+    let expected_images = images.clone();
     let expected = checkpoint.clone();
     let client = fake_harness(move |frame, mut writer| {
         let event = match &frame.request {
@@ -37,12 +58,13 @@ fn rewind_checkpoint_helpers_wait_for_completion_after_history() {
                 ApiEvent::RewindComplete {
                     session_id: session_id.clone(),
                     result: RewindResult {
+                        target_kind,
                         mode: *mode,
-                        prompt: "original".into(),
+                        prompt: prompt.into(),
                         removed_messages: 2,
                         restored_files: 0,
                         skipped_files: vec![],
-                        images: vec![("image/png".into(), "aW1hZ2UtYnl0ZXM=".into())],
+                        images: images.clone(),
                     },
                 }
             }
@@ -58,12 +80,10 @@ fn rewind_checkpoint_helpers_wait_for_completion_after_history() {
     let result = client
         .rewind_checkpoint("s1", "cp1", RewindMode::ConversationOnly)
         .unwrap();
-    assert_eq!(result.prompt, "original");
+    assert_eq!(result.target_kind, target_kind);
+    assert_eq!(result.prompt, prompt);
     assert_eq!(result.removed_messages, 2);
-    assert_eq!(
-        result.images,
-        vec![("image/png".into(), "aW1hZ2UtYnl0ZXM=".into())]
-    );
+    assert_eq!(result.images, expected_images);
     let mut saw_history = false;
     while let Some(event) = events.next_timeout(Duration::from_millis(10)) {
         saw_history |= matches!(event, ApiEvent::History { .. });

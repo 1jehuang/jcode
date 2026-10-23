@@ -10,6 +10,7 @@ import { startMockHarness } from "./mock-harness.ts";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import type { RewindCheckpoint, RewindResult, RewindTargetKind } from "../dist/index.js";
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -37,9 +38,17 @@ test("handshake records server identity and capabilities", async () => {
   await server.close();
 });
 
-test("checkpoint helpers return typed results after streamed history", async () => {
-  const checkpoint = { id: "cp1", message_index: 0, prompt: "original", can_restore_files: true, changed_file_count: 1 };
-  const result = { mode: "conversation_only" as const, prompt: "original", removed_messages: 2, restored_files: 0, images: [["image/png", "aW1hZ2UtYnl0ZXM="]] as [string, string][] };
+for (const targetKind of [undefined, "user_prompt", "assistant_message"] as const satisfies readonly (RewindTargetKind | undefined)[]) {
+test(`checkpoint helpers return ${targetKind ?? "legacy"} results after streamed history`, async () => {
+  const checkpoint: RewindCheckpoint = { id: "cp1", message_index: 0, prompt: "original", can_restore_files: true, changed_file_count: 1 };
+  const result: RewindResult = { mode: "conversation_only", prompt: targetKind === "assistant_message" ? "" : "original", removed_messages: 2, restored_files: 0 };
+  if (targetKind !== undefined) {
+    checkpoint.target_kind = targetKind;
+    result.target_kind = targetKind;
+  }
+  if (targetKind !== "assistant_message") {
+    result.images = [["image/png", "aW1hZ2UtYnl0ZXM="]];
+  }
   const server = await startMockHarness({
     onRequest(request, send) {
       if (request.req === "list_rewind_checkpoints") {
@@ -54,14 +63,23 @@ test("checkpoint helpers return typed results after streamed history", async () 
     },
   });
   const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const order: string[] = [];
+  client.on("history", () => order.push("history"));
   try {
     assert.deepEqual(await client.listRewindCheckpoints("s1"), [checkpoint]);
     assert.deepEqual(await client.rewindCheckpoint("s1", "cp1", "conversation_only"), result);
+    order.push("complete");
+    assert.deepEqual(order, ["history", "complete"]);
+    if (targetKind === undefined) {
+      assert.equal(Object.hasOwn(checkpoint, "target_kind"), false);
+      assert.equal(Object.hasOwn(result, "target_kind"), false);
+    }
   } finally {
     client.close();
     await server.close();
   }
 });
+}
 
 test("replies are correlated by id even when out of order", async () => {
   const server = await startMockHarness({
