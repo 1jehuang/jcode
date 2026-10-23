@@ -35,6 +35,10 @@ struct SessionView {
     revision: u64,
     focus_revision: u64,
     initialized: bool,
+    #[serde(skip)]
+    awaiting_inventory: bool,
+    #[serde(skip)]
+    seen_current_inventory: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -44,25 +48,45 @@ pub(super) struct PanelSessions {
     views: HashMap<String, SessionView>,
     #[serde(skip)]
     snapshots: HashMap<String, crate::side_panel::SidePanelSnapshot>,
+    #[serde(skip)]
+    snapshot_order: Vec<String>,
 }
 
 impl PanelSessions {
     fn reload_path(pid: u32) -> Option<std::path::PathBuf> {
-        crate::storage::jcode_dir()
-            .ok()
-            .map(|home| home.join(format!("client-panel-view-{pid}.json")))
+        match crate::storage::jcode_dir() {
+            Ok(home) => Some(home.join(format!("client-panel-view-{pid}.json"))),
+            Err(error) => {
+                crate::logging::warn(&format!("Could not locate client panel view: {error}"));
+                None
+            }
+        }
     }
 
     fn handoff_pid(value: Option<&str>) -> u32 {
-        value
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or_else(std::process::id)
+        match value.map(str::parse::<u32>) {
+            Some(Ok(pid)) => pid,
+            Some(Err(error)) => {
+                crate::logging::warn(&format!("Invalid client panel handoff PID: {error}"));
+                std::process::id()
+            }
+            None => std::process::id(),
+        }
     }
 
     pub(super) fn restore_for_client() -> Self {
         // Unix exec retains the PID. Windows replacement spawns a child instead.
         #[cfg(windows)]
-        let handoff = std::env::var("JCODE_PANEL_VIEW_RELOAD_PID").ok();
+        let handoff = match std::env::var("JCODE_PANEL_VIEW_RELOAD_PID") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Invalid client panel handoff environment: {error}"
+                ));
+                None
+            }
+        };
         #[cfg(not(windows))]
         let handoff: Option<String> = None;
         #[cfg(windows)]
@@ -74,15 +98,56 @@ impl PanelSessions {
         let Some(path) = Self::reload_path(pid) else {
             return Self::default();
         };
-        let restored = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok());
-        if let Some(mut restored) = restored {
-            let _ = std::fs::remove_file(path);
-            restored.active = None;
-            restored
-        } else {
-            Self::default()
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(error) => {
+                crate::logging::warn(&format!("Could not read client panel view: {error}"));
+                return Self::default();
+            }
+        };
+        let mut restored = match serde_json::from_slice::<Self>(&bytes) {
+            Ok(restored) => restored,
+            Err(error) => {
+                crate::logging::warn(&format!("Could not decode client panel view: {error}"));
+                return Self::default();
+            }
+        };
+        if let Err(error) = std::fs::remove_file(path) {
+            crate::logging::warn(&format!("Could not consume client panel view: {error}"));
+        }
+        restored.active = None;
+        restored
+    }
+
+    // Bodies are disposable. Keep view metadata even after evicting an inventory.
+    fn trim_snapshot_cache(&mut self) {
+        const MAX_INACTIVE: usize = 4;
+        const MAX_INACTIVE_BYTES: usize = 64 * 1024 * 1024;
+        self.snapshot_order
+            .retain(|id| self.snapshots.contains_key(id));
+        loop {
+            let inactive: Vec<_> = self
+                .snapshot_order
+                .iter()
+                .filter(|id| Some(id.as_str()) != self.active.as_deref())
+                .collect();
+            let bytes: usize = inactive
+                .iter()
+                .filter_map(|id| self.snapshots.get(*id))
+                .flat_map(|snapshot| &snapshot.pages)
+                .map(|page| {
+                    page.content.capacity() + page.pdf_data.as_ref().map_or(0, String::capacity)
+                })
+                .sum();
+            if inactive.len() <= MAX_INACTIVE && bytes <= MAX_INACTIVE_BYTES {
+                break;
+            }
+            let Some(oldest) = inactive.first().map(|id| (*id).clone()) else {
+                break;
+            };
+            self.snapshots.remove(&oldest);
+            self.snapshot_order.retain(|id| id != &oldest);
         }
     }
 }
@@ -117,8 +182,15 @@ impl App {
         &mut self,
         snapshot: crate::side_panel::SidePanelSnapshot,
     ) {
+        self.set_side_panel_snapshot_changed(snapshot);
+    }
+
+    pub(super) fn set_side_panel_snapshot_changed(
+        &mut self,
+        snapshot: crate::side_panel::SidePanelSnapshot,
+    ) -> bool {
         let Some(snapshot) = self.retain_panel_session_snapshot(snapshot) else {
-            return;
+            return false;
         };
         self.refresh_split_view_if_needed();
         let focus_split = self.split_view_enabled
@@ -139,12 +211,17 @@ impl App {
         } else {
             snapshot
         };
-        let snapshot = if self.observe_mode_enabled {
+        let mut snapshot = if self.observe_mode_enabled {
             self.decorate_side_panel_with_observe(snapshot, focus_observe)
         } else {
             snapshot
         };
+        if self.side_panel_user_hidden {
+            snapshot.focused_page_id = None;
+        }
+        let changed = snapshot != self.side_panel;
         self.apply_side_panel_snapshot(snapshot);
+        changed
     }
 
     pub(super) fn apply_side_panel_snapshot(
@@ -196,6 +273,7 @@ impl App {
         self.prewarm_focused_side_panel();
     }
 
+    #[cfg(test)]
     pub(super) fn restore_panel_sessions(&mut self, mut sessions: PanelSessions) {
         sessions.active = None;
         self.panel_sessions = sessions;
@@ -234,7 +312,7 @@ impl App {
                     .and_then(|id| view.pages.get(id))
             })
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(PanelViewport::default);
         self.diff_pane_scroll = viewport.scroll;
         self.diff_pane_scroll_x = viewport.scroll_x;
         self.side_panel_image_zoom_percent = viewport.zoom;
@@ -246,9 +324,13 @@ impl App {
             active: self.panel_sessions.active.clone(),
             views: self.panel_sessions.views.clone(),
             snapshots: HashMap::new(),
+            snapshot_order: Vec::new(),
         };
         if let Some(session) = &sessions.active {
             let view = sessions.views.entry(session.clone()).or_default();
+            if view.awaiting_inventory {
+                return sessions;
+            }
             view.selected = self.side_panel.focused_page_id.clone();
             view.last = self.last_side_panel_focus_id.clone();
             view.hidden = self.side_panel_user_hidden;
@@ -262,6 +344,15 @@ impl App {
     }
 
     fn remember_panel_session_view(&mut self) {
+        if self
+            .panel_sessions
+            .active
+            .as_ref()
+            .and_then(|id| self.panel_sessions.views.get(id))
+            .is_some_and(|view| view.awaiting_inventory)
+        {
+            return;
+        }
         self.remember_side_panel_viewport();
         if let Some(session) = &self.panel_sessions.active {
             let view = self
@@ -319,6 +410,7 @@ impl App {
         } else {
             self.remember_panel_session_view();
         }
+        self.panel_sessions.trim_snapshot_cache();
         let view = self
             .panel_sessions
             .views
@@ -331,6 +423,7 @@ impl App {
                 .get(&session)
                 .cloned()
                 .unwrap_or_else(|| self.side_panel.clone());
+            view.awaiting_inventory = retained.pages.is_empty();
             retained.focused_page_id = view
                 .selected
                 .as_ref()
@@ -341,8 +434,20 @@ impl App {
             return Some(retained);
         }
         if incoming.revision < view.revision {
-            return None;
+            if view.seen_current_inventory {
+                return None;
+            }
+            for page in &mut incoming.pages {
+                if page.status.stale_reason.is_none() {
+                    page.status.stale_reason = Some("Restored older inventory snapshot".into());
+                }
+            }
         }
+        if view.awaiting_inventory {
+            self.side_panel_fullscreen = view.fullscreen;
+            self.last_side_panel_focus_id = view.last.clone();
+        }
+        view.awaiting_inventory = false;
         let explicit_focus = incoming.focus_revision > view.focus_revision;
         if view.initialized && !explicit_focus {
             incoming.focused_page_id = view
@@ -359,12 +464,18 @@ impl App {
             self.side_panel_user_hidden = false;
             self.side_panel_explicit_hidden = false;
         }
-        view.revision = incoming.revision;
-        view.focus_revision = incoming.focus_revision;
+        view.revision = view.revision.max(incoming.revision);
+        view.focus_revision = view.focus_revision.max(incoming.focus_revision);
         view.initialized = true;
+        view.seen_current_inventory = true;
         self.panel_sessions
             .snapshots
-            .insert(session, incoming.clone());
+            .insert(session.clone(), incoming.clone());
+        self.panel_sessions
+            .snapshot_order
+            .retain(|id| id != &session);
+        self.panel_sessions.snapshot_order.push(session);
+        self.panel_sessions.trim_snapshot_cache();
         Some(incoming)
     }
 

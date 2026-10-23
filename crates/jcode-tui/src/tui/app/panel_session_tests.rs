@@ -272,3 +272,141 @@ fn side_panel_reexec_serialization_restores_client_view() {
     assert_second(&second);
     assert!(second.side_panel_fullscreen);
 }
+
+#[test]
+fn side_panel_reexec_unavailable_then_same_focus_revision_restores_view() {
+    let mut first = app();
+    first.set_side_panel_snapshot(inventory("panel-test-a", 4));
+    select_second(&mut first);
+    first.side_panel_fullscreen = true;
+    let bytes = serde_json::to_vec(&first.saved_panel_sessions()).unwrap();
+    let mut second = app();
+    second.restore_panel_sessions(serde_json::from_slice(&bytes).unwrap());
+    for _ in 0..2 {
+        second.set_side_panel_snapshot(crate::side_panel::SidePanelSnapshot {
+            session_id: Some("panel-test-a".into()),
+            unavailable: Some("loading".into()),
+            ..Default::default()
+        });
+        assert!(second.side_panel.pages.is_empty());
+        assert_eq!(
+            second.saved_panel_sessions().views["panel-test-a"]
+                .selected
+                .as_deref(),
+            Some("second")
+        );
+    }
+    // Reloading once more during the outage must preserve the same metadata.
+    let bytes = serde_json::to_vec(&second.saved_panel_sessions()).unwrap();
+    let saved: PanelSessions = serde_json::from_slice(&bytes).unwrap();
+    assert!(saved.snapshots.is_empty());
+    second.set_side_panel_snapshot(inventory("panel-test-a", 4));
+    assert_second(&second);
+    assert!(second.side_panel_fullscreen);
+    let mut third = app();
+    third.restore_panel_sessions(saved);
+    third.set_side_panel_snapshot(inventory("panel-test-a", 4));
+    assert_second(&third);
+    assert!(third.side_panel_fullscreen);
+}
+
+#[test]
+fn side_panel_snapshot_cache_bounds_inactive_sessions_without_losing_views() {
+    let mut app = app();
+    for index in 0..8 {
+        let session = format!("cache-{index}");
+        app.remote_session_id = Some(session.clone());
+        app.set_side_panel_snapshot(inventory(&session, 1));
+        select_second(&mut app);
+    }
+    assert_eq!(app.panel_sessions.snapshots.len(), 5);
+    assert!(!app.panel_sessions.snapshots.contains_key("cache-0"));
+    assert!(app.panel_sessions.snapshots.contains_key("cache-7"));
+    assert_eq!(app.panel_sessions.views.len(), 8);
+    app.remote_session_id = Some("cache-0".into());
+    app.set_side_panel_snapshot(inventory("cache-0", 1));
+    assert_second(&app);
+}
+
+#[test]
+fn side_panel_snapshot_cache_bounds_markdown_and_pdf_bytes_but_keeps_active() {
+    let mut sessions = PanelSessions::default();
+    sessions.active = Some("active".into());
+    for (id, pdf) in [("markdown", false), ("pdf", true), ("active", true)] {
+        let mut snapshot = inventory(id, 1);
+        let body = "x".repeat(33 * 1024 * 1024);
+        if pdf {
+            snapshot.pages[0].pdf_data = Some(body);
+        } else {
+            snapshot.pages[0].content = body;
+        }
+        sessions.snapshots.insert(id.into(), snapshot);
+        sessions.snapshot_order.push(id.into());
+    }
+    sessions.trim_snapshot_cache();
+    assert!(!sessions.snapshots.contains_key("markdown"));
+    assert!(sessions.snapshots.contains_key("pdf"));
+    assert!(sessions.snapshots.contains_key("active"));
+    assert_eq!(sessions.snapshots.len(), 2);
+}
+
+#[test]
+fn side_panel_idle_handler_redraws_only_changed_inventory() {
+    let mut app = app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let event = |snapshot| crate::protocol::ServerEvent::SidePanelState { snapshot };
+    assert!(app.handle_server_event(event(inventory("panel-test-a", 1)), &mut remote));
+    assert!(!app.handle_server_event(event(inventory("panel-test-a", 1)), &mut remote));
+    assert!(!app.handle_server_event(event(inventory("panel-test-a", 0)), &mut remote));
+    assert!(!app.handle_server_event(event(inventory("different", 99)), &mut remote));
+    app.dismiss_side_panel();
+    assert!(!app.handle_server_event(event(inventory("panel-test-a", 1)), &mut remote));
+    let unavailable = crate::side_panel::SidePanelSnapshot {
+        session_id: Some("panel-test-a".into()),
+        unavailable: Some("offline".into()),
+        ..Default::default()
+    };
+    assert!(app.handle_server_event(event(unavailable.clone()), &mut remote));
+    assert!(!app.handle_server_event(event(unavailable), &mut remote));
+    let mut closed = inventory("panel-test-a", 2);
+    closed.pages.pop();
+    assert!(app.handle_server_event(event(closed), &mut remote));
+    let mut reopened = inventory("panel-test-a", 3);
+    reopened.pages[1].content = "reopened archived body".into();
+    reopened.focus_revision = 2;
+    reopened.focused_page_id = Some("second".into());
+    assert!(app.handle_server_event(event(reopened.clone()), &mut remote));
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("second"));
+    assert!(!app.handle_server_event(event(reopened), &mut remote));
+}
+
+#[test]
+fn side_panel_reexec_accepts_backup_inventory_but_live_client_rejects_older() {
+    let mut first = app();
+    first.set_side_panel_snapshot(inventory("panel-test-a", 5));
+    select_second(&mut first);
+    let saved = serde_json::to_vec(&first.saved_panel_sessions()).unwrap();
+    let mut second = app();
+    second.restore_panel_sessions(serde_json::from_slice(&saved).unwrap());
+    second.set_side_panel_snapshot(inventory("panel-test-a", 4));
+    assert_second(&second);
+    assert!(second
+        .side_panel
+        .pages
+        .iter()
+        .all(|page| page.status.stale_reason.is_some()));
+    assert_eq!(second.side_panel.revision, 4);
+    assert!(!second.set_side_panel_snapshot_changed(inventory("panel-test-a", 3)));
+    assert_eq!(second.side_panel.revision, 4);
+    second.set_side_panel_snapshot(inventory("panel-test-a", 5));
+    assert_second(&second);
+    assert!(second
+        .side_panel
+        .pages
+        .iter()
+        .all(|page| page.status.stale_reason.is_none()));
+    assert!(!second.set_side_panel_snapshot_changed(inventory("panel-test-a", 4)));
+    assert_eq!(second.side_panel.revision, 5);
+}

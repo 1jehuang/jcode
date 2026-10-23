@@ -2535,8 +2535,7 @@ pub(in crate::tui::app) fn handle_server_event(
             true
         }
         ServerEvent::SidePanelState { snapshot } => {
-            app.set_side_panel_snapshot(snapshot);
-            false
+            app.set_side_panel_snapshot_changed(snapshot)
         }
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {
