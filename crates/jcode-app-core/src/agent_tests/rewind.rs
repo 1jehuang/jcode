@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "checkpoint_input.rs"]
+mod checkpoint_input;
+
 #[tokio::test]
 async fn rewind_waits_for_compaction_lock_and_discards_future_summary() {
     let _env = crate::storage::lock_test_env();

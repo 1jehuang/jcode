@@ -14,8 +14,6 @@ mod concurrency;
 mod concurrency_construction;
 #[path = "agent_tests/rewind.rs"]
 mod rewind;
-#[path = "agent_tests/checkpoint_input.rs"]
-mod checkpoint_input;
 #[path = "agent_tests/tool_streaming.rs"]
 mod tool_streaming;
 
