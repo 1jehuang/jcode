@@ -38,6 +38,15 @@ pub enum Request {
     ConfigureTools { id: u64, tools: SessionToolConfig },
     #[serde(rename = "list_tools")]
     ListTools { id: u64 },
+    /// Manage a retained panel in the connection's attached session.
+    /// The expected session must match the connection's attachment.
+    #[serde(rename = "panel_action")]
+    PanelAction {
+        id: u64,
+        session_id: String,
+        action: String,
+        page_id: String,
+    },
     #[serde(rename = "tool_result")]
     ToolResult {
         id: u64,

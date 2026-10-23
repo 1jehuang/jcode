@@ -412,7 +412,6 @@ mod tests {
         let display_messages = crate::tui::display_messages_from_session(&session);
         let provider_messages = session.messages_for_provider_uncached();
         let side_panel = SidePanelSnapshot {
-            focus_revision: 0,
             focused_page_id: Some("page_a".to_string()),
             pages: vec![
                 SidePanelPage {
@@ -420,22 +419,23 @@ mod tests {
                     title: "Focused".to_string(),
                     file_path: "/tmp/focused.md".to_string(),
                     format: SidePanelPageFormat::Markdown,
-                    pdf_data: None,
                     source: SidePanelPageSource::Managed,
                     content: "# Focused\nhello".to_string(),
                     updated_at_ms: 1,
+                    ..Default::default()
                 },
                 SidePanelPage {
                     id: "page_b".to_string(),
                     title: "Other".to_string(),
                     file_path: "/tmp/other.md".to_string(),
                     format: SidePanelPageFormat::Markdown,
-                    pdf_data: None,
                     source: SidePanelPageSource::Managed,
                     content: "# Other\nworld".to_string(),
                     updated_at_ms: 2,
+                    ..Default::default()
                 },
             ],
+            ..Default::default()
         };
 
         let profile = build_transcript_memory_profile(

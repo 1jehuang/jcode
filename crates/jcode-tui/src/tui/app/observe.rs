@@ -215,7 +215,6 @@ impl App {
             title: OBSERVE_PAGE_TITLE.to_string(),
             file_path: "observe://latest-context".to_string(),
             format: SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: SidePanelPageSource::Ephemeral,
             content: if self.observe_page_markdown.trim().is_empty() {
                 observe_placeholder_markdown()
@@ -223,6 +222,7 @@ impl App {
                 self.observe_page_markdown.clone()
             },
             updated_at_ms: self.observe_page_updated_at_ms.max(1),
+            ..Default::default()
         }
     }
 }

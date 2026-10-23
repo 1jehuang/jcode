@@ -263,6 +263,18 @@ jobs:
             "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-base --lib secret_input -- --nocapture
 
+      - name: Run sidepanel retention and history regressions
+        shell: bash
+        run: |
+          for package in jcode-base jcode-app-core jcode-tui jcode-protocol; do
+            python3 .github/scripts/run_with_timeout.py 600 \
+              "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+              -p "$package" --lib panel -- --test-threads=1
+          done
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-app-core --lib model_catalog_ -- --test-threads=1
+
       - name: Run browser session liveness and reuse regressions
         shell: bash
         run: |
@@ -492,6 +504,16 @@ jobs:
               -Name "Windows targeted test: $testName" `
               -TimeoutSeconds 300 `
               -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '--lib', $testName, '--', '--nocapture')
+          }
+
+      - name: Run Windows sidepanel retention and history regressions
+        shell: pwsh
+        run: |
+          foreach ($package in @('jcode-base', 'jcode-app-core', 'jcode-tui', 'jcode-protocol')) {
+            & ./scripts/invoke_cargo_with_timeout.ps1 `
+              -Name "Windows sidepanel tests: $package" `
+              -TimeoutSeconds 900 `
+              -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', $package, '--lib', 'panel', '--', '--test-threads=1')
           }
 
       - name: Run Windows hotkey and power tests

@@ -55,6 +55,7 @@ mod tests {
                 pdf_data: Some("JVBERi0xLjQKJSVFT0Y=".into()),
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let opted = side_panel_for_client(snapshot.clone(), true);
         assert_eq!(opted, snapshot);

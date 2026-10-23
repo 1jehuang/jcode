@@ -287,7 +287,6 @@ impl App {
             title: TODOS_VIEW_TITLE.to_string(),
             file_path: "todos://current-session".to_string(),
             format: SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: SidePanelPageSource::Ephemeral,
             content: if self.todos_view_markdown.trim().is_empty() {
                 todos_view_placeholder_markdown()
@@ -295,6 +294,7 @@ impl App {
                 self.todos_view_markdown.clone()
             },
             updated_at_ms: self.todos_view_updated_at_ms.max(1),
+            ..Default::default()
         }
     }
 }

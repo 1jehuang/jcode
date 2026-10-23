@@ -760,18 +760,18 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         activity: None,
         applets: Default::default(),
         side_panel: jcode_side_panel_types::SidePanelSnapshot {
-            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![jcode_side_panel_types::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
-                pdf_data: None,
                 source: jcode_side_panel_types::SidePanelPageSource::Managed,
                 content: "# Notes".to_string(),
                 updated_at_ms: 42,
+                ..Default::default()
             }],
+            ..Default::default()
         },
     };
     let json = encode_event(&event);
@@ -852,18 +852,18 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
 fn test_side_panel_state_event_roundtrip() -> Result<()> {
     let event = ServerEvent::SidePanelState {
         snapshot: jcode_side_panel_types::SidePanelSnapshot {
-            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![jcode_side_panel_types::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
-                pdf_data: None,
                 source: jcode_side_panel_types::SidePanelPageSource::Managed,
                 content: "updated".to_string(),
                 updated_at_ms: 99,
+                ..Default::default()
             }],
+            ..Default::default()
         },
     };
     let json = encode_event(&event);
@@ -999,10 +999,9 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
 
 #[test]
 fn history_delta_fields_are_backward_compatible() {
-    let event: ServerEvent = serde_json::from_str(
-        r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#,
-    )
-    .expect("legacy History without messages_base_count");
+    let event: ServerEvent =
+        serde_json::from_str(r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#)
+            .expect("legacy History without messages_base_count");
     let ServerEvent::History {
         messages_base_count,
         ..

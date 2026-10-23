@@ -6,18 +6,18 @@ fn test_mouse_scroll_over_tool_side_panel_keeps_typing_in_chat() {
     app.diff_pane_focus = false;
     app.diff_pane_auto_scroll = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
-        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
+            ..Default::default()
         }],
+        ..Default::default()
     };
 
     crate::tui::ui::record_layout_snapshot(
@@ -55,21 +55,21 @@ fn test_mouse_scroll_over_tool_side_panel_updates_visible_render() {
     app.diff_pane_focus = false;
     app.diff_pane_auto_scroll = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
-        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: (1..=30)
                 .map(|i| format!("- side-scroll-{i:02}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
             updated_at_ms: 1,
+            ..Default::default()
         }],
+        ..Default::default()
     };
 
     let backend = ratatui::backend::TestBackend::new(80, 12);
@@ -106,18 +106,18 @@ fn test_tool_side_panel_uses_shared_right_pane_keyboard_focus() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
-        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
+            ..Default::default()
         }],
+        ..Default::default()
     };
 
     assert!(app.diff_pane_visible());
@@ -139,18 +139,18 @@ fn test_side_panel_uses_left_splitter_instead_of_rounded_box() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
-        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "alpha\nbeta\ngamma".to_string(),
             updated_at_ms: 1,
+            ..Default::default()
         }],
+        ..Default::default()
     };
 
     let backend = ratatui::backend::TestBackend::new(80, 12);
@@ -174,18 +174,18 @@ fn test_side_panel_fullscreen_takes_full_width_and_keeps_input() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
-        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "alpha\nbeta\ngamma".to_string(),
             updated_at_ms: 1,
+            ..Default::default()
         }],
+        ..Default::default()
     };
     app.side_panel_fullscreen = true;
 
@@ -228,7 +228,9 @@ fn test_removed_pinned_diff_config_renders_inline_without_side_pane() {
                 "file_path": "src/demo.rs",
                 "content": "fn demo() {}\n"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None,
+            thought_signature: None,
+        }),
     }];
     app.bump_display_messages_version();
 
@@ -243,7 +245,10 @@ fn test_removed_pinned_diff_config_renders_inline_without_side_pane() {
             .is_none(),
         "removed pinned mode must not allocate a side pane"
     );
-    assert!(text.contains("fn demo() {}"), "inline diff must remain visible: {text}");
+    assert!(
+        text.contains("fn demo() {}"),
+        "inline diff must remain visible: {text}"
+    );
     assert!(!text.contains("side Pinned"), "rendered text: {text}");
 }
 
@@ -269,7 +274,9 @@ fn test_file_diff_uses_left_splitter_instead_of_rounded_box() {
                 "file_path": file_path.display().to_string(),
                 "content": "fn demo() {\n    println!(\"hi\");\n}\n"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None,
+            thought_signature: None,
+        }),
     }];
     app.bump_display_messages_version();
 

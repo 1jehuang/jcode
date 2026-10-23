@@ -212,20 +212,20 @@ fn build_side_panel(args: &Args) -> SidePanelSnapshot {
             title: format!("Bench Page {idx}"),
             file_path: format!("/tmp/bench_page_{idx}.md"),
             format: SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: SidePanelPageSource::Managed,
             content: make_blob(
                 &format!("# Bench Page {idx}\n\n"),
                 args.side_panel_page_kib * 1024,
             ),
             updated_at_ms: idx as u64,
+            ..Default::default()
         });
     }
 
     SidePanelSnapshot {
-        focus_revision: 0,
         focused_page_id: pages.first().map(|page| page.id.clone()),
         pages,
+        ..Default::default()
     }
 }
 

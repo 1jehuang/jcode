@@ -699,10 +699,10 @@ fn reconstruct_side_panel_snapshot_from_session(session: &Session) -> SidePanelS
                             title: title.clone(),
                             file_path: format!("session://{}/{}.md", session.id, page_id),
                             format: SidePanelPageFormat::Markdown,
-                            pdf_data: None,
                             source: SidePanelPageSource::Managed,
                             content: String::new(),
                             updated_at_ms: revision,
+                            ..Default::default()
                         });
                     page.title = title;
                     if action == "append"
@@ -761,10 +761,10 @@ fn reconstruct_side_panel_snapshot_from_session(session: &Session) -> SidePanelS
                             title,
                             file_path: file_path.to_string(),
                             format: SidePanelPageFormat::Markdown,
-                            pdf_data: None,
                             source: SidePanelPageSource::LinkedFile,
                             content,
                             updated_at_ms: revision,
+                            ..Default::default()
                         },
                     );
                     if input
@@ -805,9 +805,9 @@ fn reconstruct_side_panel_snapshot_from_session(session: &Session) -> SidePanelS
     }
 
     SidePanelSnapshot {
-        focus_revision: 0,
         focused_page_id,
         pages,
+        ..Default::default()
     }
 }
 
