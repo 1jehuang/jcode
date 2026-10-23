@@ -2793,16 +2793,6 @@ pub(crate) fn render_background_task_message(
     if is_swarm && !parsed.status.starts_with('✗') {
         return render_compact_swarm_background_completion(&parsed, width);
     }
-    if parsed.status.starts_with('✗') {
-        let muted = Style::default().fg(dim_color());
-        let failure = Style::default().fg(rgb(220, 100, 100));
-        let block_width = if centered {
-            super::centered_content_block_width(width, 96)
-        } else {
-            width as usize
-        };
-        let row_width = block_width.saturating_sub(1);
-        let timing = msg
     if parsed.status.starts_with('✓') {
         let muted = Style::default().fg(dim_color());
         let block_width = if centered {
@@ -2835,6 +2825,16 @@ pub(crate) fn render_background_task_message(
         }
         return lines;
     }
+    if parsed.status.starts_with('✗') {
+        let muted = Style::default().fg(dim_color());
+        let failure = Style::default().fg(rgb(220, 100, 100));
+        let block_width = if centered {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let row_width = block_width.saturating_sub(1);
+        let timing = msg
             .content
             .lines()
             .find_map(|line| {
@@ -4115,6 +4115,18 @@ fn inline_diff_header(
     }
     let mut header = Line::from(header);
     if let Some(path) = file_path {
+        let path_width = width.saturating_sub(header.width().saturating_add(3));
+        if path_width > 0 {
+            header.spans.push(Span::styled(
+                format!(" · {}", tools_ui::truncate_path_display(path, path_width)),
+                dim,
+            ));
+        }
+    }
+    super::truncate_line_with_ellipsis_to_width(&header, width)
+        .alignment(ratatui::layout::Alignment::Left)
+}
+
 /// Keep expanded source lines inside their frame. Wrap the styled source, not
 /// the gutter, so continuation rows cannot masquerade as another changed line.
 fn expanded_diff_row(
@@ -4186,18 +4198,6 @@ fn expanded_diff_row(
     }
     rows.push(Line::from(spans).alignment(Alignment::Left));
     rows
-}
-
-        let path_width = width.saturating_sub(header.width().saturating_add(3));
-        if path_width > 0 {
-            header.spans.push(Span::styled(
-                format!(" · {}", tools_ui::truncate_path_display(path, path_width)),
-                dim,
-            ));
-        }
-    }
-    super::truncate_line_with_ellipsis_to_width(&header, width)
-        .alignment(ratatui::layout::Alignment::Left)
 }
 
 fn render_tool_failure_reason(content: &str, width: usize, indent: usize) -> Line<'static> {
@@ -4732,11 +4732,6 @@ pub(crate) fn render_tool_message(
             });
         const MAX_DIFF_LINES: usize = MAX_INLINE_DIFF_LINES;
         let total_changes = change_lines.len();
-        let number_width = change_lines
-            .iter()
-            .map(|line| line.prefix.trim().trim_end_matches(['+', '-']).len())
-            .max()
-            .unwrap_or(0);
         let additions = change_lines
             .iter()
             .filter(|line| line.kind == DiffLineKind::Add)
@@ -4762,15 +4757,6 @@ pub(crate) fn render_tool_message(
             |line: &ParsedDiffLine| line.file_path.clone().or_else(|| file_path_for_ext.clone());
         let first_file_path = display_lines.first().and_then(|line| diff_file_path(line));
         lines.push(inline_diff_header(
-            if full_inline {
-                let file_ext = current_file_path
-                    .as_deref()
-                    .and_then(|p| std::path::Path::new(p).extension())
-                    .and_then(|e| e.to_str());
-                lines.extend(expanded_diff_row(line, file_ext, number_width, row_width));
-                continue;
-            }
-
             "╭─",
             Some((additions, deletions)),
             first_file_path.as_deref(),
@@ -4779,6 +4765,11 @@ pub(crate) fn render_tool_message(
 
         let mut shown_truncation = false;
         let mut previous_file_path = first_file_path;
+        let number_width = change_lines
+            .iter()
+            .map(|line| line.prefix.trim().trim_end_matches(['+', '-']).len())
+            .max()
+            .unwrap_or(0);
 
         for (i, line) in display_lines.iter().enumerate() {
             if truncated && !shown_truncation && i >= half_point {
@@ -4803,6 +4794,15 @@ pub(crate) fn render_tool_message(
                 ));
             }
             previous_file_path = current_file_path.clone();
+
+            if full_inline {
+                let file_ext = current_file_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).extension())
+                    .and_then(|e| e.to_str());
+                lines.extend(expanded_diff_row(line, file_ext, number_width, row_width));
+                continue;
+            }
 
             let base_color = if line.kind == DiffLineKind::Add {
                 diff_add_color()

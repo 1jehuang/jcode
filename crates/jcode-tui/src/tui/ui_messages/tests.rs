@@ -995,30 +995,9 @@ fn render_background_task_success_hides_ansi_preview_without_changing_raw() {
         "**Background task** `bg123` · `bash` · ✓ completed · 0.1s · exit 0\n\n```text\n\u{1b}[32m✓\u{1b}[39m passes \u{1b}[2m12ms\u{1b}[22m\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
     );
 
+    let raw = msg.content.clone();
     let plain = render_background_task_message(&msg, 80, crate::config::DiffDisplayMode::Off)
         .iter()
-        .map(extract_line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(
-        plain.contains("✓ passes 12ms"),
-        "rendered preview:\n{plain}"
-    );
-    assert!(!plain.contains('\u{1b}'));
-    assert!(!plain.contains("[32m"));
-    assert!(!plain.contains("[2m"));
-}
-
-#[test]
-fn render_system_message_strips_ansi_from_existing_inline_command_preview() {
-    let msg = DisplayMessage::system(
-        "Shell command · ✓ exit 0 · 12ms\n\n  cargo test\n\n  \u{1b}[32m✓\u{1b}[39m passes \u{1b}[2m12ms\u{1b}[22m",
-    );
-
-    let plain = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off)
-        .iter()
-    let raw = msg.content.clone();
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
@@ -1031,8 +1010,6 @@ fn render_system_message_strips_ansi_from_existing_inline_command_preview() {
     assert!(!plain.contains("[2m"));
 }
 
-#[test]
-fn render_background_task_message_uses_swarm_flavor_for_swarm_tool() {
 #[test]
 fn render_background_task_success_fits_unicode_and_narrow_widths() {
     let raw = "**Background task** `bg-unicode` · `验证界面 e\u{301} 🦀 long background intent` (`bash`) · ✓ completed · 12.3s · exit 0\n\n```text\nlarge output must stay hidden\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg-unicode\"`";
@@ -1060,6 +1037,29 @@ fn render_background_task_success_fits_unicode_and_narrow_widths() {
     assert_eq!(msg.content, raw);
 }
 
+#[test]
+fn render_system_message_strips_ansi_from_existing_inline_command_preview() {
+    let msg = DisplayMessage::system(
+        "Shell command · ✓ exit 0 · 12ms\n\n  cargo test\n\n  \u{1b}[32m✓\u{1b}[39m passes \u{1b}[2m12ms\u{1b}[22m",
+    );
+
+    let plain = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        plain.contains("✓ passes 12ms"),
+        "rendered preview:\n{plain}"
+    );
+    assert!(!plain.contains('\u{1b}'));
+    assert!(!plain.contains("[32m"));
+    assert!(!plain.contains("[2m"));
+}
+
+#[test]
+fn render_background_task_message_uses_swarm_flavor_for_swarm_tool() {
     crate::tui::markdown::set_center_code_blocks(false);
     let msg = DisplayMessage::background_task(
         "**Background task** `bg777` · `run_plan (6 nodes, deep mode)` (`swarm`) · ✓ completed · 92.4s · exit 0\n\n```text\nSwarm plan reached terminal/blocked state after 9 loop(s). completed=6 blocked=0 cycles=0 active=0 assignments=8\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg777\"`",
@@ -3987,10 +3987,25 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
 
     assert!(!plain.contains("more changes"), "plain={plain}");
     assert!(plain.contains("old line 4"), "plain={plain}");
+    let source_text = lines
+        .iter()
+        .filter(|line| extract_line_text(line).starts_with("│ "))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .skip(if line.spans[0].content.contains('↪') {
+                    1
+                } else {
+                    2
+                })
+        })
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
     assert!(
         source_text.contains("new line 4 suffix_4_abcdefghijklmnopqrstuvwxyz0123456789"),
         "plain={plain}"
     );
+    assert!(lines.iter().all(|line| line.width() <= 39), "plain={plain}");
     assert!(!plain.contains('…'), "plain={plain}");
     assert_eq!(plain.matches("+7 -7").count(), 1, "plain={plain}");
     assert_eq!(extract_line_text(lines.last().unwrap()), "╰─");
@@ -4024,25 +4039,10 @@ fn render_tool_message_memory_recall_centered_mode_left_aligns_with_padding() {
         )
         .to_string(),
         tool_calls: Vec::new(),
-    let source_text = lines
-        .iter()
-        .filter(|line| extract_line_text(line).starts_with("│ "))
-        .flat_map(|line| {
-            line.spans
-                .iter()
-                .skip(if line.spans[0].content.contains('↪') {
-                    1
-                } else {
-                    2
-                })
-        })
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
         duration_secs: None,
         title: None,
         tool_data: Some(crate::message::ToolCall {
             id: "call_memory_recall_centered".to_string(),
-    assert!(lines.iter().all(|line| line.width() <= 39), "plain={plain}");
             name: "memory".to_string(),
             input: serde_json::json!({
                 "action": "recall",
