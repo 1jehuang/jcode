@@ -4092,6 +4092,79 @@ fn inline_diff_header(
     }
     let mut header = Line::from(header);
     if let Some(path) = file_path {
+/// Keep expanded source lines inside their frame. Wrap the styled source, not
+/// the gutter, so continuation rows cannot masquerade as another changed line.
+fn expanded_diff_row(
+    line: &ParsedDiffLine,
+    file_ext: Option<&str>,
+    number_width: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(dim_color());
+    let color = if line.kind == DiffLineKind::Add {
+        diff_add_color()
+    } else {
+        diff_del_color()
+    };
+    let sign = if line.kind == DiffLineKind::Add {
+        "+"
+    } else {
+        "-"
+    };
+    let number = line.prefix.trim().trim_end_matches(['+', '-']);
+    let gutter = vec![
+        Span::styled(format!("│ {number:>number_width$} "), dim),
+        Span::styled(format!("{sign} "), Style::default().fg(color)),
+    ];
+    let gutter_width = number_width + 5;
+    // Leave room for a wide source character even on very narrow terminals.
+    if width < gutter_width + 2 {
+        return vec![super::truncate_line_with_ellipsis_to_width(
+            &Line::from(gutter),
+            width,
+        )];
+    }
+    let content_width = width - gutter_width;
+    let mut rows = Vec::new();
+    let mut spans = gutter;
+    let mut used = 0;
+    // Expand tabs in source-column coordinates, independent of the gutter.
+    let mut column = 0usize;
+    let mut source = String::new();
+    for ch in line.content.chars() {
+        if ch == '\t' {
+            let spaces = 4 - column % 4;
+            source.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else {
+            source.push(ch);
+            column += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    for span in markdown::highlight_line(&source, file_ext) {
+        let span = tint_span_with_diff_color(span, color);
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cells > content_width {
+                if !text.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut text), span.style));
+                }
+                rows.push(Line::from(std::mem::take(&mut spans)).alignment(Alignment::Left));
+                spans.push(Span::styled(format!("│ {:>number_width$} ↪ ", ""), dim));
+                used = 0;
+            }
+            text.push(ch);
+            used += cells;
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, span.style));
+        }
+    }
+    rows.push(Line::from(spans).alignment(Alignment::Left));
+    rows
+}
+
         let path_width = width.saturating_sub(header.width().saturating_add(3));
         if path_width > 0 {
             header.spans.push(Span::styled(
@@ -4653,6 +4726,11 @@ pub(crate) fn render_tool_message(
             });
         const MAX_DIFF_LINES: usize = MAX_INLINE_DIFF_LINES;
         let total_changes = change_lines.len();
+        let number_width = change_lines
+            .iter()
+            .map(|line| line.prefix.trim().trim_end_matches(['+', '-']).len())
+            .max()
+            .unwrap_or(0);
         let additions = change_lines
             .iter()
             .filter(|line| line.kind == DiffLineKind::Add)
@@ -4678,6 +4756,15 @@ pub(crate) fn render_tool_message(
             |line: &ParsedDiffLine| line.file_path.clone().or_else(|| file_path_for_ext.clone());
         let first_file_path = display_lines.first().and_then(|line| diff_file_path(line));
         lines.push(inline_diff_header(
+            if full_inline {
+                let file_ext = current_file_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).extension())
+                    .and_then(|e| e.to_str());
+                lines.extend(expanded_diff_row(line, file_ext, number_width, row_width));
+                continue;
+            }
+
             "╭─",
             Some((additions, deletions)),
             first_file_path.as_deref(),
@@ -4720,7 +4807,7 @@ pub(crate) fn render_tool_message(
             let border_prefix = format!("{}│ ", pad_str);
             let prefix_visual_width = unicode_width::UnicodeWidthStr::width(border_prefix.as_str())
                 + unicode_width::UnicodeWidthStr::width(line.prefix.as_str());
-            let max_content_width = (width as usize).saturating_sub(prefix_visual_width + 1);
+            let max_content_width = row_width.saturating_sub(prefix_visual_width);
 
             let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(border_prefix, Style::default().fg(dim_color())),

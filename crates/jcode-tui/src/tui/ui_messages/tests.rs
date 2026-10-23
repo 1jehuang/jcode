@@ -1,6 +1,58 @@
 use super::*;
 
 #[test]
+fn expanded_diff_rows_preserve_source_and_align_continuations() {
+    let source = "    let result = compute(\"界界 e\u{301}\", argument);";
+    let parsed = ParsedDiffLine {
+        kind: DiffLineKind::Add,
+        prefix: "9+ ".into(),
+        content: source.into(),
+        file_path: None,
+    };
+    let rows = expanded_diff_row(&parsed, Some("rs"), 3, 24);
+    assert!(rows.len() > 1);
+    assert!(extract_line_text(&rows[0]).starts_with("│   9 +     let"));
+    let mut reconstructed = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        assert!(row.width() <= 24, "{row:?}");
+        assert_eq!(row.alignment, Some(Alignment::Left));
+        if index > 0 {
+            assert!(extract_line_text(row).starts_with("│     ↪ "));
+        }
+        for span in row.spans.iter().skip(if index == 0 { 2 } else { 1 }) {
+            reconstructed.push_str(&span.content);
+        }
+    }
+    assert_eq!(reconstructed, source);
+    assert_eq!(rows[0].spans[1].style.fg, Some(diff_add_color()));
+}
+
+#[test]
+fn expanded_diff_rows_fit_narrow_widths_and_expand_tabs() {
+    let parsed = ParsedDiffLine {
+        kind: DiffLineKind::Del,
+        prefix: "123- ".into(),
+        content: "\t界\tvalue".into(),
+        file_path: None,
+    };
+    for width in 0..60 {
+        let rows = expanded_diff_row(&parsed, None, 3, width);
+        assert!(
+            rows.iter().all(|row| row.width() <= width),
+            "{width}: {rows:?}"
+        );
+    }
+    let rows = expanded_diff_row(&parsed, None, 3, 60);
+    assert_eq!(extract_line_text(&rows[0]), "│ 123 -     界  value");
+    assert_eq!(rows[0].spans[1].style.fg, Some(diff_del_color()));
+    let blank = ParsedDiffLine {
+        content: String::new(),
+        ..parsed
+    };
+    assert_eq!(expanded_diff_row(&blank, None, 3, 60).len(), 1);
+}
+
+#[test]
 fn inline_diff_header_compacts_directories_before_filename() {
     let path = "/home/user/project/crates/very_long_directory/src/important_file.rs";
     let line = inline_diff_header("╭─", Some((23, 4)), Some(path), 48);
@@ -3750,7 +3802,7 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
     assert!(!plain.contains("more changes"), "plain={plain}");
     assert!(plain.contains("old line 4"), "plain={plain}");
     assert!(
-        plain.contains("new line 4 suffix_4_abcdefghijklmnopqrstuvwxyz0123456789"),
+        source_text.contains("new line 4 suffix_4_abcdefghijklmnopqrstuvwxyz0123456789"),
         "plain={plain}"
     );
     assert!(!plain.contains('…'), "plain={plain}");
@@ -3786,10 +3838,25 @@ fn render_tool_message_memory_recall_centered_mode_left_aligns_with_padding() {
         )
         .to_string(),
         tool_calls: Vec::new(),
+    let source_text = lines
+        .iter()
+        .filter(|line| extract_line_text(line).starts_with("│ "))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .skip(if line.spans[0].content.contains('↪') {
+                    1
+                } else {
+                    2
+                })
+        })
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
         duration_secs: None,
         title: None,
         tool_data: Some(crate::message::ToolCall {
             id: "call_memory_recall_centered".to_string(),
+    assert!(lines.iter().all(|line| line.width() <= 39), "plain={plain}");
             name: "memory".to_string(),
             input: serde_json::json!({
                 "action": "recall",
