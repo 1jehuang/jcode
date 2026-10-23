@@ -39,7 +39,7 @@ test("handshake records server identity and capabilities", async () => {
 
 test("checkpoint helpers return typed results after streamed history", async () => {
   const checkpoint = { id: "cp1", message_index: 0, prompt: "original", can_restore_files: true, changed_file_count: 1 };
-  const result = { mode: "conversation_only" as const, prompt: "original", removed_messages: 2, restored_files: 0 };
+  const result = { mode: "conversation_only" as const, prompt: "original", removed_messages: 2, restored_files: 0, images: [["image/png", "aW1hZ2UtYnl0ZXM="]] as [string, string][] };
   const server = await startMockHarness({
     onRequest(request, send) {
       if (request.req === "list_rewind_checkpoints") {

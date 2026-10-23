@@ -426,6 +426,7 @@ fn checkpoint_rewind_events_roundtrip() -> Result<()> {
         removed_messages: 0,
         restored_files: 2,
         skipped_files: Vec::new(),
+        images: Vec::new(),
     };
     let event = ServerEvent::RewindComplete {
         id: 42,

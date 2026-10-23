@@ -3,23 +3,7 @@
 use super::{ContentBlock, RenderedMessage, Role};
 use jcode_session_types::{ResponseStats, StoredMessage};
 
-fn is_user_prompt(message: &StoredMessage) -> bool {
-    matches!(message.role, Role::User)
-        && message.display_role.is_none()
-        && !super::is_internal_system_reminder(message)
-        && !super::is_auto_poke_user_message(message)
-        && !super::super::is_scheduled_task_message(message)
-        && message.content.iter().any(|block| match block {
-            ContentBlock::Text { text, .. } => {
-                !text.trim().is_empty() && super::parse_attached_image_label(text).is_none()
-            }
-            ContentBlock::Image { .. } => true,
-            _ => false,
-        })
-        // Tool-result rows can include synthetic text and images. They are a
-        // continuation of the same turn, not another human prompt.
-        && !message.content.iter().any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-}
+use super::is_authentic_user_prompt as is_user_prompt;
 
 pub(super) fn attach(messages: &[StoredMessage], rendered: &mut [RenderedMessage]) {
     let row_by_stored_index: std::collections::HashMap<_, _> = rendered

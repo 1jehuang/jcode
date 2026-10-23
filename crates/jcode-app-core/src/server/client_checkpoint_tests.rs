@@ -253,7 +253,7 @@ async fn checkpoint_socket_restores_files_and_conversation_and_rejects_conflicts
     ] {
         send_checkpoint_request(
             &mut writer,
-            json!({"type":"message","id":id,"content":prompt}),
+            json!({"type":"message","id":id,"content":prompt,"images":[["image/png","iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII="]]}),
         )
         .await;
         checkpoint_event(
@@ -325,6 +325,10 @@ async fn checkpoint_socket_restores_files_and_conversation_and_rejects_conflicts
         unreachable!()
     };
     assert_eq!(result.mode, RewindMode::FilesOnly);
+    assert!(
+        result.images.is_empty(),
+        "files-only must preserve the current composer"
+    );
     assert_eq!(result.removed_messages, 0);
     assert_eq!(result.restored_files, 1);
     assert!(
@@ -389,6 +393,7 @@ async fn checkpoint_socket_restores_files_and_conversation_and_rejects_conflicts
         unreachable!()
     };
     assert_eq!(result.prompt, "first checkpoint");
+    assert_eq!(result.images, vec![("image/png".into(), "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=".into())]);
     assert!(
         !crate::server::usage_limit_resume::has_pending_resume(&session_id),
         "removed turns must never auto-resume"
