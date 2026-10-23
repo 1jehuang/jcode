@@ -15,10 +15,9 @@ impl App {
         }
 
         let skills = self.current_skills_snapshot();
-        let skill_prompt = self
-            .active_skill
-            .as_ref()
-            .and_then(|name| skills.get(name).map(|s| s.get_prompt().to_string()));
+        // Announced once in the transcript on activation; never in the
+        // system prompt, so skill changes cannot invalidate the cache.
+        let skill_prompt: Option<String> = None;
         let available_skills: Vec<crate::prompt::SkillInfo> = skills
             .list()
             .iter()
@@ -27,17 +26,12 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
-        let (mut split, context_info) = crate::prompt::build_system_prompt_split(
+        let (split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
             memory_prompt,
             None,
-        );
-        self.append_current_turn_system_reminder(&mut split);
-        crate::prompt::append_swarm_effort_directive(
-            &mut split,
-            self.provider.reasoning_effort().as_deref(),
         );
         self.context_info = context_info;
         split
@@ -182,7 +176,8 @@ impl App {
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. }
-                    | ContentBlock::ToolReference { .. } => {}
+                    | ContentBlock::ToolReference { .. }
+                    | ContentBlock::ProviderNative { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }
@@ -219,7 +214,8 @@ impl App {
             .filter(|e| e.active)
             .map(|e| e.content)
             .collect();
-        let sidecar = crate::sidecar::Sidecar::new();
+        // Honor this session's `/agents memory` choice, like server-side extraction.
+        let sidecar = crate::sidecar::Sidecar::for_session(&self.session);
         match sidecar
             .extract_memories_with_existing(&transcript, &existing)
             .await

@@ -712,11 +712,9 @@ fn test_ctrl_l_terminal_clear_adds_spacer_and_keeps_everything() {
     crate::tui::ui::set_last_chat_viewport_height(0);
 }
 
-/// The Ctrl+L spacer is a screen-state artifact, not transcript content: as
-/// soon as a real message arrives it is dropped, so no blank block is ever
-/// embedded in the scrollback history.
+/// New content keeps the Ctrl+L boundary so the cleared view does not reset.
 #[test]
-fn test_ctrl_l_spacer_dropped_when_new_content_arrives() {
+fn test_ctrl_l_spacer_retained_when_new_content_arrives() {
     let mut app = create_test_app();
     app.display_messages = vec![DisplayMessage::system("old chat".to_string())];
     app.bump_display_messages_version();
@@ -736,8 +734,8 @@ fn test_ctrl_l_spacer_dropped_when_new_content_arrives() {
         .collect();
     assert_eq!(
         roles,
-        vec!["system", "user"],
-        "spacer must be dropped when real content arrives (no blank block in history)"
+        vec!["system", "spacer", "user"],
+        "the clear boundary survives new content"
     );
 
     crate::tui::ui::set_last_chat_viewport_height(0);
@@ -1244,7 +1242,7 @@ fn test_workspace_info_widget_appears_in_visual_debug_frame_when_enabled() {
 #[test]
 fn test_mouse_scroll_over_diff_pane_scrolls_side_panel_without_changing_focus() {
     let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
+    let (mut app, _) = make_edit_badge_test_app(30);
     app.diff_mode = crate::config::DiffDisplayMode::File;
     app.diff_pane_scroll = 5;
     app.diff_pane_focus = false;
@@ -1272,7 +1270,7 @@ fn test_mouse_scroll_over_diff_pane_scrolls_side_panel_without_changing_focus() 
 #[test]
 fn test_mouse_scroll_animation_preserves_side_pane_scroll_sensitivity() {
     let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
+    let (mut app, _) = make_edit_badge_test_app(30);
     app.diff_mode = crate::config::DiffDisplayMode::File;
     app.diff_pane_scroll = 5;
     app.diff_pane_auto_scroll = true;

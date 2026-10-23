@@ -17,6 +17,10 @@
 //!   exit. Exit 0 allows the tool call, exit 2 blocks it and the hook's
 //!   stderr is fed back to the model as the tool error. Any other outcome
 //!   (other exit codes, timeout, spawn failure) fails open with a warning.
+//! - **Feedback** (`post_tool_feedback`): jcode waits (with a timeout) after a
+//!   successful tool call. Anything the hook prints to stdout is appended to
+//!   the tool result the model sees (e.g. linter findings for an edited file).
+//!   Timeouts and spawn failures add nothing.
 //!
 //! Hook processes get `JCODE_HOOKS_DISABLED=1` in their environment so a
 //! hook that itself invokes jcode does not recursively trigger hooks.
@@ -37,6 +41,9 @@ const PAYLOAD_ENV_LIMIT: usize = 16 * 1024;
 const TOOL_INPUT_ENV_LIMIT: usize = 16 * 1024;
 /// Maximum chars of hook stderr used as a block reason.
 const BLOCK_REASON_LIMIT: usize = 2000;
+/// Maximum bytes of `post_tool_feedback` stdout appended to a tool result,
+/// per hook command.
+const FEEDBACK_LIMIT: usize = 8 * 1024;
 
 /// Decision returned by the `pre_tool` gate hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +115,7 @@ pub fn hook_commands(event: &str) -> Vec<String> {
         "session_end" => hooks.session_end.as_ref(),
         "pre_tool" => hooks.pre_tool.as_ref(),
         "post_tool" => hooks.post_tool.as_ref(),
+        "post_tool_feedback" => hooks.post_tool_feedback.as_ref(),
         _ => None,
     };
     raw.into_iter()
@@ -248,6 +256,11 @@ fn truncate_bytes(value: &str, limit: usize) -> &str {
         end -= 1;
     }
     &value[..end]
+}
+
+/// Tool input JSON truncated to the size exported in `JCODE_HOOK_TOOL_INPUT`.
+pub fn truncate_tool_input(tool_input_json: &str) -> &str {
+    truncate_bytes(tool_input_json, TOOL_INPUT_ENV_LIMIT)
 }
 
 /// JSON payload mirroring the env fields, exported as `JCODE_HOOK_PAYLOAD`.
@@ -483,6 +496,104 @@ async fn run_pre_tool_command(
             GateDecision::Allow
         }
     }
+}
+
+/// Run the `post_tool_feedback` hooks for a completed tool call, in
+/// declaration order, and collect what they print to stdout.
+///
+/// Each hook receives the event env vars plus the full tool input JSON on
+/// stdin. Trimmed stdout (capped at 8 KB per hook) is returned regardless of
+/// exit code, because linters conventionally exit non-zero when they report
+/// findings. Timeouts, spawn failures, and empty stdout contribute nothing.
+pub async fn run_post_tool_feedback(event: &HookEvent, tool_input_json: &str) -> Option<String> {
+    let command_lines = hook_commands("post_tool_feedback");
+    if command_lines.is_empty() {
+        return None;
+    }
+    let timeout = std::time::Duration::from_millis(
+        crate::config::config()
+            .hooks
+            .post_tool_feedback_timeout_ms
+            .max(1),
+    );
+    let mut sections = Vec::new();
+    for command_line in command_lines {
+        if let Some(text) =
+            run_post_tool_feedback_command(&command_line, event, tool_input_json, timeout).await
+        {
+            sections.push(text);
+        }
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
+}
+
+async fn run_post_tool_feedback_command(
+    command_line: &str,
+    event: &HookEvent,
+    tool_input_json: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let std_cmd = match build_hook_process(command_line, event) {
+        Ok(cmd) => cmd,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Hook 'post_tool_feedback' command '{command_line}' is invalid: {error}"
+            ));
+            return None;
+        }
+    };
+    let mut cmd = tokio::process::Command::from(std_cmd);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Hook 'post_tool_feedback' command '{command_line}' failed to start: {error}"
+            ));
+            return None;
+        }
+    };
+    // Keep the stdin write under the deadline too: a hook that never reads
+    // stdin could otherwise block once the pipe fills.
+    let output = match tokio::time::timeout(timeout, async {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            // A hook that exits without reading stdin closes the pipe; that
+            // is fine, its stdout still counts.
+            let _ = stdin.write_all(tool_input_json.as_bytes()).await;
+        }
+        child.wait_with_output().await
+    })
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            crate::logging::warn(&format!(
+                "Hook 'post_tool_feedback' command '{command_line}' failed: {error}"
+            ));
+            return None;
+        }
+        Err(_elapsed) => {
+            crate::logging::warn(&format!(
+                "Hook 'post_tool_feedback' command '{command_line}' timed out after {}ms",
+                timeout.as_millis()
+            ));
+            return None;
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let text = stdout.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut text = truncate_bytes(text, FEEDBACK_LIMIT).to_string();
+    if text.len() < stdout.trim().len() {
+        text.push_str("\n[feedback truncated]");
+    }
+    Some(text)
 }
 
 #[cfg(test)]

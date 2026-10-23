@@ -153,7 +153,7 @@ pub fn ensure_menubar_helper_running() {
     use std::process::{Command, Stdio};
 
     // Allow users to opt out entirely.
-    if std::env::var_os("JCODE_NO_MENUBAR").is_some() {
+    if std::env::var_os("JCODE_NO_MENUBAR").is_some() || !menubar_enabled_in_config() {
         return;
     }
 
@@ -169,12 +169,23 @@ pub fn ensure_menubar_helper_running() {
     let pid_path = dir.join("menubar.pid");
 
     // If a recorded helper PID is still alive, do nothing.
-    if let Ok(raw) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = raw.trim().parse::<u32>() {
-            if crate::platform::is_process_running(pid) {
-                return;
-            }
-        }
+    if let Ok(raw) = std::fs::read_to_string(&pid_path)
+        && let Ok(pid) = raw.trim().parse::<u32>()
+        && crate::platform::is_process_running(pid)
+    {
+        return;
+    }
+
+    // Legacy helpers: older jcode builds anchored the singleton lock to
+    // `$HOME`/`$JCODE_HOME`, so a helper started under an overridden HOME holds
+    // a different lock and pid file than ours. Another process's environment is
+    // not reliably readable without private APIs, so we never kill them. The
+    // mitigation is: a normal launch never starts a second helper while any
+    // other `jcode menubar` process of this user is alive. Once the legacy
+    // helper exits (quit from its menu, logout), the next launch starts the
+    // single global one.
+    if other_menubar_helper_alive() {
+        return;
     }
 
     let Ok(exe) = std::env::current_exe() else {
@@ -204,6 +215,52 @@ pub fn ensure_menubar_helper_running() {
 #[cfg(not(target_os = "macos"))]
 pub fn ensure_menubar_helper_running() {}
 
+/// `[menubar] enabled` from config. The helper itself is spawned with
+/// `JCODE_NO_MENUBAR=1` (so it never recursively spawns), so the config value
+/// is the only opt-out it can observe while running.
+#[cfg(target_os = "macos")]
+fn menubar_enabled_in_config() -> bool {
+    crate::config::config().menubar.enabled
+}
+
+/// True when another process of this uid looks like a `jcode menubar` helper
+/// (see [`menubar_helper_pids`]).
+#[cfg(target_os = "macos")]
+fn other_menubar_helper_alive() -> bool {
+    let uid = unsafe { libc::getuid() };
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-U", &uid.to_string(), "-o", "pid=,args="])
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    let listing = String::from_utf8_lossy(&output.stdout);
+    !menubar_helper_pids(&listing, std::process::id()).is_empty()
+}
+
+/// Parse `ps -o pid=,args=` output and return pids whose argv is exactly
+/// `<.../jcode*> menubar`, excluding `self_pid`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn menubar_helper_pids(ps_output: &str, self_pid: u32) -> Vec<u32> {
+    ps_output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let Ok(pid) = parts.next()?.parse::<u32>() else {
+                return None;
+            };
+            let exe = parts.next()?;
+            let arg = parts.next()?;
+            if parts.next().is_some() || arg != "menubar" || pid == self_pid {
+                return None;
+            }
+            let name = std::path::Path::new(exe).file_name()?.to_str()?;
+            name.starts_with("jcode").then_some(pid)
+        })
+        .collect()
+}
+
 /// Resolve the directory holding the *global* (per-OS-user) menu bar singleton
 /// state - the "only one helper" lock and the helper pid file.
 ///
@@ -217,7 +274,7 @@ pub fn ensure_menubar_helper_running() {}
 /// real user is unchanged.
 #[cfg(target_os = "macos")]
 fn global_menubar_dir() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
+    let home = real_user_home()?;
     let dir = home.join(".jcode");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
@@ -232,8 +289,45 @@ fn running_in_menubar_sandbox() -> bool {
         env_truthy("JCODE_TEST_SESSION"),
         env_truthy("JCODE_TEMP_SERVER"),
         std::env::var_os("JCODE_HOME").as_deref(),
-        dirs::home_dir().map(|home| home.join(".jcode")).as_deref(),
+        std::env::var_os("HOME").as_deref(),
+        real_user_home().as_deref(),
     )
+}
+
+/// Home directory of the current OS user from the passwd database. Unlike
+/// `dirs::home_dir()` this ignores `$HOME`, so test harnesses that override
+/// `HOME` cannot relocate the global menu bar lock. There is deliberately no
+/// `$HOME` fallback: if passwd fails we cannot tell a real HOME from an
+/// override, so the helper is skipped entirely (fail closed).
+#[cfg(target_os = "macos")]
+fn real_user_home() -> Option<std::path::PathBuf> {
+    passwd_home_dir()
+}
+
+#[cfg(any(target_os = "macos", all(unix, test)))]
+fn passwd_home_dir() -> Option<std::path::PathBuf> {
+    passwd_home_dir_for_uid(unsafe { libc::getuid() })
+}
+
+#[cfg(any(target_os = "macos", all(unix, test)))]
+fn passwd_home_dir_for_uid(uid: libc::uid_t) -> Option<std::path::PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: all pointers reference live, correctly sized buffers owned here.
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
+    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir is a NUL-terminated string inside `buf`, which is alive.
+    let dir = unsafe { CStr::from_ptr(pwd.pw_dir) }.to_bytes();
+    if dir.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
 }
 
 #[cfg(target_os = "macos")]
@@ -252,17 +346,37 @@ fn env_truthy(key: &str) -> bool {
 ///
 /// - An explicit test/temp marker forces "sandbox".
 /// - A `$JCODE_HOME` that differs from the real `~/.jcode` is a sandbox home.
+/// - A `$HOME` that differs from the passwd home is a sandbox (a process with a
+///   foreign HOME must not own the user's menu bar).
 /// - No override (or an override equal to the real home) is the real user.
 #[cfg(target_os = "macos")]
 fn is_menubar_sandbox(
     test_session: bool,
     temp_server: bool,
     custom_home: Option<&std::ffi::OsStr>,
-    real_jcode_home: Option<&std::path::Path>,
+    env_home: Option<&std::ffi::OsStr>,
+    real_home: Option<&std::path::Path>,
 ) -> bool {
     if test_session || temp_server {
         return true;
     }
+    // passwd lookup failed: no trustworthy home, so no safe global lock
+    // location. Fail closed rather than trusting a possibly overridden $HOME.
+    let Some(real_home) = real_home else {
+        return true;
+    };
+    let real_home = Some(real_home);
+    let normalize =
+        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    if let (Some(env_home), Some(real)) = (env_home, real_home)
+        && !env_home.is_empty()
+        && normalize(std::path::Path::new(env_home)) != normalize(real)
+    {
+        return true;
+    }
+    let real_jcode_home = real_home.map(|home| home.join(".jcode"));
+    let real_jcode_home = real_jcode_home.as_deref();
 
     // No explicit override: the real user's default `~/.jcode`.
     let Some(custom_home) = custom_home else {
@@ -273,8 +387,6 @@ fn is_menubar_sandbox(
         // No real home to compare against: treat any explicit override as a sandbox.
         return true;
     };
-    let normalize =
-        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     normalize(custom) != normalize(real)
 }
 
@@ -296,11 +408,11 @@ mod macos {
     use objc2_app_kit::{
         NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
         NSApplicationActivationPolicy, NSCellImagePosition, NSColor, NSFont, NSFontAttributeName,
-        NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem,
-        NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+        NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration,
+        NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
     };
     use objc2_foundation::{
-        NSAttributedString, NSDictionary, NSObject, NSString, NSUserDefaults, ns_string,
+        NSArray, NSAttributedString, NSDictionary, NSObject, NSString, NSUserDefaults, ns_string,
     };
 
     /// Poll interval for refreshing the counts (milliseconds).
@@ -440,7 +552,7 @@ mod macos {
         // to spawn from sandboxes) plus the global singleton lock below, but a
         // stray `jcode menubar` invoked directly inside a test harness should
         // still never realize a status item.
-        if super::env_truthy("JCODE_TEST_SESSION") || super::env_truthy("JCODE_TEMP_SERVER") {
+        if super::running_in_menubar_sandbox() || !super::menubar_enabled_in_config() {
             return;
         }
 
@@ -506,13 +618,8 @@ mod macos {
                 NSFontWeightRegular
             });
         if let Some(button) = status_item.button(mtm) {
-            let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                ns_string!("terminal.fill"),
-                Some(ns_string!("jcode sessions")),
-            );
-            if let Some(icon) = icon.as_deref() {
-                icon.setTemplate(true);
-                button.setImage(Some(icon));
+            if let Some(icon) = status_icon(false) {
+                button.setImage(Some(&icon));
                 // Title on the left, icon on the right.
                 button.setImagePosition(NSCellImagePosition::ImageTrailing);
             }
@@ -555,12 +662,21 @@ mod macos {
         status_item.setMenu(Some(&menu));
 
         let last_sessions: RefCell<Vec<SessionPresence>> = RefCell::new(Vec::new());
+        // Streaming state the icon was last built for, so the image is only
+        // swapped when it flips rather than on every refresh tick.
+        let icon_streaming = std::cell::Cell::new(false);
         // Classification does not change for a session ID. Cache it so a large
         // population of internal workers costs one metadata read each rather
         // than one read per worker every second.
         let root_visibility: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
         let app_for_refresh = app.clone();
         let refresh = move || {
+            // `[menubar] enabled = false` turns the helper off without the user
+            // having to find and kill the process.
+            if !super::menubar_enabled_in_config() {
+                app_for_refresh.terminate(None);
+                return;
+            }
             // Re-sync the Light/Dark appearance each tick so toggling the
             // system theme at runtime keeps the status item visible (the
             // process won't auto-adopt the change on its own).
@@ -594,15 +710,13 @@ mod macos {
                 let title = format_menubar_title(counts);
                 let attributed = attributed_title(&title, &title_font, counts.streaming > 0);
                 button.setAttributedTitle(&attributed);
-                // Tint the template icon to match: accent green while any
-                // session is streaming, default (nil) otherwise so it follows
-                // the menu bar's normal appearance.
-                let tint: Option<Retained<NSColor>> = if counts.streaming > 0 {
-                    Some(streaming_color())
-                } else {
-                    None
-                };
-                button.setContentTintColor(tint.as_deref());
+                let streaming = counts.streaming > 0;
+                if streaming != icon_streaming.get() {
+                    if let Some(icon) = status_icon(streaming) {
+                        button.setImage(Some(&icon));
+                    }
+                    icon_streaming.set(streaming);
+                }
             }
             summary_item.setTitle(&NSString::from_str(&format_menubar_summary(counts)));
 
@@ -652,7 +766,37 @@ mod macos {
         app.setAppearance(appearance.as_deref());
     }
 
-    /// Color used for the count (and icon tint) while any session is actively
+    /// The status item icon. Idle uses a template SF Symbol so AppKit renders
+    /// it like every other menu bar extra. While streaming it is a non-template
+    /// image drawn in the streaming color through a palette configuration.
+    /// Tinting the template with `contentTintColor` instead takes the button
+    /// off the vibrancy path, so the symbol draws its literal black artwork on
+    /// a dark menu bar and never shows the green (#1124). Palette configurations
+    /// need macOS 12; where they are unavailable, or the configured image
+    /// cannot be produced, fall back to the template so the icon stays visible.
+    fn status_icon(streaming: bool) -> Option<Retained<NSImage>> {
+        let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            ns_string!("terminal.fill"),
+            Some(ns_string!("jcode sessions")),
+        )?;
+        let palette = sel!(configurationWithPaletteColors:);
+        if streaming
+            && objc2::class!(NSImageSymbolConfiguration)
+                .metaclass()
+                .responds_to(palette)
+        {
+            let colors = NSArray::from_retained_slice(&[streaming_color()]);
+            let config = NSImageSymbolConfiguration::configurationWithPaletteColors(&colors);
+            if let Some(colored) = icon.imageWithSymbolConfiguration(&config) {
+                colored.setTemplate(false);
+                return Some(colored);
+            }
+        }
+        icon.setTemplate(true);
+        Some(icon)
+    }
+
+    /// Color used for the count (and streaming icon) while any session is actively
     /// streaming a response. A slightly muted system green that reads well in
     /// both light and dark menu bars.
     fn streaming_color() -> Retained<NSColor> {
@@ -759,230 +903,5 @@ mod macos {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::session::SessionCounts;
-
-    #[test]
-    fn title_no_sessions_is_icon_only() {
-        let title = format_menubar_title(SessionCounts {
-            total: 0,
-            streaming: 0,
-        });
-        assert_eq!(title, "");
-    }
-
-    #[test]
-    fn title_idle_shows_zero_streaming_and_total() {
-        let title = format_menubar_title(SessionCounts {
-            total: 5,
-            streaming: 0,
-        });
-        assert_eq!(title, "0/5");
-    }
-
-    #[test]
-    fn title_streaming_shows_compact_ratio() {
-        let title = format_menubar_title(SessionCounts {
-            total: 7,
-            streaming: 2,
-        });
-        assert_eq!(title, "2/7");
-    }
-
-    #[test]
-    fn summary_pluralizes_sessions() {
-        assert_eq!(
-            format_menubar_summary(SessionCounts {
-                total: 1,
-                streaming: 0,
-            }),
-            "0 streaming · 1 session running"
-        );
-        assert_eq!(
-            format_menubar_summary(SessionCounts {
-                total: 3,
-                streaming: 1,
-            }),
-            "1 streaming · 3 sessions running"
-        );
-    }
-
-    #[test]
-    fn session_menu_item_title_uses_meaningful_title_instead_of_animal_name() {
-        let session_id = "session_buffalo_1781229104969_6d487ff77287de4f";
-        assert_eq!(
-            format_session_menu_item_title_with_display(
-                session_id,
-                Some("Improve menu labels"),
-                false
-            ),
-            "🐃 Improve menu labels"
-        );
-        assert_eq!(
-            format_session_menu_item_title_with_display(
-                session_id,
-                Some("Improve menu labels"),
-                true
-            ),
-            "🐃 Improve menu labels · streaming"
-        );
-    }
-
-    #[test]
-    fn session_menu_item_title_is_icon_only_without_meaningful_title() {
-        let session_id = "session_buffalo_1781229104969_6d487ff77287de4f";
-        assert_eq!(
-            format_session_menu_item_title_with_display(session_id, None, false),
-            "🐃"
-        );
-        assert_eq!(
-            format_session_menu_item_title_with_display("weird-id", None, false),
-            "💫"
-        );
-    }
-
-    #[test]
-    fn session_menu_item_title_loads_persisted_todo_title() {
-        let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        let temp = tempfile::tempdir().expect("create temporary JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp.path());
-
-        let session_id = "session_buffalo_1781229104969_6d487ff77287de4f";
-        let mut session = crate::session::Session::create_with_id(
-            session_id.to_string(),
-            None,
-            Some("Generated session title".to_string()),
-        );
-        session.save().expect("save session");
-        crate::todo::save_todos(
-            session_id,
-            &[crate::todo::TodoItem {
-                content: "Use todo context in the menu bar".to_string(),
-                status: "in_progress".to_string(),
-                priority: "high".to_string(),
-                id: "menubar-label".to_string(),
-                group: Some("Meaningful menu labels".to_string()),
-                confidence: Some(crate::todo::ConfidenceState::Plausible),
-                completion_confidence: None,
-                confidence_history: Vec::new(),
-                blocked_by: Vec::new(),
-                assigned_to: None,
-            }],
-        )
-        .expect("save todos");
-
-        assert_eq!(
-            format_session_menu_item_title(session_id, false),
-            "🐃 Meaningful menu labels"
-        );
-
-        if let Some(previous_home) = previous_home {
-            crate::env::set_var("JCODE_HOME", previous_home);
-        } else {
-            crate::env::remove_var("JCODE_HOME");
-        }
-    }
-
-    #[test]
-    fn menu_presence_includes_only_user_root_sessions() {
-        let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        let temp = tempfile::tempdir().expect("create temporary JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp.path());
-
-        let mut root = crate::session::Session::create_with_id(
-            "session_fox_root".to_string(),
-            None,
-            Some("Root work".to_string()),
-        );
-        root.mark_active();
-        root.save().expect("save root session");
-
-        let mut debug = crate::session::Session::create_with_id(
-            "session_owl_debug".to_string(),
-            None,
-            Some("Internal worker".to_string()),
-        );
-        debug.set_debug(true);
-        debug.mark_active();
-        debug.save().expect("save debug session");
-
-        let mut child = crate::session::Session::create_with_id(
-            "session_bear_child".to_string(),
-            Some(root.id.clone()),
-            Some("Child work".to_string()),
-        );
-        child.mark_active();
-        child.save().expect("save child session");
-
-        let visible = user_root_session_presence();
-        assert_eq!(
-            visible
-                .iter()
-                .map(|presence| presence.session_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["session_fox_root"]
-        );
-        assert_eq!(counts_for_presence(&visible).total, 1);
-
-        root.mark_closed();
-        debug.mark_closed();
-        child.mark_closed();
-        if let Some(previous_home) = previous_home {
-            crate::env::set_var("JCODE_HOME", previous_home);
-        } else {
-            crate::env::remove_var("JCODE_HOME");
-        }
-    }
-
-    #[test]
-    fn counts_report_serializes_to_json() {
-        let report = CountsReport::from(SessionCounts {
-            total: 4,
-            streaming: 2,
-        });
-        let json = serde_json::to_string(&report).unwrap();
-        assert_eq!(json, r#"{"total":4,"streaming":2}"#);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn menubar_sandbox_detection() {
-        use std::ffi::OsStr;
-        use std::path::Path;
-
-        let real = Path::new("/Users/me/.jcode");
-
-        // Real user, no override: not a sandbox -> owns the menu bar.
-        assert!(!is_menubar_sandbox(false, false, None, Some(real)));
-        // Override equal to the real home is still the real user.
-        assert!(!is_menubar_sandbox(
-            false,
-            false,
-            Some(OsStr::new("/Users/me/.jcode")),
-            Some(real),
-        ));
-
-        // Explicit test/temp markers force sandbox regardless of home.
-        assert!(is_menubar_sandbox(true, false, None, Some(real)));
-        assert!(is_menubar_sandbox(false, true, None, Some(real)));
-
-        // A throwaway sandbox home (e2e / self-dev / onboarding) is a sandbox.
-        assert!(is_menubar_sandbox(
-            false,
-            false,
-            Some(OsStr::new("/private/tmp/jcode-e2e-home-xyz")),
-            Some(real),
-        ));
-
-        // No discoverable real home: any explicit override is treated as sandbox.
-        assert!(is_menubar_sandbox(
-            false,
-            false,
-            Some(OsStr::new("/private/tmp/jcode-e2e-home-xyz")),
-            None,
-        ));
-    }
-}
+#[path = "menubar_tests.rs"]
+mod tests;

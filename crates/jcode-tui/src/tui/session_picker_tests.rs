@@ -100,6 +100,106 @@ fn make_session_with_flags(
 }
 
 #[test]
+fn standalone_resume_renders_before_list_load_finishes() {
+    let mut picker = SessionPicker::loading();
+    let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("loading frame");
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    assert!(picker.loading_message.is_some());
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Loading sessions"));
+}
+
+#[test]
+fn standalone_resume_refresh_preserves_cached_selection_and_search() {
+    let mut picker = SessionPicker::loading();
+    let first = make_session("first", "first", false, SessionStatus::Closed);
+    let second = make_session("second", "second", false, SessionStatus::Closed);
+    assert!(
+        !picker
+            .apply_session_list_update(SessionListUpdate::Cached((
+                Vec::new(),
+                vec![first.clone(), second.clone()],
+            )))
+            .expect("cached list")
+    );
+    assert!(picker.loading_message.is_none());
+    let index = picker
+        .find_item_index_for_session_id("second")
+        .expect("second item");
+    picker.list_state.select(Some(index));
+    picker.search_query = "test".to_string();
+    picker.search_active = true;
+    picker.filter_mode_user_chosen = true;
+    assert!(
+        picker
+            .apply_session_list_update(SessionListUpdate::Fresh(Ok((
+                Vec::new(),
+                vec![second, first],
+            ))))
+            .expect("fresh list")
+    );
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("second")
+    );
+    assert_eq!(picker.search_query, "test");
+    assert!(picker.search_active);
+    assert!(picker.filter_mode_user_chosen);
+}
+
+#[test]
+fn standalone_resume_load_error_preserves_existing_list() {
+    let mut picker = SessionPicker::loading();
+    picker
+        .apply_session_list_update(SessionListUpdate::Cached((
+            Vec::new(),
+            vec![make_session(
+                "cached",
+                "cached",
+                false,
+                SessionStatus::Closed,
+            )],
+        )))
+        .expect("cached list");
+    let err = picker
+        .apply_session_list_update(SessionListUpdate::Fresh(Err(anyhow::anyhow!(
+            "scan failed"
+        ))))
+        .expect_err("report loader failure");
+    assert_eq!(err.to_string(), "scan failed");
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("cached")
+    );
+}
+
+#[test]
+fn standalone_resume_empty_refresh_finishes_loading() {
+    let mut picker = SessionPicker::loading();
+    assert!(
+        picker
+            .apply_session_list_update(SessionListUpdate::Fresh(Ok((Vec::new(), Vec::new(),))))
+            .expect("empty list")
+    );
+    assert!(picker.loading_message.is_none());
+    assert!(picker.selected_session().is_none());
+}
+
+#[test]
 #[ignore = "developer benchmark: profiles real /resume through first rendered picker frame"]
 fn benchmark_real_resume_first_render_reports_timings() {
     invalidate_session_list_cache();
@@ -866,116 +966,7 @@ fn test_filter_mode_keyboard_shortcuts_cycle_both_directions() {
     assert_eq!(picker.filter_mode, SessionFilterMode::All);
 }
 
-fn live_presence(session_id: &str, streaming: bool) -> crate::session::SessionPresence {
-    crate::session::SessionPresence {
-        session_id: session_id.to_string(),
-        pid: std::process::id(),
-        streaming,
-        streaming_since: streaming
-            .then(|| std::time::SystemTime::now() - std::time::Duration::from_secs(90)),
-        internal: false,
-    }
-}
-
-#[test]
-fn test_active_filter_shows_only_live_sessions_ready_before_working() {
-    let live_working = make_session("session_working", "alpha", false, SessionStatus::Active);
-    let live_ready = make_session("session_ready", "beta", false, SessionStatus::Active);
-    let dead = make_session("session_dead", "dead", false, SessionStatus::Closed);
-
-    let mut picker = SessionPicker::new(vec![live_working, live_ready, dead]);
-    picker.activate_active_filter();
-    picker.set_live_presence_for_test(vec![
-        live_presence("session_working", true),
-        live_presence("session_ready", false),
-    ]);
-
-    let visible: Vec<&str> = picker
-        .visible_session_iter()
-        .map(|session| session.id.as_str())
-        .collect();
-    // Only live sessions appear; the ready one is triaged above the working one.
-    assert_eq!(visible, vec!["session_ready", "session_working"]);
-
-    let ready = picker
-        .visible_session_iter()
-        .find(|session| session.id == "session_ready")
-        .expect("ready visible");
-    let working = picker
-        .visible_session_iter()
-        .find(|session| session.id == "session_working")
-        .expect("working visible");
-    assert!(!picker.session_is_streaming(ready));
-    assert!(picker.session_is_streaming(working));
-    assert!(picker.session_streaming_duration(working).is_some());
-}
-
-#[test]
-fn test_active_rows_render_working_and_ready_badges() {
-    let live_working = make_session("session_working", "alpha", false, SessionStatus::Active);
-    let live_ready = make_session("session_ready", "beta", false, SessionStatus::Closed);
-    let mut picker = SessionPicker::new(vec![live_working, live_ready]);
-    picker.activate_active_filter();
-    picker.set_live_presence_for_test(vec![
-        live_presence("session_working", true),
-        live_presence("session_ready", false),
-    ]);
-
-    let working = picker
-        .visible_session_iter()
-        .find(|session| session.id == "session_working")
-        .cloned()
-        .expect("working visible");
-    let ready = picker
-        .visible_session_iter()
-        .find(|session| session.id == "session_ready")
-        .cloned()
-        .expect("ready visible");
-
-    let working_lines = picker.render_session_item_lines(&working, false);
-    let working_text = working_lines
-        .iter()
-        .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        working_text.contains("working 1m"),
-        "expected working badge with duration, got: {working_text}"
-    );
-
-    let first_frame = picker
-        .render_session_item_lines_at_frame(&working, false, 0)
-        .iter()
-        .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-    let second_frame = picker
-        .render_session_item_lines_at_frame(&working, false, 1)
-        .iter()
-        .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(first_frame.contains('⠋'));
-    assert!(second_frame.contains('⠙'));
-    assert_ne!(first_frame, second_frame, "running glyph should animate");
-    assert!(picker.has_visible_running_sessions());
-
-    let ready_lines = picker.render_session_item_lines(&ready, false);
-    let ready_text = ready_lines
-        .iter()
-        .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        ready_text.contains("ready"),
-        "expected ready badge, got: {ready_text}"
-    );
-    // Live presence overrides the stale persisted "closed" status.
-    assert!(
-        !ready_text.contains("closed"),
-        "live session must not render as closed: {ready_text}"
-    );
-}
+include!("session_picker_tests/live_presence.rs");
 
 fn make_claude_session(session_id: &str) -> SessionInfo {
     let mut session = make_session(
@@ -1064,30 +1055,6 @@ fn live_claude_row_is_labeled_and_closed_claude_cannot_take_over() {
         .handle_overlay_key(KeyCode::Char('T'), KeyModifiers::empty())
         .unwrap();
     assert!(!picker.claude_takeover_confirmation_active_for_test());
-}
-
-#[test]
-fn test_current_session_row_is_labeled() {
-    let session = make_session("session_self", "self", false, SessionStatus::Active);
-    let mut picker = SessionPicker::new(vec![session.clone()]);
-    picker.set_current_session_id(Some("session_self".to_string()));
-
-    let lines = picker.render_session_item_lines(&session, false);
-    let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-    assert!(
-        text.contains("current"),
-        "expected current label, got: {text}"
-    );
-}
-
-#[test]
-fn test_maybe_refresh_live_presence_throttles_and_detects_changes() {
-    let session = make_session("session_live", "live", false, SessionStatus::Active);
-    let mut picker = SessionPicker::new(vec![session]);
-    picker.activate_active_filter();
-    // Freshly injected snapshot: refresh is throttled, nothing changes.
-    picker.set_live_presence_for_test(vec![live_presence("session_live", true)]);
-    assert!(!picker.maybe_refresh_live_presence());
 }
 
 #[test]
@@ -1294,6 +1261,20 @@ fn onboarding_banner_is_action_only() {
 }
 
 #[test]
+fn onboarding_banner_space_submits_like_enter() {
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.activate_onboarding_banner(vec![Line::from("welcome")]);
+    let action = picker
+        .handle_overlay_key(KeyCode::Char(' '), KeyModifiers::empty())
+        .expect("space");
+    assert!(matches!(
+        action,
+        OverlayAction::Selected(PickerResult::ReviewRecentProject)
+    ));
+    assert!(picker.onboarding_review_recent_project_highlighted());
+}
+
+#[test]
 fn onboarding_banner_offers_review_then_new_session() {
     let mut picker = SessionPicker::new(Vec::new());
     picker.activate_onboarding_banner(vec![Line::from("welcome")]);
@@ -1349,88 +1330,100 @@ fn onboarding_banner_offers_review_then_new_session() {
     assert!(picker.onboarding_review_recent_project_highlighted());
 }
 
-#[test]
-fn onboarding_banner_renders_prompt_and_both_action_rows() {
-    let mut picker = SessionPicker::new(Vec::new());
-    picker.activate_onboarding_banner(vec![
-        Line::from("Welcome to jcode"),
-        Line::from("Choose how to begin."),
-    ]);
-
-    let backend = ratatui::backend::TestBackend::new(120, 40);
+fn render_onboarding_picker_lines(
+    picker: &mut SessionPicker,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
+    let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     terminal
         .draw(|frame| picker.render(frame))
         .expect("render onboarding picker");
-
     let buffer = terminal.backend().buffer().clone();
-    let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
-    let lines = (0..buffer.area.height)
+    (0..buffer.area.height)
         .map(|y| {
             (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
+fn onboarding_test_picker() -> SessionPicker {
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some("/srv/projects/demo".to_string()));
+    picker.activate_onboarding_banner(vec![
+        Line::from("Welcome to jcode"),
+        Line::from("Choose how to begin."),
+    ]);
+    picker
+}
+
+#[test]
+fn onboarding_banner_renders_actions_side_by_side_with_or() {
+    let mut picker = onboarding_test_picker();
+    let lines = render_onboarding_picker_lines(&mut picker, 120, 40);
+    let text = lines.join("\n");
+
+    assert!(text.contains("Welcome to jcode"), "{lines:#?}");
     assert!(
-        text.contains("Welcome to jcode"),
-        "onboarding prompt should render in the banner: {text:?}"
-    );
-    assert!(
-        text.contains("Start in the current directory"),
-        "start-new row should render in the banner: {text:?}"
-    );
-    assert!(
-        text.contains("Find bugs in my most active repo"),
-        "suggested-review row should render in the banner: {text:?}"
+        !text.contains("Start in the current directory"),
+        "old start label must be gone: {lines:#?}"
     );
     assert!(
         !text.contains("Sessions"),
-        "resume chrome must be absent: {text:?}"
+        "resume chrome must be absent: {lines:#?}"
     );
     assert!(
         !text.contains('╭') && !text.contains('╰') && !text.contains('│'),
         "onboarding choice should not render an outer boundary: {lines:#?}"
     );
 
+    let row = lines
+        .iter()
+        .position(|line| line.contains("Find bugs in my most active repo"))
+        .expect("review action");
+    let line = &lines[row];
+    let review_x = line.find("Find bugs in my most active repo").unwrap();
+    let or_x = line
+        .find(" or ")
+        .expect("'or' between the actions on the same row");
+    let start_x = line
+        .find("New session in /srv/projects/demo")
+        .expect("start action names the directory, on the same row");
+    assert!(review_x < or_x && or_x < start_x, "{lines:#?}");
+
     let welcome_y = lines
         .iter()
         .position(|line| line.contains("Welcome to jcode"))
-        .expect("welcome row");
+        .unwrap();
+    assert!(welcome_y < row, "{lines:#?}");
+    assert!(
+        row.abs_diff(lines.len() / 2) <= 1,
+        "actions vertically centered: {lines:#?}"
+    );
+}
+
+#[test]
+fn onboarding_banner_stacks_actions_when_narrow() {
+    let mut picker = onboarding_test_picker();
+    let lines = render_onboarding_picker_lines(&mut picker, 50, 30);
+
     let review_y = lines
         .iter()
         .position(|line| line.contains("Find bugs in my most active repo"))
-        .expect("review row");
+        .expect("review action");
+    let or_y = lines
+        .iter()
+        .position(|line| line.trim() == "or")
+        .expect("'or' on its own line");
     let start_y = lines
         .iter()
-        .position(|line| line.contains("Start in the current directory"))
-        .expect("start-new row");
-    let review_x = lines[review_y]
-        .find("Find bugs in my most active repo")
-        .expect("review column");
-    let start_x = lines[start_y]
-        .find("Start in the current directory")
-        .expect("start-new column");
-
-    assert!(
-        welcome_y < review_y,
-        "welcome copy should introduce the centered suggested prompt: {lines:#?}"
-    );
-    assert!(
-        review_y.abs_diff(buffer.area.height as usize / 2) <= 1,
-        "suggested prompt should be vertically centered: {lines:#?}"
-    );
-    assert!(
-        review_x < 50,
-        "suggested prompt should span the visual center: {lines:#?}"
-    );
-    let width = buffer.area.width as usize;
-    let start_end = lines[start_y].trim_end().chars().count();
-    assert!(
-        start_y >= buffer.area.height as usize - 3 && start_x > width / 2 && start_end + 4 >= width,
-        "blank-session action should stay secondary in the bottom-right: {lines:#?}"
-    );
+        .position(|line| line.contains("New session in /srv/projects/demo"))
+        .expect("start action");
+    assert_eq!(or_y, review_y + 1, "{lines:#?}");
+    assert_eq!(start_y, review_y + 2, "{lines:#?}");
 }
 
 #[test]
@@ -1849,7 +1842,11 @@ fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
                         let row = rows.iter().find(|row| row.contains(text)).expect(text);
                         assert!(row.starts_with(text), "preview must be flush left: {row:?}");
                     }
-                    for text in ["list item", "code sample", "tool:"] {
+                    assert!(
+                        rows.iter().all(|row| !row.contains("tool:")),
+                        "preview must not show a tool-name summary line: {rows:?}"
+                    );
+                    for text in ["list item", "code sample"] {
                         let row = rows.iter().find(|row| row.contains(text)).expect(text);
                         assert!(
                             row.chars().take_while(|c| *c == ' ').count() <= 2,
@@ -1869,6 +1866,18 @@ fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
 
 #[test]
 fn test_preview_structured_messages_stay_left_aligned() {
+    // The todo tool card is only shown inline when todos are not pinned.
+    let _env_lock = crate::storage::lock_test_env();
+    crate::env::set_var("JCODE_PIN_TODOS", "0");
+    crate::config::invalidate_config_cache();
+    struct RestorePin;
+    impl Drop for RestorePin {
+        fn drop(&mut self) {
+            crate::env::remove_var("JCODE_PIN_TODOS");
+            crate::config::invalidate_config_cache();
+        }
+    }
+    let _restore = RestorePin;
     let todos = serde_json::json!([{
         "id": "alignment", "content": "Verify structured preview alignment",
         "status": "completed", "priority": "high", "confidence": "verified"
@@ -1910,12 +1919,19 @@ fn test_preview_structured_messages_stay_left_aligned() {
                 "preview must restore chat context"
             );
             let cache = picker.preview_cache.as_ref().unwrap();
+            assert!(
+                cache
+                    .wrapped_lines
+                    .iter()
+                    .all(|line| !line_text(line).contains("tool:")),
+                "preview must not show a tool-name summary line"
+            );
             for needle in [
-                "tool:",
                 "Verify structured preview alignment",
                 "Reviewing the weak points",
                 "Check structured preview alignment",
-                "All alignment checks passed",
+                // Successful background notices render as one compact line.
+                "Background task alignment-task",
             ] {
                 let line = cache
                     .wrapped_lines
@@ -2029,7 +2045,7 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
     // Simulate an in-flight background load for the selected session: empty
     // preview + a pending load whose id matches. Keep the sender alive so the
     // receiver reports `Empty` (still loading) rather than `Disconnected`.
-    let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<PreviewMessage>>>();
+    let (tx, rx) = std::sync::mpsc::channel::<Option<LoadedSessionPreview>>();
     picker.pending_preview_load = Some(PendingSessionPreviewLoad {
         session_id: "async_sticky".to_string(),
         receiver: rx,
@@ -2599,5 +2615,192 @@ fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
     assert!(
         !any_highlight,
         "no search means no highlight color in preview"
+    );
+}
+
+#[test]
+fn onboarding_start_label_marks_home_directory() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some(home.display().to_string()));
+    picker.activate_onboarding_banner(vec![Line::from("Welcome to jcode")]);
+    let lines = render_onboarding_picker_lines(&mut picker, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("New session in ~ (home)")),
+        "home directory should read '~ (home)': {lines:#?}"
+    );
+}
+
+#[test]
+fn test_resume_prefers_current_project_filter_when_it_has_sessions() {
+    let mut here = make_session("here", "here", false, SessionStatus::Closed);
+    here.working_dir = Some("/work/project".to_string());
+    let mut sub = make_session("sub", "sub", false, SessionStatus::Closed);
+    sub.working_dir = Some("/work/project/crates/a".to_string());
+    let mut other = make_session("other", "other", false, SessionStatus::Closed);
+    other.working_dir = Some("/work/other".to_string());
+
+    let mut picker = SessionPicker::new(vec![here, sub, other]);
+    picker.set_current_dir(Some("/work/project".to_string()));
+    picker.prefer_current_dir_filter();
+
+    assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
+    let ids: Vec<_> = picker
+        .visible_session_iter()
+        .map(|session| session.id.clone())
+        .collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert!(!ids.contains(&"other".to_string()));
+
+    // Once the user picks a filter, reloads must not snap it back.
+    while picker.filter_mode != SessionFilterMode::All {
+        picker.cycle_filter_mode();
+    }
+    picker.prefer_current_dir_filter();
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+}
+
+#[test]
+fn test_resume_keeps_all_filter_when_current_project_has_no_sessions() {
+    let mut other = make_session("other", "other", false, SessionStatus::Closed);
+    other.working_dir = Some("/work/other".to_string());
+
+    let mut picker = SessionPicker::new(vec![other]);
+    picker.set_current_dir(Some("/work/project".to_string()));
+    picker.prefer_current_dir_filter();
+
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+    assert_eq!(picker.visible_sessions.len(), 1);
+}
+
+#[test]
+fn test_current_dir_matches_sibling_git_worktree() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let main = root.path().join("repo");
+    let wt_git = main.join(".git/worktrees/feature");
+    std::fs::create_dir_all(&wt_git).expect("worktree gitdir");
+    std::fs::write(wt_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = root.path().join("repo-feature");
+    std::fs::create_dir_all(worktree.join("src")).expect("worktree dir");
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", wt_git.display()),
+    )
+    .expect(".git file");
+    let unrelated = root.path().join("unrelated");
+    std::fs::create_dir_all(&unrelated).expect("unrelated dir");
+
+    let mut in_worktree = make_session("wt", "wt", false, SessionStatus::Closed);
+    in_worktree.working_dir = Some(worktree.join("src").display().to_string());
+    let mut elsewhere = make_session("elsewhere", "elsewhere", false, SessionStatus::Closed);
+    elsewhere.working_dir = Some(unrelated.display().to_string());
+
+    let mut picker = SessionPicker::new(vec![in_worktree.clone(), elsewhere.clone()]);
+    picker.set_current_dir(Some(main.display().to_string()));
+
+    assert!(picker.session_in_current_dir(&in_worktree));
+    assert!(!picker.session_in_current_dir(&elsewhere));
+}
+
+#[test]
+fn test_compact_dir_keeps_whole_trailing_components() {
+    use super::render::compact_dir;
+    assert_eq!(compact_dir("/srv/app"), "/srv/app");
+    assert_eq!(
+        compact_dir("/srv/relatorios/sherlocker-formula-20261010/worktrees/base"),
+        "…/worktrees/base"
+    );
+    assert_eq!(
+        compact_dir("/srv/a/an-extremely-long-single-directory-name-here"),
+        "…/an-extremely-long-single-…"
+    );
+}
+
+#[test]
+fn test_resume_project_scope_is_off_by_default() {
+    assert!(
+        !crate::config::Config::default()
+            .display
+            .resume_project_scope
+    );
+    let mut here = make_session("here", "here", false, SessionStatus::Closed);
+    here.working_dir = Some("/work/project".to_string());
+    let mut other = make_session("other", "other", false, SessionStatus::Closed);
+    other.working_dir = Some("/work/other".to_string());
+
+    let mut picker = SessionPicker::new(vec![here, other]);
+    picker.set_current_dir(Some("/work/project".to_string()));
+    if !crate::config::config().display.resume_project_scope {
+        picker.apply_resume_project_scope_default();
+        assert_eq!(picker.filter_mode, SessionFilterMode::All);
+        assert_eq!(picker.visible_sessions.len(), 2);
+    }
+}
+
+#[test]
+fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards() {
+    let _env_lock = crate::storage::lock_test_env();
+    crate::env::set_var("JCODE_PIN_TODOS", "1");
+    crate::config::invalidate_config_cache();
+
+    let mut session = make_session_with_many_turns("pinned_preview", 60);
+    session.messages_preview.push(PreviewMessage {
+        role: "tool".to_string(),
+        content: "DUPLICATE_TODO_TOOL_CARD".to_string(),
+        tool_calls: Vec::new(),
+        tool_data: Some(crate::message::ToolCall {
+            id: "todo-tool".to_string(),
+            name: "todo".to_string(),
+            input: serde_json::json!({"todos": []}),
+            intent: None,
+            thought_signature: None,
+        }),
+        timestamp: None,
+    });
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.preview_extras.insert(
+        "pinned_preview".to_string(),
+        PreviewExtras {
+            hidden_prompts: 100,
+            todos_payload: Some(
+                serde_json::json!({
+                    "todos": [{
+                        "id": "1",
+                        "content": "PINNED_PREVIEW_TASK",
+                        "status": "in_progress",
+                        "priority": "high"
+                    }]
+                })
+                .to_string(),
+            ),
+        },
+    );
+
+    let text = buffer_text(&mut picker, 120, 30);
+    crate::env::remove_var("JCODE_PIN_TODOS");
+    crate::config::invalidate_config_cache();
+
+    assert!(text.contains("PINNED_PREVIEW_TASK"), "{text}");
+    assert!(!text.contains("DUPLICATE_TODO_TOOL_CARD"), "{text}");
+    // 60 visible prompts after 100 hidden ones: the last is numbered 160.
+    assert!(text.contains("160›"), "{text}");
+    // Pinned todos sit at the top of the preview content, under the sticky prompt.
+    let rows: Vec<String> = text
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(120)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+    let todo_row = rows
+        .iter()
+        .position(|row| row.contains("PINNED_PREVIEW_TASK"))
+        .expect("todo row");
+    assert!(
+        todo_row <= 4,
+        "todo band should be pinned at top, row {todo_row}:\n{text}"
     );
 }

@@ -5,6 +5,8 @@ async fn communicate_list_and_await_members_work_end_to_end() {
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+    // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
+    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
     // Independently created root sessions own separate swarms (83dbc36dc);
@@ -136,6 +138,8 @@ async fn communicate_await_members_background_returns_immediately_and_notifies()
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+    // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
+    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
     // Independently created root sessions own separate swarms (83dbc36dc);
@@ -242,6 +246,8 @@ async fn communicate_run_plan_with_empty_plan_returns_inline_even_in_background_
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+    // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
+    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
 
@@ -297,6 +303,8 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+    // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
+    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
     // Independently created root sessions own separate swarms (83dbc36dc);
@@ -382,6 +390,8 @@ async fn communicate_spawn_reports_completion_back_to_spawner() {
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+    // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
+    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
 
@@ -460,6 +470,8 @@ async fn communicate_spawn_with_prompt_and_summary_work_end_to_end() {
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+    // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
+    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
 
@@ -562,6 +574,8 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+    // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
+    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
     // Independently created root sessions own separate swarms (83dbc36dc);
@@ -653,6 +667,33 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     // keeps whole-swarm reach as an escape hatch. The peer was not spawned by
     // the sender, so promote the sender to coordinator (self-promotion is
     // allowed while the swarm has no coordinator) so the broadcast reaches it.
+    // A non-coordinator `message` with no target is a mistake (forgot
+    // to_session): it errors instead of broadcasting. The peer is a plain
+    // agent here; the sender was elected coordinator on join.
+    let peer_ctx = test_ctx(&peer_session, &repo_dir);
+    let untargeted = tool
+        .execute(json!({"action": "message", "message": "oops"}), peer_ctx.clone())
+        .await;
+    assert!(
+        untargeted
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.to_string().contains("needs a target")),
+        "worker message without a target should be rejected: {:?}",
+        untargeted.map(|o| o.output)
+    );
+    // The same worker can still reach the coordinator directly.
+    tool.execute(
+        json!({"action": "message", "message": "hi boss", "to_session": sender_session.clone()}),
+        peer_ctx,
+    )
+    .await
+    .expect("worker message with a target still works");
+    sender
+        .next_message_notification(Duration::from_secs(5))
+        .await
+        .expect("coordinator should receive the worker's message");
+
     let assign_output = tool
         .execute(
             json!({
@@ -668,6 +709,20 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
         assign_output.output.contains("Assigned role 'coordinator'"),
         "unexpected assign_role output: {}",
         assign_output.output
+    );
+
+    // The coordinator may message everyone by omitting the target.
+    let to_all = tool
+        .execute(json!({"action": "message", "message": "hello-all"}), ctx.clone())
+        .await
+        .expect("coordinator message without target should broadcast");
+    assert!(to_all.output.contains("Broadcast sent"), "{}", to_all.output);
+    assert_eq!(
+        peer.next_message_notification(Duration::from_secs(5))
+            .await
+            .expect("peer should receive the coordinator's message")
+            .as_deref(),
+        Some("broadcast")
     );
 
     // `broadcast` should reach the peer scoped as a broadcast even though no

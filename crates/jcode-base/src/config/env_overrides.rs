@@ -39,6 +39,12 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_EFFORT_DECREASE_KEY") {
             self.keybindings.effort_decrease = v;
         }
+        if let Ok(v) = std::env::var("JCODE_SPEED_INCREASE_KEY") {
+            self.keybindings.speed_increase = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_SPEED_DECREASE_KEY") {
+            self.keybindings.speed_decrease = v;
+        }
         if let Ok(v) = std::env::var("JCODE_CENTERED_TOGGLE_KEY") {
             self.keybindings.centered_toggle = v;
         }
@@ -78,11 +84,17 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_DIAGRAM_PANE_TOGGLE_KEY") {
             self.keybindings.diagram_pane_toggle = v;
         }
+        if let Ok(v) = std::env::var("JCODE_DIAGRAM_PANE_VISIBILITY_TOGGLE_KEY") {
+            self.keybindings.diagram_pane_visibility_toggle = v;
+        }
         if let Ok(v) = std::env::var("JCODE_TYPING_SCROLL_LOCK_TOGGLE_KEY") {
             self.keybindings.typing_scroll_lock_toggle = v;
         }
         if let Ok(v) = std::env::var("JCODE_DIFF_MODE_CYCLE_KEY") {
             self.keybindings.diff_mode_cycle = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_COMMIT_LOG_KEY") {
+            self.keybindings.commit_log = v;
         }
         if let Ok(v) = std::env::var("JCODE_INFO_WIDGET_TOGGLE_KEY") {
             self.keybindings.info_widget_toggle = v;
@@ -142,6 +154,11 @@ impl Config {
             && let Ok(parsed) = v.trim().parse::<usize>()
         {
             self.tools.mcp_tools_token_threshold = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_CODEMODE")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.tools.codemode = parsed;
         }
 
         // ACP adapter
@@ -270,6 +287,11 @@ impl Config {
                 self.display.external_sessions = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_RESUME_PROJECT_SCOPE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.resume_project_scope = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_PERFORMANCE") {
             let trimmed = v.trim().to_lowercase();
             if matches!(trimmed.as_str(), "auto" | "full" | "reduced" | "minimal") {
@@ -389,20 +411,9 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        for (key, target) in [
-            (
-                "JCODE_SWARM_ROOT_EFFORT",
-                &mut self.agents.swarm_root_effort,
-            ),
-            (
-                "JCODE_SWARM_DEEP_ROOT_EFFORT",
-                &mut self.agents.swarm_deep_root_effort,
-            ),
-        ] {
-            if let Ok(value) = std::env::var(key) {
-                let value = value.trim();
-                *target = (!value.is_empty()).then(|| value.to_string());
-            }
+        if let Ok(value) = std::env::var("JCODE_SWARM_ROOT_EFFORT") {
+            let value = value.trim();
+            self.agents.swarm_root_effort = (!value.is_empty()).then(|| value.to_string());
         }
         if let Ok(v) = std::env::var("JCODE_SWARM_SPAWN_MODE") {
             if let Some(parsed) = SwarmSpawnMode::parse(&v) {
@@ -419,8 +430,33 @@ impl Config {
                 self.agents.swarm_max_concurrent_agents = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SWARM_STALL_AFTER_SECS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.agents.swarm_stall_after_secs = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SWARM_STALL_NUDGE") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => self.agents.swarm_stall_nudge = true,
+                "0" | "false" | "no" | "off" => self.agents.swarm_stall_nudge = false,
+                _ => {}
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
+        }
+        for (key, target) in [
+            ("JCODE_MEMORY_JEV_MODEL", &mut self.agents.memory_jev_model),
+            (
+                "JCODE_BROWSER_JEV_MODEL",
+                &mut self.agents.browser_jev_model,
+            ),
+            ("JCODE_VOICE_JEV_MODEL", &mut self.agents.voice_jev_model),
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                *target = (!value.is_empty()).then(|| value.to_string());
+            }
         }
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
@@ -519,6 +555,15 @@ impl Config {
             self.hooks.pre_tool_transform_timeout_ms = parsed;
         }
         hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
+        hook_env_override(
+            &mut self.hooks.post_tool_feedback,
+            "JCODE_HOOK_POST_TOOL_FEEDBACK",
+        );
+        if let Ok(v) = std::env::var("JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.hooks.post_tool_feedback_timeout_ms = parsed;
+        }
         if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 self.hooks.pre_tool_timeout_ms = parsed;
@@ -559,6 +604,22 @@ impl Config {
             && !v.trim().is_empty()
         {
             self.websearch.searxng_url = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_PREFER_NATIVE")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.websearch.prefer_native = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_MAX_USES")
+            && let Ok(parsed) = v.trim().parse::<u32>()
+        {
+            self.websearch.native_max_uses = (parsed > 0).then_some(parsed);
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_ALLOWED_DOMAINS") {
+            self.websearch.native_allowed_domains = parse_env_list(&v);
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_BLOCKED_DOMAINS") {
+            self.websearch.native_blocked_domains = parse_env_list(&v);
         }
 
         if let Ok(v) = std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES") {
@@ -748,6 +809,17 @@ impl Config {
             }
         }
 
+        if let Ok(v) = std::env::var("JCODE_HIBERNATION_IDLE_SECS") {
+            if let Ok(seconds) = v.trim().parse::<u64>() {
+                self.session.hibernation_idle_secs = seconds;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_HIBERNATION_MODE") {
+            if let Some(mode) = jcode_config_types::HibernationMode::parse(&v) {
+                self.session.hibernation_mode = mode;
+            }
+        }
+
         // Power management
         if let Ok(v) = std::env::var("JCODE_PREVENT_SLEEP_WHILE_STREAMING") {
             if let Some(parsed) = parse_env_bool(&v) {
@@ -840,6 +912,11 @@ impl Config {
             && parsed > 0
         {
             self.provider.retry_backoff_cap_secs = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_REQUEST_COMPRESSION")
+            && !v.trim().is_empty()
+        {
+            self.provider.request_compression = v.trim().to_ascii_lowercase();
         }
 
         // Copilot premium mode: env var overrides config

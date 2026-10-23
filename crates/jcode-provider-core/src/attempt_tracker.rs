@@ -31,6 +31,7 @@ use tokio::task::JoinHandle;
 fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
     match event {
         StreamEvent::TextDelta(_)
+        | StreamEvent::TextSuffixReplace { .. }
         | StreamEvent::TextDone
         | StreamEvent::ToolUseStart { .. }
         | StreamEvent::ToolInputDelta(_)
@@ -46,7 +47,8 @@ fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
         | StreamEvent::OpenAIReasoning { .. }
         | StreamEvent::MessageEnd { .. }
         | StreamEvent::Compaction { .. }
-        | StreamEvent::NativeToolCall { .. } => true,
+        | StreamEvent::NativeToolCall { .. }
+        | StreamEvent::ProviderNative { .. } => true,
         StreamEvent::ThinkingStart
         | StreamEvent::ThinkingEnd
         | StreamEvent::ThinkingDone { .. }
@@ -55,6 +57,7 @@ fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
         | StreamEvent::ConnectionType { .. }
         | StreamEvent::ConnectionPhase { .. }
         | StreamEvent::StatusDetail { .. }
+        | StreamEvent::ServiceTier { .. }
         | StreamEvent::Error { .. }
         | StreamEvent::SessionId(_)
         | StreamEvent::UpstreamProvider { .. } => false,
@@ -73,9 +76,15 @@ impl AttemptGuard {
     /// Wait for all events the attempt buffered to be forwarded to the outer
     /// sender (preserving ordering relative to any subsequent rollback event),
     /// then report whether any replay-visible output was emitted.
-    pub async fn finish(self) -> bool {
-        let _ = self.forwarder.await;
+    pub async fn finish(mut self) -> bool {
+        let _ = (&mut self.forwarder).await;
         self.saw_output.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for AttemptGuard {
+    fn drop(&mut self) {
+        self.forwarder.abort();
     }
 }
 
@@ -94,7 +103,15 @@ pub fn track_attempt_output(
     let saw_output = Arc::new(AtomicBool::new(false));
     let saw_output_writer = Arc::clone(&saw_output);
     let forwarder = tokio::spawn(async move {
-        while let Some(item) = attempt_rx.recv().await {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = outer.closed() => break,
+                item = attempt_rx.recv() => match item {
+                    Some(item) => item,
+                    None => break,
+                },
+            };
             if let Ok(event) = &item
                 && stream_event_is_replay_visible(event)
             {
@@ -132,6 +149,28 @@ pub fn retry_backoff_delay(attempt: u32, base_ms: u64) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tracker_cancellation_consumer_drop_closes_idle_attempt() {
+        let (outer_tx, outer_rx) = mpsc::channel::<Result<StreamEvent>>(1);
+        let (attempt_tx, guard) = track_attempt_output(outer_tx);
+        drop(outer_rx);
+        tokio::time::timeout(std::time::Duration::from_millis(100), attempt_tx.closed())
+            .await
+            .expect("consumer drop must close the attempt even without another event");
+        drop(attempt_tx);
+        assert!(!guard.finish().await);
+    }
+
+    #[tokio::test]
+    async fn tracker_cancellation_guard_drop_stops_idle_forwarder() {
+        let (outer_tx, _outer_rx) = mpsc::channel::<Result<StreamEvent>>(1);
+        let (attempt_tx, guard) = track_attempt_output(outer_tx);
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_millis(100), attempt_tx.closed())
+            .await
+            .expect("abandoning an attempt must not leave a detached forwarder");
+    }
 
     #[test]
     fn text_and_tool_events_are_replay_visible() {

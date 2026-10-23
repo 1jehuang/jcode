@@ -426,6 +426,8 @@ mod tests {
             confidence_history: Vec::new(),
             blocked_by: blocked_by.iter().map(|s| s.to_string()).collect(),
             assigned_to: None,
+            stage: None,
+            details: None,
         }
     }
 

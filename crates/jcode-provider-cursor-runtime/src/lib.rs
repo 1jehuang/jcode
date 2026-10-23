@@ -14,17 +14,20 @@ use chrono::Utc;
 use jcode_base::auth::cursor as cursor_auth;
 use jcode_base::provider::cursor::{AVAILABLE_MODELS, DEFAULT_MODEL};
 use jcode_message_types::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
-use jcode_provider_core::{EventStream, Provider};
+use jcode_provider_core::{EventStream, NativeToolResult, NativeToolResultSender, Provider};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 mod agent_transport;
+pub mod wire;
 
 const MODELS_API_URL: &str = "https://api.cursor.com/v0/models";
+const MAX_AGENT_MODELS_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PROMPT_CHARS: usize = 120_000;
 
 fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
@@ -86,7 +89,7 @@ fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
                 ContentBlock::OpenAICompaction { .. } => {
                     out.push_str("[openai native compaction]\n");
                 }
-                ContentBlock::ToolReference { .. } => {}
+                ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
             }
         }
         out.push('\n');
@@ -111,6 +114,126 @@ fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
 struct CursorModelsResponse {
     #[serde(default)]
     models: Vec<String>,
+}
+
+/// Decode the model ids returned by Cursor's native
+/// `agent.v1.AgentService/GetUsableModels` endpoint.
+///
+/// Cursor's CLI uses a raw protobuf unary response rather than the Connect
+/// streaming envelope used by `Run`. The response contains repeated
+/// `ModelDetails` messages in field 1, and `ModelDetails.model_id` is field 1.
+/// Keep this parser deliberately small and forward-compatible: unknown fields
+/// are skipped, while malformed/truncated input is rejected.
+fn decode_agent_models(mut payload: &[u8]) -> Result<Vec<String>> {
+    if payload.len() >= 5 && (payload[0] == 0 || payload[0] == 1) {
+        let framed_len =
+            u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize;
+        if framed_len == payload.len().saturating_sub(5) {
+            payload = &payload[5..];
+        }
+    }
+
+    let mut models = Vec::new();
+    for field in protobuf_fields(payload)? {
+        if field.number != 1 || field.wire_type != 2 {
+            continue;
+        }
+        let model_id = protobuf_fields(field.data)?
+            .into_iter()
+            .find(|nested| nested.number == 1 && nested.wire_type == 2)
+            .and_then(|nested| std::str::from_utf8(nested.data).ok())
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        if let Some(model) = model_id
+            && !models.iter().any(|known| known == model)
+        {
+            models.push(model.to_string());
+        }
+    }
+    Ok(models)
+}
+
+#[derive(Debug)]
+struct ProtobufField<'a> {
+    number: u64,
+    wire_type: u8,
+    data: &'a [u8],
+}
+
+fn protobuf_fields(mut payload: &[u8]) -> Result<Vec<ProtobufField<'_>>> {
+    let mut fields = Vec::new();
+    while !payload.is_empty() {
+        let (tag, rest) = read_protobuf_varint(payload)?;
+        payload = rest;
+        let number = tag >> 3;
+        let wire_type = (tag & 7) as u8;
+        if number == 0 {
+            anyhow::bail!("Cursor model catalog contained an invalid protobuf field number");
+        }
+        match wire_type {
+            0 => {
+                let (_, rest) = read_protobuf_varint(payload)?;
+                payload = rest;
+                fields.push(ProtobufField {
+                    number,
+                    wire_type,
+                    data: &[],
+                });
+            }
+            1 => {
+                if payload.len() < 8 {
+                    anyhow::bail!("Cursor model catalog protobuf was truncated");
+                }
+                payload = &payload[8..];
+                fields.push(ProtobufField {
+                    number,
+                    wire_type,
+                    data: &[],
+                });
+            }
+            2 => {
+                let (length, rest) = read_protobuf_varint(payload)?;
+                let length = usize::try_from(length)
+                    .context("Cursor model catalog protobuf length overflowed")?;
+                if rest.len() < length {
+                    anyhow::bail!("Cursor model catalog protobuf was truncated");
+                }
+                fields.push(ProtobufField {
+                    number,
+                    wire_type,
+                    data: &rest[..length],
+                });
+                payload = &rest[length..];
+            }
+            5 => {
+                if payload.len() < 4 {
+                    anyhow::bail!("Cursor model catalog protobuf was truncated");
+                }
+                payload = &payload[4..];
+                fields.push(ProtobufField {
+                    number,
+                    wire_type,
+                    data: &[],
+                });
+            }
+            _ => anyhow::bail!("Cursor model catalog used unsupported protobuf wire type"),
+        }
+    }
+    Ok(fields)
+}
+
+fn read_protobuf_varint(payload: &[u8]) -> Result<(u64, &[u8])> {
+    let mut value = 0u64;
+    for (index, byte) in payload.iter().copied().enumerate() {
+        if index >= 10 {
+            anyhow::bail!("Cursor model catalog protobuf varint overflowed");
+        }
+        value |= u64::from(byte & 0x7f) << (index * 7);
+        if byte & 0x80 == 0 {
+            return Ok((value, &payload[index + 1..]));
+        }
+    }
+    anyhow::bail!("Cursor model catalog protobuf varint was truncated")
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -144,10 +267,21 @@ fn merge_cursor_models(dynamic: &[String], current: &str) -> Vec<String> {
     merged
 }
 
-async fn fetch_available_models(client: &reqwest::Client, api_key: &str) -> Result<Vec<String>> {
-    let response = client
-        .get(MODELS_API_URL)
-        .basic_auth(api_key, Some(""))
+enum CursorModelsAuth<'a> {
+    ApiKey(&'a str),
+    Bearer(&'a str),
+}
+
+async fn fetch_available_models(
+    client: &reqwest::Client,
+    auth: CursorModelsAuth<'_>,
+) -> Result<Vec<String>> {
+    let request = client.get(MODELS_API_URL);
+    let request = match auth {
+        CursorModelsAuth::ApiKey(api_key) => request.basic_auth(api_key, Some("")),
+        CursorModelsAuth::Bearer(access_token) => request.bearer_auth(access_token),
+    };
+    let response = request
         .send()
         .await
         .context("Failed to fetch Cursor model catalog")?;
@@ -174,14 +308,128 @@ async fn fetch_available_models(client: &reqwest::Client, api_key: &str) -> Resu
         .collect())
 }
 
+async fn fetch_agent_models(client: &reqwest::Client, access_token: &str) -> Result<Vec<String>> {
+    let host = agent_transport::agent_host();
+    let url = format!("https://{host}/agent.v1.AgentService/GetUsableModels");
+    let response = client
+        .post(url)
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("content-type", "application/proto")
+        .header("connect-protocol-version", "1")
+        .header("x-ghost-mode", "true")
+        .header("x-cursor-client-type", "cli")
+        .header(
+            "x-cursor-client-version",
+            agent_transport::cli_client_version(),
+        )
+        .header(
+            "x-session-id",
+            cursor_auth::session_id_for_access_token(access_token),
+        )
+        .body(Vec::<u8>::new())
+        .send()
+        .await
+        .context("Failed to fetch Cursor AgentService model catalog")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = jcode_base::util::http_error_body(response, "HTTP error").await;
+        anyhow::bail!(
+            "Cursor AgentService model catalog request failed ({}): {}",
+            status,
+            body.trim()
+        );
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_AGENT_MODELS_RESPONSE_BYTES)
+    {
+        anyhow::bail!("Cursor AgentService model catalog response exceeded 4 MiB");
+    }
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed to read Cursor AgentService model catalog")?
+    {
+        if body.len() as u64 + chunk.len() as u64 > MAX_AGENT_MODELS_RESPONSE_BYTES {
+            anyhow::bail!("Cursor AgentService model catalog response exceeded 4 MiB");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    decode_agent_models(&body)
+}
+
 fn runtime_cursor_api_key() -> Option<String> {
     jcode_base::auth::cursor::load_api_key().ok()
+}
+
+#[derive(Clone, Default)]
+pub struct ToolResultMultiplexer {
+    routes: Arc<Mutex<HashMap<String, mpsc::Sender<NativeToolResult>>>>,
+}
+
+impl ToolResultMultiplexer {
+    pub fn new() -> Self {
+        Self {
+            routes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn register(&self, stream_uuid: &str, tx: mpsc::Sender<NativeToolResult>) -> StreamGuard {
+        if let Ok(mut routes) = self.routes.lock() {
+            routes.insert(stream_uuid.to_string(), tx);
+        }
+        StreamGuard {
+            stream_uuid: stream_uuid.to_string(),
+            routes: self.routes.clone(),
+        }
+    }
+
+    pub fn dispatch(&self, result: NativeToolResult) {
+        let stream_uuid = result
+            .request_id
+            .split(':')
+            .next()
+            .unwrap_or(&result.request_id);
+        let sender = self
+            .routes
+            .lock()
+            .ok()
+            .and_then(|routes| routes.get(stream_uuid).cloned());
+        if let Some(sender) = sender {
+            tokio::spawn(async move {
+                let _ = sender.send(result).await;
+            });
+        }
+    }
+}
+
+pub struct StreamGuard {
+    stream_uuid: String,
+    routes: Arc<Mutex<HashMap<String, mpsc::Sender<NativeToolResult>>>>,
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        if let Ok(mut routes) = self.routes.lock() {
+            routes.remove(&self.stream_uuid);
+        }
+    }
 }
 
 pub struct CursorCliProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
+    /// `/fast` override. `None` keeps the model's own default (Composer runs
+    /// Fast, other models run Standard unless their id carries `-fast`).
+    fast: Arc<RwLock<Option<bool>>>,
+    multiplexer: ToolResultMultiplexer,
+    result_tx: NativeToolResultSender,
+    loop_started: Arc<std::sync::atomic::AtomicBool>,
+    result_rx: Arc<Mutex<Option<mpsc::Receiver<NativeToolResult>>>>,
 }
 
 impl CursorCliProvider {
@@ -224,12 +472,35 @@ impl CursorCliProvider {
         }
     }
 
+    fn ensure_forwarder_loop(&self) {
+        if !self
+            .loop_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+            && let Ok(mut rx_opt) = self.result_rx.lock()
+            && let Some(mut rx) = rx_opt.take()
+        {
+            let multiplexer = self.multiplexer.clone();
+            tokio::spawn(async move {
+                while let Some(result) = rx.recv().await {
+                    multiplexer.dispatch(result);
+                }
+            });
+        }
+    }
+
     pub fn new() -> Self {
         let model = std::env::var("JCODE_CURSOR_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
+        let multiplexer = ToolResultMultiplexer::new();
+        let (result_tx, result_rx) = mpsc::channel::<NativeToolResult>(64);
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
+            fast: Arc::new(RwLock::new(None)),
+            multiplexer,
+            result_tx,
+            loop_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            result_rx: Arc::new(Mutex::new(Some(result_rx))),
         };
         provider.seed_cached_catalog();
         provider
@@ -247,9 +518,9 @@ impl Provider for CursorCliProvider {
     async fn complete(
         &self,
         messages: &[Message],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         system: &str,
-        _resume_session_id: Option<&str>,
+        resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let prompt = build_cli_prompt(system, messages);
         let model = self
@@ -275,14 +546,45 @@ impl Provider for CursorCliProvider {
             Some(0),
             &[
                 ("logical_message_count", messages.len().to_string()),
-                ("ignored_tool_count", _tools.len().to_string()),
+                ("advertised_tool_count", tools.len().to_string()),
             ],
         );
         let client = self.client.clone();
+        let resume_session_id = resume_session_id.map(str::to_string);
         let (tx, rx) = mpsc::channel::<Result<jcode_message_types::StreamEvent>>(100);
+        let stream_uuid = uuid::Uuid::new_v4().to_string();
+        let (tool_result_tx, tool_result_rx) = mpsc::channel::<NativeToolResult>(16);
+        let stream_guard = self.multiplexer.register(&stream_uuid, tool_result_tx);
+        let tools = tools.to_vec();
+        let system = system.to_string();
+        self.ensure_forwarder_loop();
+        let fast_override = *self
+            .fast
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model_catalog = self
+            .fetched_models
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
 
         tokio::spawn(async move {
-            let result = run_native_text_command(client, tx.clone(), &prompt, &model).await;
+            let _stream_guard = stream_guard;
+            let result = run_native_text_command(
+                client,
+                tx.clone(),
+                &prompt,
+                &model,
+                fast_override,
+                &model_catalog,
+                None,
+                resume_session_id.as_deref(),
+                &stream_uuid,
+                &tools,
+                &system,
+                tool_result_rx,
+            )
+            .await;
 
             if let Err(err) = result {
                 let _ = tx.send(Err(err)).await;
@@ -350,11 +652,37 @@ impl Provider for CursorCliProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let Some(api_key) = runtime_cursor_api_key() else {
-            return Ok(());
+        // Prefer the API key endpoint for backwards compatibility. When no
+        // key is configured, use the same managed/IDE OAuth resolution as the
+        // native AgentService transport. This is read-only and failures retain
+        // the static and persisted fallback catalog.
+        let fetched = if let Some(api_key) = runtime_cursor_api_key() {
+            fetch_available_models(&self.client, CursorModelsAuth::ApiKey(&api_key)).await
+        } else {
+            match cursor_auth::resolve_direct_tokens(&self.client).await {
+                Ok(tokens) => match fetch_agent_models(&self.client, &tokens.access_token).await {
+                    Ok(models) if !models.is_empty() => Ok(models),
+                    Ok(_) => {
+                        fetch_available_models(
+                            &self.client,
+                            CursorModelsAuth::Bearer(&tokens.access_token),
+                        )
+                        .await
+                    }
+                    Err(agent_error) => fetch_available_models(
+                        &self.client,
+                        CursorModelsAuth::Bearer(&tokens.access_token),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("AgentService discovery also failed: {agent_error:#}")
+                    }),
+                },
+                Err(error) => Err(error).context("no Cursor API key or OAuth credentials"),
+            }
         };
 
-        match fetch_available_models(&self.client, &api_key).await {
+        match fetched {
             Ok(models) => {
                 if !models.is_empty() {
                     jcode_base::logging::info(&format!(
@@ -380,7 +708,7 @@ impl Provider for CursorCliProvider {
     }
 
     fn handles_tools_internally(&self) -> bool {
-        false
+        true
     }
 
     fn supports_compaction(&self) -> bool {
@@ -395,25 +723,112 @@ impl Provider for CursorCliProvider {
             client: self.client.clone(),
             model: Arc::new(RwLock::new(self.model())),
             fetched_models: self.fetched_models.clone(),
+            fast: Arc::new(RwLock::new(
+                *self
+                    .fast
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            )),
+            multiplexer: self.multiplexer.clone(),
+            result_tx: self.result_tx.clone(),
+            loop_started: self.loop_started.clone(),
+            result_rx: self.result_rx.clone(),
         })
+    }
+
+    fn native_result_sender(&self) -> Option<NativeToolResultSender> {
+        self.ensure_forwarder_loop();
+        Some(self.result_tx.clone())
+    }
+
+    /// Cursor carries speed as a separate `fast` model param rather than as a
+    /// service tier, but `/fast` maps onto it naturally: `priority` pins Fast,
+    /// `off` pins Standard. Report the effective state for the current model.
+    fn service_tier(&self) -> Option<String> {
+        let fast_override = *self
+            .fast
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        agent_transport::resolve_model_id(&self.model(), fast_override)
+            .fast
+            .then(|| "priority".to_string())
+    }
+
+    fn set_service_tier(&self, service_tier: &str) -> Result<()> {
+        let value = match service_tier.trim().to_ascii_lowercase().as_str() {
+            "priority" | "fast" | "on" | "true" => Some(true),
+            "off" | "standard" | "false" | "none" => Some(false),
+            "default" | "auto" | "" => None,
+            other => anyhow::bail!(
+                "Unsupported Cursor speed '{other}'. Use 'priority' (fast) or 'off' (standard)."
+            ),
+        };
+        *self
+            .fast
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
+        Ok(())
+    }
+
+    fn available_service_tiers(&self) -> Vec<&'static str> {
+        vec!["priority", "off"]
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_native_text_command(
     client: reqwest::Client,
     tx: mpsc::Sender<Result<StreamEvent>>,
     prompt: &str,
     model: &str,
+    fast_override: Option<bool>,
+    model_catalog: &[String],
+    _account_label: Option<&str>,
+    resume_session_id: Option<&str>,
+    stream_uuid: &str,
+    tools: &[ToolDefinition],
+    system: &str,
+    mut tool_result_rx: mpsc::Receiver<NativeToolResult>,
 ) -> Result<()> {
     let tokens = cursor_auth::resolve_direct_tokens(&client).await?;
+
+    // Cursor rejects some bare base ids (`grok-4.6`, `claude-opus-5-5`) and only
+    // serves the exact ids in its catalog, so model resolution needs it. The
+    // catalog is normally prefetched in the background, but a first turn can
+    // race that. Fetch it inline (bounded) when we have nothing yet.
+    let fetched_catalog;
+    let model_catalog = if model_catalog.is_empty() {
+        fetched_catalog = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fetch_agent_models(&client, &tokens.access_token),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+        fetched_catalog.as_slice()
+    } else {
+        model_catalog
+    };
 
     // The current Cursor agent transport (`agent.v1.AgentService/Run`) is a
     // paced bidirectional Connect/HTTP2 stream. The old
     // `ChatService/StreamUnifiedChatWithTools` endpoint was decommissioned for
     // API-key / CLI tokens and now returns "Update Required"/payment errors.
-    let first_result =
-        crate::agent_transport::run_agent_turn(&tokens.access_token, prompt, model, tx.clone())
-            .await;
+    let first_result = crate::agent_transport::run_agent_turn(
+        &tokens.access_token,
+        prompt,
+        model,
+        fast_override,
+        model_catalog,
+        resume_session_id,
+        stream_uuid,
+        tools,
+        system,
+        &mut tool_result_rx,
+        tx.clone(),
+    )
+    .await;
 
     match first_result {
         Ok(()) => Ok(()),
@@ -423,7 +838,20 @@ async fn run_native_text_command(
                 .with_context(|| {
                     format!("Cursor token was rejected and refresh also failed after: {err:#}")
                 })?;
-            crate::agent_transport::run_agent_turn(&refreshed.access_token, prompt, model, tx).await
+            crate::agent_transport::run_agent_turn(
+                &refreshed.access_token,
+                prompt,
+                model,
+                fast_override,
+                model_catalog,
+                resume_session_id,
+                stream_uuid,
+                tools,
+                system,
+                &mut tool_result_rx,
+                tx,
+            )
+            .await
         }
         Err(err) => Err(err),
     }

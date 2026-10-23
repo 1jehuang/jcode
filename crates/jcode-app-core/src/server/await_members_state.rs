@@ -165,8 +165,29 @@ pub(super) fn load_state(key: &str) -> Option<PersistedAwaitMembersState> {
     load_json_state(AWAIT_MEMBERS_DIR, key, is_stale)
 }
 
-pub(super) fn save_state(state: &PersistedAwaitMembersState) {
-    save_json_state(AWAIT_MEMBERS_DIR, &state.key, state, "await_members state")
+pub(crate) fn save_state(state: &PersistedAwaitMembersState) {
+    save_json_state(AWAIT_MEMBERS_DIR, &state.key, state, "await_members state");
+    invalidate_pending_scan();
+}
+
+/// Snapshot of the await-state directory, reused while the directory is
+/// unchanged. Every resume History asks for one session's pending awaits, and
+/// rescanning hundreds of state files per client during a reconnect storm cost
+/// tens of ms each. Writes in this process invalidate it directly, since the
+/// directory mtime alone can miss same-tick updates.
+struct PendingScan {
+    dir_mtime: Option<std::time::SystemTime>,
+    built_at: std::time::Instant,
+    states: Vec<PersistedAwaitMembersState>,
+}
+
+static PENDING_SCAN: std::sync::Mutex<Option<PendingScan>> = std::sync::Mutex::new(None);
+const PENDING_SCAN_TTL: Duration = Duration::from_secs(5);
+
+fn invalidate_pending_scan() {
+    *PENDING_SCAN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
 #[expect(
@@ -250,6 +271,33 @@ pub(super) fn all_pending_await_members() -> Vec<PersistedAwaitMembersState> {
 /// be finalized with a timeout instead of silently dropping the promised
 /// notify/wake.
 pub(super) fn all_pending_await_members_including_expired() -> Vec<PersistedAwaitMembersState> {
+    let dir_mtime = std::fs::metadata(state_dir(AWAIT_MEMBERS_DIR))
+        .and_then(|meta| meta.modified())
+        .ok();
+    {
+        let guard = PENDING_SCAN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(scan) = guard.as_ref()
+            && scan.dir_mtime.is_some()
+            && scan.dir_mtime == dir_mtime
+            && scan.built_at.elapsed() < PENDING_SCAN_TTL
+        {
+            return scan.states.clone();
+        }
+    }
+    let states = scan_pending_await_members_including_expired();
+    *PENDING_SCAN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingScan {
+        dir_mtime,
+        built_at: std::time::Instant::now(),
+        states: states.clone(),
+    });
+    states
+}
+
+fn scan_pending_await_members_including_expired() -> Vec<PersistedAwaitMembersState> {
     let dir = state_dir(AWAIT_MEMBERS_DIR);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

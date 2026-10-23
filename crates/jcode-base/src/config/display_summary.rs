@@ -23,6 +23,8 @@ impl Config {
 - Model prev: `{}`
 - Effort increase: `{}`
 - Effort decrease: `{}`
+- Speed increase: `{}`
+- Speed decrease: `{}`
 - Centered toggle: `{}`
 - Prompt up: `{}`
 - Prompt down: `{}`
@@ -82,6 +84,7 @@ impl Config {
 - Disable base tools: {}
 - MCP tools: {}
 - MCP auto threshold: {} tokens
+- Codemode: {}
 
 **Provider:**
 - Default model: {}
@@ -98,7 +101,6 @@ impl Config {
 - Swarm / subagent: {}
 - Swarm spawn mode: {}
 - Swarm root effort: {}
-- Deep swarm root effort: {}
 - Spawn hook: {}
 - Review: {}
 - Judge: {}
@@ -143,6 +145,8 @@ impl Config {
             self.keybindings.model_switch_prev,
             self.keybindings.effort_increase,
             self.keybindings.effort_decrease,
+            self.keybindings.speed_increase,
+            self.keybindings.speed_decrease,
             self.keybindings.centered_toggle,
             self.keybindings.scroll_prompt_up,
             self.keybindings.scroll_prompt_down,
@@ -248,6 +252,7 @@ impl Config {
             self.tools.disable_base_tools,
             self.tools.mcp_tools.as_str(),
             self.tools.mcp_tools_token_threshold,
+            self.tools.codemode,
             self.provider
                 .default_model
                 .as_deref()
@@ -280,8 +285,7 @@ impl Config {
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
             self.agents.swarm_spawn_mode.as_str(),
-            self.agents.root_effort_for_swarm(false),
-            self.agents.root_effort_for_swarm(true),
+            self.agents.root_effort_for_swarm(),
             self.terminal
                 .spawn_hook
                 .as_deref()

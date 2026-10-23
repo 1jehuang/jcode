@@ -116,7 +116,9 @@ pub fn next_account_label() -> Result<String> {
     let auth = load_auth_file()?;
     Ok(crate::auth::account_store::next_account_label(
         ACCOUNT_LABEL_PREFIX,
-        auth.anthropic_accounts.len(),
+        auth.anthropic_accounts
+            .iter()
+            .map(|account| account.label.as_str()),
     ))
 }
 
@@ -297,6 +299,8 @@ pub fn jcode_path() -> Result<PathBuf> {
 
 /// Read the jcode auth file, auto-migrating from legacy format if needed.
 pub fn load_auth_file() -> Result<JcodeAuthFile> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let path = jcode_path()?;
     if !path.exists() {
         return Ok(JcodeAuthFile::default());
@@ -313,7 +317,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
     {
         crate::logging::info("Migrating legacy single-account auth.json to multi-account format");
         auth.anthropic_accounts.push(AnthropicAccount {
-            label: "default".to_string(),
+            label: primary_account_label(),
             access: legacy.access,
             refresh: legacy.refresh,
             expires: legacy.expires,
@@ -321,7 +325,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
             subscription_type: Some("max".to_string()),
             scopes: Vec::new(),
         });
-        auth.active_anthropic_account = Some("default".to_string());
+        auth.active_anthropic_account = Some(primary_account_label());
         let _ = save_auth_file(&auth);
     }
 
@@ -337,6 +341,8 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
 
 /// Write the jcode auth file (multi-account format).
 pub fn save_auth_file(auth: &JcodeAuthFile) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let auth_path = jcode_path()?;
 
     let clean = JcodeAuthFile {
@@ -368,6 +374,8 @@ pub fn active_account_label() -> Option<String> {
 
 /// Persist the active account choice to disk (and set the runtime override).
 pub fn set_active_account(label: &str) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
     crate::auth::account_store::set_active_account(
         label,
@@ -383,6 +391,8 @@ pub fn set_active_account(label: &str) -> Result<()> {
 
 /// Add or update an account. Returns the label used.
 pub fn upsert_account(account: AnthropicAccount) -> Result<String> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
     let label = crate::auth::account_store::upsert_account(
         ACCOUNT_LABEL_PREFIX,
@@ -398,6 +408,8 @@ pub fn upsert_account(account: AnthropicAccount) -> Result<String> {
 
 /// Remove an account by label.
 pub fn remove_account(label: &str) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
     let before = auth.anthropic_accounts.len();
     auth.anthropic_accounts.retain(|a| a.label != label);
@@ -420,6 +432,8 @@ pub fn remove_account(label: &str) -> Result<()> {
 
 /// Remove every stored Anthropic account in one write.
 pub fn clear_accounts() -> Result<usize> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
     let removed = auth.anthropic_accounts.len();
     auth.anthropic_accounts.clear();
@@ -431,6 +445,8 @@ pub fn clear_accounts() -> Result<usize> {
 
 /// Update tokens for a specific account (called after token refresh).
 pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: i64) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
     if let Some(account) = auth
         .anthropic_accounts
@@ -449,6 +465,8 @@ pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: 
 
 /// Update profile metadata for a specific account.
 pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
     if let Some(account) = auth
         .anthropic_accounts

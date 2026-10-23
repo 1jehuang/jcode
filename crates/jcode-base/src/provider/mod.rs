@@ -1,10 +1,14 @@
 mod accessors;
 mod account_failover;
+mod account_selection;
 pub mod activation;
 pub mod anthropic;
 pub mod antigravity;
 pub mod bedrock;
+mod catalog_memo;
 mod catalog_routes;
+pub use catalog_memo::bump_catalog_generation;
+use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
 pub mod catalog_scheduler;
 pub mod copilot;
 pub mod cursor;
@@ -27,14 +31,14 @@ mod routing;
 mod selection;
 mod startup;
 mod state;
+mod stream_start;
 mod stream_timeout;
 
 use crate::auth;
 use crate::message::{Message, ToolDefinition};
 use account_failover::{
     account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
-    same_provider_account_candidates, same_provider_account_failover_enabled,
-    set_account_override_for_provider,
+    same_provider_account_failover_enabled,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -44,6 +48,7 @@ use registry::ProviderRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
+pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
 pub use catalog_routes::{
     append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
     remote_model_is_server_copilot_only, remote_model_routes_fallback,
@@ -61,7 +66,8 @@ pub use jcode_provider_core::{
     RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
     explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
     inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
-    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
+    oauth_account_label, provider_from_model_key, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -91,6 +97,40 @@ pub(crate) use routing::{
 /// provider here at startup.
 static ACTIVE_PROVIDER: RwLock<Option<Arc<dyn Provider>>> = RwLock::new(None);
 
+/// Pick the newest usable Bedrock flagship from `routes`, if it should replace
+/// the placeholder default. Pure so it can be tested without AWS.
+fn bedrock_promoted_default(current: &str, routes: &[ModelRoute]) -> Option<String> {
+    if current != bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL {
+        return None;
+    }
+    let usable: Vec<&str> = routes
+        .iter()
+        .filter(|route| route.available)
+        .map(|route| route.model.as_str())
+        .collect();
+    crate::auth::lifecycle::preferred_model_for_provider("bedrock", &usable)
+        .filter(|best| best != current)
+}
+
+fn promote_bedrock_placeholder_default(bedrock: &bedrock::BedrockProvider) {
+    // The hardcoded known list has unverified availability (newer Claude ids
+    // often need an inference profile), so only promote from a real catalog.
+    if !bedrock.has_catalog() {
+        return;
+    }
+    if let Some(best) = bedrock_promoted_default(&bedrock.model(), &bedrock.model_routes()) {
+        bedrock.replace_placeholder_default_model(&best);
+    }
+}
+
+/// Build a Bedrock provider whose default is already the newest flagship in its
+/// cached catalog, instead of the stale placeholder.
+pub(crate) fn new_bedrock_provider() -> bedrock::BedrockProvider {
+    let provider = bedrock::BedrockProvider::new();
+    promote_bedrock_placeholder_default(&provider);
+    provider
+}
+
 /// Register the live agent provider so background helpers (memory sidecar) can
 /// reach whatever provider the user is actually running on. Safe to call more
 /// than once; the most recent registration wins.
@@ -118,6 +158,14 @@ pub use stream_timeout::{
     MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER, max_stream_idle_timeout, stream_idle_timeout,
     stream_idle_timeout_for_effort, stream_idle_timeout_multiplier_for_effort,
 };
+
+/// Effective `[provider] request_compression` policy. Unknown values fall back
+/// to `Auto` (the shipped default) rather than silently disabling.
+pub fn request_compression_mode() -> jcode_provider_core::request_compression::CompressionMode {
+    use jcode_provider_core::request_compression::CompressionMode;
+    CompressionMode::parse(&crate::config::config().provider.request_compression)
+        .unwrap_or(CompressionMode::Auto)
+}
 
 /// Whether reasoning deltas should be persisted in session history for later
 /// provider context reconstruction.
@@ -269,34 +317,22 @@ fn configured_standard_openrouter_profile_routes() -> Vec<ModelRoute> {
         .collect()
 }
 
-pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Result<()> {
-    match provider.set_model(model) {
-        Ok(()) => Ok(()),
-        Err(first_err) => {
-            let first_message = first_err.to_string();
-            crate::logging::auth_event(
-                "auth_changed_retry_after_set_model_failure",
-                provider.name(),
-                &[("reason", first_message.as_str())],
-            );
-            // Use the preserve-current-provider variant: this is a retry for an
-            // already-open session, so refreshing auth from disk must NOT swap a
-            // user-defined named OpenAI-compatible profile slot for a generic
-            // OpenRouter runtime (which would lose `profile_id` and re-introduce
-            // the `<profile>:<model>` prefix on the wire). See #408.
-            provider.on_auth_changed_preserve_current_provider();
-            provider.set_model(model).map_err(|second_err| {
-                anyhow::anyhow!(
-                    "{} (retried after reloading auth from disk: {})",
-                    first_message,
-                    second_err
-                )
-            })
-        }
+/// Strip an explicit Jcode subscription prefix (`jcode:` or
+/// `jcode-subscription:`) from a model spec.
+pub(crate) fn jcode_subscription_model_prefix(model: &str) -> Option<&str> {
+    let (prefix, rest) = model.split_once(':')?;
+    let prefix = prefix.trim();
+    if !(prefix.eq_ignore_ascii_case("jcode") || prefix.eq_ignore_ascii_case("jcode-subscription"))
+    {
+        return None;
     }
+    let rest = rest.trim();
+    (!rest.is_empty()).then_some(rest)
 }
 
 use self::dispatch::CompletionMode;
+
+mod session_restore;
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,
     ModelCatalogHttpStatus, OpenAIModelCatalog, anthropic_catalog_scope_for_route,
@@ -320,15 +356,27 @@ pub use self::models::{
     populate_account_models, populate_anthropic_models, populate_anthropic_models_for_scope,
     populate_context_limits, populate_context_limits_from_config,
     populate_context_limits_from_config_value, provider_for_model, provider_for_model_with_hint,
-    provider_unavailability_detail_for_account, record_model_unavailable_for_account,
-    record_provider_unavailable_for_account, refresh_openai_model_catalog_in_background,
+    provider_unavailability_detail_for_account, provider_unavailability_detail_for_account_label,
+    record_model_unavailable_for_account, record_provider_unavailable_for_account,
+    record_provider_unavailable_for_account_label, refresh_openai_model_catalog_in_background,
     resolve_model_capabilities, should_refresh_anthropic_model_catalog,
     should_refresh_anthropic_model_catalog_for_scope, should_refresh_openai_model_catalog,
+};
+pub use self::models::{
+    begin_openai_model_catalog_refresh_for_scope, cached_openai_model_ids_for_scope,
+    cached_openai_reasoning_efforts_for_scope, cached_openai_service_tiers_for_scope,
+    clear_model_unavailable_for_scope, finish_openai_model_catalog_refresh_for_scope,
+    get_best_available_openai_model_for_scope, known_openai_model_ids_for_scope,
+    model_availability_for_scope, openai_catalog_scope_for_credential,
+    persist_openai_model_catalog_for_scope, populate_account_models_for_scope,
+    record_model_unavailable_for_scope, refresh_openai_model_catalog_in_background_for_scope,
+    should_refresh_openai_model_catalog_for_scope,
 };
 pub use self::selection::DefaultModelSelection;
 use self::selection::{ActiveProvider, ProviderAvailability};
 use self::state::ProviderState;
 pub use self::state::{ProviderModelSelectionSource, ProviderRuntimeState, ProviderStateEvent};
+pub use session_restore::*;
 
 pub(crate) const GROK_BUILD_PROFILE_ID: &str = "grok-build";
 
@@ -368,6 +416,8 @@ pub struct MultiProvider {
     /// switches, catalog display, or auth refresh handling.
     openai_compatible_profiles: RwLock<HashMap<String, Arc<dyn Provider>>>,
     active_openai_compatible_profile: RwLock<Option<String>>,
+    /// Stable application session identity, retained across runtime replacement.
+    session_id: RwLock<Option<String>>,
     active: RwLock<ActiveProvider>,
     /// Notifications generated during provider/account auto-selection.
     /// The TUI should drain and display these on session start.
@@ -384,6 +434,8 @@ pub struct MultiProvider {
     /// a couple of seconds, saturating every core. The memo collapses those
     /// into one build per TTL window; auth/model changes invalidate it
     /// explicitly so pickers never see stale routes after a switch.
+    /// Unique configuration lineage, preserved only by equivalent forks.
+    catalog_scope: u64,
     routes_memo: Mutex<Option<RoutesMemoEntry>>,
     /// Number of model-catalog prefetches launched by the latest auth refresh.
     /// Shared by forks so the server can wait for real work rather than sleeping
@@ -391,213 +443,18 @@ pub struct MultiProvider {
     post_auth_refreshes_pending: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-/// Memoized route catalog with the inputs that decide its freshness: build
-/// time (short TTL), the auth generation at build time (bumped by
-/// `AuthStatus::invalidate_cache()` on login/logout/credential edits), and the
-/// catalog generation (bumped by prefetch/refresh completions).
-#[derive(Clone)]
-struct RoutesMemoEntry {
-    built_at: std::time::Instant,
-    auth_generation: u64,
-    catalog_generation: u64,
-    routes: Vec<ModelRoute>,
-    /// `listable_model_names_from_routes(&routes)`, cached because the
-    /// non-chat-model heuristic string-scans every route name and callers
-    /// (catalog snapshots) ask for names and routes together.
-    listable_models: Vec<String>,
-}
-
-/// Process-wide route-catalog memo shared across `MultiProvider` instances.
-///
-/// The shared server forks one `MultiProvider` per client connection, so a
-/// per-instance memo cannot deduplicate the builds triggered by a burst of
-/// simultaneous client spawns: every fresh fork still built its own catalog.
-/// Catalog content is derived almost entirely from process-global state
-/// (credential files, disk caches, config), so identical forks can share one
-/// build. Instance-specific inputs (active provider/model/profile) are folded
-/// into the memo key; anything not captured is bounded by the short TTL and
-/// the auth/catalog generations.
-static GLOBAL_ROUTES_MEMO: LazyLock<Mutex<HashMap<String, RoutesMemoEntry>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Single-flight guard for catalog builds. During a client connect burst every
-/// connection calls `model_routes()` at nearly the same instant; without this
-/// they all miss the still-empty memo and build the same catalog in parallel
-/// (a thundering herd that pegs every core). Holding this lock across the
-/// build makes followers block (sleep, not spin) until the leader publishes
-/// its result, which they then serve from the shared memo.
-static GLOBAL_ROUTES_BUILD_LOCK: Mutex<()> = Mutex::new(());
-
-/// Bumped whenever provider catalogs change out-of-band (prefetch completion,
-/// forced catalog refresh, auth changes). Invalidates every shared memo entry.
-static CATALOG_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn catalog_generation() -> u64 {
-    CATALOG_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Invalidate every memoized route catalog in the process.
-///
-/// Called when provider catalogs change out-of-band (background catalog
-/// refresh completion, auth changes). This is what keeps the route memo TTL a
-/// backstop rather than the mechanism: a completed refresh is reflected on the
-/// next render instead of waiting for the memo to expire.
-pub fn bump_catalog_generation() {
-    CATALOG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
-
 impl MultiProvider {
-    /// Drop this instance's route-catalog memo. Use for changes that are
-    /// captured by [`Self::routes_memo_key`] (model/provider/profile switches):
-    /// the shared memo stays valid because those instances key differently.
-    fn invalidate_routes_memo(&self) {
-        if let Ok(mut memo) = self.routes_memo.lock() {
-            *memo = None;
-        }
-    }
-
-    /// Drop every memoized catalog in the process. Use for changes that alter
-    /// catalog *content* beyond the memo key: credential changes and catalog
-    /// prefetch/refresh completions. Deliberately not called from set_model /
-    /// set_active_provider, which run once per shared-server fork during
-    /// connect bursts and would otherwise defeat the shared memo.
-    fn invalidate_routes_memo_globally(&self) {
-        self.invalidate_routes_memo();
-        CATALOG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Key identifying the instance-specific state that feeds the route
-    /// catalog. Two `MultiProvider` instances with equal keys (given equal
-    /// auth/catalog generations) produce equivalent catalogs, so shared-server
-    /// forks can reuse one build. The current model matters because the active
-    /// OpenRouter model gets priority endpoint-refresh scheduling and detail
-    /// annotations in the catalog; the configured-provider bitmap matters
-    /// because each configured runtime contributes its own route family.
-    fn routes_memo_key(&self) -> String {
-        let active = self.active_provider();
-        let credential_mode = self.credential_mode();
-        let profile = self
-            .active_openai_compatible_profile
+    fn bound_session_id(&self) -> Option<String> {
+        self.session_id
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
-            .unwrap_or_default();
-        let mut compat_profiles: Vec<String> = self
-            .openai_compatible_profiles
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .keys()
-            .cloned()
-            .collect();
-        compat_profiles.sort();
-        let configured = [
-            ("an", self.anthropic_provider().is_some()),
-            ("oa", self.openai_provider().is_some()),
-            ("co", self.copilot_provider().is_some()),
-            ("ag", self.antigravity_provider().is_some()),
-            ("ge", self.gemini_provider().is_some()),
-            ("cu", self.cursor_provider().is_some()),
-            ("be", self.bedrock_provider().is_some()),
-            ("or", self.openrouter_provider().is_some()),
-        ]
-        .iter()
-        .filter(|(_, present)| *present)
-        .map(|(tag, _)| *tag)
-        .collect::<Vec<_>>()
-        .join(",");
-        format!(
-            "{}|{}|{}|{:?}|{}|{}|{}",
-            // Scope by home so sandboxes (tests, JCODE_HOME switches) never
-            // share catalogs that were built from different credential files.
-            std::env::var("JCODE_HOME").unwrap_or_default(),
-            Self::provider_key(active),
-            self.model(),
-            credential_mode,
-            profile,
-            configured,
-            compat_profiles.join(","),
-        )
     }
 
-    /// Return a fresh memoized catalog entry (routes + listable model names),
-    /// building it at most once per TTL window per catalog-relevant state.
-    ///
-    /// Freshness is keyed on a short TTL plus the auth and catalog
-    /// generations. Lookup order: this instance's memo, the process-wide
-    /// shared memo (so shared-server forks reuse one build), then a
-    /// single-flight build that followers wait on instead of duplicating.
-    fn fresh_routes_memo_entry(&self) -> RoutesMemoEntry {
-        // Backstop only: invalidation is event-driven via auth/catalog
-        // generations, so a completed refresh shows up on the next render.
-        const ROUTES_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-
-        // Rendering no longer schedules catalog I/O; the sweeper does.
-        catalog_scheduler::ensure_started();
-
-        let auth_generation = pricing::auth_pricing_generation();
-        let catalog_gen = catalog_generation();
-        let fresh = |entry: &RoutesMemoEntry| {
-            entry.auth_generation == auth_generation
-                && entry.catalog_generation == catalog_gen
-                && entry.built_at.elapsed() < ROUTES_MEMO_TTL
-        };
-
-        // Fast path: this instance already built (or copied) a fresh catalog.
-        if let Ok(memo) = self.routes_memo.lock()
-            && let Some(entry) = memo.as_ref()
-            && fresh(entry)
-        {
-            return entry.clone();
+    fn bind_provider_session(&self, provider: &dyn Provider) {
+        if let Some(session_id) = self.bound_session_id() {
+            provider.set_session_id(&session_id);
         }
-
-        // Shared path: another instance with the same catalog-relevant state
-        // (typically a fresh fork on the shared server) built one already.
-        let shared_key = self.routes_memo_key();
-        let try_shared = || -> Option<RoutesMemoEntry> {
-            let shared = GLOBAL_ROUTES_MEMO.lock().ok()?;
-            let entry = shared.get(&shared_key)?;
-            if !fresh(entry) {
-                return None;
-            }
-            let entry = entry.clone();
-            if let Ok(mut memo) = self.routes_memo.lock() {
-                *memo = Some(entry.clone());
-            }
-            Some(entry)
-        };
-        if let Some(entry) = try_shared() {
-            return entry;
-        }
-
-        // Single-flight: serialize builds so a connect burst produces one
-        // build and N-1 memo hits instead of N parallel builds.
-        let _build_guard = GLOBAL_ROUTES_BUILD_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Re-check after acquiring the lock: the leader that held it may have
-        // just published exactly the entry this instance needs.
-        if let Some(entry) = try_shared() {
-            return entry;
-        }
-
-        let routes = catalog_routes::multiprovider_model_routes(self);
-        let entry = RoutesMemoEntry {
-            built_at: std::time::Instant::now(),
-            auth_generation,
-            catalog_generation: catalog_gen,
-            listable_models: listable_model_names_from_routes(&routes),
-            routes,
-        };
-        if let Ok(mut memo) = self.routes_memo.lock() {
-            *memo = Some(entry.clone());
-        }
-        if let Ok(mut shared) = GLOBAL_ROUTES_MEMO.lock() {
-            // Tiny keyspace (active provider + model + profile); prune stale
-            // entries opportunistically so it cannot grow unbounded.
-            shared.retain(|_, existing| fresh(existing));
-            shared.insert(shared_key, entry.clone());
-        }
-        entry
     }
 
     #[cfg(test)]
@@ -612,6 +469,7 @@ impl MultiProvider {
         mode: CompletionMode<'_>,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.bind_auto_account_for_request(self.active_provider())?;
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
@@ -642,6 +500,107 @@ impl MultiProvider {
             };
 
         let active = self.active_provider();
+        // Saved account requests remain session-local. Only configured pool
+        // members may propose another exact account after a startup failure.
+        if let Some(bound_label) = self.selected_account_for_provider(active) {
+            let key = Self::provider_key(active);
+            let exists = match active {
+                ActiveProvider::OpenAI => crate::auth::codex::list_accounts()?
+                    .iter()
+                    .any(|a| a.label == bound_label),
+                ActiveProvider::Claude => crate::auth::claude::list_accounts()?
+                    .iter()
+                    .any(|a| a.label == bound_label),
+                _ => false,
+            };
+            if !exists {
+                anyhow::bail!(
+                    "Saved account '{}' no longer exists. Select an account with /model.",
+                    bound_label
+                );
+            }
+            if let Some(reason) =
+                models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
+            {
+                self.try_same_provider_account_failover(
+                    active,
+                    messages,
+                    tools,
+                    mode,
+                    &reason,
+                    &mut Vec::new(),
+                )
+                .await?;
+                anyhow::bail!(
+                    "{} ({}) is unavailable: {}",
+                    Self::provider_label(active),
+                    bound_label,
+                    reason
+                );
+            }
+            let attempt = match mode {
+                CompletionMode::Unified { system } => {
+                    self.complete_on_provider(active, messages, tools, system, resume_session_id)
+                        .await
+                }
+                CompletionMode::Split {
+                    system_static,
+                    system_dynamic,
+                } => {
+                    self.complete_split_on_provider(
+                        active,
+                        messages,
+                        tools,
+                        system_static,
+                        system_dynamic,
+                        resume_session_id,
+                    )
+                    .await
+                }
+            };
+            let attempt = self.await_account_stream_start(active, attempt).await;
+            match attempt {
+                Ok(stream) => {
+                    match active {
+                        ActiveProvider::OpenAI => {
+                            models::clear_openai_provider_unavailability_for_account_label(Some(
+                                &bound_label,
+                            ))
+                        }
+                        ActiveProvider::Claude => {
+                            models::clear_claude_provider_unavailability_for_account_label(Some(
+                                &bound_label,
+                            ))
+                        }
+                        _ => {}
+                    }
+                    return Ok(stream);
+                }
+                Err(err) => {
+                    let decision = Self::classify_failover_error(&err);
+                    if decision.should_failover() {
+                        let reason = Self::summarize_error(&err);
+                        if decision.should_mark_provider_unavailable() {
+                            models::record_provider_unavailable_for_account_label(
+                                key,
+                                Some(&bound_label),
+                                &reason,
+                            );
+                        }
+                        self.try_same_provider_account_failover(
+                            active,
+                            messages,
+                            tools,
+                            mode,
+                            &reason,
+                            &mut Vec::new(),
+                        )
+                        .await?;
+                    }
+                    return Err(err);
+                }
+            }
+        }
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
@@ -650,19 +609,30 @@ impl MultiProvider {
 
         for candidate in sequence {
             let label = Self::provider_label(candidate);
-            let key = Self::provider_key(candidate);
+            let key = self.provider_runtime_cooldown_key(candidate);
 
-            if candidate != active && failover_reason.is_some() {
-                let prompt = self.build_failover_prompt(
+            if candidate != active {
+                // Account rotation may have exhausted the pool since the first
+                // error. Render guidance from current cooldowns, never from an
+                // annotation captured before alternate logins were attempted.
+                let reason = failover_reason
+                    .clone()
+                    .unwrap_or_else(|| "provider unavailable".to_string());
+                let reason = if self.provider_uses_oauth_accounts(active) {
+                    maybe_annotate_limit_summary(active, reason)
+                } else {
+                    reason
+                };
+                if let Some(prompt) = self.cross_provider_pool_prompt(
                     active,
                     candidate,
-                    failover_reason
-                        .clone()
-                        .unwrap_or_else(|| "provider unavailable".to_string()),
+                    reason,
                     estimated_input_chars,
                     estimated_input_tokens,
-                );
-                return Err(anyhow::anyhow!(prompt.to_error_message()));
+                ) {
+                    return Err(anyhow::anyhow!(prompt.to_error_message()));
+                }
+                continue;
             }
 
             if !self.provider_is_configured(candidate) {
@@ -678,22 +648,11 @@ impl MultiProvider {
                 continue;
             }
 
-            if let Some(detail) = provider_unavailability_detail_for_account(key) {
-                let note = format!("{}: {}", label, detail);
-                if candidate == active {
-                    crate::logging::warn(&format!(
-                        "Failover{}: skipping active provider {} - {}",
-                        mode.log_suffix(),
-                        label,
-                        detail
-                    ));
-                    failover_reason = Some(detail.clone());
-                }
-                notes.push(note);
-                continue;
-            }
-
-            if let Some(reason) = self.provider_precheck_unavailable_reason(candidate) {
+            let cached_unavailability = provider_unavailability_detail_for_account(key);
+            if let Some(reason) = cached_unavailability
+                .clone()
+                .or_else(|| self.provider_precheck_unavailable_reason(candidate))
+            {
                 let note = format!("{}: {}", label, reason);
                 if candidate == active {
                     crate::logging::warn(&format!(
@@ -705,7 +664,18 @@ impl MultiProvider {
                     failover_reason = Some(reason.clone());
                 }
                 notes.push(note);
-                record_provider_unavailable_for_account(key, &reason);
+                if cached_unavailability.is_none() {
+                    record_provider_unavailable_for_account(key, &reason);
+                }
+                if candidate == active
+                    && let Some(stream) = self
+                        .try_same_provider_account_failover(
+                            candidate, messages, tools, mode, &reason, &mut notes,
+                        )
+                        .await?
+                {
+                    return Ok(stream);
+                }
                 continue;
             }
 
@@ -729,6 +699,7 @@ impl MultiProvider {
                     .await
                 }
             };
+            let attempt = self.await_account_stream_start(candidate, attempt).await;
 
             match attempt {
                 Ok(stream) => {
@@ -755,23 +726,28 @@ impl MultiProvider {
                     return Ok(stream);
                 }
                 Err(err) => {
-                    let summary =
-                        maybe_annotate_limit_summary(candidate, Self::summarize_error(&err));
+                    let summary = Self::summarize_error(&err);
+                    let display_summary = if self.provider_uses_oauth_accounts(candidate) {
+                        maybe_annotate_limit_summary(candidate, summary.clone())
+                    } else {
+                        summary.clone()
+                    };
                     let decision = Self::classify_failover_error(&err);
                     crate::logging::info(&format!(
                         "Provider {} failed{}: {} (failover={} decision={})",
                         label,
                         mode.log_suffix(),
-                        summary,
+                        display_summary,
                         decision.should_failover(),
                         decision.as_str()
                     ));
-                    notes.push(format!("{}: {}", label, summary));
+                    notes.push(format!("{}: {}", label, display_summary));
                     if decision.should_failover() {
                         if decision.should_mark_provider_unavailable() {
                             record_provider_unavailable_for_account(key, &summary);
                         }
                         if candidate == active
+                            && decision.should_mark_provider_unavailable()
                             && let Some(stream) = self
                                 .try_same_provider_account_failover(
                                     candidate, messages, tools, mode, &summary, &mut notes,
@@ -949,6 +925,9 @@ impl MultiProvider {
     fn named_provider_profile_model_prefix(model: &str) -> Option<(String, String)> {
         let (prefix, rest) = model.split_once(':')?;
         if explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
             || Self::openai_compatible_model_prefix(model).is_some()
         {
             return None;
@@ -1506,7 +1485,7 @@ impl MultiProvider {
                 .bedrock
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                Some(Arc::new(bedrock::BedrockProvider::new()));
+                Some(Arc::new(new_bedrock_provider()));
         }
 
         let registry = ProviderRegistry::new(self);
@@ -1564,6 +1543,9 @@ impl MultiProvider {
         // single provider would make it reject the id and silently keep its
         // fallback default model.
         if explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
             || Self::openai_compatible_model_prefix(model).is_some()
         {
             return self.set_model(model);
@@ -1651,6 +1633,14 @@ impl MultiProvider {
     }
 
     fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
+        if let Some(label) = self.selected_account_for_provider(active) {
+            let method = if active == ActiveProvider::Claude {
+                "claude-oauth"
+            } else {
+                "openai-oauth"
+            };
+            return format!("{method}@{label}:{current_model}");
+        }
         let prefix = match active {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
@@ -1712,6 +1702,25 @@ impl Default for MultiProvider {
 
 #[async_trait]
 impl Provider for MultiProvider {
+    fn set_session_id(&self, session_id: &str) {
+        *self
+            .session_id
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session_id.to_owned());
+    }
+
+    fn catalog_sharing_identity(&self) -> Option<String> {
+        Some(format!(
+            "{:?}",
+            (
+                "multiprovider-v1",
+                self.routes_memo_key(),
+                pricing::auth_pricing_generation(),
+                catalog_generation(),
+                self.display_name(),
+            )
+        ))
+    }
     async fn prewarm(&self, tools: &[ToolDefinition], system_static: &str) {
         let provider = match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider(),
@@ -1726,6 +1735,7 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
         };
         if let Some(provider) = provider {
+            self.bind_provider_session(provider.as_ref());
             provider.prewarm(tools, system_static).await;
         }
     }
@@ -1915,6 +1925,58 @@ impl Provider for MultiProvider {
         Ok(())
     }
 
+    fn oauth_account_label(&self) -> Option<String> {
+        self.selected_account_for_provider(self.active_provider())
+    }
+
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            _ => None,
+        }
+    }
+
+    fn active_oauth_account_email(&self) -> Option<String> {
+        let runtime = match self.active_provider() {
+            ActiveProvider::Claude => self.anthropic_provider(),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Copilot => self.copilot_provider(),
+            ActiveProvider::Antigravity => self.antigravity_provider(),
+            ActiveProvider::Gemini => self.gemini_provider(),
+            ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::Bedrock => self.bedrock_provider().map(|p| p as Arc<dyn Provider>),
+            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
+        }?;
+        runtime.active_oauth_account_email()
+    }
+
+    fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
+        let active = self.active_provider();
+        if let Some(label) = label {
+            let method = match active {
+                ActiveProvider::Claude => "claude-oauth",
+                ActiveProvider::OpenAI => "openai-oauth",
+                _ => anyhow::bail!("This provider does not support saved OAuth accounts"),
+            };
+            return self.set_model_on_saved_account(method, label, &self.model());
+        }
+        let runtime = match active {
+            ActiveProvider::Claude => self.anthropic_provider(),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            _ => None,
+        };
+        if let Some(runtime) = runtime {
+            runtime.set_oauth_account(None)?;
+        }
+        self.invalidate_routes_memo();
+        Ok(())
+    }
+
     fn active_explicit_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
         use jcode_provider_core::ResolvedCredential;
         // Only report an *explicit* in-memory pin. Auto mode returns `None` so
@@ -2000,6 +2062,27 @@ impl Provider for MultiProvider {
             anyhow::bail!("Model cannot be empty");
         }
 
+        if let Some((prefix, target_model)) = requested_model.split_once(':')
+            && let Some((method, label)) = prefix.split_once('@')
+            && matches!(method, "claude-oauth" | "openai-oauth")
+        {
+            return self.set_model_on_saved_account(method, label, target_model);
+        }
+        // Bare model changes keep the selected login. Explicit generic routes
+        // opt back into the normal active-account preference.
+        if let Some((prefix, _)) = requested_model.split_once(':')
+            && let Some(route) =
+                jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix)
+        {
+            let runtime = match route.provider {
+                jcode_provider_core::DualAuthProvider::Anthropic => self.anthropic_provider(),
+                jcode_provider_core::DualAuthProvider::OpenAI => self.openai_provider(),
+            };
+            if let Some(runtime) = runtime {
+                runtime.set_oauth_account(None)?;
+            }
+        }
+
         if let Some(target_model) = requested_model.strip_prefix("grok-build:") {
             let target_model = target_model.trim();
             if target_model.is_empty() {
@@ -2017,6 +2100,13 @@ impl Provider for MultiProvider {
             registry.set_active_compatible_profile(GROK_BUILD_PROFILE_ID);
             self.set_active_provider(ActiveProvider::OpenRouter);
             return Ok(());
+        }
+
+        // `jcode:<model>` is the explicit spec for the Jcode subscription
+        // runtime. Without this it fell through to the active provider and
+        // `--model jcode:gpt-5.5` silently stayed on the previous model.
+        if let Some(target_model) = jcode_subscription_model_prefix(requested_model) {
+            return self.set_model_on_jcode_subscription(target_model);
         }
 
         if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)
@@ -2235,6 +2325,13 @@ impl Provider for MultiProvider {
         self.fresh_routes_memo_entry().routes
     }
 
+    fn model_capabilities_need_refresh(&self) -> bool {
+        matches!(self.active_provider(), ActiveProvider::OpenAI)
+            && self
+                .openai_provider()
+                .is_some_and(|provider| provider.model_capabilities_need_refresh())
+    }
+
     async fn prefetch_models(&self) -> Result<()> {
         let anthropic = self.anthropic_provider();
         let openai = self.openai_provider();
@@ -2347,6 +2444,12 @@ impl Provider for MultiProvider {
                 "Optional model catalog refresh failed: {}",
                 optional_errors.join("; ")
             ));
+        }
+
+        // Bedrock's built-in default is a 2024 model; once its catalog (live
+        // or cached) is known, land on the newest usable Claude flagship.
+        if let Some(bedrock) = self.bedrock_provider() {
+            promote_bedrock_placeholder_default(&bedrock);
         }
 
         if !errors.is_empty() {
@@ -2470,6 +2573,7 @@ impl Provider for MultiProvider {
         match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider().and_then(|a| a.service_tier()),
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.service_tier()),
+            ActiveProvider::Cursor => self.cursor_provider().and_then(|c| c.service_tier()),
             _ => None,
         }
     }
@@ -2484,8 +2588,12 @@ impl Provider for MultiProvider {
                 .openai_provider()
                 .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
                 .set_service_tier(service_tier),
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .ok_or_else(|| anyhow::anyhow!("Cursor provider not available"))?
+                .set_service_tier(service_tier),
             _ => Err(anyhow::anyhow!(
-                "Service tier switching is only supported for OpenAI models and Claude Opus 4.8"
+                "Service tier switching is only supported for OpenAI models, Cursor models, and Claude Opus 4.8"
             )),
         }
     }
@@ -2499,6 +2607,10 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenAI => self
                 .openai_provider()
                 .map(|o| o.available_service_tiers())
+                .unwrap_or_default(),
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .map(|c| c.available_service_tiers())
                 .unwrap_or_default(),
             _ => vec![],
         }
@@ -2780,19 +2892,29 @@ impl Provider for MultiProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
+        let fork_start = std::time::Instant::now();
         let current_model = self.model();
         let active = self.active_provider();
 
+        let mut lap = std::time::Instant::now();
+        let mut laps: Vec<(&str, u128)> = Vec::new();
+        let mut mark = |name: &'static str, laps: &mut Vec<(&str, u128)>| {
+            laps.push((name, lap.elapsed().as_millis()));
+            lap = std::time::Instant::now();
+        };
+        mark("model_active", &mut laps);
         let anthropic = if self.anthropic_provider().is_some() {
             external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
         } else {
             None
         };
+        mark("anthropic", &mut laps);
         let openai = if self.openai_provider().is_some() {
             external::instantiate_expected_external_provider(external::OPENAI_RUNTIME)
         } else {
             None
         };
+        mark("openai", &mut laps);
         let copilot_api = self
             .copilot_api
             .read()
@@ -2808,6 +2930,7 @@ impl Provider for MultiProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        mark("copy", &mut laps);
         let cursor_provider = if self
             .cursor
             .read()
@@ -2818,11 +2941,13 @@ impl Provider for MultiProvider {
         } else {
             None
         };
+        mark("cursor", &mut laps);
         let bedrock_provider = if self.bedrock_provider().is_some() {
-            Some(Arc::new(bedrock::BedrockProvider::new()))
+            Some(Arc::new(new_bedrock_provider()))
         } else {
             None
         };
+        mark("bedrock", &mut laps);
         let openrouter = if self
             .openrouter
             .read()
@@ -2834,6 +2959,7 @@ impl Provider for MultiProvider {
             None
         };
 
+        mark("openrouter", &mut laps);
         let provider = Self {
             anthropic: RwLock::new(anthropic),
             openai: RwLock::new(openai),
@@ -2845,17 +2971,34 @@ impl Provider for MultiProvider {
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
+            session_id: RwLock::new(self.bound_session_id()),
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: self.initial_provider,
+            catalog_scope: self.catalog_scope,
             routes_memo: Mutex::new(None),
             post_auth_refreshes_pending: Arc::clone(&self.post_auth_refreshes_pending),
         };
 
+        let runtimes_ms = fork_start.elapsed().as_millis();
+        let catalog_start = std::time::Instant::now();
         provider.spawn_anthropic_catalog_refresh_if_needed();
         provider.spawn_openai_catalog_refresh_if_needed();
+        let catalog_ms = catalog_start.elapsed().as_millis();
+        let set_model_start = std::time::Instant::now();
         let switch_request = self.fork_model_switch_request(active, &current_model);
         let _ = provider.set_model(&switch_request);
+        crate::logging::info(&format!(
+            "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
+            runtimes_ms,
+            laps.iter()
+                .map(|(name, ms)| format!("{name}={ms}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            catalog_ms,
+            set_model_start.elapsed().as_millis(),
+            fork_start.elapsed().as_millis()
+        ));
         Arc::new(provider)
     }
 
@@ -2866,7 +3009,10 @@ impl Provider for MultiProvider {
         // in-flight helper work but stale for a brand-new session. Reconstruct the
         // orchestrator so the reloadable config cache and current auth state choose
         // the provider/model again.
-        let provider = Self::new_fast();
+        let mut provider = Self::new_fast();
+        // Reconstruction uses the same composition root. Selection, home,
+        // reloadable config and auth/catalog revisions remain part of the key.
+        provider.catalog_scope = self.catalog_scope;
 
         // An explicit CLI initial provider/model remains the starting selection
         // for new sessions, while each session can switch freely afterward.
@@ -2893,7 +3039,13 @@ impl Provider for MultiProvider {
             ActiveProvider::Copilot => None,
             ActiveProvider::Antigravity => None,
             ActiveProvider::Gemini => None,
-            ActiveProvider::Cursor => None,
+            // Cursor's AgentService keeps its bidirectional stream open until
+            // the MCP tool result is sent back over the same stream. Dropping
+            // the sender here made every Cursor tool call hang after the tool
+            // ran locally.
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .and_then(|provider| provider.native_result_sender()),
             ActiveProvider::Bedrock => None,
             ActiveProvider::OpenRouter => None,
         }
@@ -2967,3 +3119,123 @@ pub fn cache_ttl_for_provider_model(provider: &str, model: Option<&str>) -> Opti
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod bedrock_placeholder_default_tests {
+    use super::*;
+
+    fn route(model: &str, available: bool) -> ModelRoute {
+        ModelRoute {
+            model: model.to_string(),
+            provider: "AWS Bedrock".to_string(),
+            api_method: "bedrock".to_string(),
+            available,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }
+    }
+
+    #[test]
+    fn bedrock_placeholder_promotes_to_newest_usable_claude() {
+        let routes = vec![
+            route(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, true),
+            route("anthropic.claude-sonnet-4-20250514-v1:0", true),
+            route("us.anthropic.claude-opus-4-6-v1", true),
+            route("amazon.nova-pro-v1:0", true),
+        ];
+        assert_eq!(
+            bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes)
+                .as_deref(),
+            Some("us.anthropic.claude-opus-4-6-v1")
+        );
+    }
+
+    #[test]
+    fn bedrock_placeholder_skips_unusable_routes() {
+        // A newer Opus that needs a missing inference profile is unavailable
+        // and must not become the default.
+        let routes = vec![
+            route("anthropic.claude-opus-5-20260101-v1:0", false),
+            route("anthropic.claude-sonnet-4-20250514-v1:0", true),
+        ];
+        assert_eq!(
+            bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes)
+                .as_deref(),
+            Some("anthropic.claude-sonnet-4-20250514-v1:0")
+        );
+    }
+
+    /// End to end through the real construction path: a cached Bedrock catalog
+    /// on disk must make a freshly built provider start on the newest Claude
+    /// flagship instead of the 2024 placeholder; with no catalog it stays put.
+    #[test]
+    fn new_bedrock_provider_starts_on_newest_cached_flagship() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let keys = [
+            "JCODE_HOME",
+            "JCODE_BEDROCK_MODEL",
+            "JCODE_BEDROCK_REGION",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        for key in &keys[1..] {
+            crate::env::remove_var(key);
+        }
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let fresh = new_bedrock_provider();
+        assert_eq!(
+            fresh.model(),
+            bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL,
+            "no catalog: keep placeholder rather than guess from the known list"
+        );
+
+        let cache = crate::storage::app_config_dir()
+            .expect("config dir")
+            .join("bedrock_models_cache.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cache,
+            serde_json::json!({
+                "models": [
+                    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                    "anthropic.claude-sonnet-4-20250514-v1:0",
+                    "anthropic.claude-opus-4-20250514-v1:0",
+                ],
+                "inference_profiles": [],
+                "region": null,
+                "fetched_at_rfc3339": "2026-10-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let promoted = new_bedrock_provider().model();
+
+        crate::env::set_var(
+            "JCODE_BEDROCK_MODEL",
+            "anthropic.claude-3-5-haiku-20241022-v1:0",
+        );
+        let pinned = new_bedrock_provider().model();
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => crate::env::set_var(key, value),
+                None => crate::env::remove_var(key),
+            }
+        }
+        assert_eq!(promoted, "anthropic.claude-opus-4-20250514-v1:0");
+        assert_eq!(pinned, "anthropic.claude-3-5-haiku-20241022-v1:0");
+    }
+
+    #[test]
+    fn bedrock_explicit_model_is_never_replaced() {
+        let routes = vec![route("us.anthropic.claude-opus-4-6-v1", true)];
+        assert_eq!(
+            bedrock_promoted_default("anthropic.claude-sonnet-4-20250514-v1:0", &routes),
+            None
+        );
+    }
+}

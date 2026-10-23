@@ -71,9 +71,39 @@ async fn run_unix(args: Args) -> Result<()> {
     )
     .await?;
     let working_dir = connection.remote_working_dir().to_owned();
+    // The TUI stays local. Preserve its workspace separately from the VM's,
+    // and share the exact managed-host config with read-only metadata probes.
+    let explicit_source = std::env::var_os("JCODE_SSH_LOCAL_WORKING_DIR").is_some();
+    crate::env::set_var(
+        "JCODE_SSH_LOCAL_IS_SOURCE",
+        if explicit_source { "1" } else { "0" },
+    );
+    if let Some(local_dir) = std::env::var_os("JCODE_SSH_LOCAL_WORKING_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+    {
+        crate::env::set_var("JCODE_SSH_LOCAL_WORKING_DIR", local_dir);
+    }
+    if super::cloud_managed::is_managed(host) {
+        let _ = super::cloud_managed::ssh_args()?;
+        crate::env::set_var("JCODE_SSH_CONFIG", super::cloud_managed::ssh_config_path()?);
+    } else {
+        crate::env::remove_var("JCODE_SSH_CONFIG");
+    }
     crate::env::set_var("JCODE_SSH_REMOTE", host);
     crate::env::set_var("JCODE_SSH_BINARY", binary);
     crate::env::set_var("JCODE_SSH_WORKING_DIR", &working_dir);
+    // The local migration lease is the source of truth for the last transfer.
+    // Do not reuse a timestamp from a previous attachment or another host.
+    let lease = args
+        .resume
+        .as_deref()
+        .and_then(crate::storage::read_session_lease);
+    if let Some(timestamp) = last_transfer_for_host(host, lease.as_ref()) {
+        crate::env::set_var("JCODE_SSH_LAST_TRANSFER_AT", timestamp);
+    } else {
+        crate::env::remove_var("JCODE_SSH_LAST_TRANSFER_AT");
+    }
     if let Some(socket) = args.ssh_server_socket.as_deref() {
         crate::env::set_var("JCODE_SSH_SERVER_SOCKET", socket);
     } else {
@@ -115,11 +145,30 @@ async fn run_unix(args: Args) -> Result<()> {
         _ = quit.recv() => Ok(()),
     };
     let cleanup = connection.close().await;
-    result.and(cleanup)
+    let result = result.and(cleanup);
+    if result.is_ok()
+        && let Some(handoff) = super::cloud_move::take_stashed_handoff()
+    {
+        return super::cloud_move::exec_handoff(handoff);
+    }
+    result
 }
 
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn last_transfer_for_host<'a>(
+    host: &str,
+    lease: Option<&'a crate::storage::SessionLease>,
+) -> Option<&'a str> {
+    let lease = lease?;
+    if lease.away_host.as_deref() != Some(host)
+        || chrono::DateTime::parse_from_rfc3339(&lease.updated_at).is_err()
+    {
+        return None;
+    }
+    Some(&lease.updated_at)
 }
 
 /// Return a remote-aware resume command, never a local session lookup.
@@ -146,6 +195,30 @@ pub(crate) fn resume_hint(session_id: &str) -> Option<String> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn transfer_timestamp_requires_matching_host_and_valid_lease() {
+        let mut lease = crate::storage::SessionLease {
+            session_id: "session_cloud_widget".into(),
+            epoch: 1,
+            away_host: Some("cloud-box".into()),
+            repo_root: Some("/repo".into()),
+            last_sync_snapshot: None,
+            last_sync_head: None,
+            updated_at: "2026-10-20T07:30:00Z".into(),
+        };
+        assert_eq!(
+            last_transfer_for_host("cloud-box", Some(&lease)),
+            Some("2026-10-20T07:30:00Z")
+        );
+        assert_eq!(last_transfer_for_host("other-box", Some(&lease)), None);
+        assert_eq!(last_transfer_for_host("cloud-box", None), None);
+        lease.away_host = None;
+        assert_eq!(last_transfer_for_host("cloud-box", Some(&lease)), None);
+        lease.away_host = Some("cloud-box".into());
+        lease.updated_at = "not-a-timestamp".into();
+        assert_eq!(last_transfer_for_host("cloud-box", Some(&lease)), None);
+    }
 
     #[test]
     fn remote_modes_accept_explicit_remote_ids_without_local_lookup() {

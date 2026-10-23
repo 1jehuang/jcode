@@ -25,6 +25,33 @@ use tokio::sync::{Mutex, RwLock};
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
+/// Do not probe any identity until telemetry is enabled. Only the provider
+/// may identify its effective OAuth credential. An API-key route must not expose the email
+/// of an unrelated saved subscription account.
+pub(crate) fn provider_oauth_email(
+    provider: &dyn Provider,
+) -> Option<crate::protocol::ProviderOAuthEmail> {
+    selected_provider_oauth_email(provider, crate::telemetry::is_enabled(), || {
+        provider.active_oauth_account_email()
+    })
+}
+
+fn selected_provider_oauth_email(
+    provider: &dyn Provider,
+    telemetry_enabled: bool,
+    resolve: impl FnOnce() -> Option<String>,
+) -> Option<crate::protocol::ProviderOAuthEmail> {
+    if !telemetry_enabled
+        || provider.active_resolved_credential()
+            == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+    {
+        return None;
+    }
+    // The provider owns the effective credential snapshot, including unbound
+    // active OAuth and account failover. Never substitute a global login here.
+    resolve().map(crate::protocol::ProviderOAuthEmail::new)
+}
+
 fn optional_token_usage_totals(totals: TokenUsageTotals) -> Option<TokenUsageTotals> {
     (totals.messages_with_token_usage > 0).then_some(totals)
 }
@@ -112,6 +139,7 @@ pub(super) async fn handle_get_state(
     id: u64,
     client_session_id: &str,
     client_is_processing: bool,
+    pending_soft_interrupts: usize,
     sessions: &SessionAgents,
     writer: &Arc<Mutex<WriteHalf>>,
 ) -> Result<()> {
@@ -128,6 +156,7 @@ pub(super) async fn handle_get_state(
             message_count: session_count,
             is_processing: client_is_processing
                 || crate::turn_cancel_registry::has_active_turn(client_session_id),
+            pending_soft_interrupts: Some(pending_soft_interrupts),
         },
     )
     .await
@@ -151,6 +180,7 @@ pub(super) async fn handle_get_history(
     server_icon: &str,
     was_interrupted: Option<bool>,
     supports_pdf_panels: bool,
+    history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let history_start = Instant::now();
     let activity =
@@ -177,6 +207,7 @@ pub(super) async fn handle_get_history(
             was_interrupted,
             activity,
             supports_pdf_panels,
+            history_base,
         )
         .await?;
         crate::logging::info(&format!(
@@ -201,6 +232,7 @@ pub(super) async fn handle_get_history(
         HistoryPayloadMode::Full,
         true,
         supports_pdf_panels,
+        history_base,
     )
     .await?;
     let send_history_ms = history_start.elapsed().as_millis();
@@ -233,20 +265,36 @@ pub(super) async fn handle_get_model_catalog(
         available_model_routes,
         resolved_credential,
         service_tier,
+        available_service_tiers,
         reasoning_effort,
         source,
+        provider_oauth_email,
+        provider_oauth_account_label,
     ) = {
         match agent.try_lock() {
-            Ok(agent_guard) => (
-                Some(agent_guard.provider_name()),
-                Some(agent_guard.provider_model()),
-                agent_guard.available_models_display(),
-                agent_guard.model_routes(),
-                agent_guard.active_resolved_credential(),
-                agent_guard.provider_handle().service_tier(),
-                agent_guard.provider_handle().reasoning_effort(),
-                "live",
-            ),
+            Ok(agent_guard) => {
+                let catalog = super::available_models_cache::for_agent(&agent_guard).snapshot();
+                (
+                    Some(agent_guard.provider_name()),
+                    Some(agent_guard.provider_model()),
+                    catalog.available_models,
+                    catalog.model_routes,
+                    agent_guard.active_resolved_credential(),
+                    agent_guard.provider_handle().service_tier(),
+                    Some(
+                        agent_guard
+                            .provider_handle()
+                            .available_service_tiers()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    ),
+                    agent_guard.provider_handle().reasoning_effort(),
+                    "live",
+                    provider_oauth_email(agent_guard.provider_handle().as_ref()),
+                    agent_guard.provider_handle().serving_oauth_account_label(),
+                )
+            }
             Err(_) => {
                 crate::logging::warn(&format!(
                     "handle_get_model_catalog: session {} busy, using provider/persisted fallback",
@@ -270,8 +318,17 @@ pub(super) async fn handle_get_model_catalog(
                     model_routes,
                     provider.active_resolved_credential(),
                     provider.service_tier(),
+                    Some(
+                        provider
+                            .available_service_tiers()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    ),
                     provider.reasoning_effort(),
                     "fallback",
+                    provider_oauth_email(provider.as_ref()),
+                    provider.serving_oauth_account_label(),
                 )
             }
         }
@@ -283,11 +340,14 @@ pub(super) async fn handle_get_model_catalog(
         id,
         session_id: session_id.to_string(),
         messages: Vec::new(),
+        messages_base_count: None,
+        images_unchanged: false,
         images: Vec::new(),
         provider_name,
         provider_model,
         available_models,
         available_model_routes,
+        available_service_tiers,
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: None,
@@ -305,11 +365,14 @@ pub(super) async fn handle_get_model_catalog(
         status_detail: None,
         upstream_provider: None,
         resolved_credential,
+        provider_oauth_email,
+        provider_oauth_account_label,
         reasoning_effort,
         // Catalog replies still use History, so the TUI applies this field as
         // authoritative. Omitting it falsely turns off /fast status and its badge.
         service_tier,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: Default::default(),
@@ -408,6 +471,54 @@ pub(super) async fn handle_get_compacted_history(
     .await
 }
 
+/// Trim History to the messages after the client's verified prefix.
+///
+/// Returns the full list with `None` when no base was offered, the base is
+/// longer than the transcript, or the fingerprint disagrees (rewind,
+/// compaction, edited tool output, different session), so a stale client
+/// prefix can never survive.
+pub(super) fn apply_history_base(
+    messages: Vec<HistoryMessage>,
+    history_base: Option<crate::protocol::HistoryBase>,
+) -> (Vec<HistoryMessage>, Option<usize>) {
+    let Some(base) = history_base else {
+        return (messages, None);
+    };
+    if base.count == 0 || base.count > messages.len() {
+        return (messages, None);
+    }
+    let fingerprint = crate::protocol::history_prefix_fingerprint(
+        messages[..base.count]
+            .iter()
+            .map(crate::protocol::HistoryMessageRef::from),
+    );
+    if fingerprint != base.fingerprint {
+        crate::logging::info(&format!(
+            "History base mismatch: count={}, sending full transcript of {} messages",
+            base.count,
+            messages.len()
+        ));
+        return (messages, None);
+    }
+    let mut messages = messages;
+    let tail = messages.split_off(base.count);
+    (tail, Some(base.count))
+}
+
+/// Omit History images the client already holds (matching fingerprint).
+pub(super) fn apply_history_images_base(
+    images: Vec<crate::session::RenderedImage>,
+    history_base: Option<crate::protocol::HistoryBase>,
+) -> (Vec<crate::session::RenderedImage>, bool) {
+    let Some(expected) = history_base.and_then(|base| base.images_fingerprint) else {
+        return (images, false);
+    };
+    if images.is_empty() || crate::protocol::history_images_fingerprint(&images) != expected {
+        return (images, false);
+    }
+    (Vec::new(), true)
+}
+
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
     HistoryMessage {
         response_stats: msg.response_stats,
@@ -424,11 +535,25 @@ fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryM
     }
 }
 
+#[cfg(test)]
 fn history_reload_recovery_snapshot(
     session_id: &str,
     was_interrupted: Option<bool>,
 ) -> Option<crate::protocol::ReloadRecoverySnapshot> {
-    match super::reload_recovery::pending_directive_for_session(session_id) {
+    history_reload_recovery_snapshot_with(session_id, was_interrupted, || {
+        infer_persisted_session_interrupted_by_reload(session_id)
+    })
+}
+
+fn history_reload_recovery_snapshot_with(
+    session_id: &str,
+    was_interrupted: Option<bool>,
+    infer_interrupted: impl FnOnce() -> bool,
+) -> Option<crate::protocol::ReloadRecoverySnapshot> {
+    let recovery_start = Instant::now();
+    let pending = super::reload_recovery::pending_directive_for_session(session_id);
+    let pending_ms = recovery_start.elapsed().as_millis();
+    match pending {
         Ok(Some(directive)) => {
             crate::logging::info(&format!(
                 "history_reload_recovery_snapshot: attaching server-owned recovery intent for session={} without marking delivered",
@@ -443,17 +568,26 @@ fn history_reload_recovery_snapshot(
         )),
     }
 
+    let t = Instant::now();
     let reload_ctx = crate::tool::selfdev::ReloadContext::peek_for_session(session_id)
         .ok()
         .flatten();
-    let inferred_interrupted = was_interrupted
-        .unwrap_or_else(|| infer_persisted_session_interrupted_by_reload(session_id));
+    let peek_ms = t.elapsed().as_millis();
+    let inferred_interrupted = was_interrupted.unwrap_or_else(infer_interrupted);
+    let t = Instant::now();
     let directive = crate::tool::selfdev::ReloadContext::recovery_directive_for_session(
         session_id,
         reload_ctx.as_ref(),
         inferred_interrupted,
         None,
     );
+    crate::logging::info(&format!(
+        "[TIMING] history_recovery: session={}, pending={}ms, peek={}ms, directive={}ms",
+        session_id,
+        pending_ms,
+        peek_ms,
+        t.elapsed().as_millis()
+    ));
     crate::logging::info(&format!(
         "history_reload_recovery_snapshot: session={} explicit_was_interrupted={:?} inferred_was_interrupted={} has_reload_ctx={} directive={}",
         session_id,
@@ -486,6 +620,7 @@ fn persisted_session_has_reload_interruption_marker(session: &Session) -> bool {
     })
 }
 
+#[cfg(test)]
 fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
     let session = match Session::load_for_remote_startup(session_id)
         .or_else(|_| Session::load_startup_stub(session_id))
@@ -500,6 +635,11 @@ fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
         }
     };
 
+    session_interrupted_by_reload(&session)
+}
+
+fn session_interrupted_by_reload(session: &Session) -> bool {
+    let session_id = session.id.as_str();
     let last_is_user = session
         .messages
         .last()
@@ -509,7 +649,7 @@ fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
     let interrupted = matches!(session.status, SessionStatus::Crashed { .. })
         || (matches!(session.status, SessionStatus::Active) && last_is_user && marker_active)
         || (matches!(session.status, SessionStatus::Closed) && last_is_user && marker_active)
-        || persisted_session_has_reload_interruption_marker(&session);
+        || persisted_session_has_reload_interruption_marker(session);
 
     crate::logging::info(&format!(
         "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} marker_active={} interrupted={}",
@@ -539,10 +679,13 @@ async fn send_history_from_persisted_session(
     was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
     supports_pdf_panels: bool,
+    history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
-    let session = match crate::session::Session::load_for_remote_startup(session_id)
-        .or_else(|_| crate::session::Session::load_startup_stub(session_id))
-    {
+    let loaded = super::run_blocking_io(|| {
+        crate::session::Session::load_for_remote_startup(session_id)
+            .or_else(|_| crate::session::Session::load_startup_stub(session_id))
+    });
+    let session = match loaded {
         Ok(session) => session,
         Err(error)
             if error
@@ -576,12 +719,21 @@ async fn send_history_from_persisted_session(
         .reasoning_effort
         .clone()
         .or_else(|| provider.reasoning_effort());
+    let agent_model_overrides = session.agent_model_overrides.clone();
+    let inferred_interrupted = was_interrupted
+        .is_none()
+        .then(|| session_interrupted_by_reload(&session));
     drop(session);
 
-    let messages = rendered_messages
+    let messages: Vec<HistoryMessage> = rendered_messages
         .into_iter()
         .map(rendered_to_history_message)
         .collect();
+    let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (images, images_unchanged) = apply_history_images_base(
+        images,
+        history_base.filter(|_| messages_base_count.is_some()),
+    );
     let side_panel = super::client_writer::side_panel_for_client(
         crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         supports_pdf_panels,
@@ -599,14 +751,24 @@ async fn send_history_from_persisted_session(
         id,
         session_id: session_id.to_string(),
         messages,
+        messages_base_count,
+        images_unchanged,
         images,
         provider_name,
         provider_model,
         subagent_model,
+        agent_model_overrides,
         autoreview_enabled,
         autojudge_enabled,
         available_models: Vec::new(),
         available_model_routes: Vec::new(),
+        available_service_tiers: Some(
+            provider
+                .available_service_tiers()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        ),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: optional_total_tokens(token_usage_totals),
@@ -619,11 +781,15 @@ async fn send_history_from_persisted_session(
         server_icon: Some(server_icon.to_string()),
         server_has_update: Some(server_has_newer_binary()),
         was_interrupted,
-        reload_recovery: history_reload_recovery_snapshot(session_id, was_interrupted),
+        reload_recovery: history_reload_recovery_snapshot_with(session_id, was_interrupted, || {
+            inferred_interrupted.unwrap_or(false)
+        }),
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
         resolved_credential: provider.active_resolved_credential(),
+        provider_oauth_email: provider_oauth_email(provider.as_ref()),
+        provider_oauth_account_label: provider.serving_oauth_account_label(),
         reasoning_effort,
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
@@ -635,6 +801,36 @@ async fn send_history_from_persisted_session(
     };
 
     write_event(writer, &history_event).await
+}
+
+/// How long the bootstrap History payload may wait on the model-name catalog.
+///
+/// The catalog is a memo hit most of the time (~5ms), but a cold or
+/// invalidated memo rebuilds every provider's routes, which measured p90 667ms
+/// and up to 7s on a busy shared server. History gates the client's first
+/// real frame (session name, transcript, model facts), while the catalog only
+/// feeds the model picker, and the client already requests the full catalog
+/// right after History. So History never waits long for it.
+const HISTORY_MODEL_CATALOG_BUDGET: Duration = Duration::from_millis(5);
+
+/// Model names for the History payload, bounded by
+/// [`HISTORY_MODEL_CATALOG_BUDGET`]. On timeout the build keeps running in the
+/// background (warming the shared routes memo for the follow-up
+/// `GetModelCatalog`) and History ships without names. Clients treat an empty
+/// list as "not loaded yet" and fill it from that follow-up.
+async fn available_models_for_history(provider: Arc<dyn Provider>) -> Vec<String> {
+    let build = tokio::task::spawn_blocking(move || provider.available_models_display());
+    match tokio::time::timeout(HISTORY_MODEL_CATALOG_BUDGET, build).await {
+        Ok(Ok(models)) => models,
+        Ok(Err(_)) => Vec::new(),
+        Err(_) => {
+            crate::logging::info(&format!(
+                "History model catalog not ready within {}ms; deferring to GetModelCatalog",
+                HISTORY_MODEL_CATALOG_BUDGET.as_millis()
+            ));
+            Vec::new()
+        }
+    }
 }
 
 #[expect(
@@ -655,8 +851,10 @@ async fn send_history_with_guard(
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
     supports_pdf_panels: bool,
+    history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let history_start = Instant::now();
+    let catalog_provider = include_model_catalog.then(|| agent_guard.provider_handle());
     let (
         messages,
         images,
@@ -666,7 +864,6 @@ async fn send_history_with_guard(
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,
-        available_models,
         available_model_routes,
         skills,
         tool_names,
@@ -681,7 +878,6 @@ async fn send_history_with_guard(
         history_snapshot_ms,
         image_render_ms,
         tool_names_ms,
-        available_models_ms,
         model_routes_ms,
         skills_ms,
         provider_meta_ms,
@@ -695,19 +891,10 @@ async fn send_history_with_guard(
         let image_render_ms = 0;
 
         let tool_names_start = Instant::now();
-        let tool_names = agent_guard.tool_names().await;
+        // Only the `mcp__*` names are consumed below (the header's `mcp:`
+        // inventory); avoid materializing every tool definition.
+        let tool_names = agent_guard.visible_mcp_tool_names().await;
         let tool_names_ms = tool_names_start.elapsed().as_millis();
-
-        let (available_models, available_models_ms) = if include_model_catalog {
-            let available_models_start = Instant::now();
-            let available_models = agent_guard.available_models_display();
-            (
-                available_models,
-                available_models_start.elapsed().as_millis(),
-            )
-        } else {
-            (Vec::new(), 0)
-        };
 
         // Model-route expansion can be relatively expensive (provider/account routing,
         // endpoint cache reads, etc.). The TUI already supports later
@@ -738,7 +925,6 @@ async fn send_history_with_guard(
             agent_guard.subagent_model(),
             agent_guard.autoreview_enabled(),
             agent_guard.autojudge_enabled(),
-            available_models,
             available_model_routes,
             skills,
             tool_names,
@@ -753,7 +939,6 @@ async fn send_history_with_guard(
             history_snapshot_ms,
             image_render_ms,
             tool_names_ms,
-            available_models_ms,
             model_routes_ms,
             skills_ms,
             provider_meta_ms,
@@ -761,9 +946,36 @@ async fn send_history_with_guard(
         )
     };
 
+    let available_service_tiers = Some(
+        agent_guard
+            .provider_handle()
+            .available_service_tiers()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    let provider_oauth_email = provider_oauth_email(agent_guard.provider_handle().as_ref());
+    let provider_oauth_account_label = agent_guard.provider_handle().serving_oauth_account_label();
+    let inferred_interrupted = was_interrupted
+        .is_none()
+        .then(|| session_interrupted_by_reload(agent_guard.session_for_history()));
+
     // Only snapshot preparation needs the agent. Never hold it across session
     // metadata locks or socket backpressure.
     drop(agent_guard);
+
+    // The model-name catalog is fetched after the agent is released: on a
+    // cold memo it can take far longer than the rest of the snapshot, and it
+    // must neither block a racing turn nor (beyond a short budget) the client's
+    // first real frame.
+    let (available_models, available_models_ms) = match catalog_provider {
+        Some(provider) => {
+            let start = Instant::now();
+            let models = available_models_for_history(provider).await;
+            (models, start.elapsed().as_millis())
+        }
+        None => (Vec::new(), 0),
+    };
 
     let side_panel_start = Instant::now();
     let side_panel = super::client_writer::side_panel_for_client(
@@ -813,18 +1025,55 @@ async fn send_history_with_guard(
         (all, count)
     };
 
+    let build_start = Instant::now();
+    let (agent_model_overrides, server_has_update, reload_recovery, applets, build_parts) =
+        super::run_blocking_io(|| {
+            let t = Instant::now();
+            let overrides = crate::session::Session::read_agent_model_overrides(session_id);
+            let overrides_ms = t.elapsed().as_millis();
+            let t = Instant::now();
+            let has_update = server_has_newer_binary();
+            let update_ms = t.elapsed().as_millis();
+            let t = Instant::now();
+            let recovery =
+                history_reload_recovery_snapshot_with(session_id, was_interrupted, || {
+                    inferred_interrupted.unwrap_or(false)
+                });
+            let recovery_ms = t.elapsed().as_millis();
+            let t = Instant::now();
+            let applets = crate::applets::snapshot_for_session(session_id).unwrap_or_default();
+            let applets_ms = t.elapsed().as_millis();
+            (
+                overrides,
+                has_update,
+                recovery,
+                applets,
+                format!(
+                    "overrides={overrides_ms}ms, update_check={update_ms}ms, recovery={recovery_ms}ms, applets={applets_ms}ms"
+                ),
+            )
+        });
+    let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (images, images_unchanged) = apply_history_images_base(
+        images,
+        history_base.filter(|_| messages_base_count.is_some()),
+    );
     let history_event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
         messages,
+        messages_base_count,
+        images_unchanged,
         images,
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
         subagent_model,
+        agent_model_overrides,
         autoreview_enabled,
         autojudge_enabled,
         available_models,
         available_model_routes,
+        available_service_tiers,
         mcp_servers,
         skills,
         total_tokens: optional_total_tokens(token_usage_totals),
@@ -835,20 +1084,23 @@ async fn send_history_with_guard(
         server_version: Some(jcode_build_meta::version().to_string()),
         server_name: Some(server_name.to_string()),
         server_icon: Some(server_icon.to_string()),
-        server_has_update: Some(server_has_newer_binary()),
+        server_has_update: Some(server_has_update),
         was_interrupted,
-        reload_recovery: history_reload_recovery_snapshot(session_id, was_interrupted),
+        reload_recovery,
         connection_type,
         status_detail,
         upstream_provider,
         resolved_credential,
+        provider_oauth_email,
+        provider_oauth_account_label,
         reasoning_effort,
         service_tier,
         compaction_mode,
         activity,
         side_panel,
-        applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
+        applets,
     };
+    let build_ms = build_start.elapsed().as_millis();
     let encode_start = Instant::now();
     let json = encode_event(&history_event);
     // Free the structured event as soon as the wire bytes exist so only ~1x
@@ -868,9 +1120,11 @@ async fn send_history_with_guard(
     let write_ms = write_start.elapsed().as_millis();
 
     crate::logging::info(&format!(
-        "[TIMING] send_history write: session={}, bytes={}, encode={}ms, writer_lock={}ms, write={}ms, total={}ms",
+        "[TIMING] send_history write: session={}, bytes={}, build={}ms ({}), encode={}ms, writer_lock={}ms, write={}ms, total={}ms",
         session_id,
         json_len,
+        build_ms,
+        build_parts,
         encode_ms,
         writer_lock_ms,
         write_ms,
@@ -1074,7 +1328,8 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             )
         };
 
-        if !initial_models.is_empty() {
+        let needs_capability_refresh = provider.model_capabilities_need_refresh();
+        if !initial_models.is_empty() && !needs_capability_refresh {
             return;
         }
 
@@ -1098,7 +1353,7 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             )
         };
 
-        if refreshed.0 == initial_models && refreshed.1.is_empty() {
+        if !needs_capability_refresh && refreshed.0 == initial_models && refreshed.1.is_empty() {
             return;
         }
 

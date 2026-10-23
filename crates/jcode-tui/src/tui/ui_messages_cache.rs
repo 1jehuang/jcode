@@ -29,6 +29,7 @@ where
             show_tool_duration: crate::config::config().display.show_tool_duration,
             show_tool_timestamp: crate::config::config().display.show_tool_timestamp,
             timestamp_tz: crate::config::config().display.timestamp_tz.clone(),
+            latex_rendering: crate::config::config().display.latex_rendering,
         },
         render,
     )

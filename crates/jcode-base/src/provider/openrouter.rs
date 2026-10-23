@@ -81,7 +81,7 @@ pub fn has_openrouter_credentials() -> bool {
 pub fn get_api_key() -> Option<String> {
     let key_name = configured_api_key_name();
     let env_file = configured_env_file_name();
-    load_api_key_from_env_or_config(&key_name, &env_file)
+    crate::provider_catalog::load_runtime_api_key(&key_name, &env_file)
 }
 
 /// OpenRouter API base URL
@@ -116,17 +116,17 @@ fn autodetected_openai_compatible_profile()
         return Some(compat);
     }
 
+    // Check credentials first and only fully resolve (default-model ranking
+    // reads each profile's cached catalog from disk) the profiles that match.
+    // Resolving every profile up front was wasted work on every provider
+    // construction.
     let mut matches = openai_compatible_profiles()
         .iter()
         .filter(|profile| profile.id != OPENAI_COMPAT_PROFILE.id)
-        .filter_map(|profile| {
-            let resolved = resolve_openai_compatible_profile(*profile);
-            if crate::provider_catalog::openai_compatible_profile_is_configured(*profile) {
-                Some(resolved)
-            } else {
-                None
-            }
+        .filter(|profile| {
+            crate::provider_catalog::openai_compatible_profile_is_configured(**profile)
         })
+        .map(|profile| resolve_openai_compatible_profile(*profile))
         .collect::<Vec<_>>();
 
     if matches.len() == 1 {

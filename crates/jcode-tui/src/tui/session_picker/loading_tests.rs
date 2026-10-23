@@ -420,9 +420,9 @@ fn load_codex_preview_reads_only_tail_of_large_transcript() {
     std::fs::write(&transcript_path, &contents).expect("write big transcript");
 
     let preview = load_codex_preview_from_path(&transcript_path).expect("preview");
-    // Preview is capped at 20 messages.
+    // Preview is capped at PREVIEW_MESSAGE_LIMIT messages.
     assert!(
-        preview.len() <= 20,
+        preview.len() <= PREVIEW_MESSAGE_LIMIT,
         "preview should be capped, got {}",
         preview.len()
     );
@@ -472,7 +472,7 @@ fn load_claude_code_preview_reads_only_tail_of_large_transcript() {
 
     let preview = load_claude_code_preview_from_path(&transcript_path).expect("preview");
     assert!(
-        preview.len() <= 20,
+        preview.len() <= PREVIEW_MESSAGE_LIMIT,
         "preview should be capped, got {}",
         preview.len()
     );
@@ -570,6 +570,8 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
             confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(90)],
             blocked_by: Vec::new(),
             assigned_to: None,
+            stage: None,
+            details: None,
         }],
     )
     .expect("save todos");
@@ -623,6 +625,8 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
             confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(90)],
             blocked_by: Vec::new(),
             assigned_to: None,
+            stage: None,
+            details: None,
         }],
     )
     .expect("save todos");

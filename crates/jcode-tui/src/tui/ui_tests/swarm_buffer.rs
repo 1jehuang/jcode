@@ -410,7 +410,7 @@ fn swarm_strip_stands_down_through_dock_blinks() {
 
 /// The swarm dock widget renders the compact summary at the cell level:
 /// place it through the real `calculate_placements` + `render_all` path into
-/// a TestBackend and assert the summary + progress bar landed inside the
+/// a TestBackend and assert the agent summary landed inside the
 /// placement rect.
 #[test]
 fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
@@ -421,7 +421,6 @@ fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
     let data = crate::tui::info_widget::InfoWidgetData {
         swarm_info: Some(crate::tui::info_widget::SwarmInfo {
             managed_members: vec![coordinator, strip_member("s1", "reviewer", "completed")],
-            plan_progress: Some((3, 2, 7)),
             ..Default::default()
         }),
         ..Default::default()
@@ -462,16 +461,16 @@ fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        dock_text.contains("1/2 agents"),
+        dock_text.contains("1/2 active"),
         "expected agents tally inside dock rect, got:\n{dock_text}"
     );
     assert!(
-        dock_text.contains("nodes 3/7"),
-        "expected node progress in dock header, got:\n{dock_text}"
+        !dock_text.contains("nodes "),
+        "plan progress must not appear in the dock, got:\n{dock_text}"
     );
     assert!(
-        dock_text.contains('▁'),
-        "expected plan progress bar inside dock rect, got:\n{dock_text}"
+        dock_text.contains("researcher") && dock_text.contains("reviewer"),
+        "expected one row per agent inside dock rect, got:\n{dock_text}"
     );
     // Nothing from the dock leaked left of its rect.
     for row in &rows[rect.y as usize..(rect.y + rect.height) as usize] {
@@ -544,8 +543,13 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
         .draw(|frame| crate::tui::ui::draw(frame, state))
         .expect("overscroll frame");
     let rows = buffer_rows(&terminal);
-    // The overscroll line is the last row of the frame.
-    rows.last().cloned().unwrap_or_default()
+    // The status line is pinned directly below the input, so it is the last
+    // non-blank row of the frame (rows below it are unused viewport).
+    rows.iter()
+        .rev()
+        .find(|row| !row.trim().is_empty())
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[test]
@@ -565,7 +569,10 @@ fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
         "full 10-cell bar when roomy: {row}"
     );
     assert!(row.contains("OAuth") && row.contains("OpenAI"), "{row}");
-    assert!(!row.contains("(overscroll"), "no countdown on the pinned line: {row}");
+    assert!(
+        !row.contains("(overscroll"),
+        "no countdown on the pinned line: {row}"
+    );
 }
 
 #[test]
@@ -615,10 +622,16 @@ fn overscroll_model_is_pink() {
         .draw(|frame| crate::tui::ui::draw(frame, &state))
         .expect("overscroll frame");
     let buf = terminal.backend().buffer();
-    let y = buf.area.height - 1;
-    let row: String = (0..buf.area.width)
-        .map(|x| buf[(x, y)].symbol().to_string())
-        .collect();
+    let row_at = |y: u16| -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    };
+    let y = (0..buf.area.height)
+        .rev()
+        .find(|&y| !row_at(y).trim().is_empty())
+        .expect("status line rendered");
+    let row = row_at(y);
     let col = row
         .find("GPT-5.6 Sol")
         .map(|byte| row[..byte].chars().count() as u16)
@@ -660,11 +673,15 @@ fn widgets_render_detail_layer_without_repeating_status_line_facts() {
     }
 
     let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("test terminal");
+    // The Updates box is a widget box too and lists the build's latest commit
+    // subjects; pin it empty so a subject like "… main …" cannot fail the scan.
+    crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(Some(Vec::new()));
     for _ in 0..3 {
         terminal
             .draw(|frame| crate::tui::ui::draw(frame, &state))
             .expect("frame");
     }
+    crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(None);
     let rows = buffer_rows(&terminal);
     let frame = rows.join("\n");
     // Text inside rounded widget boxes only: every column from a box's left
@@ -681,9 +698,14 @@ fn widgets_render_detail_layer_without_repeating_status_line_facts() {
         .join("\n");
     assert!(!widgets.is_empty(), "expected widgets:\n{frame}");
 
-    assert!(widgets.contains("turn_execution.rs"), "Changes detail:\n{frame}");
+    assert!(
+        widgets.contains("turn_execution.rs"),
+        "Changes detail:\n{frame}"
+    );
     assert!(widgets.contains("62 tok/s"), "Runtime detail:\n{frame}");
-    for owned in ["GPT-5.6", "74k", "256k", "29%", "OAuth", "OpenAI", "main", "~3", "↑1"] {
+    for owned in [
+        "GPT-5.6", "74k", "256k", "29%", "OAuth", "OpenAI", "main", "~3", "↑1",
+    ] {
         assert!(
             !widgets.contains(owned),
             "{owned:?} is a status-line fact and must not repeat in widgets:\n{frame}"

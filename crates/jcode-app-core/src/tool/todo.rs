@@ -63,7 +63,152 @@ fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
             history.push(value);
         }
         todo.confidence_history = history;
+        // `assigned_to` links a todo to the swarm worker running it. It is set
+        // by swarm dispatch, not the model (the schema does not expose it), so
+        // a model rewrite of the list must not silently unassign the worker.
+        if todo.assigned_to.is_none() {
+            todo.assigned_to = previous_todo.and_then(|prev| prev.assigned_to.clone());
+        }
     }
+}
+
+/// How a todo call wrote, for measuring whether agents use incremental edits
+/// instead of resending the list. Counted locally in
+/// `~/.jcode/stats/todo-write-modes.json`; nothing leaves the machine.
+fn todo_write_mode(input: &Value) -> &'static str {
+    let has = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
+    match (has("todos"), has("update") || has("add") || has("remove")) {
+        (true, _) => "full",
+        (false, true) => "patch",
+        (false, false) if has("goals") || has("plan") => "assessment",
+        _ => "read",
+    }
+}
+
+fn record_todo_write_mode(input: &Value) {
+    static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_guard) = COUNTER_LOCK.lock() else {
+        return;
+    };
+    let mode = todo_write_mode(input);
+    let Ok(dir) = crate::storage::jcode_dir().map(|dir| dir.join("stats")) else {
+        return;
+    };
+    let path = dir.join("todo-write-modes.json");
+    let mut counts: HashMap<String, u64> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    *counts.entry(mode.to_string()).or_default() += 1;
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = crate::storage::write_json_fast(&path, &counts);
+}
+
+/// Turn incremental edits into a full `todos` list so every downstream rule
+/// (status validation, confidence history, gates, lane and plan sync) runs on
+/// one path. `update` changes only the given fields of todos matched by `id`;
+/// `add` appends new todos (or inserts each after its `after` id); `remove`
+/// drops ids. Only applies when `todos` is absent: a full list always wins.
+fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(input);
+    };
+    let patching = ["update", "add", "remove"]
+        .iter()
+        .any(|key| obj.get(*key).is_some_and(|value| !value.is_null()));
+    if !patching {
+        return Ok(input);
+    }
+    if obj.get("todos").is_some_and(|value| !value.is_null()) {
+        bail!("send either a full `todos` list or `update`/`add`/`remove` edits, not both");
+    }
+    let parse_list = |value: Option<Value>| -> Result<Vec<Value>> {
+        match value {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Array(items)) => Ok(items),
+            Some(Value::String(raw)) if raw.trim().is_empty() => Ok(Vec::new()),
+            Some(Value::String(raw)) => match serde_json::from_str::<Value>(raw.trim()) {
+                Ok(Value::Array(items)) => Ok(items),
+                Ok(single @ Value::Object(_)) => Ok(vec![single]),
+                _ => bail!("expected a list"),
+            },
+            Some(single @ Value::Object(_)) => Ok(vec![single]),
+            Some(other) => bail!("expected a list, got {other}"),
+        }
+    };
+    let updates = parse_list(obj.remove("update"))?;
+    let adds = parse_list(obj.remove("add"))?;
+    let removes: Vec<String> = parse_list(obj.remove("remove"))?
+        .into_iter()
+        .filter_map(|value| match value {
+            Value::String(id) => Some(id),
+            Value::Object(fields) => fields.get("id").and_then(Value::as_str).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+
+    let Value::Array(mut todos) = stored() else {
+        bail!("stored todos are not a list");
+    };
+    let id_of = |todo: &Value| todo.get("id").and_then(Value::as_str).map(str::to_string);
+
+    for update in updates {
+        let Some(fields) = update.as_object() else {
+            bail!("each update must be an object with an id");
+        };
+        let Some(id) = fields.get("id").and_then(Value::as_str) else {
+            bail!("each update needs an `id`");
+        };
+        let Some(todo) = todos
+            .iter_mut()
+            .find(|todo| id_of(todo).as_deref() == Some(id))
+        else {
+            bail!("no todo with id {id:?}; use `add` for new todos");
+        };
+        let target = todo.as_object_mut().expect("stored todo is an object");
+        for (key, value) in fields {
+            if key != "id" {
+                // `phase`/`lane` are the card's words for `stage`/`group`;
+                // write the canonical key so an alias never sits beside it.
+                let key = match key.as_str() {
+                    "phase" | "wave" => "stage",
+                    "lane" => "group",
+                    other => other,
+                };
+                target.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+
+    for mut add in adds {
+        let Some(fields) = add.as_object_mut() else {
+            bail!("each added todo must be an object");
+        };
+        let after = fields
+            .remove("after")
+            .and_then(|v| v.as_str().map(str::to_string));
+        let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
+        if let Some(id) = &id
+            && todos.iter().any(|todo| id_of(todo).as_deref() == Some(id))
+        {
+            bail!("todo id {id:?} already exists; use `update` to change it");
+        }
+        match after.and_then(|after| {
+            todos
+                .iter()
+                .position(|t| id_of(t).as_deref() == Some(&after))
+        }) {
+            Some(index) => todos.insert(index + 1, add),
+            None => todos.push(add),
+        }
+    }
+
+    if !removes.is_empty() {
+        todos.retain(|todo| !id_of(todo).is_some_and(|id| removes.contains(&id)));
+    }
+
+    obj.insert("todos".to_string(), Value::Array(todos));
+    Ok(input)
 }
 
 #[derive(Deserialize)]
@@ -728,13 +873,12 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read or update structured todo items and optional goal-level assessments. \
-         Use this tool VERY frequently, far more than feels necessary. The user watches \
-         todo progress live, so a stale list looks like stalled work. For any task with \
-         more than one step: write the full plan before starting, mark an item \
-         in_progress before working on it, mark it completed the moment it is done \
-         (never batch completions), and add newly discovered work as soon as you find it. \
-         Expect to call this after nearly every meaningful step."
+        "Read or update todos and goal assessments. For multi-step work, write the plan \
+         once with `todos`. Then use `update` by id for status/field changes and `add` \
+         for new work. Reserve full replacement for restructuring; remove rarely. \
+         Mark work in_progress before starting and completed as soon as it is done. \
+         Keep the live list current after meaningful steps. Use short titles, with \
+         longer context in details. Organize parallel lanes within sequential phases."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -742,16 +886,44 @@ impl Tool for TodoTool {
             "type": "object",
             "properties": {
                 "intent": super::intent_schema_property(),
+                "update": {
+                    "type": "array",
+                    "description": "Edit existing todos by id: each entry is {id, ...fields to change}; other fields and todos are untouched. Prefer this for status changes instead of resending the list.",
+                    "items": {
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {"id": {"type": "string"}},
+                        "additionalProperties": true
+                    }
+                },
+                "add": {
+                    "type": "array",
+                    "description": "Append new todos (same fields as todos). Optional `after`: id to insert after.",
+                    "items": {
+                        "type": "object",
+                        "required": ["content", "status", "priority", "id", "confidence"],
+                        "additionalProperties": true
+                    }
+                },
+                "remove": {
+                    "type": "array",
+                    "description": "Ids of todos to delete. Prefer marking status cancelled.",
+                    "items": {"type": "string"}
+                },
                 "todos": {
                     "type": "array",
-                    "description": "Todo list to save.",
+                    "description": "Full todo list; replaces the whole list. Use for the initial plan or a real restructure, otherwise prefer update/add/remove.",
                     "items": {
                         "type": "object",
                         "required": ["content", "status", "priority", "id", "confidence"],
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "Task."
+                                "description": "Short title, ideally under 40 characters; todos render side by side. Put longer context in details."
+                            },
+                            "details": {
+                                "type": "string",
+                                "description": "Optional longer brief: files, acceptance criteria, context. Not shown on the card; given to a swarm worker that takes this todo."
                             },
                             "status": {
                                 "type": "string",
@@ -766,9 +938,14 @@ impl Tool for TodoTool {
                                 "type": "string",
                                 "description": "ID."
                             },
-                            "group": {
+                            "lane": {
                                 "type": "string",
-                                "description": "Optional group label; one group per coherent goal, new direction = new group. Omit for flat list."
+                                "description": "Optional lane name: one lane per coherent goal; todos in a lane run in order and one swarm agent owns a lane. Omit for flat list."
+                            },
+                            "phase": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Optional phase (1, 2, 3...). Phase 2 starts after phase 1 is done. Inside a phase, lanes (todos sharing a lane) run in parallel. Omit when steps must happen in list order."
                             },
                             "confidence": {
                                 "type": "string",
@@ -866,6 +1043,11 @@ impl Tool for TodoTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        record_todo_write_mode(&input);
+        let input = apply_todo_patch(input, || {
+            serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
+                .unwrap_or(Value::Array(Vec::new()))
+        })?;
         let params = parse_todo_input(input)?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
         let operation = if is_write { "write" } else { "read" };
@@ -978,11 +1160,17 @@ mod tests {
             .get("properties")
             .and_then(|v| v.as_object())
             .expect("todo schema should have properties");
-        assert_eq!(props.len(), 4);
+        assert_eq!(props.len(), 7);
         assert!(props.contains_key("intent"));
         assert!(props.contains_key("todos"));
         assert!(props.contains_key("plan"));
         assert!(props.contains_key("goals"));
+        for patch in ["update", "add", "remove"] {
+            assert!(
+                props.contains_key(patch),
+                "{patch} patch mode should be offered"
+            );
+        }
 
         let item = props["todos"]
             .get("items")
@@ -997,6 +1185,10 @@ mod tests {
             .get("properties")
             .and_then(|v| v.as_object())
             .expect("todo item should advertise properties");
+        assert!(item_props.contains_key("phase"));
+        assert!(item_props.contains_key("lane"));
+        assert!(!item_props.contains_key("stage"));
+        assert!(!item_props.contains_key("group"));
         assert!(item_props.contains_key("confidence"));
         assert!(item_props.contains_key("completion_confidence"));
         assert!(!item_props.contains_key("closed_feedback_loop"));
@@ -1673,6 +1865,135 @@ mod tests {
     /// ungrouped goal unconditionally (not only as a group header), so an
     /// ungrouped goal left over from a previous flat todo list is exactly what
     /// the reporter saw frozen in the panel.
+    #[tokio::test]
+    async fn patch_mode_accepts_phase_and_lane_and_counts_write_modes() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "todo-phase-lane";
+        let tool = TodoTool::new();
+
+        // Full write using the card's words.
+        tool.execute(
+            json!({"todos": [{"content": "a", "status": "pending", "priority": "high",
+                              "id": "a", "confidence": "plausible",
+                              "phase": 2, "lane": "parser"}]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("full write with phase/lane");
+        let todos = load_todos(session).unwrap();
+        assert_eq!(todos[0].stage, Some(2));
+        assert_eq!(todos[0].group.as_deref(), Some("parser"));
+
+        // Patch moving it with the same words.
+        tool.execute(
+            json!({"update": [{"id": "a", "phase": 3, "lane": "ui"}]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("patch with phase/lane");
+        let todos = load_todos(session).unwrap();
+        assert_eq!(todos[0].stage, Some(3));
+        assert_eq!(todos[0].group.as_deref(), Some("ui"));
+
+        tool.execute(json!({}), test_ctx(session))
+            .await
+            .expect("read");
+        let counts: HashMap<String, u64> = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("stats/todo-write-modes.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(counts.get("full"), Some(&1));
+        assert_eq!(counts.get("patch"), Some(&1));
+        assert_eq!(counts.get("read"), Some(&1));
+
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_mode_updates_adds_and_removes_without_resending_the_list() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "todo-patch-mode";
+        let tool = TodoTool::new();
+
+        tool.execute(
+            json!({"todos": [
+                {"content": "a", "status": "pending", "priority": "high", "id": "a",
+                 "confidence": "plausible", "stage": 1, "group": "lane", "details": "keep me"},
+                {"content": "b", "status": "pending", "priority": "high", "id": "b",
+                 "confidence": "plausible", "stage": 1, "group": "lane"},
+            ]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("initial write");
+
+        // Status change by id: every other field and todo is untouched.
+        tool.execute(
+            json!({"update": [{"id": "a", "status": "completed",
+                               "completion_confidence": "validated"}]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("update");
+        let todos = load_todos(session).unwrap();
+        assert_eq!(todos[0].status, "completed");
+        assert_eq!(todos[0].stage, Some(1));
+        assert_eq!(todos[0].group.as_deref(), Some("lane"));
+        assert_eq!(todos[0].details.as_deref(), Some("keep me"));
+        assert_eq!(todos[1].status, "pending");
+
+        // Insert after a given id, then remove one.
+        tool.execute(
+            json!({"add": [{"content": "between", "status": "pending", "priority": "high",
+                            "id": "m", "confidence": "plausible", "after": "a"}],
+                   "remove": ["b"]}),
+            test_ctx(session),
+        )
+        .await
+        .expect("add + remove");
+        let ids: Vec<String> = load_todos(session)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, ["a", "m"]);
+
+        // Mistakes are rejected instead of silently doing something else.
+        for bad in [
+            json!({"update": [{"id": "nope", "status": "completed"}]}),
+            json!({"add": [{"content": "dup", "status": "pending", "priority": "high",
+                            "id": "a", "confidence": "plausible"}]}),
+            json!({"update": [{"id": "a", "status": "finished-ish"}]}),
+            json!({"todos": [], "update": [{"id": "a", "status": "pending"}]}),
+        ] {
+            assert!(
+                tool.execute(bad.clone(), test_ctx(session)).await.is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            load_todos(session).unwrap().len(),
+            2,
+            "failed patches change nothing"
+        );
+
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     #[tokio::test]
     async fn an_ungrouped_goal_does_not_survive_into_a_grouped_next_task() {
         let _guard = crate::storage::lock_test_env();

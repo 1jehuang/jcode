@@ -9,6 +9,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Continue working".to_string(),
@@ -52,6 +54,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    stage: None,
+                    details: None,
                     group: None,
                     id: "todo-1".to_string(),
                     content: "Continue working".to_string(),
@@ -64,6 +68,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     confidence_history: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    stage: None,
+                    details: None,
                     group: None,
                     id: "todo-2".to_string(),
                     content: "Handle the newly discovered follow-up".to_string(),
@@ -154,6 +160,8 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Resume after interrupt".to_string(),
@@ -574,6 +582,7 @@ fn test_handle_server_event_soft_interrupt_injected_system_renders_system_messag
             display_role: Some("system".to_string()),
             point: "D".to_string(),
             tools_skipped: None,
+            client_ids: Vec::new(),
         },
         &mut remote,
     );
@@ -621,6 +630,7 @@ fn test_handle_server_event_soft_interrupt_injected_keeps_other_pending_previews
             display_role: Some("user".to_string()),
             point: "D".to_string(),
             tools_skipped: None,
+            client_ids: Vec::new(),
         },
         &mut remote,
     );
@@ -644,6 +654,7 @@ fn test_handle_server_event_soft_interrupt_injected_duplicate_content_keeps_late
             display_role: Some("user".to_string()),
             point: "D".to_string(),
             tools_skipped: None,
+            client_ids: Vec::new(),
         },
         &mut remote,
     );
@@ -672,6 +683,7 @@ fn test_handle_server_event_soft_interrupt_injected_combined_content_clears_comp
             display_role: Some("user".to_string()),
             point: "D".to_string(),
             tools_skipped: None,
+            client_ids: Vec::new(),
         },
         &mut remote,
     );
@@ -697,6 +709,7 @@ fn test_handle_server_event_soft_interrupt_injected_unrelated_content_keeps_pend
             display_role: Some("system".to_string()),
             point: "D".to_string(),
             tools_skipped: None,
+            client_ids: Vec::new(),
         },
         &mut remote,
     );
@@ -721,6 +734,7 @@ fn test_handle_server_event_soft_interrupt_injected_background_task_retains_row_
             display_role: Some("background_task".to_string()),
             point: "D".to_string(),
             tools_skipped: None,
+            client_ids: Vec::new(),
         },
         &mut remote,
     );
@@ -770,7 +784,12 @@ fn test_handle_server_event_notification_background_task_scope_uses_failed_row()
         app.background_task_rows_ref()[0].status,
         crate::tui::BackgroundTaskRowStatus::Failed
     );
-    assert!(text.contains("× bg bash"), "missing compact failed row:\n{text}");
+    let widget_rows = crate::tui::TuiState::info_widget_data(&app)
+        .background_info
+        .expect("failed task should feed the background widget")
+        .rows;
+    assert_eq!(widget_rows.len(), 1);
+    assert_eq!(widget_rows[0].label, "bash");
     assert!(
         !text.contains("Background task failed") && !text.contains("[stderr] line one"),
         "unexpected expanded background task card:\n{text}"
@@ -802,6 +821,8 @@ fn test_swarm_completion_notification_inserts_agent_snapshot_without_report_pros
             auth_method: Some("OAuth".to_string()),
             effort: Some("high".to_string()),
             elapsed_secs: Some(35),
+            activity_age_secs: None,
+            ..Default::default()
         },
     }];
     let rt = tokio::runtime::Runtime::new().unwrap();

@@ -2,6 +2,34 @@
 use super::*;
 
 #[test]
+fn best_effort_bridge_diagnostics_never_persist_page_payloads() {
+    let secret = "https://private.example/?token=secret-token page text and script contents";
+    let bridge = anyhow::anyhow!(secret.to_string()).context("getContent failed");
+    let transport = anyhow::Error::new(std::io::Error::other(secret))
+        .context(format!("getActiveTab failed: {secret}"));
+    let json = anyhow::Error::new(
+        serde_json::from_str::<Value>("not json with secret-token").unwrap_err(),
+    )
+    .context(secret);
+    for error in [bridge, transport, json] {
+        let diagnostic = browser_error_diagnostic(&error);
+        assert!(!diagnostic.contains("secret-token"), "{diagnostic}");
+        assert!(!diagnostic.contains("private.example"), "{diagnostic}");
+        assert!(!diagnostic.contains("page text"), "{diagnostic}");
+        assert!(!diagnostic.contains("script contents"), "{diagnostic}");
+        assert!(diagnostic.contains("failure") || diagnostic.contains("failed"));
+    }
+}
+
+#[cfg(unix)]
+#[path = "browser_session_tests.rs"]
+mod browser_session_tests;
+
+#[cfg(unix)]
+#[path = "browser_user_browser_tests.rs"]
+mod browser_user_browser_tests;
+
+#[test]
 fn press_script_uses_selector_when_present() {
     let script = build_press_script(Some("Enter"), Some("#email")).unwrap();
     assert!(script.contains("document.querySelector"));
@@ -259,8 +287,10 @@ async fn readiness_does_not_trust_a_stale_setup_marker() {
     let prev_autolaunch = std::env::var_os("JCODE_BROWSER_AUTOLAUNCH");
     let temp = tempfile::TempDir::new().expect("create temp dir");
     jcode_base::env::set_var("JCODE_HOME", temp.path());
-    // Keep the test hermetic: never launch a real Firefox from here.
+    let prev_auto_update = std::env::var_os("JCODE_BROWSER_AUTO_UPDATE");
+    // Keep the test hermetic: never launch a real Firefox or query GitHub.
     jcode_base::env::set_var("JCODE_BROWSER_AUTOLAUNCH", "0");
+    jcode_base::env::set_var("JCODE_BROWSER_AUTO_UPDATE", "0");
 
     let browser_dir = temp.path().join("browser");
     std::fs::create_dir_all(&browser_dir).expect("create browser dir");
@@ -296,6 +326,10 @@ async fn readiness_does_not_trust_a_stale_setup_marker() {
         jcode_base::env::set_var("JCODE_BROWSER_AUTOLAUNCH", prev_autolaunch);
     } else {
         jcode_base::env::remove_var("JCODE_BROWSER_AUTOLAUNCH");
+    }
+    match prev_auto_update {
+        Some(v) => jcode_base::env::set_var("JCODE_BROWSER_AUTO_UPDATE", v),
+        None => jcode_base::env::remove_var("JCODE_BROWSER_AUTO_UPDATE"),
     }
 }
 
@@ -424,3 +458,8 @@ fn nested_scroll_uses_container_delta_without_escaping_scope() {
     assert!(script.contains("top:600"));
     assert!(script.contains("return {scrolled:true"));
 }
+
+// #1743 live acceptance (ignored by default; see the module docs).
+#[cfg(unix)]
+#[path = "browser_live_1743_tests.rs"]
+mod browser_live_1743_tests;

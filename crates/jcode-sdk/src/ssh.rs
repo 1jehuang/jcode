@@ -37,6 +37,8 @@ pub struct SshConnectOptions {
     /// Total SSH startup and API handshake deadline, independent of request_timeout.
     pub connect_timeout: Duration,
     pub client_name: String,
+    /// Desktop inline response rendering capability, false for other clients.
+    pub supports_user_response: bool,
     pub request_timeout: Option<Duration>,
     /// Private key used exclusively for this connection (`IdentitiesOnly`).
     /// Managed hosts authorize a fresh key per connection, so agent and
@@ -60,6 +62,7 @@ impl Default for SshConnectOptions {
             remote_binary: "jcode".into(),
             connect_timeout: Duration::from_secs(30),
             client_name: defaults.client_name,
+            supports_user_response: false,
             request_timeout: defaults.request_timeout,
             identity_file: None,
             known_hosts_file: None,
@@ -201,9 +204,10 @@ impl SshConnectOptions {
         let stderr = read(Box::new(child.stderr.take().expect("piped stderr")));
         let deadline = std::time::Instant::now() + timeout;
         let status = loop {
-            if let Some(status) = child.try_wait().map_err(|e| {
-                Error::new(ErrorKind::Transport, format!("ssh wait failed: {e}"))
-            })? {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| Error::new(ErrorKind::Transport, format!("ssh wait failed: {e}")))?
+            {
                 break status;
             }
             if std::time::Instant::now() >= deadline {
@@ -228,6 +232,7 @@ impl SshConnectOptions {
     ) -> Result<Command> {
         self.validate()?;
         let mut command = Command::new("ssh");
+        crate::process::no_console_window(&mut command);
         if self.isolated_config {
             command.args(["-F", "/dev/null"]);
         }

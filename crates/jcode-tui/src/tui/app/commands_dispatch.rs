@@ -35,6 +35,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/keys"
             | "/keybindings"
             | "/alignment"
+            | "/latex"
             | "/reasoning"
             | "/thinking"
             | "/thinking-display"
@@ -66,6 +67,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/rebuild"
             | "/update"
             | "/update-sim"
+            | "/update-rehearsal"
             | "/onboarding-sim"
             | "/onboarding-preview"
             | "/usage"
@@ -110,6 +112,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/split"
             | "/btw"
             | "/transfer"
+            | "/desktop"
             | "/workspace"
     )
 }
@@ -225,8 +228,10 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         // `/test`, `/mission`, `/goal`, and `/goals` are dispatched inside
         // `handle_session_command`, so they need no separate entries here.
         || super::commands::handle_session_command(app, trimmed)
+        || super::commands_desktop::handle_desktop_command(app, trimmed)
         || super::commands::handle_dictation_command(app, trimmed)
         || super::commands::handle_config_command(app, trimmed)
+        || super::commands::handle_latex_command(app, trimmed)
         || super::commands_colors::handle_colors_command(app, trimmed)
         || super::commands::handle_log_command(app, trimmed)
         || super::commands::handle_diff_command(app, trimmed)
@@ -242,6 +247,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::state_ui::handle_info_command(app, trimmed)
         || super::auth::handle_auth_command(app, trimmed)
         || super::tui_lifecycle_runtime::handle_dev_command(app, trimmed)
+        || app.handle_update_rehearsal_command(trimmed)
 }
 
 /// Environment-mode tests run in their own process, so parallel local-mode
@@ -282,7 +288,14 @@ mod tests {
         use crate::tui::app::{input, tests::create_test_app};
         let mut app = create_test_app();
         app.is_remote = true;
-        for command in ["/config init", "/logout", "/save test", "/reload", "/git"] {
+        for command in [
+            "/config init",
+            "/logout",
+            "/save test",
+            "/reload",
+            "/git",
+            "/latex unicode",
+        ] {
             assert!(super::dispatch_local_command(&mut app, command));
             assert!(
                 app.display_messages
@@ -348,6 +361,7 @@ mod tests {
             "/rebuild",
             "/fast default on",
             "/agents",
+            "/latex unicode",
             "/subagent-model",
             "/transcript path",
             "!cat ~/.ssh/config",
@@ -356,6 +370,7 @@ mod tests {
             "/split",
             "/btw question",
             "/transfer",
+            "/desktop",
             "/workspace",
             "/workspace split",
             "/todos",

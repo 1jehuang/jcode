@@ -31,79 +31,6 @@ fn tool_is_named_swarm() {
 }
 
 #[test]
-fn task_graph_seed_collision_is_detected_from_server_error() {
-    let response = ServerEvent::Error {
-        id: 1,
-        message: "Seed rejected: duplicate node id 'final-synthesis'".to_string(),
-        retry_after_secs: None,
-    };
-    assert_eq!(
-        super::seed_node_id_collision(&response),
-        Some("final-synthesis")
-    );
-    assert_eq!(
-        super::seed_node_id_collision(&ServerEvent::Done { id: 1 }),
-        None
-    );
-}
-
-#[test]
-fn conflicting_seed_ids_are_scoped_and_dependencies_follow_the_remap() {
-    let nodes = vec![
-        crate::protocol::TaskGraphNodeSpec {
-            id: "explore".to_string(),
-            content: "explore".to_string(),
-            kind: Some("explore".to_string()),
-            depends_on: Vec::new(),
-            priority: 10,
-        },
-        crate::protocol::TaskGraphNodeSpec {
-            id: "final-synthesis".to_string(),
-            content: "synthesize".to_string(),
-            kind: Some("synthesize".to_string()),
-            depends_on: vec!["explore".to_string()],
-            priority: 20,
-        },
-        crate::protocol::TaskGraphNodeSpec {
-            id: "verify".to_string(),
-            content: "verify".to_string(),
-            kind: Some("verify".to_string()),
-            depends_on: vec!["final-synthesis".to_string()],
-            priority: 30,
-        },
-    ];
-    let occupied = HashSet::from([
-        // This node represents an exact replay. The server would have accepted it
-        // after the conflicting id was fixed, so the client must not rename every
-        // occupied id preemptively.
-        "explore".to_string(),
-        "final-synthesis".to_string(),
-        "final-synthesis::seed-deadbeef".to_string(),
-    ]);
-
-    let (remapped, changes) =
-        super::remap_conflicting_seed_nodes(&nodes, &occupied, "final-synthesis", "seed-deadbeef");
-
-    assert_eq!(
-        changes,
-        vec![(
-            "final-synthesis".to_string(),
-            "final-synthesis::seed-deadbeef-2".to_string()
-        )]
-    );
-    assert_eq!(remapped[0], nodes[0], "non-conflicting nodes stay stable");
-    assert_eq!(remapped[1].id, "final-synthesis::seed-deadbeef-2");
-    assert_eq!(
-        remapped[2].depends_on,
-        vec!["final-synthesis::seed-deadbeef-2".to_string()]
-    );
-    assert_eq!(
-        super::format_seed_remaps(&changes),
-        "final-synthesis -> final-synthesis::seed-deadbeef-2"
-    );
-}
-
-#[test]
 fn task_id_from_output_path_extracts_background_task_id() {
     assert_eq!(
         super::task_id_from_output_path(Path::new("/tmp/tasks/123abc.output")),
@@ -292,27 +219,13 @@ async fn run_plan_driver_guard_releases_claim_on_drop_without_task() {
 }
 
 #[test]
-fn run_plan_concurrency_is_mode_aware() {
-    // Light mode (no explicit limit) keeps the small cheap fan-out default.
+fn run_plan_concurrency_defaults_and_clamps() {
     assert_eq!(
-        resolve_run_plan_concurrency(None, false, 32),
-        super::LIGHT_MODE_DEFAULT_CONCURRENCY
+        resolve_run_plan_concurrency(None),
+        super::DEFAULT_RUN_PLAN_CONCURRENCY
     );
-
-    // Deep mode (no explicit limit) fans out wide using the configured cap,
-    // NOT the old hardcoded 3 and NOT the light default.
-    assert_eq!(resolve_run_plan_concurrency(None, true, 32), 32);
-    assert_eq!(resolve_run_plan_concurrency(None, true, 64), 64);
-
-    // Deep mode with the cap set to 0 means "no extra cap": dispatch the whole
-    // ready set, bounded only by the swarm member cap.
-    assert_eq!(resolve_run_plan_concurrency(None, true, 0), usize::MAX);
-
-    // An explicit request always wins over the mode default, in both modes,
-    // and is clamped to at least 1.
-    assert_eq!(resolve_run_plan_concurrency(Some(5), true, 32), 5);
-    assert_eq!(resolve_run_plan_concurrency(Some(5), false, 32), 5);
-    assert_eq!(resolve_run_plan_concurrency(Some(0), true, 32), 1);
+    assert_eq!(resolve_run_plan_concurrency(Some(5)), 5);
+    assert_eq!(resolve_run_plan_concurrency(Some(0)), 1);
 }
 
 #[test]
@@ -330,42 +243,20 @@ fn run_plan_utilization_tracks_peak_and_starvation() {
     assert_eq!(util.loops, 3);
     assert_eq!(util.starved_loops, 1);
 
-    let report = util.report(8, true);
+    let report = util.report(8);
     assert!(report.contains("peak 8 of 8"));
     assert!(report.contains("1 of 3 loop(s)"));
-    // 1/3 starved and peak 8: healthy run, no hint.
-    assert!(!report.contains("Deep-mode hint"));
-}
-
-#[test]
-fn run_plan_utilization_flags_serial_deep_runs() {
-    // A deep run that trickles one task at a time despite a 32-slot budget.
-    let mut util = super::RunPlanUtilization::default();
-    for _ in 0..4 {
-        util.record_loop(0, Some(32), 1);
-    }
-    assert_eq!(util.peak_in_flight, 1);
-    assert_eq!(util.starved_loops, 4);
-
-    let deep_report = util.report(32, true);
-    assert!(deep_report.contains("peak 1 of 32"));
-    assert!(deep_report.contains("Deep-mode hint"));
-    assert!(deep_report.contains("expand"));
-
-    // The same shape in light mode is by design; no nagging.
-    let light_report = util.report(32, false);
-    assert!(!light_report.contains("Deep-mode hint"));
 }
 
 #[test]
 fn run_plan_utilization_handles_unbounded_budget() {
     let mut util = super::RunPlanUtilization::default();
-    // Unbounded budget (deep_cap=0): open slots are not meaningful, so no
-    // starvation accounting, but peak parallelism still records.
+    // Unbounded budget: open slots are not meaningful, so no starvation
+    // accounting, but peak parallelism still records.
     util.record_loop(10, None, 5);
     assert_eq!(util.peak_in_flight, 15);
     assert_eq!(util.starved_loops, 0);
-    let report = util.report(usize::MAX, true);
+    let report = util.report(usize::MAX);
     assert!(report.contains("peak 15 of unbounded"));
 }
 
@@ -387,10 +278,6 @@ fn await_wakes_only_for_ready_items_beyond_the_wave_baseline() {
         unresolved_dependency_ids: Vec::new(),
         next_ready_ids: Vec::new(),
         newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "deep".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
     };
 
     // Items already ready at wave start (even permanently-undispatchable
@@ -425,10 +312,6 @@ fn run_plan_progress_counts_only_completed_toward_percent_and_shows_live_active(
         unresolved_dependency_ids: Vec::new(),
         next_ready_ids: Vec::new(),
         newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "deep".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
     };
 
     let (completed, total, message) = super::run_plan_progress_snapshot(&summary, 4, 137);
@@ -480,10 +363,6 @@ fn run_plan_progress_active_prefers_plan_execution_state_when_larger() {
         unresolved_dependency_ids: Vec::new(),
         next_ready_ids: Vec::new(),
         newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "light".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
     };
 
     // Plan says 3 active but only 1 live member is observable (e.g. status
@@ -494,56 +373,6 @@ fn run_plan_progress_active_prefers_plan_execution_state_when_larger() {
         message,
         "completed 2 · failed 1 · blocked 1 · active 3 · assignments 5"
     );
-}
-
-#[test]
-fn plan_status_budget_line_is_deep_only_and_nudges_serialized_graphs() {
-    let base = crate::protocol::PlanGraphStatus {
-        swarm_id: Some("swarm-a".to_string()),
-        version: 1,
-        item_count: 10,
-        ready_ids: vec!["a".to_string()],
-        blocked_ids: Vec::new(),
-        active_ids: vec!["b".to_string()],
-        completed_ids: vec!["c".to_string()],
-        failed_ids: Vec::new(),
-        failed_reasons: Default::default(),
-        cycle_ids: Vec::new(),
-        unresolved_dependency_ids: Vec::new(),
-        next_ready_ids: Vec::new(),
-        newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "deep".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
-    };
-
-    // Light plans get no budget line at all.
-    let light = crate::protocol::PlanGraphStatus {
-        mode: "light".to_string(),
-        ..base.clone()
-    };
-    assert_eq!(super::plan_status_budget_line(&light, 32), None);
-
-    // Deep + narrow frontier (2 of 32) with 7 more items serialized behind
-    // edges -> budget line plus the widen nudge.
-    let narrow = super::plan_status_budget_line(&base, 32).expect("deep plans get a budget line");
-    assert!(narrow.contains("Parallel budget: 32"));
-    assert!(narrow.contains("ready set is 1 wide (1 active)"));
-    assert!(narrow.contains("expand_node"));
-
-    // Deep + the frontier is all that remains -> line but no nudge.
-    let almost_done = crate::protocol::PlanGraphStatus {
-        item_count: 3,
-        ..base.clone()
-    };
-    let line = super::plan_status_budget_line(&almost_done, 32).unwrap();
-    assert!(line.contains("Parallel budget: 32"));
-    assert!(!line.contains("expand_node"));
-
-    // deep_cap=0 (unbounded) surfaces the member cap as the budget.
-    let unbounded = super::plan_status_budget_line(&base, 0).unwrap();
-    assert!(unbounded.contains("1000 (member cap)"));
 }
 
 #[test]
@@ -636,10 +465,6 @@ fn run_plan_terminal_summary_reports_failed_nodes() {
         unresolved_dependency_ids: Vec::new(),
         next_ready_ids: Vec::new(),
         newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "deep".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
     };
 
     let with_failures = super::format_run_plan_terminal_summary(5, &base, 7);
@@ -682,10 +507,6 @@ fn plan_terminal_node_count_includes_failed_without_double_counting() {
         unresolved_dependency_ids: Vec::new(),
         next_ready_ids: Vec::new(),
         newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "light".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
     };
     // a (completed) + c (failed) + x (blocked/cycle, deduped) = 3. Without
     // failed_ids in the terminal count a run with failed nodes would never
@@ -699,7 +520,7 @@ fn canonical_swarm_action_maps_common_synonyms() {
     assert_eq!(canonical_swarm_action("read_messages"), "read");
     assert_eq!(canonical_swarm_action("send"), "message");
     assert_eq!(canonical_swarm_action("msg"), "message");
-    assert_eq!(canonical_swarm_action("direct_message"), "dm");
+    assert_eq!(canonical_swarm_action("direct_message"), "message");
     assert_eq!(canonical_swarm_action("announce"), "broadcast");
     assert_eq!(canonical_swarm_action("agents"), "list");
     assert_eq!(canonical_swarm_action("plan"), "plan_status");
@@ -717,7 +538,7 @@ fn canonical_swarm_action_is_case_insensitive_and_trims() {
 fn canonical_swarm_action_passes_through_known_and_unknown_actions() {
     // Real actions are unchanged.
     assert_eq!(canonical_swarm_action("spawn"), "spawn");
-    assert_eq!(canonical_swarm_action("dm"), "dm");
+    assert_eq!(canonical_swarm_action("dm"), "message");
     assert_eq!(canonical_swarm_action("assign_role"), "assign_role");
     // Genuinely unknown actions are returned unchanged for normal validation.
     assert_eq!(canonical_swarm_action("totally_made_up"), "totally_made_up");
@@ -756,10 +577,6 @@ fn format_plan_status_includes_next_ready() {
         unresolved_dependency_ids: Vec::new(),
         next_ready_ids: vec!["task-2".to_string()],
         newly_ready_ids: vec!["task-3".to_string()],
-        low_confidence_ids: Vec::new(),
-        mode: "deep".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
     });
     let text = output.output;
     assert!(text.contains("Plan status for swarm swarm-a"));
@@ -784,10 +601,6 @@ fn in_flight_slot_accounting_counts_queued_workers_not_coordinator() {
         unresolved_dependency_ids: Vec::new(),
         next_ready_ids: vec!["queued-assigned".to_string()],
         newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "light".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
     };
     let members = vec![
         AgentInfo {
@@ -859,10 +672,6 @@ fn in_flight_count_excludes_foreign_queued_session() {
         unresolved_dependency_ids: Vec::new(),
         next_ready_ids: Vec::new(),
         newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "light".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
     };
     let members = vec![
         AgentInfo {
@@ -981,7 +790,7 @@ fn schema_still_requires_action() {
 }
 
 #[test]
-fn schema_advertises_model_and_effort_spawn_overrides() {
+fn schema_advertises_model_override_but_not_effort() {
     let schema = CommunicateTool::new().parameters_schema();
     let props = schema["properties"]
         .as_object()
@@ -995,11 +804,9 @@ fn schema_advertises_model_and_effort_spawn_overrides() {
             .contains("list_models"),
         "model param should point at the list_models action"
     );
-    assert!(props.contains_key("effort"));
-    assert_eq!(
-        props["effort"]["enum"],
-        json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
-    );
+    // Worker effort is user-configured (`agents.swarm_effort`, default low),
+    // never chosen by the coordinating agent.
+    assert!(!props.contains_key("effort"));
     assert!(
         schema["properties"]["action"]["enum"]
             .as_array()
@@ -1233,7 +1040,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
     assert!(output.contains("Configured agents.swarm_model default: openai-api:gpt-5.5"));
     assert!(output.contains("gpt-5.5 via OpenAI [openai-api-key] (API key)"));
     assert!(output.contains("claude-fable-5 via Anthropic [anthropic-api-key] [unavailable]"));
-    assert!(output.contains("effort"));
+    assert!(!output.contains("pass effort"));
 }
 
 #[test]
@@ -1246,132 +1053,93 @@ fn format_swarm_model_list_handles_empty_catalog() {
 }
 
 #[test]
-fn schema_advertises_supported_swarm_fields() {
+fn schema_advertises_a_lean_lane_first_action_set() {
     let schema = CommunicateTool::new().parameters_schema();
     let props = schema["properties"]
         .as_object()
         .expect("swarm schema should have properties");
-
-    assert!(props.contains_key("action"));
-    assert!(props.contains_key("key"));
-    assert!(props.contains_key("value"));
-    assert!(props.contains_key("message"));
-    assert!(props.contains_key("to_session"));
-    assert_eq!(
-        props["to_session"]["description"],
-        json!("Session ID or unique friendly name of one agent. Alias of target_session.")
-    );
-    assert!(props.contains_key("channel"));
-    assert!(props.contains_key("proposer_session"));
-    assert!(props.contains_key("reason"));
-    assert!(props.contains_key("target_session"));
-    assert_eq!(
-        props["target_session"]["description"],
-        json!("Session ID or unique friendly name for management actions. Alias of to_session.")
-    );
-    assert!(props.contains_key("role"));
-    assert!(props.contains_key("prompt"));
-    assert!(props.contains_key("working_dir"));
-    assert!(props.contains_key("limit"));
-    assert!(props.contains_key("task_id"));
-    assert!(props.contains_key("spawn_if_needed"));
-    assert!(props.contains_key("prefer_spawn"));
-    assert!(props.contains_key("session_ids"));
-    assert!(props.contains_key("mode"));
-    assert_eq!(
-        props["mode"]["enum"],
-        json!(["all", "any", "deep", "light"]),
-        "mode must advertise both task_graph and await_members values"
-    );
-    assert!(props.contains_key("target_status"));
-    assert!(props.contains_key("timeout_minutes"));
-    assert!(props.contains_key("concurrency_limit"));
-    assert!(props.contains_key("wake"));
-    assert!(props.contains_key("delivery"));
-    assert!(props.contains_key("plan_items"));
-    assert!(props.contains_key("initial_message"));
-    assert!(props.contains_key("force"));
-    assert!(props.contains_key("retain_agents"));
-    assert!(props.contains_key("background"));
+    let actions: Vec<&str> = schema["properties"]["action"]["enum"]
+        .as_array()
+        .expect("action enum")
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    for kept in [
+        "launch",
+        "spawn",
+        "message",
+        "report",
+        "status",
+        "plan_status",
+        "list",
+        "summary",
+        "await_members",
+        "stop",
+        "resume",
+        "retry",
+        "list_models",
+    ] {
+        assert!(
+            actions.contains(&kept),
+            "{kept} should be offered: {actions:?}"
+        );
+    }
+    for hidden in [
+        "propose_plan",
+        "approve_plan",
+        "reject_plan",
+        "assign_task",
+        "assign_next",
+        "fill_slots",
+        "run_plan",
+        "resync_plan",
+        "share",
+        "read",
+        "start_task",
+        "salvage",
+        "subscribe_channel",
+        "task_graph",
+    ] {
+        assert!(!actions.contains(&hidden), "{hidden} should not be offered");
+    }
     assert!(
-        props["background"]["description"]
-            .as_str()
-            .expect("background description")
-            .contains("run_plan"),
-        "background flag should document run_plan support"
+        actions.len() <= 16,
+        "keep the swarm tool small: {actions:?}"
     );
-    assert!(props.contains_key("notify"));
-    assert!(props.contains_key("status"));
-    assert!(props.contains_key("validation"));
-    assert!(props.contains_key("follow_up"));
-    assert_eq!(
-        props["delivery"]["enum"],
-        json!(["notify", "interrupt", "wake"])
-    );
-    assert_eq!(
-        props["plan_items"]["items"]["additionalProperties"],
-        json!(true)
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("status"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("report"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("plan_status"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("start"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("start_task"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("assign_next"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("fill_slots"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("run_plan"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("cleanup"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("salvage"))
-    );
+    for kept in [
+        "message",
+        "to_session",
+        "target_session",
+        "channel",
+        "label",
+        "phase",
+        "prompt",
+        "model",
+        "session_ids",
+        "background",
+        "concurrency_limit",
+        "retain_agents",
+        "delivery",
+        "wake",
+        "status",
+        "validation",
+        "follow_up",
+    ] {
+        assert!(props.contains_key(kept), "{kept} param should be offered");
+    }
+    for dropped in [
+        "key",
+        "value",
+        "proposer_session",
+        "reason",
+        "role",
+        "plan_items",
+    ] {
+        assert!(
+            !props.contains_key(dropped),
+            "{dropped} belongs to hidden actions"
+        );
+    }
 }
 
 struct EnvGuard {
@@ -1383,6 +1151,12 @@ impl EnvGuard {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let original = std::env::var_os(key);
         crate::env::set_var(key, value);
+        Self { key, original }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        crate::env::remove_var(key);
         Self { key, original }
     }
 }
@@ -1483,12 +1257,15 @@ impl RawClient {
         self.send_request(Request::Subscribe {
             system_prompt: None,
             supports_pdf_panels: false,
+            supports_user_response: false,
+            supports_server_failover: false,
             id,
             working_dir: Some(working_dir.display().to_string()),
             selfdev: None,
             target_session_id: None,
             client_instance_id: None,
             client_has_local_history: false,
+            history_base: None,
             allow_session_takeover: false,
             crash_on_disconnect: false,
             continue_on_disconnect: false,
@@ -1702,185 +1479,8 @@ async fn wait_for_member_presence(
     }
 }
 
-#[test]
-fn default_await_members_targets_include_ready() {
-    assert_eq!(
-        default_await_target_statuses(),
-        vec!["ready", "completed", "stopped", "failed", "crashed"]
-    );
-}
-
-fn credential_failed_worker(session_id: &str, detail: &str, age_secs: u64) -> AgentInfo {
-    AgentInfo {
-        session_id: session_id.to_string(),
-        status: Some("failed".to_string()),
-        detail: Some(detail.to_string()),
-        role: Some("agent".to_string()),
-        is_headless: Some(true),
-        report_back_to_session_id: Some("coord".to_string()),
-        status_age_secs: Some(age_secs),
-        provider_name: Some("anthropic".to_string()),
-        ..Default::default()
-    }
-}
-
-#[test]
-fn credential_failure_wave_detected_for_recent_auth_failed_workers() {
-    // The observed incident: every dispatched worker died within seconds with
-    // an Anthropic 401 (expired OAuth + revoked refresh token) and nothing
-    // completed. That must classify as a wave, not as N independent failures.
-    let members = vec![
-        AgentInfo {
-            session_id: "coord".to_string(),
-            status: Some("running".to_string()),
-            role: Some("coordinator".to_string()),
-            ..Default::default()
-        },
-        credential_failed_worker("w1", "Anthropic API error (401 Unauthorized)", 2),
-        credential_failed_worker("w2", "Anthropic API error (401 Unauthorized)", 3),
-        credential_failed_worker("w3", "invalid_grant: refresh token invalid", 5),
-    ];
-    let wave = super::detect_credential_failure_wave(&members, "coord", 0, 60)
-        .expect("three recent credential failures with zero completions is a wave");
-    assert_eq!(wave.session_ids, vec!["w1", "w2", "w3"]);
-    assert_eq!(wave.sample_detail, "Anthropic API error (401 Unauthorized)");
-    assert_eq!(wave.provider.as_deref(), Some("anthropic"));
-
-    let message = super::format_credential_failure_wave_error(&wave, 60);
-    assert!(message.contains("paused dispatching"));
-    assert!(message.contains("3 worker(s)"));
-    assert!(message.contains("401 Unauthorized"));
-    assert!(message.contains("`jcode login --provider claude`"));
-}
-
-#[test]
-fn credential_failure_wave_requires_at_least_two_workers() {
-    let members = vec![credential_failed_worker(
-        "w1",
-        "Anthropic API error (401 Unauthorized)",
-        2,
-    )];
-    assert_eq!(
-        super::detect_credential_failure_wave(&members, "coord", 0, 60),
-        None,
-        "one bad worker is not a wave"
-    );
-}
-
-#[test]
-fn credential_failure_wave_not_detected_once_anything_completed() {
-    // Completions prove the credential works (or worked); later auth failures
-    // are then per-worker problems, not a route-wide outage to halt over.
-    let members = vec![
-        credential_failed_worker("w1", "Anthropic API error (401 Unauthorized)", 2),
-        credential_failed_worker("w2", "Anthropic API error (401 Unauthorized)", 3),
-    ];
-    assert_eq!(
-        super::detect_credential_failure_wave(&members, "coord", 1, 60),
-        None
-    );
-}
-
-#[test]
-fn credential_failure_wave_ignores_stale_and_non_credential_failures() {
-    let members = vec![
-        // Stale: failed long before this window (e.g. a previous, already
-        // diagnosed wave; the user has since re-authenticated and retried).
-        credential_failed_worker("old", "Anthropic API error (401 Unauthorized)", 3600),
-        // Unknown age must not count either.
-        AgentInfo {
-            status_age_secs: None,
-            ..credential_failed_worker("ageless", "401 Unauthorized", 0)
-        },
-        // Non-credential failure.
-        credential_failed_worker("crashed", "worker panicked: index out of bounds", 2),
-        // Only one recent credential failure remains: below the wave minimum.
-        credential_failed_worker("w1", "Anthropic API error (401 Unauthorized)", 2),
-    ];
-    assert_eq!(
-        super::detect_credential_failure_wave(&members, "coord", 0, 60),
-        None
-    );
-}
-
-#[test]
-fn credential_failure_wave_ignores_foreign_members() {
-    // A foreign, client-attached session that failed with an auth error is not
-    // one of run_plan's workers; it must not trip the breaker.
-    let foreign = AgentInfo {
-        is_headless: Some(false),
-        report_back_to_session_id: None,
-        ..credential_failed_worker("foreign", "401 Unauthorized", 2)
-    };
-    let members = vec![
-        foreign,
-        credential_failed_worker("w1", "401 Unauthorized", 2),
-    ];
-    assert_eq!(
-        super::detect_credential_failure_wave(&members, "coord", 0, 60),
-        None
-    );
-}
-
-#[test]
-fn credential_login_fix_hint_maps_provider_names() {
-    assert_eq!(
-        super::credential_login_fix_hint(Some("anthropic")),
-        "`jcode login --provider claude`"
-    );
-    assert_eq!(
-        super::credential_login_fix_hint(Some("OpenAI")),
-        "`jcode login --provider openai`"
-    );
-    assert_eq!(
-        super::credential_login_fix_hint(Some("copilot")),
-        "`jcode login --provider copilot`"
-    );
-    assert_eq!(
-        super::credential_login_fix_hint(None),
-        "`jcode login --provider <provider>`"
-    );
-}
-
-#[test]
-fn run_plan_terminal_summary_includes_recorded_failure_reasons() {
-    let mut failed_reasons = std::collections::BTreeMap::new();
-    failed_reasons.insert(
-        "c".to_string(),
-        "task failed: Anthropic API error (401 Unauthorized)".to_string(),
-    );
-    let summary = crate::protocol::PlanGraphStatus {
-        swarm_id: Some("swarm-a".to_string()),
-        version: 1,
-        item_count: 2,
-        ready_ids: Vec::new(),
-        blocked_ids: Vec::new(),
-        active_ids: Vec::new(),
-        completed_ids: vec!["a".to_string()],
-        failed_ids: vec!["c".to_string()],
-        failed_reasons,
-        cycle_ids: Vec::new(),
-        unresolved_dependency_ids: Vec::new(),
-        next_ready_ids: Vec::new(),
-        newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "light".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
-    };
-    let output = super::format_run_plan_terminal_summary(3, &summary, 2);
-    assert!(output.contains("Failed nodes: c"));
-    assert!(
-        output.contains("c: task failed: Anthropic API error (401 Unauthorized)"),
-        "terminal summary must carry the recorded failure reason:\n{output}"
-    );
-
-    let plan_status = format_plan_status(&summary).output;
-    assert!(
-        plan_status.contains("c: task failed: Anthropic API error (401 Unauthorized)"),
-        "plan_status must display the recorded failure reason:\n{plan_status}"
-    );
-}
+#[path = "communicate_tests/credential_failures.rs"]
+mod credential_failures;
 
 include!("communicate_tests/input_format.rs");
 include!("communicate_tests/end_to_end.rs");

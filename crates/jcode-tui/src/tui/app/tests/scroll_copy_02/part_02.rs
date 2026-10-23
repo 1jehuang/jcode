@@ -508,6 +508,25 @@ fn test_expand_badge_does_not_render_for_short_untruncated_edit_diff() {
 }
 
 #[test]
+fn test_expand_badge_renders_when_diffs_are_hidden() {
+    let _render_lock = scroll_render_test_lock();
+    for mode in [
+        crate::config::DiffDisplayMode::Off,
+        crate::config::DiffDisplayMode::File,
+    ] {
+        // Even a short diff is hidden outside inline mode, so the badge must
+        // stay visible as the way back to it.
+        let (mut app, mut terminal) = make_edit_badge_test_app(2);
+        app.diff_mode = mode;
+        let rendered = render_and_snap(&app, &mut terminal);
+        assert!(
+            rendered.contains("[E] expand"),
+            "{mode:?} should keep the expand badge on edit rows:\n{rendered}"
+        );
+    }
+}
+
+#[test]
 fn test_expand_badge_shortcut_opens_full_inline_from_non_inline_mode() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, _terminal) = create_copy_test_app();
@@ -749,6 +768,141 @@ fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
         "clicking chat should restore chat focus"
     );
     assert_eq!(app.status_notice(), Some("Focus: chat".to_string()));
+}
+
+#[test]
+fn test_side_panel_dismiss_survives_local_page_refresh() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        for (command, page_id) in [
+            ("/splitview on", "split_view"),
+            ("/observe on", "observe"),
+            ("/todos on", "session_todos"),
+        ] {
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.dismiss_side_panel();
+            app.push_display_message(DisplayMessage::assistant("new live content"));
+            app.refresh_split_view_if_needed();
+            app.observe_tool_call(&crate::message::ToolCall {
+                id: "side-refresh".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"file_path": "AGENTS.md"}),
+                intent: None,
+                thought_signature: None,
+            });
+            app.refresh_todos_view_if_needed();
+            assert!(
+                app.side_panel.focused_page().is_none(),
+                "refresh reopened {page_id}"
+            );
+            assert_eq!(app.last_side_panel_focus_id.as_deref(), Some(page_id));
+            app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+                .unwrap();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.dismiss_side_panel();
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            assert!(
+                !app.side_panel_user_hidden,
+                "explicit app command should reveal"
+            );
+        }
+    });
+}
+
+#[test]
+fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, _) = make_edit_badge_test_app(30);
+    // The File diff cache is process-global and keyed by path and message
+    // index. Sibling tests render shorter `demo.txt` edits at the same index,
+    // so use a path of our own to always render this 30-line diff.
+    if let Some(tool) = app.display_messages[1].tool_data.as_mut() {
+        tool.input["file_path"] = serde_json::json!("side-close-file-diff.txt");
+    }
+    app.bump_display_messages_version();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(app.diff_pane_visible(), "File diff should remain visible");
+    assert!(app.diff_pane_focus, "visible File diff should retain focus");
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        .unwrap();
+    assert!(
+        app.diff_pane_scroll > 0,
+        "j should still scroll the File diff"
+    );
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    assert!(app.diff_pane_focus);
+}
+
+#[test]
+fn test_side_panel_close_in_file_mode_without_edits_restores_composer() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+    assert_eq!(app.display_edit_tool_message_count, 0);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(!app.diff_pane_visible());
+    assert!(
+        !app.diff_pane_focus,
+        "focus must not stay on an invisible File diff pane"
+    );
+    render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::last_layout_snapshot()
+            .unwrap()
+            .diff_pane_area
+            .is_none(),
+        "no right pane should remain without edits"
+    );
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "j", "normal typing must reach the composer");
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
 }
 
 #[test]
@@ -1374,5 +1528,199 @@ fn test_click_on_inline_image_body_cycles_level() {
         app.image_expand_level(IMAGE_ID),
         ImageExpandLevel::Fit,
         "clicking blank space beside the image must not cycle it"
+    );
+}
+
+/// Ctrl+wheel (how terminals report a trackpad pinch) over an inline image
+/// steps its size without wrapping, while Ctrl+wheel elsewhere still scrolls.
+#[test]
+fn test_ctrl_wheel_over_inline_image_zooms_without_wrapping() {
+    use crate::tui::ui::inline_image_ui::{
+        AllFit, ImageExpandLevel, InlineImageItem, build_section,
+    };
+    use jcode_tui_messages::PreparedChatFrame;
+
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    const IMAGE_ID: u64 = 0xB1AC;
+    let chat_width: u16 = 80;
+    let items = vec![InlineImageItem {
+        id: IMAGE_ID,
+        width: 320,
+        height: 200,
+        label: "pinch.png".to_string(),
+        uses_text_fallback: false,
+    }];
+    let section = build_section(&items, chat_width, 40, false, true, &AllFit);
+    let region = *section
+        .image_regions
+        .iter()
+        .find(|r| r.hash == IMAGE_ID)
+        .expect("section should carry the image region");
+    let prepared =
+        std::sync::Arc::new(PreparedChatFrame::from_single(std::sync::Arc::new(section)));
+    let visible_end = prepared.wrapped_plain_line_count();
+    let content_area = Rect::new(0, 0, chat_width, visible_end as u16 + 1);
+    crate::tui::ui::clear_copy_viewport_snapshot();
+    crate::tui::ui::record_copy_viewport_frame_snapshot_for_test(
+        prepared,
+        0,
+        visible_end,
+        content_area,
+        &vec![0u16; visible_end],
+    );
+
+    let row = content_area.y + region.abs_line_idx as u16 + 1;
+    let col = content_area.x + region.width / 2;
+    let wheel = |app: &mut App, kind: MouseEventKind, column: u16| {
+        app.handle_mouse_event(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::CONTROL,
+        })
+    };
+
+    wheel(&mut app, MouseEventKind::ScrollUp, col);
+    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Large);
+    // Full has the same geometry as Large here, so zooming in further holds.
+    wheel(&mut app, MouseEventKind::ScrollUp, col);
+    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Large);
+    wheel(&mut app, MouseEventKind::ScrollDown, col);
+    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Fit);
+    wheel(&mut app, MouseEventKind::ScrollDown, col);
+    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Fit);
+
+    // Off the image, Ctrl+wheel falls through to chat scrolling.
+    wheel(&mut app, MouseEventKind::ScrollUp, chat_width - 2);
+    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Fit);
+}
+
+fn create_math_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage {
+            role: "user".to_string(),
+            content: "show latex".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        },
+        DisplayMessage {
+            role: "assistant".to_string(),
+            content: "Euler $e^{i\\pi_{3}} + 1 = 0$ done.\n\n$$\n\\frac{\\partial L}{\\partial \\theta_{88}} = \\theta^\\top x\n$$".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        },
+    ];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.streaming.streaming_text.clear();
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    (app, terminal)
+}
+
+#[test]
+fn test_copy_selection_select_all_copies_rendered_math_as_latex() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_math_copy_test_app();
+
+    let screen = render_and_snap(&app, &mut terminal);
+    // Sanity: the screen shows the Unicode approximation, not the source.
+    assert!(screen.contains("┌─ math"), "{screen}");
+    assert!(screen.contains('⊤'), "\\top should render as ⊤: {screen}");
+    assert!(!screen.contains("\\frac"), "{screen}");
+
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
+        .unwrap();
+    assert!(app.select_all_in_copy_mode());
+    let selected = app
+        .current_copy_selection_text()
+        .expect("expected selected transcript text");
+    assert!(
+        selected.contains("Euler $e^{i\\pi_{3}} + 1 = 0$ done."),
+        "inline math should copy as LaTeX: {selected}"
+    );
+    assert!(
+        selected.contains("$$\n\\frac{\\partial L}{\\partial \\theta_{88}} = \\theta^\\top x\n$$"),
+        "display math should copy as LaTeX: {selected}"
+    );
+    assert!(!selected.contains('⊤'), "{selected}");
+
+    let range = app.normalized_copy_selection().expect("range");
+    let (chars, _) = crate::tui::ui::copy_selection_metrics(range).expect("metrics");
+    assert_eq!(chars, selected.chars().count());
+}
+
+#[test]
+fn test_copy_selection_partial_drag_over_inline_math_copies_whole_formula() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_math_copy_test_app();
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
+        .unwrap();
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let (visible_start, visible_end) =
+        crate::tui::ui::copy_viewport_visible_range().expect("visible copy range");
+    let (line_idx, text) = (visible_start..visible_end)
+        .find_map(|abs| {
+            let text = crate::tui::ui::copy_viewport_line_text(abs).unwrap_or_default();
+            text.contains("Euler").then_some((abs, text))
+        })
+        .expect("prose line");
+    let euler_col =
+        unicode_width::UnicodeWidthStr::width(&text[..text.find("Euler").unwrap()]);
+    // Drag from the start of "Euler" to two cells into the formula.
+    let start_col = euler_col;
+    let end_col = euler_col + "Euler ".len() + 2;
+    let row = layout.messages_area.y + (line_idx - visible_start) as u16;
+    let screen_x = |target: usize| {
+        (layout.messages_area.x..layout.messages_area.x + layout.messages_area.width)
+            .find(|&column| {
+                crate::tui::ui::copy_viewport_point_from_screen(column, row)
+                    .is_some_and(|p| p.abs_line == line_idx && p.column == target)
+            })
+            .expect("screen x")
+    };
+    let (sx, ex) = (screen_x(start_col), screen_x(end_col));
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), sx),
+        (MouseEventKind::Drag(MouseButton::Left), ex),
+    ] {
+        app.handle_mouse_event(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+    let selected = app.current_copy_selection_text().expect("selection");
+    assert_eq!(selected, "Euler $e^{i\\pi_{3}} + 1 = 0$");
+}
+
+#[test]
+fn test_unicode_math_copy_badge_copies_latex_to_clipboard() {
+    let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
+    let (mut app, mut terminal) = create_math_copy_test_app();
+    let screen = render_and_snap(&app, &mut terminal);
+    assert!(screen.contains("[S]"), "math frame should get a badge: {screen}");
+
+    app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.status_notice(), Some("Copied math".to_string()));
+    assert_eq!(
+        clipboard.text().as_deref(),
+        Some("$$\n\\frac{\\partial L}{\\partial \\theta_{88}} = \\theta^\\top x\n$$")
     );
 }

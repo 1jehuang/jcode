@@ -74,6 +74,9 @@ echo "Embedding git metadata: hash=${git_hash:-<none>} tag=${git_tag:-<none>} di
 
 docker run --rm \
   -e CARGO_TERM_COLOR=always \
+  -e CARGO_PROFILE_RELEASE_OPT_LEVEL \
+  -e CARGO_BUILD_JOBS \
+  -e JCODE_CI_BUILD \
   -e JCODE_RELEASE_BUILD="${JCODE_RELEASE_BUILD:-1}" \
   -e JCODE_BUILD_SEMVER="${JCODE_BUILD_SEMVER:-}" \
   -e JCODE_BUILD_METADATA_FILE=/jcode-build-meta \
@@ -145,8 +148,33 @@ docker run --rm \
 	    export CARGO_TARGET_DIR=/work/target/linux-compat
 	    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 	    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-static-libgcc}"
-	    cargo build --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" \
+	    build_command=(cargo build)
+	    if [[ "${JCODE_CI_BUILD:-0}" == 1 ]]; then
+	      # Hosted Ubuntu cannot produce our glibc 2.17 baseline yet. Run the
+	      # static justrust client inside the existing manylinux2014 container.
+	      export JUSTRUST_TOOLCHAIN=system JUSTRUST_SLOTS=0 JUSTRUST_NO_TELEMETRY=1
+	      export JUSTRUST_INSTALL_DIR=/root/.local/bin
+	      bash scripts/install_justrust_ci.sh
+	      export PATH="$JUSTRUST_INSTALL_DIR:$PATH"
+	      build_command=(justrust build --local)
+	    fi
+	    "${build_command[@]}" --locked --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" \
 	      -p jcode --bin jcode --features linux-compat-vendored-openssl
+
+        # Exercise the exact portable binary before packaging. Cloud upgrades
+        # must not publish an artifact that cannot complete the handoff protocol.
+        built="$CARGO_TARGET_DIR/$JCODE_COMPAT_TARGET/$JCODE_COMPAT_PROFILE/jcode"
+        "$built" --no-update --no-selfdev --version
+        for command in receive credentials router-credentials cancel-return; do
+          "$built" --no-update --no-selfdev cloud "$command" --help >/dev/null
+        done
+        # Running inside the baseline image also checks dynamic dependencies;
+        # check symbol versions explicitly so a newer accidental sysroot fails.
+        newest_glibc=$(objdump -T "$built" | sed -n "s/.*GLIBC_\([0-9][0-9.]*\).*/\1/p" | sort -Vu | tail -n1)
+        if [[ -z "$newest_glibc" || "$(printf "%s\n" 2.17 "$newest_glibc" | sort -V | tail -n1)" != 2.17 ]]; then
+          echo "error: portable binary exceeds the glibc 2.17 baseline: $newest_glibc" >&2
+          exit 1
+        fi
 
 	    cp "$CARGO_TARGET_DIR/$JCODE_COMPAT_TARGET/$JCODE_COMPAT_PROFILE/jcode" "/out/'"$artifact"'.bin"
 	    chmod +x "/out/'"$artifact"'.bin"
@@ -232,7 +260,7 @@ if [[ -n "$git_hash" ]]; then
   # `version` prints e.g. "version\tv0.61.2 (268913473)", so take the whole
   # value rather than just the first whitespace-separated field.
   embedded="$("$out_dir/$artifact.bin" --no-update --no-selfdev version 2>/dev/null \
-    | awk -F'\t' '$1 == "version" { print $2; exit }')"
+    | awk -F'\t' '$1 == "version" { print $2 }')"
   if [[ -n "$embedded" && "$embedded" != *"$git_hash"* ]]; then
     echo "error: embedded build metadata reports '$embedded' but the tree is at '$git_hash'" >&2
     echo "       (stale build cache; re-run after 'cargo clean' or bump JCODE_BUILD_GIT_HASH)" >&2

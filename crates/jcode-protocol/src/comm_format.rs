@@ -186,8 +186,11 @@ pub fn format_comm_members(current_session_id: &str, members: &[AgentInfo]) -> S
             // Last observed activity (tokens/tools/heartbeats). status_age only
             // tracks lifecycle transitions, so a worker mid-turn for minutes
             // looks stale without this even while it streams tokens.
-            let activity_age_suffix = match member.last_activity_age_secs {
-                Some(age) if status == "running" || status == "queued" => {
+            let activity_age_suffix = match (member.stalled_secs, member.last_activity_age_secs) {
+                (Some(stalled), _) => {
+                    format!(" · ⚠ STALLED (no activity for {})", format_secs(stalled))
+                }
+                (None, Some(age)) if status == "running" || status == "queued" => {
                     format!(" · active {} ago", format_secs(age))
                 }
                 _ => String::new(),
@@ -402,6 +405,9 @@ pub fn format_comm_status_snapshot(snapshot: &AgentStatusSnapshot) -> String {
     if let Some(age_secs) = snapshot.last_activity_age_secs {
         meta.push(format!("active={} ago", format_secs(age_secs)));
     }
+    if let Some(stalled) = snapshot.stalled_secs {
+        meta.push(format!("STALLED={}", format_secs(stalled)));
+    }
     if let Some(age_secs) = snapshot.status_age_secs {
         meta.push(format!("status_age={}s", age_secs));
     }
@@ -430,26 +436,9 @@ pub fn format_comm_status_snapshot(snapshot: &AgentStatusSnapshot) -> String {
 pub fn format_comm_plan_status(summary: &PlanGraphStatus) -> String {
     let swarm_id = summary.swarm_id.as_deref().unwrap_or("unknown");
     let mut output = format!(
-        "Plan status for swarm {}\n\n  Version: {}\n  Mode: {}\n  Items: {}\n",
-        swarm_id, summary.version, summary.mode, summary.item_count
+        "Plan status for swarm {}\n\n  Version: {}\n  Items: {}\n",
+        swarm_id, summary.version, summary.item_count
     );
-    // Growth accounting: deep mode is meant to outgrow its seed (decomposition,
-    // gate-injected gaps). Surfacing seeded-vs-grown makes a plan that never
-    // grew visibly under-explored.
-    if summary.mode.eq_ignore_ascii_case("deep") && summary.item_count > 0 {
-        output.push_str(&format!(
-            "  Growth: {} seeded -> {} nodes ({} machinery-grown)",
-            summary.seeded_count, summary.item_count, summary.grown_count
-        ));
-        if summary.grown_count == 0 {
-            output.push_str(
-                " — the graph has not grown beyond its seed yet; \
-                 expect expand_node decomposition and gate-injected gaps",
-            );
-        }
-        output.push('\n');
-    }
-
     output.push_str(&format!(
         "  Ready: {}\n",
         if summary.ready_ids.is_empty() {
@@ -497,12 +486,6 @@ pub fn format_comm_plan_status(summary: &PlanGraphStatus) -> String {
                 output.push_str(&format!("    {}: {}\n", id, reason));
             }
         }
-    }
-    if !summary.low_confidence_ids.is_empty() {
-        output.push_str(&format!(
-            "  Low confidence (completed but shaky; widen with follow-up nodes): {}\n",
-            summary.low_confidence_ids.join(", ")
-        ));
     }
     if !summary.cycle_ids.is_empty() {
         output.push_str(&format!("  Cycles: {}\n", summary.cycle_ids.join(", ")));

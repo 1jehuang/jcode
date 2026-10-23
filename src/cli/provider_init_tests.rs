@@ -46,6 +46,10 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::GrokBuild.as_arg_value(), "grok-build");
     assert_eq!(ProviderChoice::XiaomiMimo.as_arg_value(), "xiaomi-mimo");
     assert_eq!(ProviderChoice::MetaMuse.as_arg_value(), "meta-muse");
+    assert_eq!(
+        ProviderChoice::MuseSubscription.as_arg_value(),
+        "muse-subscription"
+    );
     assert_eq!(ProviderChoice::Celeris.as_arg_value(), "celeris");
     assert_eq!(ProviderChoice::Lmstudio.as_arg_value(), "lmstudio");
     assert_eq!(ProviderChoice::Ollama.as_arg_value(), "ollama");
@@ -529,6 +533,14 @@ fn choice_for_login_provider_round_trips_openai_compatible_profiles() {
     assert_eq!(
         choice_for_login_provider(provider_catalog::OPENAI_COMPAT_LOGIN_PROVIDER),
         Some(ProviderChoice::OpenaiCompatible)
+    );
+    assert_eq!(
+        choice_for_login_provider(provider_catalog::MUSE_SUBSCRIPTION_LOGIN_PROVIDER),
+        Some(ProviderChoice::MuseSubscription)
+    );
+    assert_eq!(
+        login_provider_for_choice(&ProviderChoice::MuseSubscription).map(|p| p.id),
+        Some("muse-subscription")
     );
 }
 
@@ -1109,4 +1121,27 @@ fn pending_external_auth_review_candidates_include_shared_and_legacy_sources() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn env_model_for_choice_only_targets_openrouter_slot_runtimes() {
+    let env = Some("mistralai/mistral-large-4-0");
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Openrouter, env),
+        env
+    );
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Deepseek, env),
+        env
+    );
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Claude, env),
+        None
+    );
+    assert_eq!(env_model_for_choice_from(&ProviderChoice::Auto, env), None);
+    assert_eq!(env_model_for_choice_from(&ProviderChoice::Jcode, env), None);
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Openrouter, None),
+        None
+    );
 }

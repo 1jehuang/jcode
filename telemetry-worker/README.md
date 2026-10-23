@@ -9,6 +9,74 @@ ever installed jcode OR did meaningful work in it. Run it with:
 wrangler d1 execute jcode-telemetry --remote --file=users.sql
 ```
 
+## Private model-provider OAuth account telemetry
+
+This worker also receives identifiable OAuth account email telemetry, separately
+from anonymous event analytics. Client telemetry opt-out and the one-time status
+notice are handled by the client, not this worker. Only model providers
+`anthropic`, `openai`, `gemini`, `copilot`, and `antigravity` are accepted.
+Clients map aliases such as Claude/Codex/GitHub to these canonical labels.
+Do not send tokens, refresh tokens, JWTs, API keys, OAuth callback parameters,
+provider profile bodies, or unrelated Gmail/calendar/MCP identities.
+
+Protocol:
+
+- `POST /v1/oauth-account/check` accepts exactly `{id, provider, email_hash}`.
+  `id` is an installation UUID. `email_hash` is the lowercase 64-character
+  SHA256 hex digest of the UTF-8 bytes of `email.trim().toLowerCase()`.
+  Returns only `{installation_known, email_tracked}` booleans. Known means
+  that UUID exists in `events`, retained `daily_active_users`, or
+  `oauth_accounts`. Tracked means the candidate provider/digest is stored
+  **for this installation**, never global account membership.
+- Clients preflight before sending raw email. The notice eligibility condition
+  is `installation_known && !email_tracked`; raw upload occurs after the client
+  has handled any required notice. New installations may upload without a
+  notice. This known-install check is not an upload authorization mechanism.
+- `POST /v1/oauth-account` accepts exactly `{id, provider, email, email_hash?}`.
+  Email is trimmed/lowercased and validated as a bounded ASCII mailbox with
+  a dotted domain (254 characters maximum, 64-character local part).
+  If supplied, the digest must match the server-computed SHA256 value.
+  The insert is atomically deduplicated by installation/provider/digest.
+  Successful inserts and duplicates both return opaque `{ok:true}`.
+
+Both endpoints require JSON POST bodies capped at 1 KiB, reject unknown fields,
+refuse browser Origin headers and CORS preflights, and return `Cache-Control:
+no-store`. Neither emails nor digests enter ordinary events, Firehose, response
+bodies, or application logs. A SHA256 email digest is **identifiable private
+data**, not anonymization. Installation UUIDs are correlation identifiers, not
+credentials: anyone who possesses a UUID could probe that installation's
+account presence. Installation-scoped lookup and opaque upload responses avoid
+global email enumeration, but do not authenticate a caller or prove email
+ownership. Before enabling publicly, operators should review edge abuse/rate
+limits for these paths without introducing IP or request-body application logs.
+Do not reuse the permissive anonymous-event CORS policy here.
+
+Migration `0030_oauth_accounts.sql` and `npm run migrate:oauth-accounts` add the
+private table and lookup indexes. The command targets production, so run it
+only during an explicitly authorized rollout before deploying the worker.
+No deployment or remote migration is required to run `npm test`.
+
+### OAuth account retention and deletion
+
+The existing nightly cron deletes private account records older than 90 days
+from `created_at`, in bounded batches. Repeated uploads do not refresh expiry.
+A maintenance backlog or cron failure can delay physical deletion, so monitor
+cron health and use a narrowly scoped private-data operation for urgent
+requests. After expiry or explicit deletion, server tracking is forgotten;
+clients may still have their own upload/notice markers. This worker has no
+public list, export, or deletion endpoint.
+
+Delete records by installation ID with a parameterized private D1 operation:
+`DELETE FROM oauth_accounts WHERE telemetry_id = ?`. Verify the corresponding
+`SELECT COUNT(*)` is zero. For an account-wide deletion request, remove matching
+provider/digest rows across all installations, including any historical copies.
+Only authorized operators may compute or use the digest for that operation.
+The digest and raw email must be deleted together, not merely redact `email`.
+Access to this table must be private and least-privilege, excluded from ordinary
+anonymous analytics dashboards and exports. Coordinate deletion of backups or
+copies according to their retention policy. Ordinary telemetry-event pruning
+or client opt-out does not retroactively remove these account records.
+
 ## Storage architecture
 
 Events are dual-written to two stores with different jobs:
@@ -326,23 +394,52 @@ Dedicated event rows are retained for 365
 days (halved during emergency pruning), and their detail rows cascade on parent
 deletion. Lifecycle detail rows follow their existing parent retention.
 
-## Token value dashboard
+## Token value dashboards and source semantics
 
-`npm run token-value` reports the list-price dollar value of the token flow
-through jcode, priced per model rather than with one blended rate. Setup:
+`npm run model-usage` reads the authoritative contract-v2 per-response
+`daily_model_usage_v2` rollup (migration 0031) for clients that emit
+`usage_report` with `usage_contract_version: 2`. New clients POST to `/v2/usage`,
+which accepts only that event and contract version and rejects invalid bodies
+before storage. Older servers return 404 so clients can retain reports for retry.
+The existing `/v1/event` endpoint remains compatible with legacy reports. Its monthly rows
+keep `agent`, `compaction`, and `sidecar` sources separate. These are distinct
+response categories, not alternative copies of session totals. Input is already
+normalized to **uncached, disjoint tokens** before ingestion, so total tokens are
+input + output + cache read + cache creation. Do not subtract cache reads again,
+regardless of `model_prices.input_includes_cache_read`. Exact `tokens` and
+`unpriced_tokens` accompany rounded billion-token display columns. CI is excluded.
+The old `daily_model_usage` rollup contains provider-native, mixed cache
+semantics and is deliberately excluded. Do not backfill v2 by copying its
+counters or silently combine the two contracts. V2 coverage starts with the
+versioned client/server rollout, not the start of historical telemetry.
+
+`npm run token-value` and `npm run token-value:daily` are **legacy session-end
+estimates**, retained for historical context. They read only `session_end`, not
+`turn_end`, `session_crash`, or response events. Session counters are attributed
+to their final model/provider label and end date, so model switches, incomplete
+sessions, missing final flushes and legacy process-global attribution cannot be
+reconstructed. They are not authoritative per-response usage. **Never add their
+totals to `model-usage` or union their rows with response usage**, even during a
+rollout with mixed client versions. Keep the series separately labeled rather
+than guessing a cutover or deduplicating unrelated granularities.
+
+Setup:
 
 ```bash
 npm run migrate:model-prices   # creates model_prices (migration 0023)
 npm run sync:model-prices      # fills it from https://models.dev/api.json
 npm run token-value:fresh      # refresh prices, then run the dashboard (recommended)
 npm run token-value            # dashboard using prices already stored in D1
-npm run token-value:daily      # just the per-day series, in date order
+npm run token-value:daily      # legacy per-day estimates, in date order
+npm run migrate:model-usage    # legacy response rollup table (migration 0027)
+npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0031_usage_report_receipts.sql
+npm run model-usage            # authoritative v2 response rollup, by month/source
 ```
 
-`npm run token-value:fresh` is the safe default before quoting dollar values: it
-refreshes the remote D1 price mappings and then runs the daily / per-model /
-summary panels. Use `npm run token-value` only when the prices were refreshed
-recently.
+`npm run token-value:fresh` refreshes remote D1 price mappings before running the
+legacy panels. Refresh prices before quoting either dashboard, but a successful
+sync does not guarantee coverage for response-only labels, private aliases, or
+missing bucket rates. Inspect the coverage columns, not just the command result.
 
 `npm run token-value:daily` is the plain time series when all you want is
 "dollars per day": one row per day with the tokens, sessions, and distinct
@@ -387,16 +484,41 @@ There are two distinct fixes for unmatched labels:
 
 Three things to know before quoting the number:
 
-- **Cache accounting is provider-specific.** OpenAI-compatible APIs report
-  cached tokens as a *subset* of prompt tokens; Anthropic reports them as a
-  disjoint bucket. `model_prices.input_includes_cache_read` drives the
-  correction. Skipping it overcharges OpenAI traffic ~10x, and since cache
-  reads are ~85% of all tokens, that error dominates the total.
-- **It is list price, not spend.** Most traffic runs on subscriptions (Claude
-  Max, ChatGPT Pro, Copilot) or free routes, so read it as "list-price
-  equivalent value of tokens served".
-- **Check `priced_token_pct` / `unpriced_tokens`.** Every panel reports them.
-  If coverage drops, re-run the sync before trusting the dollar figure.
+- **Legacy cache accounting is provider-specific.** The session-end dashboards
+  subtract cache reads from input, clamped to zero, only when
+  `model_prices.input_includes_cache_read = 1`. They use the same corrected token
+  denominator for totals and coverage. Unknown model mappings cannot establish
+  cache semantics, so legacy totals for those labels remain estimates. The
+  response rollup is already disjoint and must not use this correction.
+- **It is list-price equivalent, not spend.** It is neither revenue, an actual
+  bill nor COGS. Prices are current model-label mappings, not historical,
+  provider-route, service-tier or context-tier billing records.
+- **Unknown is not free.** A row is priced only when `price_kind` is `catalog`
+  or `free` and every bucket used by that row has an explicit rate. Zero rates
+  are valid. Missing rates for unused buckets do not affect coverage. A missing
+  used rate makes the entire session/rollup row unpriced: it contributes tokens
+  to `unpriced_tokens` but no dollars. No output-zero or cache-rate multiplier
+  guesses are used. Known explicit free rows count toward coverage.
+
+`priced_token_pct` (legacy panels) and `priced_pct` (legacy daily series) measure
+fully priced token coverage, including known free traffic. Empty token totals
+have NULL percentage, not 100%. `model-usage` exposes exact unpriced counts as
+well as rounded billions. Dollar totals include only fully priced rows and can
+therefore omit partially priced usage. Refreshing cannot resolve ambiguous
+private aliases by itself.
+
+Legacy daily dates are UTC session-end dates. The headline windows are rolling
+24 hours, 7 days and 30 days, not calendar-day approximations. The daily series
+retains 60 days. Seven-day token averages preserve fractions and the 30-day
+projection is only a flat-usage extrapolation, not a forecast or guaranteed floor.
+
+Regression tests execute all three checked-in SQL files against in-memory
+SQLite with migrations 0023, 0027 and 0031, including isolation from the legacy
+response rollup:
+
+```bash
+node --test test/token-value.test.mjs
+```
 
 
 ## Prompt-user dashboard

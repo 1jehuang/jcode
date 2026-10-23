@@ -1,5 +1,10 @@
 use super::*;
 
+/// Errors where no HTTP response arrived and retrying the same request may succeed.
+fn is_transient_transport_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout() || error.is_request()
+}
+
 pub(super) fn usage_percent_from_used_limit(used: f64, limit: f64) -> f32 {
     if !used.is_finite() || !limit.is_finite() || limit <= 0.0 {
         return 0.0;
@@ -21,8 +26,13 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     account_label: String,
     expires_at: i64,
 ) -> ProviderUsage {
+    let initial_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
+    let cached = cached_or_shared_anthropic_usage(&initial_key);
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let access_token = if expires_at < now_ms + 300_000 && !refresh_token.is_empty() {
+    let access_token = if cached.is_none()
+        && expires_at < now_ms + 300_000
+        && !refresh_token.is_empty()
+    {
         match crate::auth::oauth::refresh_claude_tokens_for_account(&refresh_token, &account_label)
             .await
         {
@@ -46,7 +56,11 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    match fetch_anthropic_usage_data(access_token.clone(), cache_key).await {
+    let usage = match cached {
+        Some(data) => Ok(data),
+        None => fetch_anthropic_usage_data(access_token.clone(), cache_key).await,
+    };
+    match usage {
         Ok(data) => {
             let mut report = provider_report_from_usage_data(display_name, &data);
             // Availability can be inspected before reaching the five-hour wall.
@@ -209,22 +223,46 @@ pub(super) async fn fetch_openai_usage_for_account(
         return provider_report_from_openai_usage_data(display_name, &cached);
     }
 
+    let probe_started = Instant::now();
     let client = crate::provider::shared_http_client();
-    let mut builder = client
-        .get(OPENAI_USAGE_URL)
-        .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {}", creds.access_token));
+    let request = || {
+        let mut builder = client
+            .get(OPENAI_USAGE_URL)
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {}", creds.access_token));
+        if let Some(ref account_id) = creds.account_id {
+            builder = builder.header("chatgpt-account-id", account_id);
+        }
+        builder
+    };
 
-    if let Some(ref account_id) = creds.account_id {
-        builder = builder.header("chatgpt-account-id", account_id);
+    // Flaky networks (captive portals, wifi roaming) drop single requests.
+    // Retry transport failures briefly before reporting usage as unavailable.
+    let mut sent = request().send().await;
+    for delay_ms in TRANSIENT_RETRY_DELAYS_MS {
+        match &sent {
+            Err(e) if is_transient_transport_error(e) => {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                sent = request().send().await;
+            }
+            _ => break,
+        }
     }
 
-    let response = match builder.send().await {
+    let response = match sent {
         Ok(response) => response,
         Err(e) => {
+            // Keep showing recent real limits through a network blip. The
+            // stale entry is left in place so the next poll retries promptly.
+            if let Some(last_good) = recent_good_openai_usage(&cache_key) {
+                crate::logging::info(&format!(
+                    "OpenAI usage fetch transport error, keeping last-good snapshot: {e}"
+                ));
+                return provider_report_from_openai_usage_data(display_name, &last_good);
+            }
             let report = ProviderUsage {
                 provider_name: display_name,
-                error: Some(format!("Failed to fetch: {}", e)),
+                error: Some(format!("{TRANSPORT_ERROR_PREFIX}{}", e)),
                 ..Default::default()
             };
             store_openai_usage_for_generation(
@@ -287,6 +325,24 @@ pub(super) async fn fetch_openai_usage_for_account(
     };
 
     let parsed = parse_openai_usage_payload(&json);
+
+    if let Some(label) = account_label
+        && generation == openai_usage_generation()
+        && !parsed.hard_limit_reached
+        && !parsed.limits.is_empty()
+        && !super::display::usage_reset_passed(
+            parsed.limits.iter().map(|limit| limit.resets_at.as_deref()),
+        )
+        && parsed.limits.iter().all(|limit| {
+            limit.usage_percent.is_finite() && (0.0..99.0).contains(&limit.usage_percent)
+        })
+    {
+        crate::provider::models::clear_quota_unavailability_after_probe(
+            "openai",
+            label,
+            probe_started,
+        );
+    }
 
     // Read-only detail lookup. Failure must not hide otherwise valid usage.
     let available_expirations = if parsed.available_reset_count.is_some_and(|count| count > 0) {
@@ -568,11 +624,115 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
     })
 }
 
-/// Cursor API-key report. Cursor's admin/usage API requires a paid plan; for
-/// free keys the `/v0/me` error body still tells us the key is live and which
-/// plan tier it is on, so we surface that.
+/// Cursor monthly plan usage from the dashboard endpoint. Works with any
+/// direct credential (auth.json token, vscdb token, or an exchanged API
+/// key). When the usage call fails, falls back to the `/v0/me` probe so the
+/// key status / plan tier is still surfaced.
 pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
-    let api_key = auth::cursor::load_api_key().ok()?;
+    if !auth::cursor::has_cursor_native_auth() {
+        return None;
+    }
+
+    let client = crate::provider::shared_http_client();
+    let tokens = match auth::cursor::resolve_direct_tokens(&client).await {
+        Ok(tokens) => tokens,
+        // A valid API key whose exchange is temporarily down should still
+        // surface key status instead of only a credentials error.
+        Err(_) => return Some(cursor_key_status_report().await),
+    };
+
+    let response = client
+        .post("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")
+        .header("Authorization", format!("Bearer {}", tokens.access_token))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .body("{}")
+        .send()
+        .await;
+
+    match response {
+        Ok(response) if response.status().is_success() => {
+            let json: serde_json::Value = response.json().await.unwrap_or_default();
+            let report = cursor_plan_usage_report(&json);
+            // A 200 with neither usage fields nor membership info carries
+            // nothing usable; fall back to the key-status probe. Membership
+            // without usage still shows the plan label.
+            let has_membership =
+                json.get("membershipType").is_some() || json.get("spendLimitUsage").is_some();
+            if report.limits.is_empty() && !has_membership {
+                return Some(cursor_key_status_report().await);
+            }
+            Some(report)
+        }
+        _ => Some(cursor_key_status_report().await),
+    }
+}
+
+pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsage {
+    let plan = json
+        .get("planUsage")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let membership = json
+        .get("spendLimitUsage")
+        .filter(|usage| usage.get("limitType").and_then(|v| v.as_str()) == Some("team"))
+        .map(|_| "Team")
+        .or_else(|| json.get("membershipType").and_then(|v| v.as_str()))
+        .unwrap_or("Pro");
+    let mut chars = membership.chars();
+    let membership_title: String = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Pro".to_string(),
+    };
+
+    let resets_at = json
+        .get("billingCycleEnd")
+        .and_then(reset_timestamp_from_json_value);
+
+    let mut limits = Vec::new();
+    for (name, key) in [
+        ("Included", "totalPercentUsed"),
+        ("Auto", "autoPercentUsed"),
+        ("API", "apiPercentUsed"),
+    ] {
+        let Some(percent) = plan.get(key).and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        limits.push(UsageLimit {
+            name: name.to_string(),
+            usage_percent: percent.clamp(0.0, 100.0) as f32,
+            resets_at: resets_at.clone(),
+        });
+    }
+
+    ProviderUsage {
+        provider_name: format!("Cursor {}", membership_title),
+        limits,
+        extra_info: Vec::new(),
+        hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
+        error: None,
+        last_used_unix_secs: None,
+    }
+}
+
+/// Fallback key-status probe. The `/v0/me` error body still tells us the key
+/// is live and which plan tier it is on when the usage endpoint is out of
+/// reach.
+async fn cursor_key_status_report() -> ProviderUsage {
+    let api_key = match auth::cursor::load_api_key() {
+        Ok(api_key) => api_key,
+        Err(e) => {
+            return ProviderUsage {
+                provider_name: "Cursor".to_string(),
+                error: Some(format!("Cursor usage unavailable: {}", e)),
+                ..Default::default()
+            };
+        }
+    };
 
     let client = crate::provider::shared_http_client();
     let response = client
@@ -620,7 +780,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         }
     }
 
-    Some(ProviderUsage {
+    ProviderUsage {
         provider_name: "Cursor".to_string(),
         limits: Vec::new(),
         extra_info,
@@ -629,7 +789,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
-    })
+    }
 }
 
 pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
@@ -755,7 +915,7 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     })
 }
 
-/// Jcode subscription: included daily feature allowances plus an upgrade hint
+/// Jcode subscription: monthly inference spending and included daily feature allowances, plus an upgrade hint
 /// when an allowance is running low, so users see the limit before a feature
 /// stops working rather than after.
 pub(super) async fn fetch_jcode_usage_report() -> Option<ProviderUsage> {
@@ -781,6 +941,26 @@ pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -
             .unwrap_or_else(|| me.tier.clone()),
     )];
     let mut hard_limit_reached = false;
+    let usage = &me.usage;
+    if usage.budget_usd.is_finite() && usage.budget_usd > 0.0 {
+        limits.push(UsageLimit {
+            name: "Inference spending limit (monthly)".to_string(),
+            usage_percent: usage_percent_from_used_limit(usage.used_usd, usage.budget_usd),
+            resets_at: usage.resets_at.clone(),
+        });
+        if usage.used_usd.is_finite() {
+            let used = usage.used_usd.max(0.0);
+            hard_limit_reached = used >= usage.budget_usd;
+            extra_info.push((
+                "Inference spending limit remaining".to_string(),
+                format!("${:.2}", (usage.budget_usd - used).max(0.0)),
+            ));
+            extra_info.push((
+                "Inference spending".to_string(),
+                format!("${:.2} / ${:.2}", used, usage.budget_usd),
+            ));
+        }
+    }
     if let Some(jev) = &me.jev_usage {
         let mut worst = 0.0f32;
         for (label, feature) in [

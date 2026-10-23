@@ -237,12 +237,23 @@ fn mcp_collision_manual_lifecycle_real_stdio() {
             }
             assert!(!registry.tool_names().await.contains(&legacy));
             let listed = management.execute(serde_json::json!({"action":"list"}), ctx.clone()).await.unwrap();
+            let discovered = management.execute(serde_json::json!({"action":"search"}), ctx.clone()).await.unwrap();
+            let discovered: Value = serde_json::from_str(&discovered.output).unwrap();
+            assert_eq!(discovered.as_array().unwrap().len(), 2);
             for (index, alias) in aliases.iter().enumerate() {
                 assert!(listed.output.contains(alias));
                 let output = registry.execute(alias, serde_json::json!({"token":"marker"}), ctx.clone()).await.unwrap();
                 let value: Value = serde_json::from_str(&output.output).unwrap();
                 assert_eq!(value["server"], catalog[index].0);
                 assert_eq!(value["tool"], catalog[index].1.name);
+                let unified = management.execute(serde_json::json!({
+                    "action":"call", "server":catalog[index].0,
+                    "tool":catalog[index].1.name, "arguments":{"token":"unified"}
+                }), ctx.clone()).await.unwrap();
+                let unified: Value = serde_json::from_str(&unified.output).unwrap();
+                assert_eq!(unified["server"], catalog[index].0);
+                assert_eq!(unified["tool"], catalog[index].1.name);
+                assert_eq!(unified["arguments"]["token"], "unified");
             }
             set_session_tool_policy(&ctx.session_id, None, HashSet::from([aliases[0].clone()]));
             let deferred = mcp::McpCallTool::new(Arc::clone(&manager)).with_registry(registry.clone());
@@ -368,4 +379,61 @@ async fn sdk_custom_collision_alias_cannot_bypass_legacy_deny() {
         .unwrap();
     assert!(output.output.contains("disabled"));
     assert!(rx.try_recv().is_err());
+}
+
+/// A server reconnecting with the same catalog that was advertised from cache
+/// must be a no-op (that path ran ~13x per session during a reload storm), but
+/// a changed definition must still replace the advertised proxy.
+#[tokio::test]
+async fn connected_server_refresh_skips_identical_catalog_but_applies_changes() {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let manager = Arc::new(RwLock::new(crate::mcp::McpManager::with_config(
+        crate::mcp::McpConfig::default(),
+    )));
+    let mut catalog = collision_catalog();
+    registry
+        .reconcile_mcp_tools(crate::mcp::create_mcp_tools_from_cached_many(
+            &catalog,
+            Arc::clone(&manager),
+        ))
+        .await;
+    let before = registry.tool_names().await;
+
+    // Same catalog for server-a: surface unchanged.
+    let same: Vec<_> = catalog[..1].to_vec();
+    registry
+        .refresh_connected_mcp_server(
+            crate::mcp::create_mcp_tools_from_cached_many(&same, Arc::clone(&manager)),
+            "server-a",
+        )
+        .await;
+    let mut after = registry.tool_names().await;
+    let mut before_sorted = before.clone();
+    before_sorted.sort();
+    after.sort();
+    assert_eq!(
+        after, before_sorted,
+        "identical reconnect must not change aliases"
+    );
+
+    // Changed schema for server-a: the proxy must be replaced.
+    catalog[0].1.input_schema =
+        serde_json::json!({"type":"object","properties":{"changed":{"type":"string"}}});
+    registry
+        .refresh_connected_mcp_server(
+            crate::mcp::create_mcp_tools_from_cached_many(&catalog[..1], Arc::clone(&manager)),
+            "server-a",
+        )
+        .await;
+    let alias = crate::mcp::dispatch_names(&catalog)[0].clone();
+    let defs = registry.definitions(None).await;
+    let def = defs
+        .iter()
+        .find(|def| def.name == alias)
+        .expect("server-a alias still registered");
+    assert!(
+        def.input_schema.to_string().contains("changed"),
+        "changed schema must replace the cached proxy: {}",
+        def.input_schema
+    );
 }

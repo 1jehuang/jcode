@@ -396,7 +396,7 @@ fn load_credentials_reads_legacy_oauth_without_changing_external_permissions() {
 }
 
 #[test]
-fn load_auth_file_renames_existing_labels_to_animal_scheme() {
+fn load_auth_file_preserves_existing_named_labels() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -429,7 +429,58 @@ fn load_auth_file_renames_existing_labels_to_animal_scheme() {
             .iter()
             .map(|account| account.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["openai-otter", "openai-fox"]
+        vec!["personal", "work"]
     );
-    assert_eq!(auth.active_openai_account.as_deref(), Some("openai-fox"));
+    assert_eq!(auth.active_openai_account.as_deref(), Some("work"));
+}
+
+#[test]
+fn serving_account_label_follows_credentials_not_active_login() {
+    let account = |label: &str, access: &str, refresh: &str, id: &str| OpenAiAccount {
+        label: label.into(),
+        access_token: access.into(),
+        refresh_token: refresh.into(),
+        id_token: None,
+        account_id: Some(id.into()),
+        expires_at: None,
+        email: None,
+    };
+    let accounts = vec![
+        account("otter", "a-otter", "r-otter", "acct-team"),
+        account("fox", "a-fox", "r-fox", "acct-personal"),
+    ];
+    let creds = |access: &str, refresh: &str, id: Option<&str>| CodexCredentials {
+        access_token: access.into(),
+        refresh_token: refresh.into(),
+        id_token: None,
+        account_id: id.map(str::to_string),
+        expires_at: None,
+    };
+
+    assert_eq!(
+        account_label_for_credentials(&accounts, &creds("a-otter", "x", None)).as_deref(),
+        Some("otter")
+    );
+    assert_eq!(
+        account_label_for_credentials(&accounts, &creds("stale", "r-fox", None)).as_deref(),
+        Some("fox")
+    );
+    // Both tokens rotated since load: the stable account id still identifies it.
+    assert_eq!(
+        account_label_for_credentials(&accounts, &creds("old", "old", Some("acct-team")))
+            .as_deref(),
+        Some("otter")
+    );
+    assert_eq!(
+        account_label_for_credentials(&accounts, &creds("", "", None)),
+        None
+    );
+
+    // An account id shared by two logins is ambiguous, never a guess.
+    let mut shared = accounts.clone();
+    shared.push(account("otter-2", "a2", "r2", "acct-team"));
+    assert_eq!(
+        account_label_for_credentials(&shared, &creds("old", "old", Some("acct-team"))),
+        None
+    );
 }

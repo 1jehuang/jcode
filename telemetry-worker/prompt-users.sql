@@ -1,4 +1,8 @@
 -- Users who ran at least one prompt.
+-- Since the 2026-10 split, raw prompt_submitted rows live in
+-- jcode-telemetry-bulk, so here prompt users come from turn_end and
+-- session_end/crash had_user_prompt. daily_active_users still counts
+-- prompt_submitted (the rollup is written to the main DB).
 -- Usage:
 --   npm run prompt-users
 --

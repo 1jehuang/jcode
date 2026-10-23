@@ -32,6 +32,22 @@ fn tab_stripping_and_escaped_delimiters_are_supported() {
     }
 }
 
+#[test]
+fn heredoc_declared_inside_command_substitution_is_found() {
+    assert_eq!(
+        heredoc_delimiters("gh api x -f body=\"$(cat <<'EOF'"),
+        vec![("EOF".to_string(), false, true)]
+    );
+    assert_eq!(
+        heredoc_delimiters("echo \"$(printf ')' ; cat <<-END"),
+        vec![("END".to_string(), true, false)]
+    );
+    // Single quotes suppress `$(`, so this `<<` is literal text.
+    assert!(heredoc_delimiters("echo '$(cat <<EOF'").is_empty());
+    // A closed substitution restores the outer double-quote context.
+    assert!(heredoc_delimiters("echo \"$(date) <<EOF\"").is_empty());
+}
+
 fn texts(command: &str) -> Vec<String> {
     tokenize(command).into_iter().map(|t| t.text).collect()
 }
@@ -80,6 +96,34 @@ fn truncating_redirect_target_is_marked_but_append_is_not() {
     assert!(
         !append.iter().any(|t| t.is_truncating_redirect_target),
         "append does not truncate and must not be flagged"
+    );
+}
+
+#[test]
+fn fd_duplication_is_not_a_truncating_redirect() {
+    for cmd in [
+        "printf evidence 2>&1",
+        "cmd >&2",
+        "cmd 2>&-",
+        "cmd 1>&2 && ls",
+    ] {
+        assert!(
+            !tokenize(cmd)
+                .iter()
+                .any(|t| t.is_truncating_redirect_target),
+            "{cmd} duplicates an fd and must not flag a target"
+        );
+    }
+    let both = tokenize("cmd >& out.log");
+    assert!(
+        both.iter()
+            .any(|t| t.is_truncating_redirect_target && t.text == "out.log")
+    );
+    let mixed = tokenize("cmd 2>&1 > out.txt");
+    assert!(
+        mixed
+            .iter()
+            .any(|t| t.is_truncating_redirect_target && t.text == "out.txt")
     );
 }
 

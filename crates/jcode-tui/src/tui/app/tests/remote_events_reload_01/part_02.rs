@@ -170,6 +170,8 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Continue working".to_string(),
@@ -223,6 +225,8 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Finished work".to_string(),
@@ -287,6 +291,8 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Needs validation".to_string(),
@@ -346,6 +352,8 @@ fn test_remote_poke_status_and_off_update_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Continue working".to_string(),
@@ -439,6 +447,8 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "session_rewind_remote".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -454,6 +464,7 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             provider_name: Some("mock".to_string()),
             provider_model: Some("mock-model".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],
@@ -474,9 +485,12 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
