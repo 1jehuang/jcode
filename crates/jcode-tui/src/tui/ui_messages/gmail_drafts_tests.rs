@@ -67,7 +67,7 @@ fn render_gmail_draft_failure_keeps_normal_header_without_redundant_card() {
 
     assert_eq!(lines.len(), 2, "{plain}");
     assert!(plain.contains("✗ gmail draft"), "{plain}");
-    assert!(plain.contains("╰─ Gmail draft creation failed"), "{plain}");
+    assert!(plain.contains("╰ Gmail draft creation failed"), "{plain}");
     assert!(!plain.contains("(recipient missing)"), "{plain}");
     assert!(!plain.contains("(no subject)"), "{plain}");
     assert!(!plain.contains("(empty body)"), "{plain}");

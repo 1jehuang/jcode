@@ -499,7 +499,7 @@ Completed: 2 succeeded, 1 failed"
     assert!(
         rendered
             .iter()
-            .any(|line| line.contains("╰─ missing field `mode`"))
+            .any(|line| line.contains("╰ missing field `mode`"))
     );
     assert!(
         rendered
@@ -552,7 +552,7 @@ fn test_render_tool_message_batch_all_failed_marks_all_children_failed() {
     assert_eq!(
         rendered
             .iter()
-            .filter(|line| line.contains("╰─ missing field `mode`"))
+            .filter(|line| line.contains("╰ missing field `mode`"))
             .count(),
         3
     );
