@@ -114,11 +114,7 @@ async fn panel_registered_lifecycle_and_validation() {
     assert_eq!(second_state.pages.len(), 2);
     assert_ne!(second_state.focused_page_id, first_state.focused_page_id);
     let path = temp.path().join("report.pdf");
-    std::fs::write(
-        &path,
-        b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF",
-    )
-    .unwrap();
+    std::fs::write(&path, synthetic_pdf("Panel lifecycle")).unwrap();
     let updated = registry
         .execute(
             "panel",
@@ -203,6 +199,76 @@ async fn panel_registered_lifecycle_and_validation() {
     let listed: SidePanelSnapshot = serde_json::from_value(listed.metadata.unwrap()).unwrap();
     assert_eq!(listed.pages.len(), 1);
     assert!(listed.pages.iter().all(|p| &p.id != id));
+    assert_eq!(listed.archived.len(), 1);
+    assert_eq!(&listed.archived[0].id, id);
+    assert!(
+        listed
+            .pages
+            .iter()
+            .all(|p| p.content.is_empty() && p.pdf_data.is_none())
+    );
+    let reopened = registry
+        .execute(
+            "panel",
+            json!({"action":"reopen", "panel_id":id}),
+            context(temp.path(), "panel-test"),
+        )
+        .await
+        .unwrap();
+    let reopened: SidePanelSnapshot = serde_json::from_value(reopened.metadata.unwrap()).unwrap();
+    assert!(reopened.archived.is_empty());
+    assert_eq!(reopened.focused_page_id.as_ref(), Some(id));
+    assert!(reopened.pages.iter().all(|p| p.pdf_data.is_none()));
+    assert!(
+        crate::side_panel::snapshot_for_session("panel-test")
+            .unwrap()
+            .pages
+            .iter()
+            .any(|p| &p.id == id && p.pdf_data.is_some())
+    );
+    let history = registry
+        .execute(
+            "panel",
+            json!({"action":"history"}),
+            context(temp.path(), "panel-test"),
+        )
+        .await
+        .unwrap();
+    let history: SidePanelSnapshot = serde_json::from_value(history.metadata.unwrap()).unwrap();
+    assert!(
+        history
+            .pages
+            .iter()
+            .all(|p| p.content.is_empty() && p.pdf_data.is_none())
+    );
+    assert!(
+        registry
+            .execute(
+                "panel",
+                json!({"action":"purge", "panel_id":id}),
+                context(temp.path(), "other-session")
+            )
+            .await
+            .is_err()
+    );
+    registry
+        .execute(
+            "panel",
+            json!({"action":"purge", "panel_id":id}),
+            context(temp.path(), "panel-test"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        registry
+            .execute(
+                "panel",
+                json!({"action":"reopen", "panel_id":id}),
+                context(temp.path(), "panel-test")
+            )
+            .await
+            .is_err()
+    );
     assert!(path.exists());
     let legacy = registry
         .execute(
@@ -235,4 +301,53 @@ async fn panel_registered_lifecycle_and_validation() {
             .await
             .expect("framework-injected fields must be accepted");
     }
+}
+
+/// A complete one-page PDF with real object offsets and a cross-reference table.
+fn synthetic_pdf(label: &str) -> Vec<u8> {
+    let stream = format!("BT /F1 12 Tf 50 100 Td ({label}) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+    ];
+    let mut pdf = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    pdf
+}
+
+#[test]
+fn panel_history_schema_and_sendable_future() {
+    let tool = PanelTool::new();
+    let schema = tool.parameters_schema();
+    for action in [
+        "spawn", "update", "focus", "close", "list", "history", "reopen", "purge",
+    ] {
+        assert!(
+            schema["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(action))
+        );
+    }
+    assert_eq!(schema["additionalProperties"], false);
+    fn assert_send<T: Send>(_: T) {}
+    assert_send(tool.execute(
+        json!({"action":"history"}),
+        context(std::path::Path::new("."), "synthetic"),
+    ));
 }
