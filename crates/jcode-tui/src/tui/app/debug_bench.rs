@@ -1,4 +1,6 @@
 use super::*;
+#[path = "debug_bench_fixture.rs"]
+mod fixture;
 
 impl App {
     pub(in crate::tui::app) fn build_scroll_test_content(
@@ -57,27 +59,6 @@ impl App {
         out
     }
 
-    fn build_side_panel_latency_snapshot(
-        diagrams: usize,
-        padding: usize,
-    ) -> crate::side_panel::SidePanelSnapshot {
-        let content = Self::build_scroll_test_content(diagrams, padding, None);
-        crate::side_panel::SidePanelSnapshot {
-            focus_revision: 0,
-            focused_page_id: Some("latency_bench".to_string()),
-            pages: vec![crate::side_panel::SidePanelPage {
-                id: "latency_bench".to_string(),
-                title: "Latency Bench".to_string(),
-                file_path: "latency_bench.md".to_string(),
-                format: crate::side_panel::SidePanelPageFormat::Markdown,
-                pdf_data: None,
-                source: crate::side_panel::SidePanelPageSource::Managed,
-                content,
-                updated_at_ms: 1,
-            }],
-        }
-    }
-
     pub(in crate::tui::app) fn run_side_panel_latency_bench(
         &mut self,
         raw: Option<&str>,
@@ -119,6 +100,7 @@ impl App {
         let diagrams = cfg.diagrams.unwrap_or(2).clamp(1, 3);
         let include_samples = cfg.include_samples.unwrap_or(true);
 
+        let _live_geometry = crate::tui::ui::interactive_state::preserve_interactive_render_state();
         let saved_state = ScrollTestState::capture(self);
         let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
         let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
@@ -359,6 +341,7 @@ impl App {
         let keep_mermaid_cache = cfg.keep_mermaid_cache.unwrap_or(false);
         let sleep_between_frames_ms = cfg.sleep_between_frames_ms.unwrap_or(0).min(1_000);
 
+        let _live_geometry = crate::tui::ui::interactive_state::preserve_interactive_render_state();
         let saved_state = ScrollTestState::capture(self);
         let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
         let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
@@ -782,6 +765,7 @@ impl App {
         let include_paused = cfg.include_paused.unwrap_or(true);
         let diagram_override = cfg.diagram.as_deref();
 
+        let _live_geometry = crate::tui::ui::interactive_state::preserve_interactive_render_state();
         let saved_state = ScrollTestState::capture(self);
         let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
         let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
@@ -1156,6 +1140,7 @@ impl App {
         let max_frames = cfg.max_frames.unwrap_or(160).clamp(4, 2000);
         let include_frames = cfg.include_frames.unwrap_or(false);
 
+        let _live_geometry = crate::tui::ui::interactive_state::preserve_interactive_render_state();
         let saved_state = ScrollTestState::capture(self);
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
         crate::tui::visual_debug::enable();
