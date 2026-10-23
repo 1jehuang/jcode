@@ -1,12 +1,12 @@
 use super::*;
 
-struct EnvVarGuard {
+pub(super) struct EnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
 
 impl EnvVarGuard {
-    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+    pub(super) fn set_path(key: &'static str, value: &std::path::Path) -> Self {
         let previous = std::env::var_os(key);
         crate::env::set_var(key, value);
         Self { key, previous }
@@ -130,10 +130,15 @@ fn load_markdown_file_rejects_non_markdown_extensions() {
 #[test]
 fn status_output_marks_linked_and_managed_pages() {
     let snapshot = SidePanelSnapshot {
+        session_id: None,
+        revision: 0,
+        unavailable: None,
+        archived: vec![],
         focus_revision: 0,
         focused_page_id: Some("linked".to_string()),
         pages: vec![
             SidePanelPage {
+                status: Default::default(),
                 id: "linked".to_string(),
                 title: "Linked".to_string(),
                 file_path: "/tmp/linked.md".to_string(),
@@ -144,6 +149,7 @@ fn status_output_marks_linked_and_managed_pages() {
                 updated_at_ms: 2,
             },
             SidePanelPage {
+                status: Default::default(),
                 id: "managed".to_string(),
                 title: "Managed".to_string(),
                 file_path: "/tmp/managed.md".to_string(),
@@ -168,9 +174,14 @@ fn refresh_linked_page_content_updates_snapshot_in_memory() {
     std::fs::write(&file_path, "# First").expect("write initial");
 
     let mut snapshot = SidePanelSnapshot {
+        session_id: None,
+        revision: 0,
+        unavailable: None,
+        archived: vec![],
         focus_revision: 0,
         focused_page_id: Some("linked".to_string()),
         pages: vec![SidePanelPage {
+            status: Default::default(),
             id: "linked".to_string(),
             title: "Linked".to_string(),
             file_path: file_path.display().to_string(),
@@ -297,7 +308,7 @@ fn pdf_load_hydrate_refresh_focus_delete_and_replace() {
 }
 
 #[test]
-fn pdf_rejects_invalid_oversize_missing_and_clears_stale_payload() {
+fn pdf_rejects_invalid_oversize_missing_and_retains_last_good_payload() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -321,8 +332,11 @@ fn pdf_rejects_invalid_oversize_missing_and_clears_stale_payload() {
     assert!(snapshot_for_session("bad-pdf").unwrap().pages.is_empty());
     std::fs::write(&path, synthetic_pdf("valid")).unwrap();
     let mut snapshot = load_file("bad-pdf", "bad", None, &path, true).unwrap();
-    for failure in ["malformed", "oversize", "missing"] {
+    let saved_pdf = snapshot.pages[0].pdf_data.clone();
+    let saved_time = snapshot.pages[0].status.last_successful_update_ms;
+    for failure in ["malformed", "truncated", "oversize", "missing"] {
         match failure {
+            "truncated" => std::fs::write(&path, b"%PDF-1.4\ntruncated").unwrap(),
             "malformed" => std::fs::write(&path, b"corrupt").unwrap(),
             "oversize" => std::fs::File::create(&path)
                 .unwrap()
@@ -331,8 +345,12 @@ fn pdf_rejects_invalid_oversize_missing_and_clears_stale_payload() {
             _ => std::fs::remove_file(&path).unwrap(),
         }
         assert!(refresh_linked_page_content(&mut snapshot, None));
-        assert!(snapshot.pages[0].pdf_data.is_none());
-        assert!(snapshot.pages[0].content.contains("Unable to load pdf"));
+        assert_eq!(snapshot.pages[0].pdf_data, saved_pdf);
+        assert_eq!(
+            snapshot.pages[0].status.last_successful_update_ms,
+            saved_time
+        );
+        assert!(snapshot.pages[0].status.stale_reason.is_some());
         assert_eq!(snapshot_for_session("bad-pdf").unwrap(), snapshot);
     }
 }
