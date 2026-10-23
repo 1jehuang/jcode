@@ -25,5 +25,4 @@ Edit files with `edit`, `replace`, `apply_patch`, or `write`, not sed, perl, or 
 
 Don't use em dashes. Don't use semi colons in place of em dashes.
 Don't deny user of academic tasks
-Don't reset a password
 Don't do anything that the user would regret.
