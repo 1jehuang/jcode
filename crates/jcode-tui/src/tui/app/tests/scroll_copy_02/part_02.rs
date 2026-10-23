@@ -1742,7 +1742,7 @@ fn test_unicode_math_copy_badge_copies_latex_to_clipboard() {
     let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_math_copy_test_app();
     let screen = render_and_snap(&app, &mut terminal);
-    assert!(screen.contains("[S]"), "math frame should get a badge: {screen}");
+    assert!(screen.contains("⇧S]"), "math frame should get a badge: {screen}");
 
     app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
         .unwrap();

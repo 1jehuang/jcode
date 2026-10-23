@@ -4706,11 +4706,7 @@ pub(crate) fn render_tool_message(
             lines.push(Line::from(spans).alignment(ratatui::layout::Alignment::Left));
         }
 
-        let footer = if truncated {
-            format!("{pad_str}╰─ {} hidden", total_changes - MAX_DIFF_LINES)
-        } else {
-            format!("{pad_str}╰─")
-        };
+        let footer = format!("{pad_str}╰─");
         lines.push(
             super::truncate_line_with_ellipsis_to_width(
                 &Line::from(Span::styled(footer, Style::default().fg(dim_color()))),

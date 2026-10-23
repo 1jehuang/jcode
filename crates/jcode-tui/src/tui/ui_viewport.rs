@@ -41,14 +41,26 @@ fn copy_badge_alt_label_from_config(configured: &str) -> String {
     }
 }
 
-pub(crate) fn copy_badge_alt_badge() -> String {
-    format!("[{}]", copy_badge_alt_label())
+pub(crate) fn shortcut_badge_spans(
+    key: char,
+    alt_style: Style,
+    shift_style: Style,
+    key_style: Style,
+) -> [Span<'static>; 5] {
+    let dim = Style::default().fg(dim_color());
+    [
+        Span::styled("[", dim),
+        Span::styled(copy_badge_alt_label(), alt_style),
+        Span::styled("⇧", shift_style),
+        Span::styled(key.to_ascii_uppercase().to_string(), key_style),
+        Span::styled("]", dim),
+    ]
 }
 
 fn copy_badge_shortcut_width(key_label: &str) -> usize {
     // Includes the single separator space rendered between the row content and
     // the first badge.
-    UnicodeWidthStr::width(format!(" {} [⇧] [{key_label}]", copy_badge_alt_badge()).as_str())
+    UnicodeWidthStr::width(format!(" [{}⇧{key_label}]", copy_badge_alt_label()).as_str())
 }
 
 /// Display width reserved for the compact inline expand-edit badge (`[Alt⇧E] …`).
@@ -923,14 +935,7 @@ pub(super) fn draw_messages(
             let shortcut_start = line.width();
 
             line.spans
-                .push(Span::styled(copy_badge_alt_badge(), alt_style));
-            line.spans.push(Span::raw(" "));
-            line.spans.push(Span::styled("[⇧]", shift_style));
-            line.spans.push(Span::raw(" "));
-            line.spans.push(Span::styled(
-                format!("[{}]", key.to_ascii_uppercase()),
-                key_style,
-            ));
+                .extend(shortcut_badge_spans(key, alt_style, shift_style, key_style));
 
             let final_width = line.width();
             let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {

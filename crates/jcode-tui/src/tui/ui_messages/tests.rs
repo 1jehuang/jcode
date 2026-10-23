@@ -3362,7 +3362,8 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
     assert!(!extract_line_text(&lines[0]).contains("+7"));
     assert!(!plain.contains("total"));
     let footer = lines.last().unwrap();
-    assert_eq!(extract_line_text(footer), "╰─ 2 hidden");
+    assert_eq!(extract_line_text(footer), "╰─");
+    assert!(!plain.contains("hidden"), "plain={plain}");
     let header = &lines[1];
     assert!(extract_line_text(header).starts_with("╭─ diff · +7 -7 · "));
     assert!(

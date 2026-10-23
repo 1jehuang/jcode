@@ -162,14 +162,36 @@ fn compact_expand_badge_reserves_exact_display_cells() {
     for suffix in [" expand", " ✓ Expanded"] {
         let rendered = format!(" [{}⇧E]{suffix}", super::copy_badge_alt_label());
         assert_eq!(super::expand_badge_reserved_width(suffix), rendered.width());
-        let previous = format!(" {} [⇧] [E]{suffix}", super::copy_badge_alt_badge());
+        let previous = format!(" [{}] [⇧] [E]{suffix}", super::copy_badge_alt_label());
         assert!(rendered.width() < previous.width());
     }
 }
 
 #[test]
+fn compact_shortcut_badge_matches_reserved_width_and_preserves_styles() {
+    use ratatui::{
+        style::{Color, Style},
+        text::Line,
+    };
+    let alt = Style::default().fg(Color::Yellow);
+    let shift = Style::default().fg(Color::Green);
+    let key = Style::default().fg(Color::Blue);
+    let spans = super::shortcut_badge_spans('a', alt, shift, key);
+    assert_chrome_has_explicit_foregrounds(&spans);
+    assert_eq!(spans[1].style, alt);
+    assert_eq!(spans[2].style, shift);
+    assert_eq!(spans[3].style, key);
+    let line = Line::from(spans.to_vec());
+    assert_eq!(
+        line.to_string(),
+        format!("[{}⇧A]", super::copy_badge_alt_label())
+    );
+    assert_eq!(line.width() + 1, super::copy_badge_shortcut_width("A"));
+}
+
+#[test]
 fn exact_width_expand_badge_leaves_no_content_or_ellipsis() {
-    let mut line = ratatui::text::Line::from("╰─ 28 hidden");
+    let mut line = ratatui::text::Line::from("╰─");
     super::truncate_line_for_copy_badge(&mut line, 0);
     assert_eq!(line.width(), 0);
     assert!(line.spans.is_empty());

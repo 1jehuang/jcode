@@ -909,7 +909,7 @@ fn fit_rows(width: u32, height: u32, chat_width: u16, viewport_height: u16) -> u
 
 /// Build the dim label line shown above an inline image, e.g.
 /// `  screenshot.png  1920×1080`, with a trailing show/hide badge
-/// (`[Alt] [⇧] [I] hide` / `[Alt] [⇧] [I] show image`) so the toggle is
+/// (`[Alt⇧I] hide` / `[Alt⇧I] show image`) so the toggle is
 /// discoverable right where the image renders. The line is kept deliberately
 /// short so it fits on one row; there is no visible expand badge, but clicking
 /// the rendered image body still cycles the per-image size
@@ -928,11 +928,9 @@ pub(crate) fn image_label_line(
     };
     let dim = Style::default().add_modifier(Modifier::DIM);
     let prefix = Line::from(vec![Span::styled("  ", dim), Span::styled(label, dim)]);
-    let mut suffix = vec![
-        Span::raw("  "),
-        Span::styled(super::viewport::copy_badge_alt_badge(), dim),
-        Span::styled(" [⇧] [I] ", dim),
-    ];
+    let mut suffix = vec![Span::raw("  ")];
+    suffix.extend(super::viewport::shortcut_badge_spans('I', dim, dim, dim));
+    suffix.push(Span::raw(" "));
     if images_visible {
         suffix.push(Span::styled("hide", dim));
     } else {
@@ -1279,7 +1277,7 @@ mod tests {
     fn visible_label_line_advertises_hide_badge() {
         let line = image_label_line(&item(600, 400), 80, true, ImageExpandLevel::Fit);
         let text = jcode_tui_render::line_plain_text(&line);
-        assert!(text.contains("[⇧] [I]"), "badge keys missing: {text:?}");
+        assert!(text.contains("⇧I]"), "badge keys missing: {text:?}");
         assert!(text.contains("hide"), "hide hint missing: {text:?}");
     }
 
