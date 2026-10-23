@@ -7,7 +7,7 @@ impl Agent {
         has_images: bool,
         synthetic: bool,
     ) -> Result<Option<String>> {
-        if !synthetic && (!prompt.trim().is_empty() || has_images) {
+        if !synthetic && crate::session::is_authentic_user_input(prompt, has_images) {
             Ok(Some(self.session.create_rewind_checkpoint(prompt)?.id))
         } else {
             Ok(None)
