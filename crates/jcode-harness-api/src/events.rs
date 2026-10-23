@@ -138,8 +138,11 @@ pub enum ApiEvent {
     },
 
     /// Complete session-scoped Markdown side-panel state. Replace the previous
-    /// snapshot, including when pages is empty. Sent live and during attachment
-    /// hydration, possibly before `Attached`. Subscribe before attaching.
+    /// authoritative inventory, including when pages is empty. If the snapshot
+    /// reports `unavailable`, retain the last good same-session document and
+    /// show that status instead of interpreting the read failure as deletion.
+    /// Sent live and during attachment hydration, possibly before `Attached`.
+    /// Subscribe before attaching.
     SidePanelState {
         session_id: String,
         snapshot: crate::SidePanelSnapshot,

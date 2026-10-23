@@ -535,7 +535,11 @@ async fn assert_history_service_tier_and_pdf_capability(
     session.save().expect("save session");
 
     let pdf_path = temp_home.path().join("report.pdf");
-    std::fs::write(&pdf_path, b"%PDF-1.4\n%%EOF").unwrap();
+    std::fs::write(
+        &pdf_path,
+        include_bytes!("../../tests/fixtures/side-panel-one-page.pdf"),
+    )
+    .unwrap();
     let original_panel =
         crate::side_panel::load_file(session_id, "report", Some("Report"), &pdf_path, true)
             .unwrap();

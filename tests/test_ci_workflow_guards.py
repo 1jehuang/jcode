@@ -64,7 +64,8 @@ class WorkflowGuardTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         native = workflow.split('      - name: Run sidepanel retention and history regressions\n', 1)[1].split('      - name:', 1)[0]
         windows = workflow.split('      - name: Run Windows sidepanel retention and history regressions\n', 1)[1].split('      - name:', 1)[0]
-        for package in ('jcode-base', 'jcode-app-core', 'jcode-tui', 'jcode-protocol'):
+        for package in ('jcode-base', 'jcode-app-core', 'jcode-tui', 'jcode-protocol',
+                        'jcode-harness-api-server', 'jcode-harness-api'):
             self.assertIn(package, native)
             self.assertIn(package, windows)
         self.assertIn('--lib panel -- --test-threads=1', native)

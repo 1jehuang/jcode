@@ -3436,23 +3436,7 @@ fn side_panel_attach_and_reconnect_hydrate_in_either_order_and_clear_empty() {
     }
 }
 
-#[test]
-fn side_panel_state_hydration_requires_correlated_attachment() {
-    let mut state = BridgeState::default();
-    let (_, mut reply) = recovery_attach(&mut state, Some("recover"));
-    reply["side_panel"] = markdown_panel();
-    let mut wrong = reply.clone();
-    wrong["session_id"] = json!("other");
-    assert!(state.legacy_event_to_api(&wrong).is_empty());
-    wrong = reply.clone();
-    wrong["id"] = json!(u64::MAX);
-    assert!(state.legacy_event_to_api(&wrong).is_empty());
-    assert_panel(
-        &state.legacy_event_to_api(&reply),
-        "recover",
-        markdown_panel(),
-    );
-}
+include!("translate_tests/panel_retention.rs");
 
 #[test]
 fn side_panel_history_refresh_hydrates_but_catalog_does_not_clear_panel() {
