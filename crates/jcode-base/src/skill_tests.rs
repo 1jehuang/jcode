@@ -160,6 +160,49 @@ fn disable_model_invocation_skill_is_hidden_from_model_list_but_still_resolvable
 }
 
 #[test]
+fn disable_model_invocation_non_boolean_values_keep_skill_loaded_and_model_visible() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let cases = [
+        ("quoted-true", "disable-model-invocation: \"true\"\n"),
+        ("empty", "disable-model-invocation:\n"),
+        ("word", "disable-model-invocation: yes\n"),
+        ("number", "disable-model-invocation: 1\n"),
+        ("list", "disable-model-invocation: [true]\n"),
+        ("map", "disable-model-invocation: {hidden: true}\n"),
+        ("false", "disable-model-invocation: false\n"),
+        ("hidden", "disable-model-invocation: true\n"),
+    ];
+    for (name, field) in cases {
+        write_skill_file(
+            temp.path(),
+            name,
+            &format!("---\nname: {name}\ndescription: Test skill\n{field}---\n\nBody\n"),
+        );
+    }
+    let mut registry = SkillRegistry::default();
+    registry.load_from_dir(temp.path()).expect("load skills");
+
+    let visible: Vec<&str> = registry
+        .list_model_invocable()
+        .into_iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(
+        visible,
+        [
+            "empty",
+            "false",
+            "list",
+            "map",
+            "number",
+            "quoted-true",
+            "word"
+        ]
+    );
+    assert!(registry.get("hidden").is_some());
+}
+
+#[test]
 fn parse_invocation_supports_a_trailing_prompt() {
     assert_eq!(
         SkillRegistry::parse_invocation("/frontend-design build a settings page"),

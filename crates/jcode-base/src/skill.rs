@@ -34,8 +34,8 @@ struct SkillFrontmatter {
     description: String,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
-    #[serde(rename = "disable-model-invocation", default)]
-    disable_model_invocation: bool,
+    #[serde(rename = "disable-model-invocation")]
+    disable_model_invocation: Option<serde_yaml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -525,6 +525,12 @@ impl SkillRegistry {
             disable_model_invocation,
         } = frontmatter;
 
+        // Only a real YAML `true` hides the skill; any other value must not
+        // stop a skill that loaded before this field existed from loading.
+        let disable_model_invocation = matches!(
+            disable_model_invocation,
+            Some(serde_yaml::Value::Bool(true))
+        );
         let allowed_tools = allowed_tools.map(|tools| match tools {
             AllowedTools::CommaDelimited(tools) => tools
                 .split(',')
