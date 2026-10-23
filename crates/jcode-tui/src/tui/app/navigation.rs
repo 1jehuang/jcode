@@ -199,11 +199,8 @@ impl App {
         crate::tui::mermaid::set_mermaid_inline_expand_level(image_id, level as u8);
         if let Some(source) = crate::tui::mermaid::diagram_source_for_hash(image_id) {
             let copied = super::helpers::copy_to_clipboard(&source.source);
-            self.set_status_notice(clipboard_notice::message(
-                size,
-                source.language.label(),
-                copied,
-            ));
+            let notice = clipboard_notice::message(size, source.language.label(), copied);
+            self.set_status_notice(notice);
         } else if let Some((media_type, data)) =
             super::super::ui::inline_image_ui::payload_for_copy(image_id)
         {
