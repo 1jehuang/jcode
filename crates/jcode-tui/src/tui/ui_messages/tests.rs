@@ -820,6 +820,52 @@ fn render_system_message_uses_width_stable_titles_on_kitty() {
 }
 
 #[test]
+fn render_background_task_failure_is_compact() {
+    let called = (chrono::Utc::now() - chrono::Duration::seconds(125)).to_rfc3339();
+    let msg = DisplayMessage::background_task(format!(
+        "**Background task** `bg123` · `Comparison trace` (`bash`) · ✗ failed · 11.0s · exit 101\n\n_Called at:_ `{called}`\n\n```text\n[stderr] justrust: remote build\n[stderr] warning: unused variable\n[stderr] error[E0308]: mismatched types\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`"
+    ));
+    let lines = render_background_task_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 2);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        plain.contains("✗ bash  Comparison trace · 2m ago"),
+        "{plain}"
+    );
+    assert!(
+        plain.contains("╰─ exit 101 · error[E0308]: mismatched types"),
+        "{plain}"
+    );
+    assert!(!plain.contains("remote build"));
+    for width in [0, 1, 2, 8, 20, 40] {
+        let lines =
+            render_background_task_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            assert!(UnicodeWidthStr::width(extract_line_text(&line).as_str()) <= width as usize);
+        }
+    }
+}
+
+#[test]
+fn render_background_task_failure_without_diagnostic_is_honest() {
+    let msg = DisplayMessage::background_task(
+        "**Background task** `bg123` · `bash` · ✗ failed · 7.1s · exit 1\n\n_No output captured._\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
+    );
+    let plain = render_background_task_message(&msg, 100, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plain.contains("✗ bash · took 7.1s"), "{plain}");
+    assert!(plain.contains("╰─ exit 1 · no diagnostic captured"));
+}
+
+#[test]
 fn render_background_task_message_uses_box_and_truncates_preview_lines() {
     let msg = DisplayMessage::background_task(
         "**Background task** `bg123` · `bash` · ✓ completed · 7.1s · exit 0\n\n```text\nline 1\nline 2\nline 3\nline 4\nline 5\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",

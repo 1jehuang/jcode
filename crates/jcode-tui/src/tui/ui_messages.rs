@@ -2793,6 +2793,85 @@ pub(crate) fn render_background_task_message(
     if is_swarm {
         return render_compact_swarm_background_completion(&parsed, width);
     }
+    if parsed.status.starts_with('✗') {
+        let muted = Style::default().fg(dim_color());
+        let failure = Style::default().fg(rgb(220, 100, 100));
+        let timing = msg
+            .content
+            .lines()
+            .find_map(|line| {
+                let timestamp = line.strip_prefix("_Called at:_ `")?.strip_suffix('`')?;
+                let called = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+                let seconds = (chrono::Utc::now() - called.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0);
+                Some(if seconds < 60 {
+                    format!("{seconds}s ago")
+                } else if seconds < 3600 {
+                    format!("{}m ago", seconds / 60)
+                } else {
+                    format!("{}h ago", seconds / 3600)
+                })
+            })
+            .unwrap_or_else(|| format!("took {}", parsed.duration));
+        let summary = parsed.failure_summary.clone().or_else(|| {
+            let preview = strip_ansi_escape_sequences(parsed.preview.as_deref()?);
+            preview
+                .lines()
+                .map(str::trim)
+                .map(|line| {
+                    line.strip_prefix("[stderr] ")
+                        .or_else(|| line.strip_prefix("[stdout] "))
+                        .unwrap_or(line)
+                })
+                .find(|line| {
+                    line.starts_with("error")
+                        || line.starts_with("Error:")
+                        || line.starts_with("Failed:")
+                        || line.contains("panicked at")
+                })
+                .map(str::to_owned)
+        });
+        let detail = summary
+            .map(|text| {
+                let clean = strip_ansi_escape_sequences(&text);
+                format!(
+                    "{} · {}",
+                    parsed.exit_label,
+                    clean.split_whitespace().collect::<Vec<_>>().join(" ")
+                )
+            })
+            .unwrap_or_else(|| format!("{} · no diagnostic captured", parsed.exit_label));
+        let mut header = Line::from(vec![
+            Span::styled("✗ ", failure),
+            Span::styled(
+                if task_label == parsed.tool_name {
+                    parsed.tool_name.clone()
+                } else {
+                    format!("{}  {}", parsed.tool_name, task_label)
+                },
+                Style::default(),
+            ),
+        ]);
+        let timing = format!(" · {timing}");
+        header = super::truncate_line_with_ellipsis_to_width(
+            &header,
+            (width as usize).saturating_sub(UnicodeWidthStr::width(timing.as_str())),
+        );
+        header.spans.push(Span::styled(timing, muted));
+        let reason = Line::from(vec![
+            Span::styled("╰─ ", muted),
+            Span::styled(detail, muted),
+        ]);
+        let mut lines = vec![
+            super::truncate_line_with_ellipsis_to_width(&header, width as usize),
+            super::truncate_line_with_ellipsis_to_width(&reason, width as usize),
+        ];
+        if centered {
+            left_pad_lines_for_centered_mode(&mut lines, width);
+        }
+        return lines;
+    }
     let (title, border_color, status_color, preview_color) = if parsed.status.starts_with('✓') {
         (
             if is_swarm {

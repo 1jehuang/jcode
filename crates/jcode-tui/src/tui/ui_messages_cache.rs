@@ -11,6 +11,10 @@ pub(crate) fn get_cached_message_lines<F>(
 where
     F: FnOnce(&DisplayMessage, u16, crate::config::DiffDisplayMode) -> Vec<Line<'static>>,
 {
+    // Relative call ages change even when the notification content does not.
+    if msg.role == "background_task" && msg.content.contains("_Called at:_ `") {
+        return render(msg, width, diff_mode);
+    }
     jcode_tui_messages::get_cached_message_lines(
         msg,
         width,
