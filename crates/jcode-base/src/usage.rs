@@ -12,6 +12,7 @@ mod cache;
 mod disk_cache;
 mod display;
 mod flight;
+mod local_activity;
 mod model;
 mod openai_helpers;
 mod openai_reset;
@@ -283,13 +284,13 @@ where
     let openai_generation = openai_usage_generation();
 
     let now = Instant::now();
-    let cached_results = if let Ok(map) = cache.lock() {
-        let mut cached = map.values().map(|(_, r)| r.clone()).collect::<Vec<_>>();
-        sort_reports_most_recent_first(&mut cached);
-        cached
+    let mut cached_results = if let Ok(map) = cache.lock() {
+        map.values().map(|(_, r)| r.clone()).collect::<Vec<_>>()
     } else {
         Vec::new()
     };
+    local_activity::refresh_cached_oauth_activity(&mut cached_results);
+    sort_reports_most_recent_first(&mut cached_results);
     let all_fresh = if let Ok(map) = cache.lock() {
         !map.is_empty()
             && map
@@ -429,6 +430,7 @@ fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
             .retain(|(key, _)| !details.iter().any(|(local_key, _)| local_key == key));
         report.extra_info.extend(details);
     }
+    report.extra_info.retain(|(key, _)| key != "Last used");
     if let Some(used) = crate::provider_activity::last_used_unix_secs(source_key) {
         report.last_used_unix_secs = Some(used);
         report.extra_info.push((
