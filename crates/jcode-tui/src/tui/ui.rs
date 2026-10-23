@@ -2023,21 +2023,9 @@ pub(crate) fn record_copy_viewport_frame_snapshot_for_test(
     record_copy_viewport_frame_snapshot(prepared, scroll, visible_end, content_area, left_margins);
 }
 
-pub(crate) fn line_left_margins_for_area(lines: &[Line<'static>], area_width: u16) -> Vec<u16> {
-    lines
-        .iter()
-        .map(|line| {
-            let used = line.width().min(area_width as usize) as u16;
-            let total_margin = area_width.saturating_sub(used);
-            match line.alignment.unwrap_or(Alignment::Left) {
-                Alignment::Left => 0,
-                Alignment::Center => total_margin / 2,
-                Alignment::Right => total_margin,
-            }
-        })
-        .collect()
-}
-
+#[path = "ui/line_margins.rs"]
+mod line_margins;
+pub(crate) use line_margins::line_left_margins_for_area;
 pub(crate) fn record_side_pane_snapshot(
     wrapped_lines: &[Line<'static>],
     scroll: usize,
