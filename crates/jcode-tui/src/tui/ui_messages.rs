@@ -4109,7 +4109,9 @@ pub(crate) fn render_tool_message(
     }
 
     let centered = markdown::center_code_blocks();
-    let token_badge = tool_output_token_badge(&msg.content);
+    let mut token_badge = tool_output_token_badge(&msg.content);
+    token_badge.label =
+        tools_ui::tool_usage_label(&token_badge.label, msg.duration_secs, &msg.content);
 
     // A restored or remotely mirrored transcript can occasionally retain the
     // todo result while losing its paired ToolCall metadata. Recognize the

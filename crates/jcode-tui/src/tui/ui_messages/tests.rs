@@ -3071,6 +3071,96 @@ fn discovery_cards_wrap_within_narrow_transcript_width() {
 }
 
 #[test]
+fn render_tool_message_groups_duration_and_tokens() {
+    for name in [
+        "bash",
+        "read",
+        "edit",
+        "webfetch",
+        "debug_socket",
+        "unknown_tool",
+    ] {
+        for content in ["ok", "Error: failed"] {
+            let mut msg = DisplayMessage::tool(
+                content,
+                crate::message::ToolCall {
+                    id: "timed".into(),
+                    name: name.into(),
+                    input: serde_json::json!({}),
+                    intent: Some("A completed tool call".into()),
+                    thought_signature: None,
+                },
+            );
+            msg.duration_secs = Some(2.4);
+            let tokens =
+                crate::util::format_approx_token_count(crate::util::estimate_tokens(content));
+            for width in [32, 60, 120] {
+                let lines = render_tool_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                let row = extract_line_text(&lines[0]);
+                assert!(row.contains(&format!("2.4s, {tokens}")), "{name}: {row}");
+                assert!(!row.contains("2.4s ·"), "{row}");
+                assert!(lines[0].width() < width as usize, "{row}");
+            }
+        }
+    }
+}
+
+#[test]
+fn batch_subcall_groups_duration_and_tokens() {
+    let tool = crate::message::ToolCall {
+        id: "timed-child".into(),
+        name: "read".into(),
+        input: serde_json::json!({}),
+        intent: Some("Read configuration".into()),
+        thought_signature: None,
+    };
+    let line = crate::tui::ui::tools_ui::render_batch_subcall_line(
+        &tool,
+        "✓",
+        rgb(100, 180, 100),
+        50,
+        Some(80),
+        Some("[tool timing: duration=73ms] config content"),
+    );
+    let text = extract_line_text(&line);
+    assert!(text.contains(" · 73ms, "), "{text}");
+    assert!(text.ends_with(" tok"), "{text}");
+    assert!(line.width() <= 80);
+}
+
+#[test]
+fn tool_usage_label_handles_missing_and_legacy_duration() {
+    use crate::tui::ui::tools_ui::tool_usage_label;
+    assert_eq!(tool_usage_label("217 tok", None, "ok"), "217 tok");
+    assert_eq!(tool_usage_label("217 tok", Some(0.0), "ok"), "0ms, 217 tok");
+    assert_eq!(tool_usage_label("217 tok", Some(f32::NAN), "ok"), "217 tok");
+    assert_eq!(
+        tool_usage_label(
+            "217 tok",
+            None,
+            "[tool timing: start=x finish=y duration=2.4s] ok"
+        ),
+        "2.4s, 217 tok"
+    );
+    assert_eq!(
+        tool_usage_label("217 tok", None, "[tool timing: duration=1m 4s] ok"),
+        "1m 4s, 217 tok"
+    );
+    assert_eq!(
+        tool_usage_label("217 tok", None, "[tool timing: duration=73ms] ok"),
+        "73ms, 217 tok"
+    );
+    assert_eq!(
+        tool_usage_label("217 tok", None, "[tool timing: duration=NaNs] ok"),
+        "217 tok"
+    );
+    assert_eq!(
+        tool_usage_label("217 tok", None, "[tool timing: duration=invalid] ok"),
+        "217 tok"
+    );
+}
+
+#[test]
 fn render_tool_message_colors_high_token_badge() {
     let msg = DisplayMessage {
         role: "tool".to_string(),

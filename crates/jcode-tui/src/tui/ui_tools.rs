@@ -1572,6 +1572,21 @@ pub(super) fn get_tool_summary_with_budget(
     }
 }
 
+/// Keep timing and token usage together as one compact metadata group.
+/// Older transcript entries can lack timing; never invent a duration for them.
+pub(super) fn tool_usage_label(tokens: &str, seconds: Option<f32>, output: &str) -> String {
+    let duration = seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .or_else(|| jcode_tui_messages::DisplayMessage::tool_duration_from_output(output))
+        .map(|seconds| {
+            crate::message::Message::format_duration((seconds as f64 * 1000.0).round() as u64)
+        });
+    match duration {
+        Some(duration) => format!("{duration}, {tokens}"),
+        None => tokens.to_owned(),
+    }
+}
+
 pub(super) fn render_batch_subcall_line(
     tool: &ToolCall,
     icon: &str,
@@ -1588,7 +1603,14 @@ pub(super) fn render_batch_subcall_line(
             crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),
             crate::util::ApproxTokenSeverity::Danger => rgb(224, 118, 118),
         };
-        (crate::util::format_approx_token_count(tokens), color)
+        (
+            tool_usage_label(
+                &crate::util::format_approx_token_count(tokens),
+                None,
+                content,
+            ),
+            color,
+        )
     });
     let intent = tool
         .intent
