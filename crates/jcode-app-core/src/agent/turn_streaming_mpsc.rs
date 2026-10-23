@@ -627,6 +627,10 @@ impl Agent {
                                     name,
                                     output,
                                     error: is_error.then(|| "Provider tool error".to_string()),
+                                    // Provider-native relay: no local wall-clock
+                                    // measurement exists for this execution; the
+                                    // authoritative duration arrives on history reload.
+                                    duration_ms: None,
                                 });
                             }
                             None => {}
