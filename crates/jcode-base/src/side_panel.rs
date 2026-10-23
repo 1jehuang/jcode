@@ -7,7 +7,7 @@ pub use retention::{
     purge_page, reopen_page,
 };
 mod persistence;
-use persistence::save_state;
+use persistence::{load_state, save_state};
 mod locking;
 use locking::store_lock;
 
@@ -320,19 +320,6 @@ fn hydrate_snapshot(state: PersistedSidePanelState) -> Result<SidePanelSnapshot>
     retention::hydrate(state)
 }
 
-fn load_state(session_id: &str) -> Result<PersistedSidePanelState> {
-    let path = state_file(session_id)?;
-    if !path.exists() {
-        return Ok(PersistedSidePanelState {
-            session_id: Some(session_id.to_string()),
-            ..Default::default()
-        });
-    }
-    let mut state: PersistedSidePanelState = crate::storage::read_json(&path)?;
-    state.session_id = Some(session_id.to_string());
-    Ok(state)
-}
-
 fn session_dir(session_id: &str) -> Result<PathBuf> {
     validate_page_id(session_id)?;
     let base = crate::storage::jcode_dir()?.join("side_panel");
@@ -527,6 +514,14 @@ fn linked_file_revision(path: &Path) -> u64 {
 
     hasher.finish()
 }
+
+#[cfg(test)]
+#[path = "side_panel/backup_io_tests.rs"]
+mod backup_io_tests;
+
+#[cfg(test)]
+#[path = "side_panel/backup_repair_tests.rs"]
+mod backup_repair_tests;
 
 #[cfg(test)]
 #[path = "side_panel/review_regression_tests.rs"]
