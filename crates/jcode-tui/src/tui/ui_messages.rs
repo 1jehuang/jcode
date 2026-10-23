@@ -4496,10 +4496,14 @@ pub(crate) fn render_tool_message(
         ));
         tool_line.push(Span::styled(")", Style::default().fg(dim_color())));
     }
-    let token_suffix = Line::from(vec![
-        Span::styled(" · ", Style::default().fg(dim_color())),
-        Span::styled(token_badge.label, Style::default().fg(token_badge.color)),
-    ]);
+    let mut usage_spans = vec![Span::styled(" · ", Style::default().fg(dim_color()))];
+    usage_spans.extend(tools_ui::tool_usage_spans(
+        token_badge.label,
+        token_badge.color,
+        msg.duration_secs,
+        &msg.content,
+    ));
+    let token_suffix = Line::from(usage_spans);
 
     let rendered_tool_line = super::truncate_line_preserving_suffix_to_width(
         &Line::from(tool_line),

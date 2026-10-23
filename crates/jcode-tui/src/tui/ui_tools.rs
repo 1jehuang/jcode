@@ -1587,6 +1587,39 @@ pub(super) fn tool_usage_label(tokens: &str, seconds: Option<f32>, output: &str)
     }
 }
 
+/// Style elapsed time independently from output token volume.
+pub(super) fn tool_usage_spans(
+    label: String,
+    token_color: Color,
+    seconds: Option<f32>,
+    output: &str,
+) -> Vec<Span<'static>> {
+    let duration = seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .or_else(|| jcode_tui_messages::DisplayMessage::tool_duration_from_output(output));
+    let Some(seconds) = duration else {
+        return vec![Span::styled(label, Style::default().fg(token_color))];
+    };
+    let Some((duration_label, tokens)) = label.split_once(", ") else {
+        return vec![Span::styled(label, Style::default().fg(token_color))];
+    };
+    let duration_color = if seconds >= 60.0 {
+        rgb(224, 118, 118)
+    } else if seconds >= 10.0 {
+        rgb(214, 184, 92)
+    } else {
+        rgb(118, 118, 118)
+    };
+    vec![
+        Span::styled(
+            duration_label.to_owned(),
+            Style::default().fg(duration_color),
+        ),
+        Span::styled(", ", Style::default().fg(dim_color())),
+        Span::styled(tokens.to_owned(), Style::default().fg(token_color)),
+    ]
+}
+
 pub(super) fn render_batch_subcall_line(
     tool: &ToolCall,
     icon: &str,
@@ -1656,10 +1689,14 @@ pub(super) fn render_batch_subcall_line(
         ));
     }
     let token_suffix = token_badge.map(|(label, color)| {
-        Line::from(vec![
-            Span::styled(" · ", Style::default().fg(dim_color())),
-            Span::styled(label, Style::default().fg(color)),
-        ])
+        let mut spans = vec![Span::styled(" · ", Style::default().fg(dim_color()))];
+        spans.extend(tool_usage_spans(
+            label,
+            color,
+            None,
+            output_content.unwrap_or_default(),
+        ));
+        Line::from(spans)
     });
 
     if let (Some(max_width), Some(token_suffix)) = (max_width, token_suffix.as_ref()) {

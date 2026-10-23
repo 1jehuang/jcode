@@ -3456,6 +3456,83 @@ fn tool_usage_label_handles_missing_and_legacy_duration() {
 }
 
 #[test]
+fn render_tool_message_colors_duration_independently_from_tokens() {
+    for (seconds, duration_color) in [
+        (0.42, rgb(118, 118, 118)),
+        (9.99, rgb(118, 118, 118)),
+        (10.0, rgb(214, 184, 92)),
+        (59.99, rgb(214, 184, 92)),
+        (60.0, rgb(224, 118, 118)),
+    ] {
+        for content in ["ok".to_owned(), "x".repeat(48_000)] {
+            let mut msg = DisplayMessage::tool(
+                content,
+                crate::message::ToolCall {
+                    id: "independent-metrics".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                    intent: None,
+                    thought_signature: None,
+                },
+            );
+            msg.duration_secs = Some(seconds);
+            let badge = tool_output_token_badge(&msg.content);
+            for width in [32, 120] {
+                let lines = render_tool_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                let spans = &lines[0].spans;
+                let token_index = spans
+                    .iter()
+                    .position(|span| span.content == badge.label)
+                    .expect("missing token span");
+                assert_eq!(spans[token_index].style.fg, Some(badge.color));
+                assert_eq!(spans[token_index - 1].content, ", ");
+                assert_eq!(spans[token_index - 2].style.fg, Some(duration_color));
+                assert!(lines[0].width() < width as usize);
+            }
+        }
+    }
+}
+
+#[test]
+fn batch_subcall_colors_duration_independently_from_tokens() {
+    let tool = crate::message::ToolCall {
+        id: "timed-child".into(),
+        name: "read".into(),
+        input: serde_json::json!({}),
+        intent: None,
+        thought_signature: None,
+    };
+    for (timing, color) in [
+        ("420ms", rgb(118, 118, 118)),
+        ("10s", rgb(214, 184, 92)),
+        ("1m", rgb(224, 118, 118)),
+    ] {
+        let content = format!("[tool timing: duration={timing}] {}", "x".repeat(48_000));
+        let line = crate::tui::ui::tools_ui::render_batch_subcall_line(
+            &tool,
+            "✓",
+            rgb(100, 180, 100),
+            50,
+            Some(60),
+            Some(&content),
+        );
+        let duration = line
+            .spans
+            .iter()
+            .find(|span| span.content == timing)
+            .expect("missing duration span");
+        assert_eq!(duration.style.fg, Some(color));
+        let tokens = line
+            .spans
+            .iter()
+            .find(|span| span.content.ends_with(" tok"))
+            .expect("missing token span");
+        assert_eq!(tokens.style.fg, Some(rgb(224, 118, 118)));
+        assert!(line.width() <= 60);
+    }
+}
+
+#[test]
 fn render_tool_message_colors_high_token_badge() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
