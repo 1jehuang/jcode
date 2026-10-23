@@ -595,7 +595,8 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
                 crate::kv_cache_monitor::format_token_count(output)
             )
         } else if let Some(clients) = info.client_count {
-            format!("{clients} clients")
+            let noun = if clients == 1 { "client" } else { "clients" };
+            format!("{clients} {noun}")
         } else {
             "spawned here".into()
         };

@@ -2093,6 +2093,157 @@ fn public_runtime_footer_keeps_throughput_once_without_wrapping() {
 }
 
 #[test]
+fn public_memory_footer_drops_stale_trace_and_keeps_scope() {
+    let now = Instant::now();
+    let mut data = InfoWidgetData {
+        memory_info: Some(MemoryInfo {
+            total_count: 7,
+            project_count: 4,
+            global_count: 3,
+            activity: Some(MemoryActivity {
+                state: MemoryState::Embedding,
+                state_since: now,
+                pipeline: None,
+                recent_events: vec![MemoryEvent {
+                    kind: MemoryEventKind::MemoryInjected {
+                        count: 2,
+                        prompt_chars: 318,
+                        age_ms: 44,
+                        preview: "prefers terse answers".into(),
+                        items: Vec::new(),
+                    },
+                    timestamp: now,
+                    detail: None,
+                }],
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for width in [8, 12, 24, 44] {
+        let (above, footer) = footer_probe(WidgetKind::MemoryActivity, &data, width);
+        assert!(!above.contains("Trace:"));
+        if width >= 24 {
+            assert!(footer.contains("Trace:"), "{footer}");
+        }
+    }
+    let activity = data
+        .memory_info
+        .as_mut()
+        .unwrap()
+        .activity
+        .as_mut()
+        .unwrap();
+    activity.state = MemoryState::Idle;
+    activity.state_since = now - Duration::from_secs(60);
+    for width in [8, 12, 24, 44] {
+        let (above, footer) = footer_probe(WidgetKind::MemoryActivity, &data, width);
+        assert!(!above.contains("Trace:") && !footer.contains("Trace:"));
+        if width >= 24 {
+            assert!(footer.contains("4 project · 3 global"), "{footer}");
+            assert!(!above.contains("4 project"));
+        }
+    }
+}
+
+#[test]
+fn public_swarm_footer_tracks_output_clients_and_overflow() {
+    let mut first = managed_member("fox", "running", None);
+    first.runtime.output_tokens = Some(12_000);
+    let mut second = managed_member("owl", "completed", None);
+    second.runtime.output_tokens = Some(8_000);
+    let mut data = InfoWidgetData {
+        swarm_info: Some(SwarmInfo {
+            managed_members: vec![first, second],
+            client_count: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for width in [8, 12, 24, 44] {
+        let (above, footer) = footer_probe(WidgetKind::SwarmStatus, &data, width);
+        assert!(!above.contains("20K out"));
+        if width >= 12 {
+            assert!(footer.contains("20K out"), "{footer}");
+        }
+    }
+    for member in &mut data.swarm_info.as_mut().unwrap().managed_members {
+        member.runtime.output_tokens = None;
+    }
+    let (_, footer) = footer_probe(WidgetKind::SwarmStatus, &data, 44);
+    assert!(footer.contains("1 client"), "{footer}");
+    assert!(!footer.contains("1 clients"), "{footer}");
+
+    data.swarm_info = Some(SwarmInfo {
+        session_count: 4,
+        session_names: vec!["one".into(), "two".into(), "three".into(), "four".into()],
+        client_count: Some(1),
+        ..Default::default()
+    });
+    for width in [8, 12, 24, 44] {
+        let (above, footer) = footer_probe(WidgetKind::SwarmStatus, &data, width);
+        assert!(!above.contains("1 client"));
+        if width >= 12 {
+            assert!(footer.contains("+1 more"), "{footer}");
+        }
+        if width == 44 {
+            assert!(footer.contains("1 client"), "{footer}");
+        }
+    }
+}
+
+#[test]
+fn public_background_footer_distinguishes_states_and_preserves_overflow() {
+    use crate::tui::{BackgroundTaskRow, BackgroundTaskRowStatus};
+
+    let row = |status| BackgroundTaskRow {
+        task_id: "task".into(),
+        label: "build".into(),
+        percent: Some(100.0),
+        status,
+        completed_at: Some(Instant::now()),
+    };
+    let mut data = InfoWidgetData::default();
+    for (status, legend) in [
+        (BackgroundTaskRowStatus::Running, "◌ running"),
+        (BackgroundTaskRowStatus::Completed, "✓ complete"),
+        (BackgroundTaskRowStatus::Failed, "✗ failed"),
+    ] {
+        data.background_info = Some(super::BackgroundInfo {
+            rows: vec![row(status)],
+            ..Default::default()
+        });
+        for width in [8, 12, 24, 44] {
+            let (above, footer) = footer_probe(WidgetKind::BackgroundTasks, &data, width);
+            assert!(!above.contains(legend));
+            if width >= 24 {
+                assert!(footer.contains(legend), "{footer}");
+            }
+        }
+    }
+    data.background_info = Some(super::BackgroundInfo {
+        rows: vec![
+            row(BackgroundTaskRowStatus::Running),
+            row(BackgroundTaskRowStatus::Completed),
+        ],
+        ..Default::default()
+    });
+    let (_, footer) = footer_probe(WidgetKind::BackgroundTasks, &data, 44);
+    assert!(footer.contains("◌ running · ✓ complete"), "{footer}");
+
+    data.background_info = Some(super::BackgroundInfo {
+        running_count: 8,
+        running_tasks: (0..8).map(|index| format!("task {index}")).collect(),
+        ..Default::default()
+    });
+    let (_, footer) = footer_probe(WidgetKind::BackgroundTasks, &data, 44);
+    assert!(footer.contains("+2 more"), "{footer}");
+    data.background_info.as_mut().unwrap().running_tasks.clear();
+    let (_, footer) = footer_probe(WidgetKind::BackgroundTasks, &data, 44);
+    assert!(footer.contains("this session"), "{footer}");
+}
+
+#[test]
 fn public_workspace_footer_counts_visible_sessions_and_running_state() {
     use crate::tui::workspace_map::{
         VisibleWorkspaceRow, WorkspaceSessionTile, WorkspaceSessionVisualState,
