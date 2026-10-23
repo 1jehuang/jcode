@@ -2031,6 +2031,129 @@ fn metadata_footers_add_distinct_compact_facts() {
     assert!(framed.title_right.is_none());
 }
 
+fn footer_probe(kind: WidgetKind, data: &InfoWidgetData, width: u16) -> (String, String) {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
+    terminal
+        .draw(|frame| {
+            super::render_all(
+                frame,
+                &[super::WidgetPlacement {
+                    kind,
+                    rect: frame.area(),
+                    side: super::Side::Right,
+                }],
+                data,
+            );
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let bottom = (0..16)
+        .find(|&y| buffer[(0, y)].symbol() == "╰")
+        .expect("public renderer must preserve the bottom border");
+    assert_eq!(buffer[(width - 1, bottom)].symbol(), "╯");
+    let row = |y| {
+        (0..width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    };
+    let footer = row(bottom);
+    assert!(
+        footer
+            .chars()
+            .any(|ch| !ch.is_whitespace() && !"╰╯─".contains(ch)),
+        "{kind:?} at {width} cells lost its footer: {footer}"
+    );
+    let above = (0..bottom).map(row).collect::<Vec<_>>().join("\n");
+    (above, footer)
+}
+
+#[test]
+fn public_runtime_footer_keeps_throughput_once_without_wrapping() {
+    let data = InfoWidgetData {
+        provider_name: Some("openai".into()),
+        service_tier: Some("priority".into()),
+        connection_type: Some("websocket".into()),
+        tokens_per_second: Some(61.7),
+        ..Default::default()
+    };
+    for width in [8, 12, 24, 44] {
+        let (above, footer) = footer_probe(WidgetKind::ModelInfo, &data, width);
+        assert!(!above.contains("tok/s"));
+        assert!(!footer.contains("Runtime"));
+        if width >= 24 {
+            assert!(footer.contains("62 tok/s"), "{footer}");
+            assert_eq!(footer.matches("62 tok/s").count(), 1);
+        }
+        if width == 44 {
+            assert!(above.contains("fast tier") && above.contains("websocket"));
+        }
+    }
+}
+
+#[test]
+fn public_workspace_footer_counts_visible_sessions_and_running_state() {
+    use crate::tui::workspace_map::{
+        VisibleWorkspaceRow, WorkspaceSessionTile, WorkspaceSessionVisualState,
+    };
+
+    let mut data = InfoWidgetData {
+        workspace_rows: vec![VisibleWorkspaceRow {
+            workspace: 0,
+            is_current: true,
+            focused_index: Some(0),
+            sessions: vec![WorkspaceSessionTile::new("雲")],
+        }],
+        ..Default::default()
+    };
+    let (above, footer) = footer_probe(WidgetKind::WorkspaceMap, &data, 44);
+    assert!(above.contains("Workspace"));
+    assert!(footer.contains("1 session"));
+    assert!(!footer.contains("sessions"));
+
+    data.workspace_rows[0].sessions[0].state = WorkspaceSessionVisualState::Running;
+    data.workspace_rows.push(VisibleWorkspaceRow {
+        workspace: 1,
+        is_current: false,
+        focused_index: Some(0),
+        sessions: vec![
+            WorkspaceSessionTile::with_state("狐", WorkspaceSessionVisualState::Running),
+            WorkspaceSessionTile::new("bird"),
+        ],
+    });
+    for width in [8, 12, 24, 44] {
+        let (above, footer) = footer_probe(WidgetKind::WorkspaceMap, &data, width);
+        assert!(!above.contains("3 sessions"));
+        if width == 44 {
+            assert!(footer.contains("3 sessions · 2 running"), "{footer}");
+        }
+    }
+}
+
+#[test]
+fn public_diagram_footer_keeps_dimensions_when_image_is_not_cached() {
+    let mut data = InfoWidgetData::default();
+    let (_, footer) = footer_probe(WidgetKind::Diagrams, &data, 44);
+    assert!(footer.contains("image pending"));
+    data.diagrams = vec![
+        super::DiagramInfo {
+            hash: u64::MAX,
+            width: 640,
+            height: 480,
+            label: None,
+        };
+        2
+    ];
+    for width in [8, 12, 24, 44] {
+        let (above, footer) = footer_probe(WidgetKind::Diagrams, &data, width);
+        assert!(!above.contains("640×480") && !above.contains("1/2"));
+        if width >= 24 {
+            assert!(footer.contains("640×480 · 1/2"), "{footer}");
+        }
+    }
+}
+
 #[test]
 fn ambient_footer_moves_next_run_out_of_body() {
     let data = InfoWidgetData {
