@@ -3032,7 +3032,10 @@ fn render_tool_message_labels_single_file_apply_patch_diff() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("╭─ diff · src/example.rs"), "plain={plain}");
+    assert!(
+        plain.contains("╭─ diff · +1 -1 · src/example.rs"),
+        "plain={plain}"
+    );
     assert!(plain.contains("old_value"), "plain={plain}");
     assert!(plain.contains("new_value"), "plain={plain}");
 }
@@ -3064,7 +3067,9 @@ fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let a_header = plain.find("╭─ diff · a.txt").expect("missing a.txt header");
+    let a_header = plain
+        .find("╭─ diff · +2 -2 · a.txt")
+        .expect("missing a.txt header");
     let old_a = plain.find("old a").expect("missing a.txt deletion");
     let new_a = plain.find("new a").expect("missing a.txt addition");
     let b_header = plain
@@ -3105,7 +3110,7 @@ fn render_tool_message_shows_numbered_write_result_diff_after_input_compaction()
         .join("\n");
 
     assert!(
-        lines[0].spans.iter().any(|span| span.content == "+2"),
+        lines[1].spans.iter().any(|span| span.content == "+2"),
         "plain={plain}"
     );
     assert!(plain.contains("╭─ diff"), "plain={plain}");
@@ -3228,6 +3233,25 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
         "plain={plain}"
     );
     assert!(plain.contains("suffix_2_abcdefghijklm…"), "plain={plain}");
+    assert_eq!(plain.matches("+7 -7").count(), 1, "plain={plain}");
+    assert!(!extract_line_text(&lines[0]).contains("+7"));
+    assert!(!plain.contains("total"));
+    let footer = lines.last().unwrap();
+    assert_eq!(extract_line_text(footer), "╰─ 2 hidden");
+    let header = &lines[1];
+    assert!(extract_line_text(header).starts_with("╭─ diff · +7 -7 · "));
+    assert!(
+        header
+            .spans
+            .iter()
+            .any(|span| span.content == "+7" && span.style.fg == Some(diff_add_color()))
+    );
+    assert!(
+        header
+            .spans
+            .iter()
+            .any(|span| span.content == "-7" && span.style.fg == Some(diff_del_color()))
+    );
 }
 
 #[test]
@@ -3271,6 +3295,24 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
         "plain={plain}"
     );
     assert!(!plain.contains('…'), "plain={plain}");
+    assert_eq!(plain.matches("+7 -7").count(), 1, "plain={plain}");
+    assert_eq!(extract_line_text(lines.last().unwrap()), "╰─");
+    assert!(!extract_line_text(&lines[0]).contains("+7"));
+
+    let hidden = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let hidden_plain = hidden
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(hidden_plain.matches("(+7 -7)").count(), 1);
+    assert!(!hidden_plain.contains("╭─ diff"));
+    assert!(
+        hidden[0]
+            .spans
+            .iter()
+            .any(|span| span.content == "+7" && span.style.fg == Some(diff_add_color()))
+    );
 }
 
 #[test]
@@ -3637,7 +3679,7 @@ fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
             .count();
         assert_eq!(occurrences, 1, "path should appear once: {text:#?}");
         assert!(
-            text[1].contains("diff · /repo/src/very_specific_name.rs"),
+            text[1].contains("diff · +1 -1 · /repo/src/very_specific_name.rs"),
             "{text:#?}"
         );
         if let Some(intent) = intent {

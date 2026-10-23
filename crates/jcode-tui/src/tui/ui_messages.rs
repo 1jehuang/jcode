@@ -4152,6 +4152,9 @@ pub(crate) fn render_tool_message(
         (0, 0)
     };
     let has_diff_changes = additions > 0 || deletions > 0;
+    let show_header_diff_counts = is_edit_tool
+        && has_diff_changes
+        && !(diff_mode.is_inline() && edit_tool_has_inline_diff(tc, &msg.content));
 
     let block_width = if centered {
         super::centered_content_block_width(width, 96)
@@ -4163,7 +4166,7 @@ pub(crate) fn render_tool_message(
     let base_prefix = format!("  {} {} ", icon, display_name);
     let token_suffix_width =
         UnicodeWidthStr::width(format!(" · {}", token_badge.label.as_str()).as_str());
-    let edit_suffix_width = if is_edit_tool && has_diff_changes {
+    let edit_suffix_width = if show_header_diff_counts {
         UnicodeWidthStr::width(format!(" (+{} -{})", additions, deletions).as_str())
     } else {
         0
@@ -4250,7 +4253,7 @@ pub(crate) fn render_tool_message(
             Style::default().fg(dim_color()),
         ));
     }
-    if is_edit_tool && has_diff_changes {
+    if show_header_diff_counts {
         tool_line.push(Span::styled(" (", Style::default().fg(dim_color())));
         tool_line.push(Span::styled(
             format!("+{}", additions),
@@ -4504,12 +4507,33 @@ pub(crate) fn render_tool_message(
             None => format!("{pad_str}{prefix} diff"),
         };
 
-        lines.push(
-            Line::from(Span::styled(
-                diff_header("╭─", first_file_path.as_deref()),
+        let mut header = vec![Span::styled(
+            format!("{pad_str}╭─ diff"),
+            Style::default().fg(dim_color()),
+        )];
+        if additions > 0 || deletions > 0 {
+            header.extend([
+                Span::styled(" · ", Style::default().fg(dim_color())),
+                Span::styled(
+                    format!("+{additions}"),
+                    Style::default().fg(diff_add_color()),
+                ),
+                Span::styled(" ", Style::default().fg(dim_color())),
+                Span::styled(
+                    format!("-{deletions}"),
+                    Style::default().fg(diff_del_color()),
+                ),
+            ]);
+        }
+        if let Some(path) = first_file_path.as_deref() {
+            header.push(Span::styled(
+                format!(" · {path}"),
                 Style::default().fg(dim_color()),
-            ))
-            .alignment(ratatui::layout::Alignment::Left),
+            ));
+        }
+        lines.push(
+            super::truncate_line_with_ellipsis_to_width(&Line::from(header), width as usize)
+                .alignment(ratatui::layout::Alignment::Left),
         );
 
         let mut shown_truncation = false;
@@ -4592,14 +4616,17 @@ pub(crate) fn render_tool_message(
             lines.push(Line::from(spans).alignment(ratatui::layout::Alignment::Left));
         }
 
-        let footer = if total_changes > 0 && truncated {
-            format!("{}╰─ (+{} -{} total)", pad_str, additions, deletions)
+        let footer = if truncated {
+            format!("{pad_str}╰─ {} hidden", total_changes - MAX_DIFF_LINES)
         } else {
-            format!("{}╰─", pad_str)
+            format!("{pad_str}╰─")
         };
         lines.push(
-            Line::from(Span::styled(footer, Style::default().fg(dim_color())))
-                .alignment(ratatui::layout::Alignment::Left),
+            super::truncate_line_with_ellipsis_to_width(
+                &Line::from(Span::styled(footer, Style::default().fg(dim_color()))),
+                width as usize,
+            )
+            .alignment(ratatui::layout::Alignment::Left),
         );
     }
 
