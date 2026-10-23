@@ -34,8 +34,8 @@ struct SkillFrontmatter {
     description: String,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
-    #[serde(rename = "disable-model-invocation", default)]
-    disable_model_invocation: bool,
+    #[serde(rename = "disable-model-invocation")]
+    disable_model_invocation: Option<serde_yaml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -532,6 +532,12 @@ impl SkillRegistry {
             disable_model_invocation,
         } = frontmatter;
 
+        // Only a real YAML `true` hides the skill; any other value must not
+        // stop a skill that loaded before this field existed from loading.
+        let disable_model_invocation = matches!(
+            disable_model_invocation,
+            Some(serde_yaml::Value::Bool(true))
+        );
         let allowed_tools = allowed_tools.map(|tools| match tools {
             AllowedTools::CommaDelimited(tools) => tools
                 .split(',')
@@ -1165,6 +1171,49 @@ mod tests {
                 prompt: Some("run it"),
             })
         );
+    }
+
+    #[test]
+    fn disable_model_invocation_non_boolean_values_keep_skill_loaded_and_model_visible() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cases = [
+            ("quoted-true", "disable-model-invocation: \"true\"\n"),
+            ("empty", "disable-model-invocation:\n"),
+            ("word", "disable-model-invocation: yes\n"),
+            ("number", "disable-model-invocation: 1\n"),
+            ("list", "disable-model-invocation: [true]\n"),
+            ("map", "disable-model-invocation: {hidden: true}\n"),
+            ("false", "disable-model-invocation: false\n"),
+            ("hidden", "disable-model-invocation: true\n"),
+        ];
+        for (name, field) in cases {
+            write_skill_file(
+                temp.path(),
+                name,
+                &format!("---\nname: {name}\ndescription: Test skill\n{field}---\n\nBody\n"),
+            );
+        }
+        let mut registry = SkillRegistry::default();
+        registry.load_from_dir(temp.path()).expect("load skills");
+
+        let visible: Vec<&str> = registry
+            .list_model_invocable()
+            .into_iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
+        assert_eq!(
+            visible,
+            [
+                "empty",
+                "false",
+                "list",
+                "map",
+                "number",
+                "quoted-true",
+                "word"
+            ]
+        );
+        assert!(registry.get("hidden").is_some());
     }
 
     #[test]
