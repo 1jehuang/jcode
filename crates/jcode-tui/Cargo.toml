@@ -110,6 +110,7 @@ mmdr-size-api = ["jcode-tui-mermaid/mmdr-size-api"]
 test-support = ["jcode-app-core/test-support"]
 
 [dev-dependencies]
+jcode-provider-openai = { path = "../jcode-provider-openai" }
 # Enables the downstream test-support helpers for *this* crate's own test
 # target. Feature unification applies this only to test/bench/example builds.
 jcode-app-core = { path = "../jcode-app-core", default-features = false, features = ["test-support"] }
