@@ -882,7 +882,7 @@ impl Tool for TodoTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "intent": super::intent_schema_property(),
@@ -1039,7 +1039,17 @@ impl Tool for TodoTool {
                     }
                 }
             }
-        })
+        });
+        // Patch additions accept the same fields as full todos, plus an
+        // insertion position. Keep their declarations in sync for providers
+        // that require every `required` entry to appear in `properties`.
+        let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
+        add_properties["after"] = json!({
+            "type": "string",
+            "description": "Existing todo id to insert after."
+        });
+        schema["properties"]["add"]["items"]["properties"] = add_properties;
+        schema
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
@@ -1151,6 +1161,27 @@ mod tests {
     #[test]
     fn tool_is_named_todo() {
         assert_eq!(TodoTool::new().name(), "todo");
+    }
+
+    #[test]
+    fn add_schema_declares_all_todo_fields_and_conforms_to_gemini() {
+        let schema = TodoTool::new().parameters_schema();
+        let add = &schema["properties"]["add"]["items"];
+        for (name, property) in schema["properties"]["todos"]["items"]["properties"]
+            .as_object()
+            .unwrap()
+        {
+            assert_eq!(&add["properties"][name], property, "{name}");
+        }
+        assert_eq!(add["properties"]["after"]["type"], "string");
+        let errors = jcode_schema_dialect::must_not_contain_unsupported_constructs(
+            &jcode_schema_dialect::dialect::apply(&schema, &jcode_schema_dialect::registry::GEMINI),
+            &jcode_schema_dialect::registry::GEMINI,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        for name in add["required"].as_array().unwrap() {
+            assert!(add["properties"].get(name.as_str().unwrap()).is_some());
+        }
     }
 
     #[test]
