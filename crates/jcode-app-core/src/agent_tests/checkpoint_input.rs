@@ -106,7 +106,19 @@ async fn automatic_continuations_reach_provider_through_all_turn_entry_points() 
         "streaming continuation must emit events"
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
-    assert!(agent.rewind_checkpoints().unwrap().is_empty());
+    let targets = agent.rewind_checkpoints().unwrap();
+    assert_eq!(
+        targets.len(),
+        3,
+        "visible assistant replies remain targetable"
+    );
+    assert!(
+        targets.iter().all(|target| {
+            target.target_kind == jcode_session_types::RewindTargetKind::AssistantMessage
+                && !target.can_restore_files
+        }),
+        "automatic inputs must not become human/file checkpoints"
+    );
 }
 
 #[tokio::test]

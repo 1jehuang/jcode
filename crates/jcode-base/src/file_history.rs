@@ -439,6 +439,7 @@ fn checkpoint_with_anchor(
         before.insert(path, actual);
     }
     let info = RewindCheckpoint {
+        target_kind: jcode_session_types::RewindTargetKind::UserPrompt,
         id: uuid::Uuid::new_v4().to_string(),
         message_index,
         prompt: prompt.to_owned(),
@@ -672,11 +673,11 @@ impl crate::session::Session {
         checkpoint_id: &str,
         mode: jcode_session_types::RewindMode,
     ) -> Result<jcode_session_types::RewindResult> {
-        let (checkpoint, images) = conversation::resolve_checkpoint(self, checkpoint_id, mode)?;
-        let boundary = checkpoint.info.message_index;
-        ensure!(
-            reachable(self, &checkpoint),
-            "Checkpoint belongs to a removed conversation branch"
+        let target = conversation::resolve_checkpoint(self, checkpoint_id, mode)?;
+        let boundary = target.info().message_index;
+        let assistant_target = matches!(
+            &target,
+            conversation::ResolvedTarget::AssistantMessage { .. }
         );
         if mode.restores_conversation() {
             ensure!(
@@ -688,7 +689,7 @@ impl crate::session::Session {
                 .and_then(|index| self.messages.get(index))
                 .map(|message| message.id.clone());
             ensure!(
-                anchor == checkpoint.boundary_message_id,
+                anchor.as_deref() == target.boundary_message_id(),
                 "Checkpoint belongs to a different conversation branch"
             );
             ensure!(
@@ -696,8 +697,11 @@ impl crate::session::Session {
                 "Session is owned by another machine"
             );
         }
+        if assistant_target && boundary == self.messages.len() {
+            return Ok(target.into_result(mode, 0, 0));
+        }
         let paths = if mode.restores_files() {
-            restore_paths(&self.id, &checkpoint.info.id)?
+            restore_paths(&self.id, &target.info().id)?
         } else {
             Vec::new()
         };
@@ -712,27 +716,25 @@ impl crate::session::Session {
         let conversation_commit = mode.restores_conversation().then(|| ConversationCommit {
             session_id: session_id.clone(),
             message_index: boundary,
-            boundary_message_id: checkpoint.boundary_message_id.clone(),
+            boundary_message_id: target.boundary_message_id().map(str::to_owned),
         });
         let mut persist = || -> Result<()> {
             if mode.restores_conversation() {
                 self.truncate_messages(boundary);
-                self.compaction = None;
-                self.provider_session_id = None;
-                self.model_usage_turn_id = None;
-                self.save_rewind()?;
+                self.persist_conversation_rewind()?;
             }
             Ok(())
         };
         let result = if mode.restores_files() {
-            restore_with_commit(
-                &session_id,
-                &checkpoint.info.id,
-                conversation_commit,
-                persist,
-            )
+            restore_with_commit(&session_id, &target.info().id, conversation_commit, persist)
         } else {
             persist().and_then(|()| {
+                // Keep unreachable metadata for assistant transcript undo. IDs
+                // and reachability hide it on the discarded branch; bounded
+                // file snapshot eviction and conflict checks still apply.
+                if assistant_target {
+                    return Ok(0);
+                }
                 let _guard = HISTORY_LOCK
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
@@ -744,14 +746,7 @@ impl crate::session::Session {
             })
         };
         match result {
-            Ok(restored_files) => Ok(jcode_session_types::RewindResult {
-                mode,
-                prompt: checkpoint.info.prompt,
-                images,
-                removed_messages,
-                restored_files,
-                skipped_files: Vec::new(),
-            }),
+            Ok(restored_files) => Ok(target.into_result(mode, removed_messages, restored_files)),
             Err(error) => {
                 // Once a durable transcript commit exists, reverting only the
                 // live Session would split memory from disk. Leave the target
@@ -761,7 +756,7 @@ impl crate::session::Session {
                         || conversation_saved(&ConversationCommit {
                             session_id: self.id.clone(),
                             message_index: boundary,
-                            boundary_message_id: checkpoint.boundary_message_id.clone(),
+                            boundary_message_id: target.boundary_message_id().map(str::to_owned),
                         }));
                 if !committed {
                     *self = previous;
@@ -770,6 +765,19 @@ impl crate::session::Session {
             }
         }
     }
+}
+
+pub(crate) fn rewind_boundary_saved(session: &crate::session::Session) -> bool {
+    crate::session::Session::load(&session.id).is_ok_and(|saved| {
+        saved.updated_at == session.updated_at
+            && saved
+                .messages
+                .iter()
+                .map(|message| &message.id)
+                .eq(session.messages.iter().map(|message| &message.id))
+            && saved.provider_session_id.is_none()
+            && saved.compaction.is_none()
+    })
 }
 
 fn reachable(session: &crate::session::Session, checkpoint: &Checkpoint) -> bool {

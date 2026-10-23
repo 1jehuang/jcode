@@ -4,9 +4,81 @@ use crate::message::ContentBlock;
 use crate::session::{
     Session, StoredMessage, is_attached_image_label_text, is_authentic_user_prompt,
 };
-use jcode_session_types::RewindMode;
+use jcode_session_types::{RewindMode, RewindTargetKind};
 
 const MESSAGE_TARGET_PREFIX: &str = "message:";
+const ASSISTANT_TARGET_PREFIX: &str = "assistant:";
+
+/// User targets remove their input; assistant targets keep their entire stored
+/// message. An assistant boundary is never a fabricated human/file checkpoint.
+pub(super) enum ResolvedTarget {
+    UserPrompt {
+        checkpoint: Checkpoint,
+        images: Vec<(String, String)>,
+    },
+    AssistantMessage {
+        info: RewindCheckpoint,
+        boundary_message_id: String,
+    },
+}
+
+impl ResolvedTarget {
+    pub(super) fn info(&self) -> &RewindCheckpoint {
+        match self {
+            Self::UserPrompt { checkpoint, .. } => &checkpoint.info,
+            Self::AssistantMessage { info, .. } => info,
+        }
+    }
+
+    pub(super) fn boundary_message_id(&self) -> Option<&str> {
+        match self {
+            Self::UserPrompt { checkpoint, .. } => checkpoint.boundary_message_id.as_deref(),
+            Self::AssistantMessage {
+                boundary_message_id,
+                ..
+            } => Some(boundary_message_id),
+        }
+    }
+
+    pub(super) fn into_result(
+        self,
+        mode: RewindMode,
+        removed_messages: usize,
+        restored_files: usize,
+    ) -> jcode_session_types::RewindResult {
+        let (target_kind, prompt, images) = match self {
+            Self::UserPrompt { checkpoint, images } => {
+                (RewindTargetKind::UserPrompt, checkpoint.info.prompt, images)
+            }
+            Self::AssistantMessage { .. } => (
+                RewindTargetKind::AssistantMessage,
+                String::new(),
+                Vec::new(),
+            ),
+        };
+        jcode_session_types::RewindResult {
+            mode,
+            target_kind,
+            prompt,
+            images,
+            removed_messages,
+            restored_files,
+            skipped_files: Vec::new(),
+        }
+    }
+}
+
+fn assistant_info(message: &StoredMessage, keep_len: usize) -> RewindCheckpoint {
+    RewindCheckpoint {
+        id: format!("{ASSISTANT_TARGET_PREFIX}{}", message.id),
+        target_kind: RewindTargetKind::AssistantMessage,
+        message_index: keep_len,
+        prompt: prompt_text(message),
+        timestamp: message.timestamp.map(|timestamp| timestamp.to_rfc3339()),
+        can_restore_files: false,
+        changed_file_count: 0,
+    }
+}
 
 fn prompt_text(message: &StoredMessage) -> String {
     message
@@ -28,6 +100,7 @@ fn transcript_checkpoint(session: &Session, history: &History, index: usize) -> 
     Checkpoint {
         info: RewindCheckpoint {
             id: format!("{MESSAGE_TARGET_PREFIX}{}", message.id),
+            target_kind: RewindTargetKind::UserPrompt,
             message_index: boundary.map_or(index, |boundary| boundary.message_index),
             prompt: prompt_text(message),
             timestamp: message.timestamp.map(|timestamp| timestamp.to_rfc3339()),
@@ -104,12 +177,19 @@ pub(super) fn checkpoints(session: &Session) -> Result<Vec<RewindCheckpoint>> {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let history = load(&directory(&session.id)?)?;
+    let assistants: BTreeSet<_> = session
+        .rewind_assistant_target_stored_indices()
+        .into_iter()
+        .collect();
     Ok(session
         .messages
         .iter()
         .enumerate()
-        .filter(|(_, message)| is_authentic_user_prompt(message))
+        .filter(|(index, message)| is_authentic_user_prompt(message) || assistants.contains(index))
         .map(|(index, message)| {
+            if assistants.contains(&index) {
+                return assistant_info(message, index + 1);
+            }
             let mut info = history
                 .checkpoints
                 .iter()
@@ -128,6 +208,29 @@ pub(super) fn checkpoints(session: &Session) -> Result<Vec<RewindCheckpoint>> {
 }
 
 pub(super) fn resolve_checkpoint(
+    session: &Session,
+    target_id: &str,
+    mode: RewindMode,
+) -> Result<ResolvedTarget> {
+    if let Some(message_id) = target_id.strip_prefix(ASSISTANT_TARGET_PREFIX) {
+        ensure!(
+            !mode.restores_files(),
+            "Assistant messages support conversation-only rewind"
+        );
+        let keep_len = session
+            .rewind_stored_len_for_assistant(message_id)
+            .context("Rewind assistant message is not present in this conversation branch")?;
+        let message = &session.messages[keep_len - 1];
+        return Ok(ResolvedTarget::AssistantMessage {
+            info: assistant_info(message, keep_len),
+            boundary_message_id: message.id.clone(),
+        });
+    }
+    let (checkpoint, images) = resolve_user_checkpoint(session, target_id, mode)?;
+    Ok(ResolvedTarget::UserPrompt { checkpoint, images })
+}
+
+fn resolve_user_checkpoint(
     session: &Session,
     target_id: &str,
     mode: RewindMode,

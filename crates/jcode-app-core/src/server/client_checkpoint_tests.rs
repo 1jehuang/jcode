@@ -4,6 +4,9 @@ use crate::protocol::RewindMode;
 use crate::session::Session;
 use serde_json::json;
 
+#[path = "client_checkpoint_assistant_tests.rs"]
+mod assistant_targets;
+
 #[tokio::test]
 async fn checkpoint_tools_restore_edits_replacements_moves_and_partial_patches() {
     use crate::message::Role;
@@ -281,7 +284,9 @@ async fn checkpoint_socket_restores_files_and_conversation_and_rejects_conflicts
         unreachable!()
     };
     assert_eq!(listed_session, session_id);
-    assert_eq!(checkpoints.len(), 2);
+    assert_eq!(checkpoints.len(), 4);
+    assistant_targets::restore_and_undo(&mut reader, &mut writer, &session_id, &checkpoints, &file)
+        .await;
     let first = checkpoints
         .iter()
         .find(|point| point.prompt == "first checkpoint")
@@ -365,7 +370,7 @@ async fn checkpoint_socket_restores_files_and_conversation_and_rejects_conflicts
     };
     assert_eq!(
         after_conflict.len(),
-        2,
+        4,
         "failed file restore must keep the conversation"
     );
     std::fs::write(&file, "version one\n").unwrap();
