@@ -17,6 +17,9 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// `disable-model-invocation: true`: the user can still run the skill via
+    /// `/name`, but it is kept out of every model-facing skill listing.
+    pub disable_model_invocation: bool,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -31,6 +34,8 @@ struct SkillFrontmatter {
     description: String,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
+    #[serde(rename = "disable-model-invocation", default)]
+    disable_model_invocation: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -517,6 +522,7 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            disable_model_invocation,
         } = frontmatter;
 
         let allowed_tools = allowed_tools.map(|tools| match tools {
@@ -530,6 +536,7 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            disable_model_invocation,
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
@@ -574,6 +581,15 @@ impl SkillRegistry {
     pub fn list(&self) -> Vec<&Skill> {
         let mut skills: Vec<&Skill> = self.skills.values().collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
+        skills
+    }
+
+    /// Skills the model may discover: [`Self::list`] minus skills that set
+    /// `disable-model-invocation`. Slash invocation, autocomplete and `/skills`
+    /// keep using [`Self::list`] and [`Self::get`].
+    pub fn list_model_invocable(&self) -> Vec<&Skill> {
+        let mut skills = self.list();
+        skills.retain(|skill| !skill.disable_model_invocation);
         skills
     }
 
