@@ -97,14 +97,6 @@ fn current_render_profile() -> RenderProfile {
     RENDER_PROFILE_CONTEXT.with(|profile| profile.get())
 }
 
-pub fn current_preferred_aspect_ratio_bucket() -> Option<u16> {
-    current_render_profile().preferred_aspect_per_mille
-}
-
-pub fn preferred_aspect_ratio_bucket(ratio: Option<f32>) -> Option<u16> {
-    RenderProfile::from_preferred_aspect_ratio(ratio).preferred_aspect_per_mille
-}
-
 struct RenderProfileGuard {
     previous: RenderProfile,
 }
@@ -207,6 +199,10 @@ pub use active::{
     set_streaming_preview_diagram, snapshot_active_diagrams,
 };
 
+mod diagram_accessors;
+pub use diagram_accessors::{
+    current_preferred_aspect_ratio_bucket, mermaid_source_for_hash, preferred_aspect_ratio_bucket,
+};
 pub mod d2;
 mod diagram_engine;
 pub use d2::{D2Layout, D2Options};
@@ -455,13 +451,6 @@ static MERMAID_INLINE_EXPAND_EPOCH: AtomicU64 = AtomicU64::new(0);
 type InlineLevelGeometry = [(u16, u16); 3];
 static MERMAID_INLINE_LEVEL_GEOMETRY: LazyLock<Mutex<HashMap<u64, InlineLevelGeometry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-pub fn mermaid_source_for_hash(hash: u64) -> Option<String> {
-    MERMAID_SOURCE_BY_HASH
-        .lock()
-        .ok()
-        .and_then(|sources| sources.get(&hash).cloned())
-}
 
 pub fn set_mermaid_inline_expand_level(hash: u64, level: u8) {
     if let Ok(mut levels) = MERMAID_INLINE_EXPAND_LEVEL.lock() {

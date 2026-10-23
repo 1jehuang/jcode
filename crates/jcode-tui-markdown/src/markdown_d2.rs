@@ -17,7 +17,15 @@ pub(super) fn render_d2_block(
     {
         return (None, None);
     }
-    let width = max_width.and_then(|width| u16::try_from(width).ok());
+    let width = match max_width.map(u16::try_from).transpose() {
+        Ok(width) => width,
+        Err(_) => {
+            return (
+                None,
+                Some("D2 terminal width exceeds supported range".into()),
+            );
+        }
+    };
     match mermaid::render_d2_deferred_with_registration(source, width, register, stream_scope) {
         Some(mermaid::RenderResult::Error(error)) => (None, Some(error)),
         Some(result) => {

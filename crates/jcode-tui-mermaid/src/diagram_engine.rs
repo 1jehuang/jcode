@@ -49,7 +49,13 @@ impl Settings {
             options.binary = binary;
             if let Ok(metadata) = options.binary.metadata() {
                 metadata.len().hash(&mut identity);
-                metadata.modified().ok().hash(&mut identity);
+                match metadata.modified() {
+                    Ok(modified) => Some(modified).hash(&mut identity),
+                    Err(error) => {
+                        super::log_warn(&format!("Read D2 executable modification time: {error}"));
+                        None::<std::time::SystemTime>.hash(&mut identity);
+                    }
+                }
             }
         }
         options.hash(&mut identity);
@@ -83,7 +89,7 @@ struct Task {
 
 /// First call wins. Render options are intentionally a TUI-client startup snapshot.
 pub fn configure_d2(enabled: bool, options: D2Options) {
-    let _ = SETTINGS.set(Settings::new(enabled, options));
+    SETTINGS.get_or_init(|| Settings::new(enabled, options));
 }
 fn settings() -> &'static Settings {
     SETTINGS.get_or_init(|| Settings::new(true, D2Options::default()))
@@ -101,8 +107,9 @@ pub fn is_d2_lang(language: &str) -> bool {
 pub fn diagram_source_for_hash(hash: u64) -> Option<DiagramSource> {
     if let Some(source) = SOURCES
         .lock()
-        .ok()
-        .and_then(|sources| sources.get(&hash).cloned())
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&hash)
+        .cloned()
     {
         return Some(DiagramSource {
             language: DiagramLanguage::D2,
@@ -241,8 +248,9 @@ pub fn render_d2_deferred_with_registration(
     }
     if let Some(error) = ERRORS
         .lock()
-        .ok()
-        .and_then(|errors| errors.get(&hash).cloned())
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&hash)
+        .cloned()
     {
         return Some(RenderResult::Error(error));
     }
@@ -329,6 +337,15 @@ pub fn render_d2_deferred_with_registration(
 }
 
 #[cfg(feature = "renderer")]
+fn remove_temporary_png(path: &std::path::Path) {
+    if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        super::log_warn(&format!("Remove temporary D2 PNG: {error}"));
+    }
+}
+
+#[cfg(feature = "renderer")]
 fn render_ready(
     source: &str,
     settings: &Settings,
@@ -360,18 +377,18 @@ fn render_ready(
     let temporary = cache_path.with_extension(format!("{}.tmp.png", std::process::id()));
     let dimensions = super::svg::write_d2_png(&svg, &temporary, width);
     if cancel.load(Ordering::Acquire) {
-        let _ = std::fs::remove_file(&temporary);
+        remove_temporary_png(&temporary);
         return Err("D2 compilation cancelled".into());
     }
     let (width, height) = match dimensions {
         Ok(dimensions) => dimensions,
         Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
+            remove_temporary_png(&temporary);
             return Err(error.to_string());
         }
     };
     std::fs::rename(&temporary, &cache_path).map_err(|e| {
-        let _ = std::fs::remove_file(&temporary);
+        remove_temporary_png(&temporary);
         format!("Publish D2 PNG: {e}")
     })?;
     let cached = CachedDiagram {

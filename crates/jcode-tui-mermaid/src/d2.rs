@@ -216,7 +216,9 @@ impl PrivateDirectory {
 }
 impl Drop for PrivateDirectory {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            super::log_warn(&format!("Remove private D2 directory: {error}"));
+        }
     }
 }
 
@@ -240,8 +242,14 @@ impl OwnedChild {
                 }
             }
         }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if let Err(error) = self.0.kill()
+            && error.kind() != std::io::ErrorKind::InvalidInput
+        {
+            super::log_warn(&format!("Stop D2 child: {error}"));
+        }
+        if let Err(error) = self.0.wait() {
+            super::log_warn(&format!("Reap D2 child: {error}"));
+        }
     }
 }
 impl Drop for OwnedChild {
@@ -273,7 +281,9 @@ fn capture(
                 Err(e) => break Err(format!("Read D2 output: {e}")),
             }
         };
-        let _ = tx.send(result);
+        if tx.send(result).is_err() {
+            super::log_info("D2 output receiver closed after cancellation or timeout");
+        }
     });
     rx
 }
@@ -331,7 +341,9 @@ pub(crate) fn run_child(
             .write_all(&source)
             .map_err(|e| format!("Write D2 source: {e}"));
         drop(stdin);
-        let _ = written_tx.send(result);
+        if written_tx.send(result).is_err() {
+            super::log_info("D2 input receiver closed after cancellation or timeout");
+        }
     });
     let status = loop {
         if cancelled.load(Ordering::Acquire) {

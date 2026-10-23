@@ -987,6 +987,10 @@ mod env_overrides;
 mod tests;
 
 #[cfg(test)]
+#[path = "config_d2_tests.rs"]
+mod d2_tests;
+
+#[cfg(test)]
 #[path = "config_color_tests.rs"]
 mod color_tests;
 
