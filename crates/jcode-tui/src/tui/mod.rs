@@ -1484,6 +1484,7 @@ pub(crate) fn detect_kv_cache_problem(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerKind {
+    Panels,
     Model,
     Account,
     Login,
@@ -1653,118 +1654,7 @@ pub enum InlineUiStateRef<'a> {
     Interactive(&'a InlineInteractiveState),
 }
 
-impl PickerKind {
-    pub fn schema(&self) -> InlineInteractiveSchema {
-        match self {
-            Self::Model => InlineInteractiveSchema {
-                layout: InlineInteractiveLayout::ThreeColumn,
-                primary_label: "MODEL",
-                secondary_label: "PROVIDER",
-                secondary_preview_label: "PROVIDER",
-                tertiary_label: "METHOD",
-                preview_submit_hint: "  ↵ open",
-                active_submit_hint: "  ↑↓ ←→ ↵ Esc",
-                shows_default_shortcut_hint: true,
-                preview_activation_column: 2,
-            },
-            Self::Account => InlineInteractiveSchema {
-                layout: InlineInteractiveLayout::Compact,
-                primary_label: "ACCOUNT",
-                secondary_label: "STATE",
-                secondary_preview_label: "STATE",
-                tertiary_label: "",
-                preview_submit_hint: "  ↵ select",
-                active_submit_hint: "  ↑↓/jk ↵ Esc",
-                shows_default_shortcut_hint: false,
-                preview_activation_column: 0,
-            },
-            Self::Login => InlineInteractiveSchema {
-                layout: InlineInteractiveLayout::ThreeColumn,
-                primary_label: "ITEM",
-                secondary_label: "PROVIDER",
-                secondary_preview_label: "PROVIDER",
-                tertiary_label: "ACTION",
-                preview_submit_hint: "  ↵ open",
-                active_submit_hint: "  ↑↓ ←→ ↵ Esc",
-                shows_default_shortcut_hint: true,
-                preview_activation_column: 2,
-            },
-            Self::Usage => InlineInteractiveSchema {
-                layout: InlineInteractiveLayout::ThreeColumn,
-                primary_label: "ITEM",
-                secondary_label: "STATUS",
-                secondary_preview_label: "ITEM",
-                tertiary_label: "WINDOW",
-                preview_submit_hint: "  ↵ inspect",
-                active_submit_hint: "  ↑↓ ←→ ↵ Esc",
-                shows_default_shortcut_hint: false,
-                preview_activation_column: 2,
-            },
-        }
-    }
-
-    pub fn uses_compact_navigation(&self) -> bool {
-        self.schema().layout == InlineInteractiveLayout::Compact
-    }
-
-    pub fn filter_text(&self, entry: &PickerEntry) -> String {
-        match self {
-            Self::Account => {
-                let provider = entry
-                    .active_option()
-                    .map(|option| option.provider.as_str())
-                    .unwrap_or("");
-                let state = entry.account_state_label().unwrap_or("");
-                format!("{} {} {}", entry.name, provider, state)
-            }
-            Self::Login => {
-                let auth_kind = entry
-                    .active_option()
-                    .map(|option| option.provider.as_str())
-                    .unwrap_or("");
-                let state = entry
-                    .active_option()
-                    .map(|option| option.api_method.as_str())
-                    .unwrap_or("");
-                let detail = entry
-                    .active_option()
-                    .map(|option| option.detail.as_str())
-                    .unwrap_or("");
-                format!("{} {} {} {}", entry.name, auth_kind, state, detail)
-            }
-            Self::Usage => {
-                let status = entry
-                    .active_option()
-                    .map(|option| option.provider.as_str())
-                    .unwrap_or("");
-                let window = entry
-                    .active_option()
-                    .map(|option| option.api_method.as_str())
-                    .unwrap_or("");
-                let detail = entry
-                    .active_option()
-                    .map(|option| option.detail.as_str())
-                    .unwrap_or("");
-                format!("{} {} {} {}", entry.name, status, window, detail)
-            }
-            Self::Model => {
-                let route = entry.active_option();
-                let provider = route.map(|option| option.provider.as_str()).unwrap_or("");
-                let method = route.map(|option| option.api_method.as_str()).unwrap_or("");
-                let detail = route.map(|option| option.detail.as_str()).unwrap_or("");
-                // Include the pretty name so a query like "opus 4.8" matches
-                // the row even though the underlying id is `claude-opus-4-8`.
-                let pretty =
-                    crate::tui::app::helpers::model_names::pretty_known_model_family(&entry.name)
-                        .unwrap_or_default();
-                format!(
-                    "{} {} {} {} {}",
-                    entry.name, pretty, provider, method, detail
-                )
-            }
-        }
-    }
-}
+mod picker_kind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountPickerAction {
@@ -1785,6 +1675,10 @@ pub enum AgentModelTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerAction {
+    Panel {
+        session_id: String,
+        panel_id: String,
+    },
     Model,
     Account(AccountPickerAction),
     Login(crate::provider_catalog::LoginProviderDescriptor),
@@ -1853,6 +1747,10 @@ impl InlineInteractiveState {
 
 fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
     match action {
+        PickerAction::Panel {
+            session_id,
+            panel_id,
+        } => session_id.capacity() + panel_id.capacity(),
         PickerAction::Model
         | PickerAction::RemoteLogin { .. }
         | PickerAction::RemoteImportDecision { .. }
