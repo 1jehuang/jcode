@@ -1,4 +1,6 @@
 use super::*;
+use crate::message::{ContentBlock, Role};
+use jcode_session_types::RewindMode;
 
 struct TestHome {
     _dir: tempfile::TempDir,
@@ -315,4 +317,388 @@ fn links_preserve_edit_behavior_but_disable_unsafe_restore() {
     mutate("s", &real, Some(b"hardlink edit")).unwrap();
     assert_eq!(fs::read(real).unwrap(), b"hardlink edit");
     assert!(restore("s", &cp.id).is_err());
+}
+
+#[tokio::test]
+async fn transcript_only_targets_filter_synthetic_rows_and_reject_reused_branch_positions() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, _work) = fixture();
+    let mut session = crate::session::Session::create(None, None);
+    let text = |text: &str| ContentBlock::Text {
+        text: text.into(),
+        cache_control: None,
+    };
+    session.add_message_with_display_role(
+        Role::User,
+        vec![text("internal")],
+        Some(crate::session::StoredDisplayRole::System),
+    );
+    session.add_message(
+        Role::User,
+        vec![text("<system-reminder>hidden</system-reminder>")],
+    );
+    session.add_message(
+        Role::User,
+        vec![text("[Scheduled task]\nlegacy automation")],
+    );
+    session.add_message(Role::User, vec![text("[NOTIFICATION]\nYou received 1 notification(s) from other agents working in this codebase:\n\ninternal alert")]);
+    let first_id = session.add_message(Role::User, vec![text("keep exact human text")]);
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "tool".into(),
+            name: "read".into(),
+            input: serde_json::json!({}),
+            thought_signature: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "tool".into(),
+                content: "result".into(),
+                is_error: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "dG9vbA==".into(),
+            },
+            text("tool image label"),
+        ],
+    );
+    let image_id = session.add_message(
+        Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "aHVtYW4=".into(),
+        }],
+    );
+    session.save().unwrap();
+    let mut session = crate::session::Session::load(&session.id).unwrap();
+    let targets = session.rewind_checkpoints().unwrap();
+    assert_eq!(targets.len(), 2);
+    assert_eq!(targets[0].id, format!("message:{first_id}"));
+    assert_eq!(targets[1].id, format!("message:{image_id}"));
+    assert!(
+        targets
+            .iter()
+            .all(|target| !target.can_restore_files && target.changed_file_count == 0)
+    );
+    let count = session.messages.len();
+    for mode in [RewindMode::FilesOnly, RewindMode::ConversationAndFiles] {
+        assert!(
+            session
+                .rewind_checkpoint(&targets[1].id, mode)
+                .await
+                .is_err()
+        );
+        assert_eq!(session.messages.len(), count);
+    }
+    let result = session
+        .rewind_checkpoint(&targets[1].id, RewindMode::ConversationOnly)
+        .await
+        .unwrap();
+    assert_eq!(result.prompt, "");
+    assert_eq!(result.images, vec![("image/png".into(), "aHVtYW4=".into())]);
+    assert_eq!(result.removed_messages, 1);
+    // A new prompt occupies the old raw index, but cannot inherit its identity.
+    session.add_message(Role::User, vec![text("different branch")]);
+    assert!(
+        session
+            .rewind_checkpoint(&targets[1].id, RewindMode::ConversationOnly)
+            .await
+            .is_err()
+    );
+    let forged = format!("message:{}", session.messages[1].id);
+    assert!(
+        session
+            .rewind_checkpoint(&forged, RewindMode::ConversationOnly)
+            .await
+            .is_err()
+    );
+    let result = session
+        .rewind_checkpoint(&targets[0].id, RewindMode::ConversationOnly)
+        .await
+        .unwrap();
+    assert_eq!(result.prompt, "keep exact human text");
+    assert!(result.images.is_empty());
+    assert_eq!(session.messages.len(), 4);
+}
+
+#[tokio::test]
+async fn message_targets_keep_snapshot_boundary_and_restore_original_image_order() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = work.path().join("tracked");
+    fs::write(&path, b"original").unwrap();
+    let mut session = crate::session::Session::create(None, None);
+    let checkpoint = session
+        .create_rewind_checkpoint("  exact raw prompt  ")
+        .unwrap();
+    session.add_message_with_display_role(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "late hidden context".into(),
+            cache_control: None,
+        }],
+        Some(crate::session::StoredDisplayRole::System),
+    );
+    let input_id = session.add_message(
+        Role::User,
+        vec![
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "b25l".into(),
+            },
+            ContentBlock::Image {
+                media_type: "image/jpeg".into(),
+                data: "dHdv".into(),
+            },
+            ContentBlock::Text {
+                text: "  exact raw prompt  ".into(),
+                cache_control: None,
+            },
+        ],
+    );
+    session
+        .bind_rewind_checkpoint(&checkpoint.id, &input_id)
+        .unwrap();
+    session.save().unwrap();
+    mutate(&session.id, &path, Some(b"edited")).unwrap();
+    let target = session.rewind_checkpoints().unwrap().remove(0);
+    assert_eq!(target.id, format!("message:{input_id}"));
+    assert_eq!(
+        target.message_index, 0,
+        "preserve before-injected-context snapshot boundary"
+    );
+    let result = session
+        .rewind_checkpoint(&checkpoint.id, RewindMode::FilesOnly)
+        .await
+        .unwrap();
+    assert!(result.images.is_empty());
+    assert_eq!(session.messages.len(), 2);
+    mutate(&session.id, &path, Some(b"edited again")).unwrap();
+    let result = session
+        .rewind_checkpoint(&target.id, RewindMode::ConversationAndFiles)
+        .await
+        .unwrap();
+    assert_eq!(result.prompt, "  exact raw prompt  ");
+    assert_eq!(
+        result.images,
+        vec![
+            ("image/png".into(), "b25l".into()),
+            ("image/jpeg".into(), "dHdv".into())
+        ]
+    );
+    assert_eq!(fs::read(path).unwrap(), b"original");
+    assert!(session.messages.is_empty());
+}
+
+#[tokio::test]
+async fn file_snapshot_eviction_keeps_all_transcript_targets_and_stable_ids() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, _work) = fixture();
+    let mut session = crate::session::Session::create(None, None);
+    for index in 0..=MAX_CHECKPOINTS {
+        let prompt = format!("prompt {index}");
+        let checkpoint = session.create_rewind_checkpoint(&prompt).unwrap();
+        session.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("hidden turn context {index}"),
+                cache_control: None,
+            }],
+            Some(crate::session::StoredDisplayRole::System),
+        );
+        let input_id = session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: prompt,
+                cache_control: None,
+            }],
+        );
+        session
+            .bind_rewind_checkpoint(&checkpoint.id, &input_id)
+            .unwrap();
+        session.save().unwrap();
+    }
+    let first_id = format!("message:{}", session.messages[1].id);
+    let mut session = crate::session::Session::load(&session.id).unwrap();
+    let targets = session.rewind_checkpoints().unwrap();
+    assert_eq!(targets.len(), MAX_CHECKPOINTS + 1);
+    assert_eq!(targets[0].id, first_id);
+    assert_eq!(
+        targets[0].message_index, 0,
+        "eviction must not move past hidden context"
+    );
+    assert!(!targets[0].can_restore_files);
+    assert!(
+        session
+            .rewind_checkpoint(&first_id, RewindMode::FilesOnly)
+            .await
+            .is_err()
+    );
+    session
+        .rewind_checkpoint(&first_id, RewindMode::ConversationOnly)
+        .await
+        .unwrap();
+    assert!(session.messages.is_empty());
+    assert!(
+        load(&directory(&session.id).unwrap())
+            .unwrap()
+            .conversation_boundaries
+            .is_empty()
+    );
+}
+
+#[test]
+fn legacy_history_without_any_sidecar_lists_more_than_one_hundred_prompts() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, _work) = fixture();
+    let mut session = crate::session::Session::create(None, None);
+    for index in 0..125 {
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("legacy prompt {index}"),
+                cache_control: None,
+            }],
+        );
+    }
+    session.save().unwrap();
+    let resumed = crate::session::Session::load(&session.id).unwrap();
+    let targets = resumed.rewind_checkpoints().unwrap();
+    assert_eq!(targets.len(), 125);
+    assert_eq!(targets[0].prompt, "legacy prompt 0");
+    assert_eq!(targets[124].prompt, "legacy prompt 124");
+    assert!(targets.iter().all(|target| !target.can_restore_files));
+    assert!(
+        !directory(&session.id)
+            .unwrap()
+            .join("history.json")
+            .exists()
+    );
+}
+
+#[test]
+fn old_sidecars_default_independent_boundaries_and_notification_like_human_text_survives() {
+    let history: History = serde_json::from_value(serde_json::json!({
+        "checkpoints": [], "expected": {},
+    }))
+    .unwrap();
+    assert!(history.conversation_boundaries.is_empty());
+    let _env = crate::storage::lock_test_env();
+    let (_home, _work) = fixture();
+    let mut session = crate::session::Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "[NOTIFICATION]\nYou received a friendly human message".into(),
+            cache_control: None,
+        }],
+    );
+    assert_eq!(session.rewind_checkpoints().unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_preview_refuses_new_symlinks_without_overwriting_their_targets() {
+    use std::os::unix::fs::symlink;
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = work.path().join("tracked");
+    let outside = work.path().join("outside");
+    fs::write(&path, b"original").unwrap();
+    fs::write(&outside, b"unrelated human bytes").unwrap();
+    let mut session = crate::session::Session::create(None, None);
+    user(&mut session, "edit");
+    mutate(&session.id, &path, Some(b"tool")).unwrap();
+    fs::remove_file(&path).unwrap();
+    symlink(&outside, &path).unwrap();
+    let target = session.rewind_checkpoints().unwrap().remove(0);
+    assert!(!target.can_restore_files);
+    assert_eq!(target.changed_file_count, 1);
+    assert!(
+        session
+            .rewind_checkpoint(&target.id, RewindMode::ConversationAndFiles)
+            .await
+            .is_err()
+    );
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(fs::read(outside).unwrap(), b"unrelated human bytes");
+}
+
+#[tokio::test]
+async fn live_disk_preview_does_not_capture_external_bytes_or_weaken_conflict_checks() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = work.path().join("tracked");
+    fs::write(&path, b"original").unwrap();
+    let mut session = crate::session::Session::create(None, None);
+    user(&mut session, "edit");
+    mutate(&session.id, &path, Some(b"tool")).unwrap();
+    let target = session.rewind_checkpoints().unwrap().remove(0);
+    assert_eq!(target.changed_file_count, 1);
+    assert!(target.can_restore_files);
+    let history_dir = directory(&session.id).unwrap();
+    let saved = fs::read(history_dir.join("history.json")).unwrap();
+    let blob_count = fs::read_dir(history_dir.join("blobs")).unwrap().count();
+    fs::write(&path, b"original").unwrap();
+    let observed = session.rewind_checkpoints().unwrap().remove(0);
+    assert_eq!(observed.changed_file_count, 0);
+    assert!(observed.can_restore_files);
+    assert_eq!(fs::read(history_dir.join("history.json")).unwrap(), saved);
+    assert_eq!(
+        fs::read_dir(history_dir.join("blobs")).unwrap().count(),
+        blob_count
+    );
+    assert_eq!(
+        session
+            .rewind_checkpoint(&target.id, RewindMode::FilesOnly)
+            .await
+            .unwrap()
+            .restored_files,
+        0
+    );
+    fs::write(&path, b"external").unwrap();
+    let saved = fs::read(history_dir.join("history.json")).unwrap();
+    let observed = session.rewind_checkpoints().unwrap().remove(0);
+    assert_eq!(observed.changed_file_count, 1);
+    assert!(!observed.can_restore_files);
+    assert_eq!(fs::read(history_dir.join("history.json")).unwrap(), saved);
+    let count = session.messages.len();
+    assert!(
+        session
+            .rewind_checkpoint(&target.id, RewindMode::ConversationAndFiles)
+            .await
+            .is_err()
+    );
+    assert_eq!(session.messages.len(), count);
+    assert_eq!(fs::read(path).unwrap(), b"external");
+}
+
+#[tokio::test]
+async fn external_change_of_previously_unchanged_path_is_not_hidden_by_expected_state() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = work.path().join("tracked");
+    let mut session = crate::session::Session::create(None, None);
+    user(&mut session, "create");
+    mutate(&session.id, &path, Some(b"tool")).unwrap();
+    user(&mut session, "no file edits");
+    let target = session.rewind_checkpoints().unwrap().pop().unwrap();
+    assert_eq!(target.changed_file_count, 0);
+    fs::write(&path, b"human").unwrap();
+    let current = session.rewind_checkpoints().unwrap().pop().unwrap();
+    assert_eq!(current.changed_file_count, 1);
+    assert!(!current.can_restore_files);
+    assert!(
+        session
+            .rewind_checkpoint(&target.id, RewindMode::ConversationAndFiles)
+            .await
+            .is_err()
+    );
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(fs::read(path).unwrap(), b"human");
 }

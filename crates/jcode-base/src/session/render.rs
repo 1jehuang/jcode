@@ -79,6 +79,46 @@ fn is_auto_poke_user_message(msg: &super::StoredMessage) -> bool {
             .is_some_and(crate::todo::is_auto_poke_message)
 }
 
+fn is_legacy_peer_notification(message: &super::StoredMessage) -> bool {
+    let Some(text) = message.content.iter().find_map(|block| match block {
+        ContentBlock::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let Some(rest) = text.strip_prefix("[NOTIFICATION]\nYou received ") else {
+        return false;
+    };
+    let Some((count, _)) =
+        rest.split_once(" notification(s) from other agents working in this codebase:\n\n")
+    else {
+        return false;
+    };
+    !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Human input boundaries, excluding tool continuations and synthetic notices.
+/// Keep rewind and response statistics on the same definition after resume.
+pub fn is_authentic_user_prompt(message: &super::StoredMessage) -> bool {
+    matches!(message.role, Role::User)
+        && message.display_role.is_none()
+        && !is_internal_system_reminder(message)
+        && !is_auto_poke_user_message(message)
+        && !super::is_scheduled_task_message(message)
+        && !is_legacy_peer_notification(message)
+        && message.content.iter().any(|block| match block {
+            ContentBlock::Text { text, .. } => {
+                !text.trim().is_empty() && parse_attached_image_label(text).is_none()
+            }
+            ContentBlock::Image { .. } => true,
+            _ => false,
+        })
+        && !message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+}
+
 /// Short user-facing stand-in for a synthetic gate continuation, when one
 /// exists. `None` means render the stored text as-is.
 fn auto_poke_user_message_display_summary(msg: &super::StoredMessage) -> Option<&'static str> {

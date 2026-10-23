@@ -38,6 +38,7 @@ fn rewind_checkpoint_frames_roundtrip() {
                 removed_messages: 0,
                 restored_files: 1,
                 skipped_files: vec!["changed.rs".into()],
+                images: Vec::new(),
             },
         },
     ] {

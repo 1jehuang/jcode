@@ -40,6 +40,9 @@ pub struct RewindResult {
     pub mode: RewindMode,
     /// The original prompt, ready to edit and resend after conversation restore.
     pub prompt: String,
+    /// Original user attachments as (media type, base64 data), in input order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<(String, String)>,
     pub removed_messages: usize,
     pub restored_files: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -58,5 +61,31 @@ mod tests {
         assert!(!RewindMode::ConversationOnly.restores_files());
         assert!(!RewindMode::FilesOnly.restores_conversation());
         assert!(RewindMode::FilesOnly.restores_files());
+    }
+
+    #[test]
+    fn legacy_results_default_images_and_attachment_tuples_roundtrip() {
+        let legacy = serde_json::json!({
+            "mode": "conversation_only",
+            "prompt": "original prompt",
+            "removed_messages": 2,
+            "restored_files": 0,
+        });
+        let mut result: RewindResult = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(result.images.is_empty());
+        assert_eq!(serde_json::to_value(&result).unwrap(), legacy);
+        result.images = vec![
+            ("image/png".into(), "b25l".into()),
+            ("image/jpeg".into(), "dHdv".into()),
+        ];
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            value["images"],
+            serde_json::json!([["image/png", "b25l"], ["image/jpeg", "dHdv"],])
+        );
+        assert_eq!(
+            serde_json::from_value::<RewindResult>(value).unwrap(),
+            result
+        );
     }
 }

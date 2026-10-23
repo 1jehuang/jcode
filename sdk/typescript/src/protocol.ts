@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 12;
+export const API_VERSION_MINOR = 13;
 
 export type RewindMode = "conversation_and_files" | "conversation_only" | "files_only";
 
@@ -27,6 +27,8 @@ export interface RewindResult {
   removed_messages: number;
   restored_files: number;
   skipped_files?: string[];
+  /** Original prompt attachments, as [media type, base64 data]. Absent for files-only restores. */
+  images?: [string, string][];
 }
 
 export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";

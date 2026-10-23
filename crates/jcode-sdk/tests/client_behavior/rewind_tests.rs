@@ -42,6 +42,7 @@ fn rewind_checkpoint_helpers_wait_for_completion_after_history() {
                         removed_messages: 2,
                         restored_files: 0,
                         skipped_files: vec![],
+                        images: vec![("image/png".into(), "aW1hZ2UtYnl0ZXM=".into())],
                     },
                 }
             }
@@ -59,6 +60,10 @@ fn rewind_checkpoint_helpers_wait_for_completion_after_history() {
         .unwrap();
     assert_eq!(result.prompt, "original");
     assert_eq!(result.removed_messages, 2);
+    assert_eq!(
+        result.images,
+        vec![("image/png".into(), "aW1hZ2UtYnl0ZXM=".into())]
+    );
     let mut saw_history = false;
     while let Some(event) = events.next_timeout(Duration::from_millis(10)) {
         saw_history |= matches!(event, ApiEvent::History { .. });

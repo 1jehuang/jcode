@@ -12,6 +12,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[path = "file_history_conversation.rs"]
+mod conversation;
+
 const MAX_CHECKPOINTS: usize = 100;
 static HISTORY_LOCK: Mutex<()> = Mutex::new(());
 
@@ -36,6 +39,12 @@ struct Checkpoint {
     boundary_message_id: Option<String>,
     #[serde(default)]
     input_message_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ConversationBoundary {
+    message_index: usize,
+    boundary_message_id: Option<String>,
 }
 
 type PathLocks = Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>;
@@ -98,6 +107,8 @@ fn conversation_saved(commit: &ConversationCommit) -> bool {
 #[derive(Default, Serialize, Deserialize)]
 struct History {
     checkpoints: Vec<Checkpoint>,
+    #[serde(default)]
+    conversation_boundaries: BTreeMap<String, ConversationBoundary>,
     expected: BTreeMap<PathBuf, FileState>,
     #[serde(default)]
     pending: Option<Change>,
@@ -348,9 +359,8 @@ fn load(dir: &Path) -> Result<History> {
             }
             history.restoring.clear();
             if let Some(commit) = &history.conversation_commit {
-                history
-                    .checkpoints
-                    .retain(|checkpoint| checkpoint.info.message_index < commit.message_index);
+                let boundary = commit.message_index;
+                conversation::retain_before(&mut history, boundary);
             }
             history.conversation_commit = None;
             save(dir, &history)?;
@@ -445,7 +455,17 @@ fn checkpoint_with_anchor(
     });
     let evicted = history.checkpoints.len() > MAX_CHECKPOINTS;
     if evicted {
-        history.checkpoints.remove(0);
+        let checkpoint = history.checkpoints.remove(0);
+        // Also migrate older sidecars that predate independent boundaries.
+        if let Some(input_id) = checkpoint.input_message_id {
+            history
+                .conversation_boundaries
+                .entry(input_id)
+                .or_insert(ConversationBoundary {
+                    message_index: checkpoint.info.message_index,
+                    boundary_message_id: checkpoint.boundary_message_id,
+                });
+        }
     }
     save(&dir, &history)?;
     if evicted {
@@ -463,16 +483,7 @@ pub fn checkpoints(session_id: &str) -> Result<Vec<RewindCheckpoint>> {
     Ok(history
         .checkpoints
         .iter()
-        .map(|checkpoint| {
-            let mut info = checkpoint.info.clone();
-            info.can_restore_files = checkpoint.blocked.is_empty();
-            info.changed_file_count = checkpoint
-                .before
-                .iter()
-                .filter(|(path, before)| history.expected.get(*path) != Some(*before))
-                .count();
-            info
-        })
+        .map(|checkpoint| conversation::checkpoint_info(&history, checkpoint))
         .collect())
 }
 
@@ -523,10 +534,10 @@ fn restore_with_commit(
     );
     let mut changes = Vec::new();
     for (path, desired) in &checkpoint.before {
-        if history.expected.get(path) == Some(desired) {
+        let actual = state(&dir, path)?;
+        if &actual == desired {
             continue;
         }
-        let actual = state(&dir, path)?;
         ensure!(
             history.expected.get(path) == Some(&actual),
             "File changed outside tracked tools: {}",
@@ -593,9 +604,8 @@ fn restore_with_commit(
             .insert(change.path.clone(), change.after.clone());
     }
     if let Some(commit) = &history.conversation_commit {
-        history
-            .checkpoints
-            .retain(|checkpoint| checkpoint.info.message_index < commit.message_index);
+        let boundary = commit.message_index;
+        conversation::retain_before(&mut history, boundary);
     }
     history.restoring.clear();
     history.conversation_commit = None;
@@ -614,28 +624,7 @@ impl crate::session::Session {
     }
 
     pub fn rewind_checkpoints(&self) -> std::result::Result<Vec<RewindCheckpoint>, String> {
-        let result = (|| -> Result<_> {
-            let _guard = HISTORY_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let history = load(&directory(&self.id)?)?;
-            Ok(history
-                .checkpoints
-                .iter()
-                .filter(|checkpoint| reachable(self, checkpoint))
-                .map(|checkpoint| {
-                    let mut info = checkpoint.info.clone();
-                    info.can_restore_files = checkpoint.blocked.is_empty();
-                    info.changed_file_count = checkpoint
-                        .before
-                        .iter()
-                        .filter(|(path, before)| history.expected.get(*path) != Some(*before))
-                        .count();
-                    info
-                })
-                .collect())
-        })();
-        result.map_err(|error| format!("{error:#}"))
+        conversation::checkpoints(self).map_err(|error| format!("{error:#}"))
     }
 
     pub fn bind_rewind_checkpoint(&mut self, checkpoint_id: &str, message_id: &str) -> Result<()> {
@@ -654,11 +643,17 @@ impl crate::session::Session {
                 .iter()
                 .skip(checkpoint.info.message_index)
                 .any(|message| message.id == message_id
-                    && message.role == crate::message::Role::User
-                    && message.display_role.is_none()),
+                    && crate::session::is_authentic_user_prompt(message)),
             "Checkpoint input is not an authentic user message"
         );
         checkpoint.input_message_id = Some(message_id.to_owned());
+        let boundary = ConversationBoundary {
+            message_index: checkpoint.info.message_index,
+            boundary_message_id: checkpoint.boundary_message_id.clone(),
+        };
+        history
+            .conversation_boundaries
+            .insert(message_id.to_owned(), boundary);
         save(&dir, &history)
     }
 
@@ -677,16 +672,7 @@ impl crate::session::Session {
         checkpoint_id: &str,
         mode: jcode_session_types::RewindMode,
     ) -> Result<jcode_session_types::RewindResult> {
-        let checkpoint = {
-            let _guard = HISTORY_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            load(&directory(&self.id)?)?
-                .checkpoints
-                .into_iter()
-                .find(|checkpoint| checkpoint.info.id == checkpoint_id)
-                .context("Checkpoint not found")?
-        };
+        let (checkpoint, images) = conversation::resolve_checkpoint(self, checkpoint_id, mode)?;
         let boundary = checkpoint.info.message_index;
         ensure!(
             reachable(self, &checkpoint),
@@ -711,7 +697,7 @@ impl crate::session::Session {
             );
         }
         let paths = if mode.restores_files() {
-            restore_paths(&self.id, checkpoint_id)?
+            restore_paths(&self.id, &checkpoint.info.id)?
         } else {
             Vec::new()
         };
@@ -739,7 +725,12 @@ impl crate::session::Session {
             Ok(())
         };
         let result = if mode.restores_files() {
-            restore_with_commit(&session_id, checkpoint_id, conversation_commit, persist)
+            restore_with_commit(
+                &session_id,
+                &checkpoint.info.id,
+                conversation_commit,
+                persist,
+            )
         } else {
             persist().and_then(|()| {
                 let _guard = HISTORY_LOCK
@@ -747,9 +738,7 @@ impl crate::session::Session {
                     .unwrap_or_else(|error| error.into_inner());
                 let dir = directory(&session_id)?;
                 let mut history = load(&dir)?;
-                history
-                    .checkpoints
-                    .retain(|checkpoint| checkpoint.info.message_index < boundary);
+                conversation::retain_before(&mut history, boundary);
                 save(&dir, &history)?;
                 Ok(0)
             })
@@ -758,6 +747,7 @@ impl crate::session::Session {
             Ok(restored_files) => Ok(jcode_session_types::RewindResult {
                 mode,
                 prompt: checkpoint.info.prompt,
+                images,
                 removed_messages,
                 restored_files,
                 skipped_files: Vec::new(),
@@ -791,11 +781,9 @@ fn reachable(session: &crate::session::Session, checkpoint: &Checkpoint) -> bool
     boundary < session.messages.len()
         && anchor == checkpoint.boundary_message_id.as_ref()
         && checkpoint.input_message_id.as_ref().is_some_and(|id| {
-            session
-                .messages
-                .iter()
-                .skip(boundary)
-                .any(|message| &message.id == id)
+            session.messages.iter().skip(boundary).any(|message| {
+                &message.id == id && crate::session::is_authentic_user_prompt(message)
+            })
         })
 }
 
