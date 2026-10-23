@@ -2,6 +2,8 @@ use super::*;
 use crate::tui::ui::input_ui;
 use ratatui::layout::Rect;
 
+mod clipboard_notice;
+
 #[path = "panel_controls.rs"]
 mod panel_controls;
 
@@ -197,10 +199,10 @@ impl App {
         crate::tui::mermaid::set_mermaid_inline_expand_level(image_id, level as u8);
         if let Some(source) = crate::tui::mermaid::diagram_source_for_hash(image_id) {
             let copied = super::helpers::copy_to_clipboard(&source.source);
-            self.set_status_notice(format!(
-                "Image size: {size} · {}{} code copied",
-                if copied { "" } else { "Could not copy " },
-                source.language.label()
+            self.set_status_notice(clipboard_notice::message(
+                size,
+                source.language.label(),
+                copied,
             ));
         } else if let Some((media_type, data)) =
             super::super::ui::inline_image_ui::payload_for_copy(image_id)
