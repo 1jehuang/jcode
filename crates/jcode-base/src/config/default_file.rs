@@ -432,6 +432,15 @@ mcp_tools_token_threshold = 8000
 # Env override: JCODE_CODEMODE=0 to disable.
 codemode = true
 
+[compaction]
+# Reactive waits for 80% context usage. Proactive predicts future growth.
+mode = "reactive"
+# Proactive/semantic checks become eligible at either floor, whichever is
+# reached first. This permits prediction, not unconditional compaction.
+proactive_floor = 0.40
+proactive_floor_tokens = 150000
+# Set proactive_floor_tokens = 0 to use only the percentage floor.
+
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.
 # standard emits only spec-compatible ACP messages.
@@ -883,6 +892,8 @@ mod tests {
         let config =
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
         assert!(config.tools.codemode);
+        assert_eq!(config.compaction.proactive_floor, 0.40);
+        assert_eq!(config.compaction.proactive_floor_tokens, 150_000);
         assert_eq!(
             config.provider.anthropic_reasoning_effort.as_deref(),
             Some("low")
