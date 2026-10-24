@@ -278,10 +278,15 @@ pub enum SignaturePolicy {
 }
 
 /// Whether a provider error body is the Cloud Code / Antigravity backend
-/// rejecting a turn because its function calls lack a usable thought signature.
+/// rejecting a turn because its function calls lack a usable thought signature
+/// or violate Gemini's function-call turn ordering after compaction/interruption.
 pub fn is_missing_thought_signature_error(message: &str) -> bool {
     let lowered = message.to_ascii_lowercase();
-    lowered.contains("thought_signature") || lowered.contains("thoughtsignature")
+    lowered.contains("thought_signature")
+        || lowered.contains("thoughtsignature")
+        || lowered.contains(
+            "function call turn comes immediately after a user turn or after a function response turn",
+        )
 }
 
 pub fn build_contents_with_signature_policy(
@@ -408,9 +413,13 @@ pub fn build_contents_with_signature_policy(
                             ..Default::default()
                         });
                     }
-                    ContentBlock::OpenAICompaction { .. }
-                    | ContentBlock::ToolReference { .. }
-                    | ContentBlock::ProviderNative { .. } => {}
+                    ContentBlock::OpenAICompaction { .. } => {
+                        parts.push(GeminiPart {
+                            text: Some("[Prior conversation context compacted]".to_string()),
+                            ..Default::default()
+                        });
+                    }
+                    ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
                 }
             }
             if parts.is_empty() {
@@ -915,5 +924,42 @@ mod tests {
             .unwrap();
         assert!(content.role.is_empty());
         assert!(content.parts.is_empty());
+    }
+
+    #[test]
+    fn openai_compaction_marker_keeps_leading_user_turn_before_function_call() {
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::OpenAICompaction {
+                    encrypted_content: "enc_blob".to_string(),
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: json!({ "command": "ls" }),
+                    thought_signature: Some("SIG_1".to_string()),
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+        let contents = build_contents(&messages);
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0].role, "user");
+        assert_eq!(contents[1].role, "model");
+        assert!(contents[1].parts[0].function_call.is_some());
+    }
+
+    #[test]
+    fn recognizes_function_call_turn_order_rejection_for_downgrade_retry() {
+        assert!(is_missing_thought_signature_error(
+            "Antigravity generateContent failed (HTTP 400 Bad Request): Please ensure that function call turn comes immediately after a user turn or after a function response turn."
+        ));
     }
 }
