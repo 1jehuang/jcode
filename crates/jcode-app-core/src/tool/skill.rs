@@ -143,6 +143,9 @@ impl SkillTool {
                 anyhow::anyhow!("Skill '{}' not found", name)
             }
         })?;
+        if skill.disable_model_invocation {
+            return Err(model_invocation_disabled(&skill.name));
+        }
 
         let base_dir = skill
             .path
@@ -161,7 +164,7 @@ impl SkillTool {
 
     async fn list_skills(&self, working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {
         let registry = self.effective_registry(working_dir).await;
-        let mut skills = registry.list();
+        let mut skills = registry.list_model_invocable();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
 
         let installed: std::collections::HashSet<&str> =
@@ -195,7 +198,14 @@ impl SkillTool {
             output
         };
 
-        append_endorsed_skills(&mut output, &installed);
+        let hidden: std::collections::HashSet<&str> = registry
+            .list()
+            .into_iter()
+            .filter(|s| s.disable_model_invocation)
+            .map(|s| s.name.as_str())
+            .collect();
+
+        append_endorsed_skills(&mut output, &installed, &hidden);
 
         Ok(ToolOutput::new(output).with_title("Skills: List"))
     }
@@ -209,6 +219,9 @@ impl SkillTool {
             Ok(true) => {
                 // Re-read to get updated info
                 if let Some(skill) = registry.get(&name) {
+                    if skill.disable_model_invocation {
+                        return Err(model_invocation_disabled(&skill.name));
+                    }
                     Ok(ToolOutput::new(format!(
                         "Reloaded skill '{}'\n\nDescription: {}\nPath: {}",
                         name,
@@ -252,7 +265,7 @@ impl SkillTool {
         match reloaded {
             Ok(global_count) => {
                 let effective = self.effective_registry(working_dir).await;
-                let skills = effective.list();
+                let skills = effective.list_model_invocable();
                 let mut output = format!(
                     "Reloaded {} global skills ({} effective for this session)\n\n",
                     global_count,
@@ -289,6 +302,9 @@ impl SkillTool {
         let registry = self.effective_registry(working_dir).await;
 
         if let Some(skill) = registry.get(&name) {
+            if skill.disable_model_invocation {
+                return Err(model_invocation_disabled(&skill.name));
+            }
             let mut output = format!("# Skill: {}\n\n", skill.name);
             output.push_str(&format!("**Description:** {}\n", skill.description));
             output.push_str(&format!("**Path:** {}\n", skill.path.display()));
@@ -311,9 +327,18 @@ impl SkillTool {
 
 /// Append the curated jcode-endorsed skill catalog to `output`, grouped by
 /// category and marked with installed/not-installed status. `installed` is the
-/// set of skill names currently loaded in the registry.
-fn append_endorsed_skills(output: &mut String, installed: &std::collections::HashSet<&str>) {
-    let endorsed = crate::skill::endorsed_skills();
+/// set of skill names currently loaded in the registry. Catalog entries named in
+/// `hidden` (loaded skills that set `disable-model-invocation`) are omitted, so
+/// they are neither advertised as not installed nor given an install hint.
+fn append_endorsed_skills(
+    output: &mut String,
+    installed: &std::collections::HashSet<&str>,
+    hidden: &std::collections::HashSet<&str>,
+) {
+    let endorsed: Vec<_> = crate::skill::endorsed_skills()
+        .iter()
+        .filter(|e| !hidden.contains(e.name))
+        .collect();
     if endorsed.is_empty() {
         return;
     }
@@ -322,7 +347,7 @@ fn append_endorsed_skills(output: &mut String, installed: &std::collections::Has
 
     // Group by category, preserving first-seen order.
     let mut category_order: Vec<&str> = Vec::new();
-    for skill in endorsed {
+    for skill in &endorsed {
         if !category_order.contains(&skill.category) {
             category_order.push(skill.category);
         }
@@ -362,6 +387,12 @@ fn append_endorsed_skills(output: &mut String, installed: &std::collections::Has
     output.push_str(
         "NVIDIA CUDA-X skills come from the official catalog at https://github.com/NVIDIA/skills.\n",
     );
+}
+
+fn model_invocation_disabled(name: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Skill '{name}' sets disable-model-invocation, so it can only be invoked by the user with /{name}."
+    )
 }
 
 fn normalize_skill_name(name: Option<String>, action: &str) -> Result<String> {
@@ -644,6 +675,214 @@ mod tests {
             read.output.contains("Updated description"),
             "skill edits must be visible without daemon restart, got: {}",
             read.output
+        );
+    }
+
+    fn write_manual_only_project_skill(root: &std::path::Path, name: &str) {
+        let skill_dir = root.join(".agents").join("skills").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: Manual only skill {name}\ndisable-model-invocation: true\n---\n\nManual body."
+            ),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_disable_model_invocation_skill_is_not_advertised_by_list_or_reload_all() {
+        let tool = create_test_tool();
+        let repo = tempfile::tempdir().unwrap();
+        write_project_skill(repo.path(), "model-visible-skill");
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+
+        for action in ["list", "reload_all"] {
+            let result = tool
+                .execute(
+                    json!({"action": action}),
+                    context_with_working_dir(repo.path()),
+                )
+                .await
+                .unwrap();
+            assert!(
+                result.output.contains("model-visible-skill"),
+                "{action} must still list model-invocable skills, got: {}",
+                result.output
+            );
+            assert!(
+                !result.output.contains("manual-only-skill"),
+                "{action} must not advertise disable-model-invocation skills, got: {}",
+                result.output
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_disable_model_invocation_endorsed_skill_is_not_advertised_by_catalog() {
+        let name = "frontend-design";
+        assert!(
+            crate::skill::endorsed_skills()
+                .iter()
+                .any(|e| e.name == name),
+            "{name} must be an endorsed catalog skill for this test"
+        );
+        let tool = create_test_tool();
+        let repo = tempfile::tempdir().unwrap();
+        write_manual_only_project_skill(repo.path(), name);
+
+        let result = tool
+            .execute(
+                json!({"action": "list"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !result.output.contains(&format!("/{name}")),
+            "list must not show a catalog entry for a disable-model-invocation skill, got: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains(&format!("--skill {name}")),
+            "list must not suggest installing a disable-model-invocation skill, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("/optimization [not installed]")
+                || result.output.contains("/optimization [installed]"),
+            "other endorsed skills must still be listed, got: {}",
+            result.output
+        );
+
+        let registry = tool.effective_registry(Some(repo.path())).await;
+        let input = format!("/{name} build a settings page");
+        let invocation = registry
+            .resolve_invocation(&input)
+            .expect("explicit user invocation must resolve");
+        assert_eq!(invocation.name, name);
+        assert_eq!(invocation.prompt, Some("build a settings page"));
+        let prompt = registry
+            .get(invocation.name)
+            .expect("explicit user invocation must find the hidden skill")
+            .get_prompt();
+        assert!(prompt.contains("Manual body."), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn test_disable_model_invocation_skill_is_refused_for_model_load_and_read() {
+        let tool = create_test_tool();
+        let repo = tempfile::tempdir().unwrap();
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+
+        let requests = [
+            json!({"action": "load", "name": "manual-only-skill"}),
+            json!({"action": "read", "name": "manual-only-skill"}),
+            json!({"skill": "manual-only-skill", "args": "do it"}),
+        ];
+        for request in requests {
+            let label = request.to_string();
+            let error = match tool
+                .execute(request, context_with_working_dir(repo.path()))
+                .await
+            {
+                Ok(output) => panic!(
+                    "{label} must refuse a disable-model-invocation skill, got: {}",
+                    output.output
+                ),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("manual-only-skill"), "{label}: {error}");
+            assert!(error.contains("/manual-only-skill"), "{label}: {error}");
+            assert!(!error.contains("Manual body."), "{label}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_model_invocable_skill_still_loads_and_reads_through_skill_manage() {
+        let tool = create_test_tool();
+        let repo = tempfile::tempdir().unwrap();
+        write_project_skill(repo.path(), "model-visible-skill");
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+
+        let load = tool
+            .execute(
+                json!({"action": "load", "name": "model-visible-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+            .unwrap();
+        assert!(load.output.contains("## Skill: model-visible-skill"));
+        assert!(load.output.contains("Body."));
+
+        let read = tool
+            .execute(
+                json!({"action": "read", "name": "model-visible-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+            .unwrap();
+        assert!(read.output.contains("Project skill model-visible-skill"));
+    }
+
+    #[tokio::test]
+    async fn test_reload_of_disable_model_invocation_skill_is_refused_without_details() {
+        let repo = tempfile::tempdir().unwrap();
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+        let tool = SkillTool::new(Arc::new(RwLock::new(
+            SkillRegistry::load_for_working_dir(Some(repo.path())).unwrap(),
+        )));
+
+        let error = match tool
+            .execute(
+                json!({"action": "reload", "name": "manual-only-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+        {
+            Ok(output) => panic!(
+                "reload must refuse a disable-model-invocation skill, got: {}",
+                output.output
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("/manual-only-skill"), "{error}");
+        assert!(!error.contains("Manual only skill"), "{error}");
+        assert!(
+            !error.contains(&repo.path().display().to_string()),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reload_of_model_invocable_skill_still_reports_description_and_path() {
+        let repo = tempfile::tempdir().unwrap();
+        write_project_skill(repo.path(), "model-visible-skill");
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+        let tool = SkillTool::new(Arc::new(RwLock::new(
+            SkillRegistry::load_for_working_dir(Some(repo.path())).unwrap(),
+        )));
+
+        let output = tool
+            .execute(
+                json!({"action": "reload", "name": "model-visible-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+            .unwrap();
+        let path = repo
+            .path()
+            .join(".agents/skills/model-visible-skill/SKILL.md");
+        assert_eq!(
+            output.output,
+            format!(
+                "Reloaded skill 'model-visible-skill'\n\nDescription: Project skill model-visible-skill\nPath: {}",
+                path.display()
+            )
+        );
+        assert_eq!(
+            output.title.as_deref(),
+            Some("Skills: Reloaded model-visible-skill")
         );
     }
 }

@@ -109,7 +109,7 @@ pub async fn run() -> Result<()> {
     crate::memory::register_synthetic_entry_provider(|| {
         let global = crate::skill::SkillRegistry::shared_snapshot();
         crate::skill::SkillRegistry::effective_for_working_dir(&global, None)
-            .list()
+            .list_model_invocable()
             .into_iter()
             .map(|skill| skill.as_memory_entry())
             .collect()
