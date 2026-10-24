@@ -121,6 +121,7 @@ impl App {
     }
 
     pub(super) fn reset_streaming_tps(&mut self) {
+        self.streaming.response_output.reset();
         self.streaming.streaming_tps_start = None;
         self.streaming.streaming_tps_elapsed = Duration::ZERO;
         self.streaming.streaming_tps_collect_output = false;

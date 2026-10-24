@@ -95,6 +95,7 @@ impl App {
         let mut status_spinner_renderer = super::run_shell::StatusSpinnerRenderer::default();
 
         'turn_loop: loop {
+            self.streaming.response_output.reset();
             // Mark the turn as in-flight work: from here until the turn ends,
             // missing progress beats mean a real hang, not an idle client.
             let _turn_work = crate::logging::watchdog::begin_work("turn.request");
@@ -601,6 +602,7 @@ impl App {
                                 }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
+                                        self.streaming.response_output.text(&text);
                                         if !text.is_empty() {
                                             self.usage_reset.openai_quota_rejected = false;
                                         }
@@ -649,6 +651,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        self.streaming.response_output.tool();
                                         self.usage_reset.openai_quota_rejected = false;
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer
@@ -842,7 +845,8 @@ impl App {
                                         self.status_detail = Some(format!("Provider tier: {tier}"));
                                     }
                                     StreamEvent::TextDone => {}
-                    StreamEvent::MessageEnd { .. } => {
+                    StreamEvent::MessageEnd { stop_reason } => {
+                                        self.streaming.response_output.finish(stop_reason.as_deref());
                                         self.pause_streaming_tps(true);
                                         self.stream_message_ended = true;
                                         saw_message_end = true;

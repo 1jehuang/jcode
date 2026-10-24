@@ -1559,6 +1559,13 @@ impl App {
     /// guardrail circuit breaker first, then tries auto-poke and overnight
     /// poke scheduling. Returns true when a follow-up was queued.
     pub(super) fn schedule_turn_end_followups(&mut self) -> bool {
+        self.schedule_turn_end_followups_after_response(false)
+    }
+
+    pub(super) fn schedule_turn_end_followups_after_response(
+        &mut self,
+        final_response_delivered: bool,
+    ) -> bool {
         if self.guardrail_stops_exhausted_at_turn_end() {
             self.stop_auto_continuation_after_guardrail();
             return false;
@@ -1574,11 +1581,19 @@ impl App {
         if self.has_pending_user_followup() {
             return false;
         }
-        self.schedule_auto_poke_followup_if_needed()
+        self.schedule_auto_poke_followup_after_response(final_response_delivered)
             || self.schedule_overnight_poke_followup_if_needed()
     }
 
+    #[cfg(test)]
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+        self.schedule_auto_poke_followup_after_response(false)
+    }
+
+    fn schedule_auto_poke_followup_after_response(
+        &mut self,
+        final_response_delivered: bool,
+    ) -> bool {
         // Completion is visible even with /poke off, and never needs another
         // model turn merely to show the plan's remaining weaknesses.
         self.refresh_completed_todo_report(true);
@@ -1784,6 +1799,15 @@ impl App {
             if !self.todo_final_response_requested {
                 self.todo_final_response_requested = true;
                 self.final_response_todo_fingerprint = todo_fingerprint;
+                // The ordinary answer already wrapped up this work. Keep the
+                // completed fingerprint latched, but do not buy another turn
+                // merely to repeat it. Quality gates above still run normally.
+                if final_response_delivered {
+                    crate::logging::info(
+                        "AUTO_POKE_DECISION action=idle reason=final_response_already_delivered",
+                    );
+                    return false;
+                }
                 self.queued_messages
                     .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
                 self.pending_queued_dispatch = true;
@@ -1903,6 +1927,7 @@ impl App {
     }
 
     pub(super) fn schedule_queued_dispatch_after_interrupt(&mut self) {
+        self.streaming.response_output.reset();
         if self.has_queued_followups() {
             self.pending_queued_dispatch = true;
         }
@@ -3776,6 +3801,7 @@ impl App {
     /// replayed from the top, so everything from the aborted attempt must
     /// disappear or the replay would render duplicated output.
     pub(super) fn rollback_streaming_attempt(&mut self) {
+        self.streaming.response_output.reset();
         self.stream_buffer.clear();
         self.clear_streaming_render_state();
         self.streaming_tool_calls.clear();

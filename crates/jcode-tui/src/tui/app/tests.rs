@@ -52,6 +52,7 @@ include!("tests/smoothness_benchmark.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
 include!("tests/todo_completion.rs");
+include!("tests/final_response_followup.rs");
 include!("tests/issue_496_input_routing.rs");
 include!("tests/oauth_login_progress.rs");
 include!("tests/issue_544_paste_enter.rs");

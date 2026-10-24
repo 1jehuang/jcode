@@ -606,6 +606,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 | ServerEvent::StatusDetail { .. }
         );
     if externally_started_turn_event {
+        app.streaming.response_output.reset();
         crate::logging::info(
             "Adopting externally started turn: stream event received while idle with no current_message_id",
         );
@@ -658,6 +659,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.insert_thought_line(thought_line);
                 return eager_stream_redraw;
             }
+            app.streaming.response_output.text(&text);
             let mut needs_redraw = false;
             if matches!(
                 app.status,
@@ -678,6 +680,7 @@ pub(in crate::tui::app) fn handle_server_event(
             eager_stream_redraw && needs_redraw
         }
         ServerEvent::TextReplace { text } => {
+            app.streaming.response_output.replace_text(&text);
             let ops = app.stream_buffer.flush();
             app.apply_stream_ops(ops);
             app.replace_streaming_text(text);
@@ -732,6 +735,7 @@ pub(in crate::tui::app) fn handle_server_event(
             eager_stream_redraw
         }
         ServerEvent::ToolStart { id, name } => {
+            app.streaming.response_output.tool();
             app.usage_reset.openai_quota_rejected = false;
             // Tool-call JSON is provider-generated output and is included in output-token
             // usage. Keep the TPS timer running until the server reports ToolExec; actual
@@ -758,6 +762,9 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::ToolExec { id, name } => {
+            // A reconnect can resume during execution, without replaying the
+            // ToolStart event that normally marks this response as tool work.
+            app.streaming.response_output.tool();
             // Provider output generation for this tool call is complete, but final usage
             // snapshots often arrive later. Keep collecting deltas while excluding tool
             // runtime from the elapsed TPS denominator.
@@ -1099,7 +1106,8 @@ pub(in crate::tui::app) fn handle_server_event(
             true
         }
         ServerEvent::TextDone => false,
-        ServerEvent::MessageEnd { .. } => {
+        ServerEvent::MessageEnd { stop_reason } => {
+            app.streaming.response_output.finish(stop_reason.as_deref());
             app.pause_streaming_tps(true);
             app.stream_message_ended = true;
             true
@@ -1342,7 +1350,9 @@ pub(in crate::tui::app) fn handle_server_event(
                     "client_turn_completed",
                     std::time::Duration::from_secs(30),
                 );
-                auto_poked = app.schedule_turn_end_followups();
+                auto_poked = app.schedule_turn_end_followups_after_response(
+                    app.streaming.response_output.has_final_response(),
+                );
                 if !auto_poked {
                     app.clear_visible_turn_started();
                     if app.queued_messages.is_empty() {

@@ -102,6 +102,7 @@ mod remote;
 mod remote_header_hint;
 mod remote_notifications;
 mod replay;
+mod response_output;
 pub(crate) mod run_shell;
 mod runtime_memory;
 mod shortcut_hints;
@@ -885,6 +886,7 @@ enum ColdCacheWarningTrigger {
 #[derive(Clone, Debug, Default)]
 struct StreamingProgress {
     streaming_text: String,
+    response_output: response_output::ResponseOutput,
     // Live token usage (per turn)
     streaming_input_tokens: u64,
     streaming_output_tokens: u64,
@@ -2006,6 +2008,7 @@ impl App {
         &mut self,
         signature: KvCacheRequestSignature,
     ) {
+        self.streaming.response_output.reset();
         let turn_number = self
             .display_messages
             .iter()
