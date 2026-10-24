@@ -1,6 +1,8 @@
 #[path = "ui_messages/gmail_drafts.rs"]
 mod gmail_drafts;
 use gmail_drafts::*;
+#[path = "ui_messages/todo_completion.rs"]
+mod todo_completion;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
@@ -511,6 +513,9 @@ pub(crate) fn render_system_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if let Some(lines) = todo_completion::render(msg, width, _diff_mode) {
+        return lines;
+    }
     if msg.title.as_deref() == Some("OpenAI login")
         && let Some(parsed) = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
     {

@@ -36,25 +36,14 @@ pub(super) fn render(
     lines.extend(render_pinned_todos_message(msg, width as u16, diff_mode));
     lines.push(Line::default());
 
-    // Cards intentionally abbreviate prose. The appendix never does: include
-    // every field plus current and historical weaknesses from the same frozen
-    // snapshot. Keep Markdown's semantic heading/emphasis styles, not the
-    // generic system renderer's uniform color or compact-notice path.
+    // Cards intentionally abbreviate prose. Keep the full evidence underneath
+    // in compact semantic rows rather than a second, large Markdown document.
     let details = crate::todo::completion_report::render_completion_report(
         &snapshot.todos,
         &snapshot.plan,
         &snapshot.goals,
     );
-    let details = preserve_hard_line_breaks_for_markdown(&details);
-    let mut appendix = markdown::render_markdown_with_width(&details, Some(width));
-    for line in &mut appendix {
-        for span in &mut line.spans {
-            if span.style.fg.is_none() {
-                span.style.fg = Some(todo_meta_color());
-            }
-        }
-    }
-    lines.extend(markdown::wrap_lines(appendix, width));
+    lines.extend(render_detail_rows(&details, width));
     // Preserve the pinned card's spans verbatim. Only pathological terminal
     // widths smaller than its indent need an extra wrapping pass.
     Some(
@@ -71,9 +60,76 @@ pub(super) fn render(
     )
 }
 
+fn render_detail_rows(details: &str, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut weaknesses = false;
+    for raw in details.lines().filter(|line| !line.is_empty()) {
+        if raw.starts_with("# ") {
+            continue;
+        }
+        let (text, color, bold) = if let Some(heading) = raw.strip_prefix("## ") {
+            weaknesses = heading.starts_with("Current weaknesses")
+                || heading.starts_with("Earlier weak states");
+            lines.push(Line::default());
+            (heading, todo_group_color(), true)
+        } else if let Some(heading) = raw.strip_prefix("### ") {
+            (heading, todo_group_color(), true)
+        } else if let Some(item) = raw.strip_prefix("- ") {
+            (
+                item,
+                if weaknesses {
+                    todo_warning_color()
+                } else {
+                    todo_meta_color()
+                },
+                false,
+            )
+        } else {
+            (raw, todo_meta_color(), false)
+        };
+        // Decode the formatter's escaped data through the existing Markdown
+        // parser. It cannot become active markup because punctuation is escaped.
+        let rendered = markdown::render_markdown_with_width(text, Some(width));
+        for mut line in rendered {
+            line.spans.insert(0, Span::raw("  "));
+            for span in &mut line.spans {
+                span.style.fg = Some(color);
+                if bold {
+                    span.style = span.style.bold();
+                }
+            }
+            lines.extend(markdown::wrap_lines(vec![line], width));
+        }
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn todo_completion_details_use_compact_warning_rows() {
+        let lines = render_detail_rows(
+            "# Todo completion report\n\n## Current weaknesses\n\n- acceptance path blocked\n\n## Plan\n\n- **User intention:** Preserve all evidence\n- **Intent:** clear\n",
+            80,
+        );
+        assert_eq!(lines.len(), 7);
+        let warning = lines
+            .iter()
+            .find(|line| line.to_string().contains("acceptance path blocked"))
+            .unwrap();
+        assert!(
+            warning
+                .spans
+                .iter()
+                .all(|span| span.style.fg == Some(todo_warning_color()))
+        );
+        assert!(lines.iter().any(|line| {
+            line.to_string()
+                .contains("User intention: Preserve all evidence")
+        }));
+    }
 
     #[test]
     fn todo_completion_reuses_styled_pinned_cards_at_all_widths() {
