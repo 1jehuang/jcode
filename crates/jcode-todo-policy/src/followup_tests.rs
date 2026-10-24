@@ -76,7 +76,7 @@ fn no_todos_stays_armed_and_quiet() {
 }
 
 #[test]
-fn completed_work_runs_digest_then_validation_then_final_response_once() {
+fn completed_work_skips_digest_and_runs_validation_then_final_response_once() {
     let mut policy = FollowUpPolicy::new(true);
     let mut state = TodoSnapshot {
         todos: vec![done("ship", ConfidenceState::Plausible)],
@@ -92,13 +92,9 @@ fn completed_work_runs_digest_then_validation_then_final_response_once() {
         ..Default::default()
     };
 
-    let digest = policy.decide(&state);
-    assert_eq!(kind(&digest), Some(FollowUpKind::GateDigest));
-    assert!(digest.effects.clear_gate_observations);
-    assert!(is_auto_poke_message(&digest.follow_up.unwrap().message));
-    state.gate_observations.clear();
-
     let validation = policy.decide(&state);
+    assert!(validation.effects.clear_gate_observations);
+    state.gate_observations.clear();
     assert_eq!(kind(&validation), Some(FollowUpKind::CompletionValidation));
     assert!(validation.follow_up.unwrap().message.contains("\"ship\""));
 
@@ -120,6 +116,34 @@ fn completed_work_runs_digest_then_validation_then_final_response_once() {
         kind(&policy.decide(&state)),
         Some(FollowUpKind::IncompleteTodos)
     );
+}
+
+#[test]
+fn weak_points_do_not_delay_completed_work() {
+    let mut policy = FollowUpPolicy::new(true);
+    let state = TodoSnapshot {
+        todos: vec![done("ship", ConfidenceState::Verified)],
+        gate_observations: [
+            GateObservationKind::IntentUnderstanding,
+            GateObservationKind::ClosedFeedbackLoop,
+            GateObservationKind::FeedbackLoopRelevance,
+            GateObservationKind::FeedbackLoopCoverage,
+            GateObservationKind::FeedbackLoopTraceability,
+        ]
+        .into_iter()
+        .map(|kind| GateObservation {
+            kind,
+            group: None,
+            state: None,
+        })
+        .collect(),
+        ..Default::default()
+    };
+    let decision = policy.decide(&state);
+    assert_eq!(kind(&decision), Some(FollowUpKind::FinalResponse));
+    assert!(decision.effects.clear_gate_observations);
+    // Even an unacknowledged observation log cannot restart the cycle.
+    assert_eq!(policy.decide(&state), Decision::default());
 }
 
 #[test]

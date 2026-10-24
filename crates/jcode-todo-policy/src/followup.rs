@@ -2,8 +2,8 @@
 //!
 //! This is the client-side state machine that decides, after a turn ends, what
 //! (if anything) to send next: the incomplete-todo poke, the one-shot
-//! long-session review, the deferred gate digest, the ownership gate, the
-//! completion-confidence and confidence-spike checks, and the final-response
+//! long-session review, the ownership gate, the completion-confidence and
+//! confidence-spike checks, and the final-response
 //! handoff. It is a faithful port of the TUI's `schedule_auto_poke_followup`
 //! so every client (TUI, Desktop, SDK users) runs the same policy.
 //!
@@ -14,10 +14,10 @@
 use crate::{
     ConfidenceState, GateObservation, TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
     TODO_LONG_SESSION_REVIEW_MESSAGE, TodoGoal, TodoItem, TodoPlan, build_auto_poke_message,
-    build_gate_digest, build_todo_completion_continuation_message,
-    build_todo_confidence_spike_continuation_message, build_todo_ownership_continuation_message,
-    completed_groups_have_sufficient_delivery, completion_confidence_passes, spike_completed_todos,
-    todo_status_is_cancelled, todo_status_is_completed,
+    build_todo_completion_continuation_message, build_todo_confidence_spike_continuation_message,
+    build_todo_ownership_continuation_message, completed_groups_have_sufficient_delivery,
+    completion_confidence_passes, spike_completed_todos, todo_status_is_cancelled,
+    todo_status_is_completed,
 };
 use serde::{Deserialize, Serialize};
 
@@ -113,7 +113,6 @@ pub struct FollowUpPolicy {
     default_on: bool,
     final_response_requested: bool,
     final_response_fingerprint: Option<String>,
-    digest_delivered: bool,
     gate_attempts: u8,
     spike_challenged: bool,
     last_ownership_fingerprint: Option<String>,
@@ -180,7 +179,6 @@ impl FollowUpPolicy {
             }
             self.final_response_fingerprint = None;
             self.final_response_requested = false;
-            self.digest_delivered = false;
             self.gate_attempts = 0;
             self.spike_challenged = false;
             self.last_ownership_fingerprint = None;
@@ -213,22 +211,12 @@ impl FollowUpPolicy {
             return Decision::default();
         }
 
-        // Deferred quality checks land once, at the end of the work.
-        let mut effects = TodoEffects::default();
-        if !self.digest_delivered && !snapshot.gate_observations.is_empty() {
-            effects.clear_gate_observations = true;
-            if let Some(digest) =
-                build_gate_digest(&snapshot.gate_observations, &snapshot.plan, goals)
-            {
-                self.digest_delivered = true;
-                return Decision::send(
-                    FollowUpKind::GateDigest,
-                    digest,
-                    "🔍 We asked the agent to double-check this turn's weak points.",
-                )
-                .with_effects(effects);
-            }
-        }
+        // Weak-point observations remain diagnostic data, not a reason to
+        // inject another conversation turn before the agent can finish.
+        let effects = TodoEffects {
+            clear_gate_observations: !snapshot.gate_observations.is_empty(),
+            ..TodoEffects::default()
+        };
 
         let ownership_needs_followup = !completed_groups_have_sufficient_delivery(todos, goals);
         let gate_budget_left = self.gate_attempts < MAX_GATE_ATTEMPTS;
@@ -278,7 +266,6 @@ impl FollowUpPolicy {
             self.armed = false;
             self.spike_challenged = false;
             self.gate_attempts = 0;
-            self.digest_delivered = false;
             return Decision {
                 notice: Some(
                     "⚠️ We nudged the agent several times but its validation still isn't holding up. We stopped poking; review the remaining todos yourself."
@@ -291,7 +278,6 @@ impl FollowUpPolicy {
 
         // Cycle finished cleanly.
         self.armed = self.default_on;
-        self.digest_delivered = false;
         self.gate_attempts = 0;
         if !self.final_response_requested {
             self.final_response_requested = true;
