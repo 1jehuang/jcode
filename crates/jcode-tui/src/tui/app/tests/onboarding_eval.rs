@@ -2985,6 +2985,12 @@ fn render_login_picker_overlay_text() -> String {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    // Full `ui::draw` renders mutate process-global render state (scroll
+    // metrics, layout snapshots, flicker history) that sibling tests assert on.
+    // Serialize on the shared render-state lock, matching the env-then-render
+    // lock order every other drawing test uses.
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+
     let mut app = create_test_app();
     app.onboarding_flow = None;
     app.begin_onboarding_flow_at_login();

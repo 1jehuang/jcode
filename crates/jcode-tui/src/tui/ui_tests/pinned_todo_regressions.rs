@@ -2,8 +2,13 @@ use super::*;
 use ratatui::{Terminal, backend::TestBackend};
 
 /// Keep pinning deterministic without modifying the developer's config.
+///
+/// Takes the render-state lock here, inside the env lock, so callers cannot
+/// invert the canonical env-before-render order and ABBA-deadlock against
+/// idle-animation tests holding the env lock.
 fn with_pinned_todos_config(f: impl FnOnce()) {
     let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = viewport_snapshot_test_lock();
     let home = tempfile::tempdir().expect("temporary test home");
     struct RestoreHome(Option<std::ffi::OsString>);
     impl Drop for RestoreHome {
@@ -125,7 +130,6 @@ fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
 
 #[test]
 fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
         let _changelog = header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
         reset_prompt_viewport_state_for_test();
@@ -187,7 +191,6 @@ fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() 
 
 #[test]
 fn pinned_todo_regression_hidden_message_has_zero_length_cache_boundary() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
         let mut state = TestState {
             display_messages: vec![

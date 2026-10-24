@@ -327,6 +327,13 @@ fn persisted_headless_member(
 
 #[tokio::test]
 async fn background_task_wake_runs_live_session_immediately_when_idle() {
+    // `JCODE_WAKE_MODE` is process-global and read through the config cache.
+    // `external_background_task_wake_emits_request_without_starting_turn`
+    // sets it to `external` while holding `lock_test_env`; without the same
+    // lock here this test can observe that value mid-run, take the external
+    // path, and never start its streaming turn (Elapsed on the TextDelta
+    // wait). Serialize all wake tests against the shared env lock.
+    let _env_lock = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Build result processed.".to_string()),
@@ -372,7 +379,11 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
     )
     .await;
 
-    let notification = timeout(Duration::from_secs(2), async {
+    // Hang guards, not latency budgets: the wake fans out through async spawns
+    // on a single-threaded test runtime, and under a starved parallel runner
+    // the spawned turn can take seconds to reach the mpsc. The assertion is
+    // that delivery happens at all, not that it is fast.
+    let notification = timeout(Duration::from_secs(10), async {
         loop {
             match member_event_rx.recv().await {
                 Some(ServerEvent::Notification {
@@ -397,7 +408,7 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
     }
     assert!(notification.1.contains("**Background task** `bgwake`"));
 
-    let streamed = timeout(Duration::from_secs(2), async {
+    let streamed = timeout(Duration::from_secs(10), async {
         loop {
             match member_event_rx.recv().await {
                 Some(ServerEvent::TextDelta { text })
@@ -543,6 +554,9 @@ async fn idle_live_agent_wakes_restored_headless_member_without_attachments() {
 
 #[tokio::test]
 async fn idle_live_agent_reservation_blocks_a_second_wake_until_released() {
+    // Serialize against the process-global JCODE_WAKE_MODE (see the comment
+    // on background_task_wake_runs_live_session_immediately_when_idle).
+    let _env_lock = crate::storage::lock_test_env();
     // Regression for #1152: the idle check used to drop its try_lock guard
     // before the turn started, so two concurrent wakes could both succeed.
     let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
@@ -575,6 +589,9 @@ async fn idle_live_agent_reservation_blocks_a_second_wake_until_released() {
 
 #[tokio::test]
 async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
+    // Serialize against the process-global JCODE_WAKE_MODE (see the comment
+    // on background_task_wake_runs_live_session_immediately_when_idle).
+    let _env_lock = crate::storage::lock_test_env();
     // Greptile review on #1166: releasing the guard before the terminal status
     // write let a newer wake's `running` be overwritten by this turn's `ready`.
     let provider = Arc::new(StreamingMockProvider::default());
@@ -649,6 +666,9 @@ async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
 
 #[tokio::test]
 async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
+    // Serialize against the process-global JCODE_WAKE_MODE (see the comment
+    // on background_task_wake_runs_live_session_immediately_when_idle).
+    let _env_lock = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Wake turn finished.".to_string()),

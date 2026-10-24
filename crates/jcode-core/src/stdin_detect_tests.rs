@@ -2,6 +2,12 @@ use super::*;
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
+// Not sound on macOS: this test binary always has harness threads parked on
+// condition variables, and a thread sampled within ~55ms of parking still has
+// `TH_FLAGS_SWAPPED` clear, so the process can look like it is reading stdin
+// (issue #1146). `test_sleeping_child_not_reading_stdin` covers the negative
+// direction on macOS against a process whose only thread is a timed sleep.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn test_own_process_not_reading_stdin() {
     let pid = std::process::id();
@@ -13,6 +19,103 @@ fn test_own_process_not_reading_stdin() {
 fn test_nonexistent_pid() {
     let state = is_waiting_for_stdin(u32::MAX);
     assert_ne!(state, StdinState::Reading);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn swapped_out_wait_is_not_a_stdin_read() {
+    use libc::{TH_FLAGS_SWAPPED, TH_STATE_RUNNING, TH_STATE_WAITING};
+
+    // Parked on a condition variable or in a timed sleep: blocked, but the
+    // kernel has already reclaimed its stack (issue #1146).
+    assert!(!super::macos::thread_is_reading_stdin(
+        TH_STATE_WAITING,
+        TH_FLAGS_SWAPPED
+    ));
+    // Blocked in `read(2)`: still resident, so this is a stdin wait.
+    assert!(super::macos::thread_is_reading_stdin(TH_STATE_WAITING, 0));
+    // Not blocked at all.
+    assert!(!super::macos::thread_is_reading_stdin(TH_STATE_RUNNING, 0));
+}
+
+// The `TH_FLAGS_SWAPPED` gate suppresses parked threads; this pins the negative
+// direction against a real process, since macOS reported every sleeping command
+// as waiting for terminal input before it (issue #1146).
+#[cfg(target_os = "macos")]
+#[test]
+fn test_sleeping_child_not_reading_stdin() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("5")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn sleep");
+
+    // Same delay the bash tool uses before its first poll, so the child is
+    // parked in `nanosleep` (not in `read(0)`) and its stack is long reclaimed.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let state = is_waiting_for_stdin(child.id());
+
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!(
+        state,
+        StdinState::NotReading,
+        "sleep parks in nanosleep, not in read(0)"
+    );
+}
+
+// The `TH_FLAGS_SWAPPED` gate suppresses parked threads; this pins the other
+// direction so a process genuinely blocked on terminal input is still reported.
+// `cat` reads from a pty slave, which is what an interactive command actually
+// sees.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_blocked_on_a_terminal_is_detected() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let mut master: libc::c_int = -1;
+    let mut slave: libc::c_int = -1;
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty failed");
+    // SAFETY: openpty returned two fresh descriptors we now own.
+    let master_fd = unsafe { OwnedFd::from_raw_fd(master) };
+    let slave_fd = unsafe { OwnedFd::from_raw_fd(slave) };
+
+    let mut child = std::process::Command::new("cat")
+        .stdin(std::process::Stdio::from(slave_fd))
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn cat");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut state = StdinState::NotReading;
+    while std::time::Instant::now() < deadline {
+        state = is_waiting_for_stdin(child.id());
+        if state == StdinState::Reading {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    child.kill().ok();
+    child.wait().ok();
+    drop(master_fd);
+
+    assert_eq!(
+        state,
+        StdinState::Reading,
+        "cat blocked on a pty should still be detected"
+    );
 }
 
 #[cfg(target_os = "linux")]
