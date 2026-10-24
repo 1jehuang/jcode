@@ -328,7 +328,26 @@ fn test_recovery_directive_prefers_reload_context_when_present() {
         directive.reconnect_notice.as_deref(),
         Some("Reloaded with build new-build")
     );
-    assert!(directive.continuation_message.contains("Reload succeeded"));
+    assert!(
+        directive
+            .continuation_message
+            .starts_with("Reload complete. Resuming your task.\n\n")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("Build: old-build → new-build.")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("check whether it already completed or is still running")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("unless genuinely blocked")
+    );
     assert!(
         directive
             .continuation_message

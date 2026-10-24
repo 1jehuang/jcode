@@ -428,6 +428,29 @@ fn system_glyph_env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+fn successful_reload_notice_hides_internal_directive() {
+    for content in [
+        "[auto] Reload succeeded (old → new-dirty). Continue immediately from where you left off.",
+        "[auto] Reload complete. Resuming your task.\n\nContinue the user's latest request.\nBuild: old → new.",
+        "Reload complete. Resuming your task.\nBuild: old → new.",
+    ] {
+        let msg = DisplayMessage::system(content);
+        for width in [1, 10, 30, 80, 120] {
+            let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].width() <= width as usize);
+            if width >= 80 {
+                assert_eq!(
+                    extract_line_text(&lines[0]).trim(),
+                    "Reload complete. Resuming your task."
+                );
+            }
+        }
+        assert_eq!(msg.content, content);
+    }
+}
+
+#[test]
 fn transient_system_notices_are_single_line_without_changing_content() {
     let notices = [
         "[auto] Your session was interrupted by a server reload while a tool was running. The\ntool was aborted and results may be incomplete. Continue exactly where you left off.",

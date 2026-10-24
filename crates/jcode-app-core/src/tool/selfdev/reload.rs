@@ -102,10 +102,17 @@ impl ReloadContext {
     ) -> String {
         let task_info = self.task_info_suffix();
         let turns_note = restored_turns
-            .map(|turns| format!(" Session restored with {} turns.", turns))
+            .map(|turns| format!("\nSession restored with {} turns.", turns))
             .unwrap_or_default();
         format!(
-            "Reload succeeded ({} → {}).{}{}{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
+            "Reload complete. Resuming your task.\n\n\
+             Continue the user's latest request from the last unfinished step, using the restored conversation and todo list. \
+             The reload itself is complete, not the user's task. Do not stop to announce or summarize the reload, \
+             and do not ask what to do next unless genuinely blocked.\n\n\
+             Before retrying any interrupted tool call, check whether it already completed or is still running. \
+             Do not repeat completed work or duplicate running background tasks. \
+             Validate the new behavior when relevant, then finish the original request.\n\n\
+             Build: {} → {}.{}{}{}",
             self.version_before, self.version_after, task_info, background_task_note, turns_note
         )
     }

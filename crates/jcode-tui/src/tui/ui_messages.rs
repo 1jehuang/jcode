@@ -95,6 +95,16 @@ fn render_single_line_system_notice(
         .starts_with("[auto] Your session was interrupted by a server reload")
     {
         "Server reloaded; resuming interrupted work."
+    } else if ["Reload succeeded (", "Reload complete."]
+        .iter()
+        .any(|prefix| {
+            msg.content
+                .strip_prefix("[auto] ")
+                .unwrap_or(&msg.content)
+                .starts_with(prefix)
+        })
+    {
+        "Reload complete. Resuming your task."
     } else if msg.content.starts_with("Reload complete - continuing") {
         "Reload complete - continuing."
     } else if msg.content.starts_with("📡 Network appears offline") {
