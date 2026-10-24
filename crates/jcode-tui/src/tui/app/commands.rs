@@ -34,6 +34,7 @@ use crate::id;
 use crate::message::{ContentBlock, Message, Role};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub(super) const REVIEW_PREFERRED_MODEL: &str = "gpt-5.5";
@@ -3923,6 +3924,190 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     false
+}
+
+pub(super) fn handle_mcp_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("/mcp") else {
+        return false;
+    };
+
+    if !rest.is_empty()
+        && !rest
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    {
+        return false;
+    }
+
+    // The cached config snapshot comes from startup; a user may have edited
+    // mcp.json (or been told to add a server) while the TUI is open. Reload
+    // it here so /mcp status lists and /mcp enable|disable accept servers
+    // added since startup. Autocomplete still uses the same cache, which is
+    // refreshed here too (and after toggles), so it catches up as well.
+    // Kept on the /mcp path only: a single file read on an explicit command
+    // is cheap, while keypress paths stay cache-only. (Greptile 4307539757)
+    app.mcp_config = crate::mcp::McpConfig::load_for_dir(
+        app.session.working_dir.as_deref().map(std::path::Path::new),
+    );
+    app.command_suggestions_cache.replace(None);
+
+    let args = rest.trim();
+    if args.is_empty() || args == "status" {
+        app.push_display_message(DisplayMessage::system(format_mcp_status(app)));
+        return true;
+    }
+
+    let mut parts = args.split_whitespace();
+    let Some(action) = parts.next() else {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /mcp status, /mcp enable <server>, /mcp disable <server>".to_string(),
+        ));
+        return true;
+    };
+    let server_name = parts.collect::<Vec<_>>().join(" ");
+
+    let server_name = server_name.trim();
+    if server_name.is_empty() {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /mcp enable <server> or /mcp disable <server>".to_string(),
+        ));
+        return true;
+    }
+
+    match action {
+        "enable" => toggle_mcp_server_from_tui(app, server_name, true),
+        "disable" => toggle_mcp_server_from_tui(app, server_name, false),
+        _ => app.push_display_message(DisplayMessage::error(
+            "Usage: /mcp status, /mcp enable <server>, /mcp disable <server>".to_string(),
+        )),
+    }
+    true
+}
+
+fn format_mcp_status(app: &App) -> String {
+    if app.mcp_config.servers.is_empty() {
+        return "MCP servers: none configured. Add servers to ~/.jcode/mcp.json.".to_string();
+    }
+
+    let mut connected: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (name, count) in &app.mcp_server_names {
+        connected.insert(name.as_str(), *count);
+    }
+
+    let mut servers: Vec<_> = app.mcp_config.servers.iter().collect();
+    servers.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut lines = Vec::with_capacity(servers.len() + 2);
+    lines.push("MCP servers:".to_string());
+    for (name, config) in servers {
+        let enabled = if config.is_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let connected_label = match connected.get(name.as_str()) {
+            Some(count) => format!("connected, {count} tool(s)"),
+            None => "not connected".to_string(),
+        };
+        lines.push(format!("• {name}: {enabled}, {connected_label}"));
+    }
+    lines.push("Use /mcp enable <server> or /mcp disable <server>.".to_string());
+    lines.join("\n")
+}
+
+fn toggle_mcp_server_from_tui(app: &mut App, server_name: &str, enable: bool) {
+    // Shared persist+flip flow (same one the `mcp` tool uses), so both paths
+    // agree on flag semantics and the saved file.
+    let (server_config, persistence) =
+        match crate::mcp::mcp_toggle::persist_toggle(&app.mcp_config, server_name, enable) {
+            Ok(result) => result,
+            Err(_) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "MCP server '{server_name}' not found. Add it to ~/.jcode/mcp.json first."
+                )));
+                return;
+            }
+        };
+
+    // TUI path treats a failed save as fatal: tell the user instead of
+    // silently diverging from the config on disk.
+    if !persistence.save_ok {
+        let reason = persistence
+            .save_error
+            .clone()
+            .unwrap_or_else(|| "unknown error".to_string());
+        let target = persistence
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "~/.jcode/mcp.json".to_string());
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to save MCP config to {target}: {reason}"
+        )));
+        return;
+    }
+
+    let Some(config_path) = persistence.path.clone() else {
+        return;
+    };
+
+    app.mcp_config = crate::mcp::McpConfig::load_for_dir(
+        app.session.working_dir.as_deref().map(std::path::Path::new),
+    );
+    app.command_suggestions_cache.replace(None);
+
+    if let Ok(mut manager) = app.mcp_manager.try_write() {
+        manager.reload_config();
+    }
+
+    // Spawn async background work so the sync handler returns immediately.
+    // Disable: disconnect the server and unregister its tool proxies so they
+    // vanish from the prompt. Enable: connect and register tools. The shared
+    // `mcp_toggle` service is the same one the `mcp` tool calls.
+    let manager = Arc::clone(&app.mcp_manager);
+    let registry = app.registry.clone();
+    let server_name_owned = server_name.to_string();
+    tokio::spawn(async move {
+        let connect_error = if enable {
+            // Connect the server and register its tools.
+            let (_, connect_error) = crate::mcp::mcp_toggle::connect_and_register(
+                &manager,
+                &server_name_owned,
+                &server_config,
+                Some(&registry),
+            )
+            .await;
+            connect_error
+        } else {
+            // Disconnect the server and unregister its tool proxies.
+            crate::mcp::mcp_toggle::disconnect_and_unregister(
+                &manager,
+                &server_name_owned,
+                Some(&registry),
+            )
+            .await;
+            None
+        };
+
+        // McpStatus-equivalent for the local path: refresh the UI's cached
+        // server/tool state on the bus loop once the background work is done.
+        Bus::global().publish(BusEvent::McpToggleCompleted(
+            crate::bus::McpToggleCompleted {
+                server: server_name_owned,
+                enable,
+                connect_error,
+            },
+        ));
+    });
+
+    let state = if enable { "enabled" } else { "disabled" };
+    app.set_status_notice(format!("MCP {server_name}: {state}"));
+    app.push_display_message(DisplayMessage::system(format!(
+        "MCP server '{server_name}' {state}. Saved to {}.",
+        config_path.display()
+    )));
 }
 
 pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {

@@ -1568,8 +1568,9 @@ impl Registry {
         };
 
         // Register MCP management tool immediately (with registry for dynamic tool registration)
-        let mcp_tool =
-            mcp::McpManagementTool::new(Arc::clone(&mcp_manager)).with_registry(self.clone());
+        let mcp_tool = mcp::McpManagementTool::new(Arc::clone(&mcp_manager))
+            .with_registry(self.clone())
+            .with_event_tx(event_tx.clone());
         self.register("mcp".to_string(), Arc::new(mcp_tool) as Arc<dyn Tool>)
             .await;
         self.register(
@@ -1890,6 +1891,19 @@ impl Registry {
     /// Get shared access to the compaction manager
     pub fn compaction(&self) -> Arc<RwLock<CompactionManager>> {
         self.compaction.clone()
+    }
+}
+
+/// The shared MCP toggle flow (jcode-base `mcp_toggle`) talks to the registry
+/// through this trait so the toggle logic stays crate-independent.
+#[async_trait::async_trait]
+impl crate::mcp::mcp_toggle::ToolRegistrar for Registry {
+    async fn register_tool(&self, name: String, tool: Arc<dyn Tool>) {
+        self.register(name, tool).await;
+    }
+
+    async fn unregister_tools_for(&self, server_prefix: &str) {
+        self.unregister_prefix(server_prefix).await;
     }
 }
 

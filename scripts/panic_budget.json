@@ -1,5 +1,5 @@
 {
-  "total": 174,
+  "total": 175,
   "tracked_files": {
     "crates/jcode-app-core/build.rs": 4,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
@@ -13,6 +13,7 @@
     "crates/jcode-app-core/src/tool/compile_remote.rs": 2,
     "crates/jcode-app-core/src/tool/computer/win.rs": 3,
     "crates/jcode-app-core/src/tool/discover.rs": 1,
+    "crates/jcode-app-core/src/tool/mcp.rs": 1,
     "crates/jcode-app-core/src/tool/mod.rs": 1,
     "crates/jcode-app-core/src/tool/sdk.rs": 1,
     "crates/jcode-app-core/src/tool/todo.rs": 1,

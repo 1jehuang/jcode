@@ -1695,6 +1695,14 @@ impl App {
                 self.observe_tool_result(&tc, &output, is_error, tool_title.as_deref());
                 self.note_tool_completed(&tc, is_error);
                 self.note_todo_gate_result(&tc, &output, is_error);
+
+                // The mcp tool can toggle connect/disconnect/enable/disable,
+                // changing which servers are live. Refresh the cached server
+                // list so the info widget updates immediately (local path).
+                if tc.name == "mcp" {
+                    self.refresh_mcp_server_names().await;
+                }
+
                 let _ = self.session.save();
             }
 

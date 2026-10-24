@@ -12,7 +12,7 @@ use crate::bus::{Bus, BusEvent, LoginCompleted, ToolEvent, ToolStatus};
 use crate::compaction::CompactionEvent;
 use crate::config::config;
 use crate::id;
-use crate::mcp::McpManager;
+use crate::mcp::{McpConfig, McpManager};
 use crate::message::{
     ContentBlock, Message, Role, StreamEvent, TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition,
 };
@@ -1163,6 +1163,10 @@ pub struct App {
     resize_redraw_pending: bool,
     // Cached MCP server names and tool counts (updated on connect/disconnect)
     mcp_server_names: Vec<(String, usize)>,
+    // Cached MCP config snapshot for slash-command autocomplete and local commands.
+    // Refresh on startup and after MCP config mutations; do not read/parse config
+    // on every keystroke.
+    mcp_config: McpConfig,
     // When the current connection phase (authenticating/connecting/waiting) began.
     // Reset on every phase change so the "suspiciously long" yellow status is
     // measured per-attempt instead of inheriting the whole-turn elapsed time

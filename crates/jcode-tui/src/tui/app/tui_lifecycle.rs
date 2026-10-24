@@ -317,6 +317,9 @@ impl App {
         }
         let display = config().display.clone();
         let features = config().features.clone();
+        let mcp_config = crate::mcp::McpConfig::load_for_dir(
+            session.working_dir.as_deref().map(std::path::Path::new),
+        );
         let autoreview_enabled = session
             .autoreview_enabled
             .unwrap_or(config().autoreview.enabled);
@@ -443,6 +446,7 @@ impl App {
             last_resize_redraw: None,
             resize_redraw_pending: false,
             mcp_server_names: Vec::new(),
+            mcp_config,
             connection_phase_started: None,
             stream_buffer: StreamBuffer::new(),
             thinking_start: None,
@@ -776,6 +780,9 @@ impl App {
         session.ensure_initial_session_context_message();
         let display = config().display.clone();
         let features = config().features.clone();
+        let mcp_config = crate::mcp::McpConfig::load_for_dir(
+            session.working_dir.as_deref().map(std::path::Path::new),
+        );
         let autoreview_enabled = session
             .autoreview_enabled
             .unwrap_or(config().autoreview.enabled);
@@ -932,6 +939,7 @@ impl App {
             last_resize_redraw: None,
             resize_redraw_pending: false,
             mcp_server_names: Vec::new(), // Vec<(name, tool_count)>
+            mcp_config,
             connection_phase_started: None,
             stream_buffer: StreamBuffer::new(),
             thinking_start: None,
