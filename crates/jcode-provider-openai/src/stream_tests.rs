@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn cache_response_evidence_records_native_diagnosis_without_response_contents() {
+    let response = serde_json::json!({
+        "id": "resp_private_identifier", "model": "gpt-6.1-sol", "service_tier": "default",
+        "usage": {"input_tokens": 30743, "input_tokens_details": {"cached_tokens": 20096}},
+        "output": [{"content": "PRIVATE_PROMPT"}],
+        "prompt_cache_diagnostics": {
+            "type": "cache_miss", "reason": "service_tier_changed",
+            "comparison_reusable_tokens": 30379, "cache_missed_tokens": 10283,
+            "private_detail": "PRIVATE_PROVIDER_DATA"
+        }
+    });
+    let evidence = cache_response_evidence(&response);
+    assert!(evidence["response_id_hash"].as_u64().is_some());
+    assert_eq!(evidence["model"], "gpt-6.1-sol");
+    assert_eq!(evidence["service_tier"], "default");
+    assert_eq!(evidence["input_tokens"], 30743);
+    assert_eq!(evidence["cached_tokens"], 20096);
+    assert_eq!(evidence["diagnostic_type"], "cache_miss");
+    assert_eq!(evidence["diagnostic_reason"], "service_tier_changed");
+    assert_eq!(evidence["comparison_reusable_tokens"], 30379);
+    assert_eq!(evidence["cache_missed_tokens"], 10283);
+    let serialized = evidence.to_string();
+    for private in [
+        "resp_private_identifier",
+        "PRIVATE_PROMPT",
+        "PRIVATE_PROVIDER_DATA",
+    ] {
+        assert!(!serialized.contains(private));
+    }
+}
+
+#[test]
+fn cache_response_evidence_does_not_invent_missing_or_malformed_metadata() {
+    let evidence = cache_response_evidence(&serde_json::json!({
+        "model": "invalid\nlog entry", "service_tier": "x".repeat(129),
+        "usage": {"input_tokens": -1, "input_tokens_details": {"cached_tokens": "20096"}},
+        "prompt_cache_diagnostics": {
+            "type": "unknown PRIVATE_DATA", "reason": "unknown PRIVATE_DATA",
+            "comparison_reusable_tokens": -10, "cache_missed_tokens": "10283"
+        }
+    }));
+    assert!(evidence.as_object().unwrap().values().all(Value::is_null));
+    let missing = cache_response_evidence(&serde_json::json!({}));
+    assert!(missing.as_object().unwrap().values().all(Value::is_null));
+}
+
+#[test]
 fn service_tier_metadata_is_provider_reported_and_precedes_completion() {
     for kind in ["response.created", "response.completed"] {
         for tier in ["default", "priority", "ultrafast"] {
