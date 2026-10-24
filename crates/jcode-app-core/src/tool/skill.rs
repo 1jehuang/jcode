@@ -198,7 +198,14 @@ impl SkillTool {
             output
         };
 
-        append_endorsed_skills(&mut output, &installed);
+        let hidden: std::collections::HashSet<&str> = registry
+            .list()
+            .into_iter()
+            .filter(|s| s.disable_model_invocation)
+            .map(|s| s.name.as_str())
+            .collect();
+
+        append_endorsed_skills(&mut output, &installed, &hidden);
 
         Ok(ToolOutput::new(output).with_title("Skills: List"))
     }
@@ -320,9 +327,18 @@ impl SkillTool {
 
 /// Append the curated jcode-endorsed skill catalog to `output`, grouped by
 /// category and marked with installed/not-installed status. `installed` is the
-/// set of skill names currently loaded in the registry.
-fn append_endorsed_skills(output: &mut String, installed: &std::collections::HashSet<&str>) {
-    let endorsed = crate::skill::endorsed_skills();
+/// set of skill names currently loaded in the registry. Catalog entries named in
+/// `hidden` (loaded skills that set `disable-model-invocation`) are omitted, so
+/// they are neither advertised as not installed nor given an install hint.
+fn append_endorsed_skills(
+    output: &mut String,
+    installed: &std::collections::HashSet<&str>,
+    hidden: &std::collections::HashSet<&str>,
+) {
+    let endorsed: Vec<_> = crate::skill::endorsed_skills()
+        .iter()
+        .filter(|e| !hidden.contains(e.name))
+        .collect();
     if endorsed.is_empty() {
         return;
     }
@@ -331,7 +347,7 @@ fn append_endorsed_skills(output: &mut String, installed: &std::collections::Has
 
     // Group by category, preserving first-seen order.
     let mut category_order: Vec<&str> = Vec::new();
-    for skill in endorsed {
+    for skill in &endorsed {
         if !category_order.contains(&skill.category) {
             category_order.push(skill.category);
         }
@@ -700,6 +716,57 @@ mod tests {
                 result.output
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_disable_model_invocation_endorsed_skill_is_not_advertised_by_catalog() {
+        let name = "frontend-design";
+        assert!(
+            crate::skill::endorsed_skills()
+                .iter()
+                .any(|e| e.name == name),
+            "{name} must be an endorsed catalog skill for this test"
+        );
+        let tool = create_test_tool();
+        let repo = tempfile::tempdir().unwrap();
+        write_manual_only_project_skill(repo.path(), name);
+
+        let result = tool
+            .execute(
+                json!({"action": "list"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !result.output.contains(&format!("/{name}")),
+            "list must not show a catalog entry for a disable-model-invocation skill, got: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains(&format!("--skill {name}")),
+            "list must not suggest installing a disable-model-invocation skill, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("/optimization [not installed]")
+                || result.output.contains("/optimization [installed]"),
+            "other endorsed skills must still be listed, got: {}",
+            result.output
+        );
+
+        let registry = tool.effective_registry(Some(repo.path())).await;
+        let input = format!("/{name} build a settings page");
+        let invocation = registry
+            .resolve_invocation(&input)
+            .expect("explicit user invocation must resolve");
+        assert_eq!(invocation.name, name);
+        assert_eq!(invocation.prompt, Some("build a settings page"));
+        let prompt = registry
+            .get(invocation.name)
+            .expect("explicit user invocation must find the hidden skill")
+            .get_prompt();
+        assert!(prompt.contains("Manual body."), "{prompt}");
     }
 
     #[tokio::test]
