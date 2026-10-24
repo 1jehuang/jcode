@@ -187,7 +187,7 @@ fn received_429_is_cached_without_waiting_for_error_body() {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut bytes = [0; 4096];
-            stream.read(&mut bytes).await.unwrap();
+            let _n = stream.read(&mut bytes).await.unwrap();
             stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 62\r\nContent-Length: 10000\r\nConnection: close\r\n\r\n").await.unwrap();
             std::future::pending::<()>().await;
         });
@@ -213,7 +213,7 @@ fn aborted_http_body_read_persists_backoff() {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut bytes = [0; 4096];
-            stream.read(&mut bytes).await.unwrap();
+            let _n = stream.read(&mut bytes).await.unwrap();
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 10000\r\n\r\n").await.unwrap();
             let _ = sent.send(());
             std::future::pending::<()>().await;

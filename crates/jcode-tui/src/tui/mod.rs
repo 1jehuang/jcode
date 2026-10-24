@@ -2069,6 +2069,7 @@ pub struct PickerEntry {
     pub is_current: bool,
     pub is_default: bool,
     pub is_favorite: bool,
+    pub is_memory_model: bool,
     pub recommended: bool,
     pub recommendation_rank: usize,
     pub usage_score: u32,

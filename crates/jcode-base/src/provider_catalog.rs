@@ -12,8 +12,7 @@ pub const MINIMAX_CHINA_SETUP_URL: &str = "https://platform.minimaxi.com/docs/ll
 
 mod profile_credentials;
 pub use profile_credentials::{
-    load_openai_compatible_profile_api_key, load_runtime_api_key,
-    openai_compatible_profile_is_configured,
+    load_openai_compatible_profile_api_key, openai_compatible_profile_is_configured,
 };
 
 pub fn api_base_uses_localhost(raw: &str) -> bool {

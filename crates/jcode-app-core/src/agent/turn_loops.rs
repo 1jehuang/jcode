@@ -875,15 +875,6 @@ impl Agent {
                     usage_cache_read,
                     usage_cache_creation,
                 );
-                let output = usage_output.unwrap_or(0);
-                let total = self
-                    .effective_context_tokens_from_usage(
-                        usage_input.unwrap_or(0),
-                        usage_cache_read,
-                        usage_cache_creation,
-                    )
-                    .saturating_add(output);
-                crate::session_metrics::record_token_usage(&self.session.id, total, output);
             }
 
             if print_output

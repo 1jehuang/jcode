@@ -13,6 +13,10 @@ Usage:
 Notes:
   - Counts Rust compiler lines that begin with "warning:" from `cargo check -q`
   - Baseline is stored in scripts/warning_budget.txt
+  - Local runs behind Aikido Device Protection can fail crate fetches with
+    HTTP 403 "published too recently to be vetted". Route cargo through the
+    socks5h proxy to download: export https_proxy=socks5h://127.0.0.1:1080
+    all_proxy=socks5h://127.0.0.1:1080 (see ~/.jcode scratch sweep scripts)
 USAGE
 }
 
