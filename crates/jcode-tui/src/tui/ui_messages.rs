@@ -508,6 +508,92 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
     out
 }
 
+/// KV cache notices describe the response directly above them, so render
+/// them as a dim `╰` corner hanging off that response rather than a
+/// standalone notice that reads as a header for what follows.
+fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'static>>> {
+    let content = msg.content.trim();
+    let body = content
+        .trim_start_matches("⚠️")
+        .trim_start_matches("ℹ️")
+        .trim_start();
+    if !(body.starts_with("KV cache miss") || body.starts_with("KV cache refresh")) {
+        return None;
+    }
+    let warn = content.starts_with("⚠️");
+    let summary = kv_cache_footer_summary(body);
+    let body = summary.as_deref().unwrap_or(body);
+    let prefix = "╰ ";
+    let max = (width as usize).saturating_sub(prefix.len() + 1).max(1);
+    let text = if unicode_width::UnicodeWidthStr::width(body) > max {
+        let mut out = String::new();
+        let mut used = 0;
+        for ch in body.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + w + 1 > max {
+                break;
+            }
+            used += w;
+            out.push(ch);
+        }
+        out.push('…');
+        out
+    } else {
+        body.to_string()
+    };
+    let color = if warn {
+        system_message_color()
+    } else {
+        dim_color()
+    };
+    Some(vec![Line::from(vec![
+        Span::styled(prefix, Style::default().fg(dim_color())),
+        Span::styled(text, Style::default().fg(color)),
+    ])])
+}
+
+fn parse_kv_token_count(s: &str) -> Option<f64> {
+    let s = s.trim().trim_start_matches('~');
+    let (num, mult) = match s.chars().last()? {
+        'K' | 'k' => (&s[..s.len() - 1], 1e3),
+        'M' | 'm' => (&s[..s.len() - 1], 1e6),
+        _ => (s, 1.0),
+    };
+    num.replace(',', "").parse::<f64>().ok().map(|n| n * mult)
+}
+
+/// `19K KV cache miss · provider switch · 60% hit` from the full
+/// notice text. Returns None when the notice is not in a recognized shape.
+fn kv_cache_footer_summary(body: &str) -> Option<String> {
+    let kind = if body.starts_with("KV cache refresh") {
+        "KV cache refresh"
+    } else {
+        "KV cache miss"
+    };
+    let reason = body
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(r, _)| r.trim().to_string())?;
+    let missed = body
+        .split_once('~')
+        .and_then(|(_, rest)| rest.split_once(" tokens"))
+        .map(|(n, _)| n.trim().to_string());
+    let hit = body.split_once(" cached / ").and_then(|(before, after)| {
+        let cached = parse_kv_token_count(before.rsplit(' ').next()?)?;
+        let expected = parse_kv_token_count(after.split(' ').next()?)?;
+        (expected > 0.0).then(|| ((cached / expected) * 100.0).round().clamp(0.0, 100.0))
+    });
+    let lead = match missed {
+        Some(missed) => format!("{missed} {kind}"),
+        None => kind.to_string(),
+    };
+    let mut parts = vec![lead, reason];
+    if let Some(hit) = hit {
+        parts.push(format!("{hit:.0}% hit"));
+    }
+    Some(parts.join(" · "))
+}
+
 pub(crate) fn render_system_message(
     msg: &DisplayMessage,
     width: u16,
@@ -565,6 +651,9 @@ pub(crate) fn render_system_message(
         return markdown::wrap_lines(lines, width.max(1) as usize);
     }
     if let Some(lines) = render_scheduled_session_message(msg, width) {
+        return lines;
+    }
+    if let Some(lines) = render_kv_cache_footer(msg, width) {
         return lines;
     }
     // Routine notices occupy one row regardless of compact_notifications.
@@ -4884,3 +4973,14 @@ fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
 #[cfg(test)]
 #[path = "ui_messages/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod kv_cache_footer_tests {
+    #[test]
+    fn summarizes_miss_reason_missed_and_hit_pct() {
+        let s = super::kv_cache_footer_summary(
+            "KV cache miss [provider switch] turn 3 call 2: 28.6K cached / 47.6K expected tokens: ~19.0K tokens resent (x). See KV_CACHE_USAGE in logs.",
+        );
+        assert_eq!(s.as_deref(), Some("19.0K KV cache miss · provider switch · 60% hit"));
+    }
+}
