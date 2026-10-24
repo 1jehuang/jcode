@@ -21,8 +21,8 @@ pub(super) async fn execute_with_background(
         _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET) => {
             let info = crate::background::global().adopt(&name, &session_id, work).await;
             Ok(crate::tool::ToolOutput::new(format!(
-                "Tool '{}' was moved to background automatically after 3 seconds (task_id: {}). Use the `bg` tool with action 'wait' to wait for completion/checkpoints, or action 'status'/'output' to inspect it.",
-                name, info.task_id
+                "Tool '{}' was moved to background automatically after 3 seconds (task_id: {}).\n\n{}",
+                name, info.task_id, crate::tool::BACKGROUND_WAIT_GUIDANCE
             )))
         }
     }
@@ -1931,10 +1931,11 @@ impl Agent {
                         "by the user"
                     };
                     let bg_msg = format!(
-                        "Tool '{}' was moved to background {} (task_id: {}). \
-                         Use the `bg` tool with action 'wait' to wait for completion/checkpoints, \
-                         or action 'status'/'output' to inspect it.",
-                        tc.name, reason, bg_info.task_id
+                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
+                        tc.name,
+                        reason,
+                        bg_info.task_id,
+                        crate::tool::BACKGROUND_WAIT_GUIDANCE
                     );
 
                     let _ = event_tx.send(ServerEvent::ToolDone {

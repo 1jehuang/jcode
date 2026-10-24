@@ -80,6 +80,12 @@ async fn foreground_budget_promotes_slow_search_without_cancelling_it() {
     assert_eq!(metadata["timeout_promoted"], true);
     assert_eq!(metadata["foreground_timeout_ms"], 1);
     assert!(output.output.contains("continuing in background"));
+    assert!(
+        output
+            .output
+            .contains(crate::tool::BACKGROUND_WAIT_GUIDANCE)
+    );
+    assert!(!output.output.contains("Use `bg"));
 
     // The adopted handle must remain alive after the foreground call returns.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

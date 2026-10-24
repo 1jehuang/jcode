@@ -344,22 +344,24 @@ async fn await_or_background_search(
                 )
                 .await;
             Ok(ToolOutput::new(format!(
-                    "Search is still running after 5s and is continuing in background.\n\n\
+                "Search is still running after 5s and is continuing in background.\n\n\
                      Task ID: {}\n\
                      Name: {}\n\n\
-                     Use `bg` with action=\"wait\" and task_id=\"{}\" to wait for completion, or action=\"output\" to inspect its output.",
-                    info.task_id, display_name, info.task_id,
-                ))
-                .with_title(display_name.clone())
-                .with_metadata(json!({
-                    "background": true,
-                    "task_id": info.task_id,
-                    "display_name": display_name,
-                    "output_file": info.output_file.to_string_lossy(),
-                    "status_file": info.status_file.to_string_lossy(),
-                    "timeout_promoted": true,
-                    "foreground_timeout_ms": foreground_budget.as_millis(),
-                })))
+                     {}",
+                info.task_id,
+                display_name,
+                super::BACKGROUND_WAIT_GUIDANCE,
+            ))
+            .with_title(display_name.clone())
+            .with_metadata(json!({
+                "background": true,
+                "task_id": info.task_id,
+                "display_name": display_name,
+                "output_file": info.output_file.to_string_lossy(),
+                "status_file": info.status_file.to_string_lossy(),
+                "timeout_promoted": true,
+                "foreground_timeout_ms": foreground_budget.as_millis(),
+            })))
         }
     }
 }

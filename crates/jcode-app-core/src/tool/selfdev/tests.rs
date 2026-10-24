@@ -835,6 +835,10 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
         .await
         .expect("second build should queue");
 
+    for output in [&first.output, &second.output] {
+        assert!(output.contains(crate::tool::BACKGROUND_WAIT_GUIDANCE));
+        assert!(!output.contains("Use `bg"));
+    }
     let first_meta = first.metadata.expect("first metadata");
     let second_meta = second.metadata.expect("second metadata");
     let first_task_id = first_meta["task_id"].as_str().expect("first task id");
