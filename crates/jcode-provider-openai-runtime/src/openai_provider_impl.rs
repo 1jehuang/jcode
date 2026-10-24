@@ -57,6 +57,18 @@ impl Provider for OpenAIProvider {
             .clone()
     }
 
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        if let Some(label) = self.oauth_account_label() {
+            return Some(label);
+        }
+        let credentials = self.credentials.try_read().ok()?;
+        if !Self::is_chatgpt_mode(&credentials) || self.is_browser_only() {
+            return None;
+        }
+        let accounts = jcode_base::auth::codex::list_accounts().ok()?;
+        jcode_base::auth::codex::account_label_for_credentials(&accounts, &credentials)
+    }
+
     fn active_oauth_account_email(&self) -> Option<String> {
         let credentials = match self.credentials.try_read() {
             Ok(credentials) => credentials,
@@ -307,7 +319,10 @@ impl Provider for OpenAIProvider {
                 ),
             ],
         );
-        let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
+        let usage_diag = match self.credentials.try_read() {
+            Ok(credentials) => super::openai_stream_runtime::serving_account_diag(&credentials).0,
+            Err(_) => "account=unknown (credentials busy)".to_string(),
+        };
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Info,
             "request_start",
@@ -351,7 +366,7 @@ impl Provider for OpenAIProvider {
             model_id,
             transport_mode_snapshot.as_str(),
             use_websocket_transport,
-            usage_snapshot.diagnostic_fields(),
+            usage_diag,
             self.diagnostic_state_summary()
         ));
 

@@ -170,6 +170,62 @@ pub fn get_openai_usage_sync() -> OpenAIUsageData {
     OpenAIUsageData::default()
 }
 
+static OPENAI_LABEL_REFRESH_IN_FLIGHT: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+/// Usage for one saved OpenAI account, by label. Never blocks: reads the
+/// label-scoped cache and, when stale, refreshes that account in the
+/// background. Use this for the account a request actually authenticates
+/// as, not `get_openai_usage_sync`, which follows the global active login.
+pub fn get_openai_usage_for_label_sync(label: &str) -> OpenAIUsageData {
+    let label = label.trim().to_string();
+    if label.is_empty() {
+        return OpenAIUsageData::default();
+    }
+    let key = openai_usage_cache_key("", Some(&label));
+    let snapshot = openai_usage_cache()
+        .try_lock()
+        .ok()
+        .and_then(|map| map.get(&key).cloned());
+    let stale = snapshot.as_ref().is_none_or(OpenAIUsageData::is_stale);
+    if stale && let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let in_flight = OPENAI_LABEL_REFRESH_IN_FLIGHT.get_or_init(Default::default);
+        if in_flight
+            .lock()
+            .is_ok_and(|mut labels| labels.insert(label.clone()))
+        {
+            runtime.spawn(async move {
+                if let Some(account) = auth::codex::list_accounts()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|account| account.label == label)
+                {
+                    let creds = auth::codex::CodexCredentials {
+                        access_token: account.access_token,
+                        refresh_token: account.refresh_token,
+                        id_token: account.id_token,
+                        account_id: account.account_id,
+                        expires_at: account.expires_at,
+                    };
+                    let _ = fetch_openai_usage_for_account(
+                        "OpenAI (ChatGPT)".into(),
+                        creds,
+                        Some(&label),
+                    )
+                    .await;
+                }
+                if let Ok(mut labels) = in_flight.lock() {
+                    labels.remove(&label);
+                }
+            });
+        }
+    }
+    snapshot
+        .map(|data| data.display_snapshot())
+        .unwrap_or_default()
+}
+
 #[derive(Default)]
 struct EmailScopedOpenAiUsage {
     generation: u64,

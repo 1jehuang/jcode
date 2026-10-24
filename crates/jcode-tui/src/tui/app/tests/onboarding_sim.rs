@@ -119,17 +119,16 @@ fn rehearsal_telemetry_choice_is_not_saved() {
         write_fake_gemini_cli_login();
         let mut app = create_test_app();
         app.start_onboarding_simulator();
-        let before = crate::tui::app::onboarding_flow::TelemetryLevel::current();
+        let before = crate::telemetry::category_settings();
 
-        // Open telemetry settings, pick "Send nothing".
+        // Open telemetry settings, uncheck everything, Continue.
         app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE)
             .unwrap();
-        app.handle_key(KeyCode::Down, KeyModifiers::NONE).unwrap();
-        app.handle_key(KeyCode::Down, KeyModifiers::NONE).unwrap();
+        app.handle_key(KeyCode::Char('n'), KeyModifiers::NONE).unwrap();
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE).unwrap();
 
         assert_eq!(
-            crate::tui::app::onboarding_flow::TelemetryLevel::current(),
+            crate::telemetry::category_settings(),
             before
         );
         let marker = std::path::Path::new(&std::env::var_os("JCODE_HOME").unwrap())

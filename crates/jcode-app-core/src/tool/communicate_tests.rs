@@ -520,7 +520,7 @@ fn canonical_swarm_action_maps_common_synonyms() {
     assert_eq!(canonical_swarm_action("read_messages"), "read");
     assert_eq!(canonical_swarm_action("send"), "message");
     assert_eq!(canonical_swarm_action("msg"), "message");
-    assert_eq!(canonical_swarm_action("direct_message"), "dm");
+    assert_eq!(canonical_swarm_action("direct_message"), "message");
     assert_eq!(canonical_swarm_action("announce"), "broadcast");
     assert_eq!(canonical_swarm_action("agents"), "list");
     assert_eq!(canonical_swarm_action("plan"), "plan_status");
@@ -538,7 +538,7 @@ fn canonical_swarm_action_is_case_insensitive_and_trims() {
 fn canonical_swarm_action_passes_through_known_and_unknown_actions() {
     // Real actions are unchanged.
     assert_eq!(canonical_swarm_action("spawn"), "spawn");
-    assert_eq!(canonical_swarm_action("dm"), "dm");
+    assert_eq!(canonical_swarm_action("dm"), "message");
     assert_eq!(canonical_swarm_action("assign_role"), "assign_role");
     // Genuinely unknown actions are returned unchanged for normal validation.
     assert_eq!(canonical_swarm_action("totally_made_up"), "totally_made_up");
@@ -784,7 +784,7 @@ fn schema_still_requires_action() {
 }
 
 #[test]
-fn schema_advertises_model_and_effort_spawn_overrides() {
+fn schema_advertises_model_override_but_not_effort() {
     let schema = CommunicateTool::new().parameters_schema();
     let props = schema["properties"]
         .as_object()
@@ -798,11 +798,9 @@ fn schema_advertises_model_and_effort_spawn_overrides() {
             .contains("list_models"),
         "model param should point at the list_models action"
     );
-    assert!(props.contains_key("effort"));
-    assert_eq!(
-        props["effort"]["enum"],
-        json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
-    );
+    // Worker effort is user-configured (`agents.swarm_effort`, default low),
+    // never chosen by the coordinating agent.
+    assert!(!props.contains_key("effort"));
     assert!(
         schema["properties"]["action"]["enum"]
             .as_array()
@@ -1036,7 +1034,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
     assert!(output.contains("Configured agents.swarm_model default: openai-api:gpt-5.5"));
     assert!(output.contains("gpt-5.5 via OpenAI [openai-api-key] (API key)"));
     assert!(output.contains("claude-fable-5 via Anthropic [anthropic-api-key] [unavailable]"));
-    assert!(output.contains("effort"));
+    assert!(!output.contains("pass effort"));
 }
 
 #[test]
@@ -1049,135 +1047,93 @@ fn format_swarm_model_list_handles_empty_catalog() {
 }
 
 #[test]
-fn schema_advertises_supported_swarm_fields() {
+fn schema_advertises_a_lean_lane_first_action_set() {
     let schema = CommunicateTool::new().parameters_schema();
     let props = schema["properties"]
         .as_object()
         .expect("swarm schema should have properties");
-
-    assert!(props.contains_key("action"));
-    assert!(props.contains_key("key"));
-    assert!(props.contains_key("value"));
-    assert!(props.contains_key("message"));
-    assert!(props.contains_key("to_session"));
-    assert_eq!(
-        props["to_session"]["description"],
-        json!("Session ID or unique friendly name of one agent. Alias of target_session.")
-    );
-    assert!(props.contains_key("channel"));
-    assert!(props.contains_key("proposer_session"));
-    assert!(props.contains_key("reason"));
-    assert!(props.contains_key("target_session"));
-    assert_eq!(
-        props["target_session"]["description"],
-        json!("Session ID or unique friendly name for management actions. Alias of to_session.")
-    );
-    assert!(props.contains_key("role"));
-    assert!(props.contains_key("prompt"));
-    assert!(props.contains_key("working_dir"));
-    assert!(props.contains_key("limit"));
-    assert!(props.contains_key("task_id"));
-    assert!(props.contains_key("spawn_if_needed"));
-    assert!(props.contains_key("prefer_spawn"));
-    assert!(props.contains_key("session_ids"));
-    assert!(props.contains_key("mode"));
-    assert_eq!(props["mode"]["enum"], json!(["all", "any"]));
-    for removed in ["node_id", "gate_id", "nodes", "artifact"] {
-        assert!(!props.contains_key(removed), "{removed} should be gone");
+    let actions: Vec<&str> = schema["properties"]["action"]["enum"]
+        .as_array()
+        .expect("action enum")
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    for kept in [
+        "launch",
+        "spawn",
+        "message",
+        "report",
+        "status",
+        "plan_status",
+        "list",
+        "summary",
+        "await_members",
+        "stop",
+        "resume",
+        "retry",
+        "list_models",
+    ] {
+        assert!(
+            actions.contains(&kept),
+            "{kept} should be offered: {actions:?}"
+        );
     }
-    let actions = schema["properties"]["action"]["enum"].to_string();
-    for removed in ["task_graph", "expand_node", "complete_node", "inject_gap"] {
-        assert!(!actions.contains(removed), "{removed} should be gone");
+    for hidden in [
+        "propose_plan",
+        "approve_plan",
+        "reject_plan",
+        "assign_task",
+        "assign_next",
+        "fill_slots",
+        "run_plan",
+        "resync_plan",
+        "share",
+        "read",
+        "start_task",
+        "salvage",
+        "subscribe_channel",
+        "task_graph",
+    ] {
+        assert!(!actions.contains(&hidden), "{hidden} should not be offered");
     }
-    assert!(props.contains_key("target_status"));
-    assert!(props.contains_key("timeout_minutes"));
-    assert!(props.contains_key("concurrency_limit"));
-    assert!(props.contains_key("wake"));
-    assert!(props.contains_key("delivery"));
-    assert!(props.contains_key("plan_items"));
-    assert!(props.contains_key("initial_message"));
-    assert!(props.contains_key("force"));
-    assert!(props.contains_key("retain_agents"));
-    assert!(props.contains_key("background"));
     assert!(
-        props["background"]["description"]
-            .as_str()
-            .expect("background description")
-            .contains("run_plan"),
-        "background flag should document run_plan support"
+        actions.len() <= 16,
+        "keep the swarm tool small: {actions:?}"
     );
-    assert!(props.contains_key("notify"));
-    assert!(props.contains_key("status"));
-    assert!(props.contains_key("validation"));
-    assert!(props.contains_key("follow_up"));
-    assert_eq!(
-        props["delivery"]["enum"],
-        json!(["notify", "interrupt", "wake"])
-    );
-    assert_eq!(
-        props["plan_items"]["items"]["additionalProperties"],
-        json!(true)
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("status"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("report"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("plan_status"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("start"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("start_task"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("assign_next"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("fill_slots"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("run_plan"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("cleanup"))
-    );
-    assert!(
-        schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .contains(&json!("salvage"))
-    );
+    for kept in [
+        "message",
+        "to_session",
+        "target_session",
+        "channel",
+        "label",
+        "phase",
+        "prompt",
+        "model",
+        "session_ids",
+        "background",
+        "concurrency_limit",
+        "retain_agents",
+        "delivery",
+        "wake",
+        "status",
+        "validation",
+        "follow_up",
+    ] {
+        assert!(props.contains_key(kept), "{kept} param should be offered");
+    }
+    for dropped in [
+        "key",
+        "value",
+        "proposer_session",
+        "reason",
+        "role",
+        "plan_items",
+    ] {
+        assert!(
+            !props.contains_key(dropped),
+            "{dropped} belongs to hidden actions"
+        );
+    }
 }
 
 struct EnvGuard {

@@ -438,7 +438,8 @@ pub struct TodoItem {
     /// Optional group label. Todos that share a group are displayed together
     /// under a single header. Use one group per coherent goal; when work is
     /// steered into a new area, start a new group instead of renaming.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also accepted as `lane`: the lane this todo belongs to.
+    #[serde(default, alias = "lane", skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     /// Forward-looking evidence state that this todo can be completed
     /// correctly. Legacy sessions stored a 0-100 score; numbers map onto the
@@ -458,34 +459,59 @@ pub struct TodoItem {
     pub confidence_history: Vec<ConfidenceState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assigned_to: Option<String>,
-    /// Optional execution wave. Todos that share a wave are independent and
-    /// may run in parallel; a later wave starts only after earlier waves
-    /// finish. `None` means "sequential in list order". Deliberately a plain
-    /// number instead of id-based dependencies so a model cannot create
-    /// cycles or dangling references.
+    /// Existing background task IDs in this session. Dependencies block only
+    /// while running, never after completion (including failure/cancellation).
+    /// An empty array or null clears dependencies.
     #[serde(
         default,
-        deserialize_with = "deserialize_optional_wave",
+        deserialize_with = "deserialize_waiting_on",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub waiting_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_to: Option<String>,
+    /// Optional execution stage. Stages run in order: stage 2 starts only
+    /// after every todo in stage 1 is done. Inside a stage, todos that share a
+    /// `group` form one lane that runs in list order, and different lanes run
+    /// in parallel. `None` means "sequential in list order". Deliberately a
+    /// plain number instead of id-based dependencies so a model cannot create
+    /// cycles or dangling references. Older sessions stored this as `wave`.
+    #[serde(
+        default,
+        alias = "wave",
+        alias = "phase",
+        deserialize_with = "deserialize_optional_stage",
         skip_serializing_if = "Option::is_none"
     )]
-    pub wave: Option<u32>,
+    pub stage: Option<u32>,
+    /// Optional longer brief: file paths, acceptance criteria, context. Never
+    /// drawn on the todo card (which shows only the short `content` title),
+    /// but appended to a swarm worker's assignment so short titles do not
+    /// starve workers of context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
 }
 
-/// Accept `2`, `2.0`, `"2"`, `"wave 2"`, `""`, or `null` for a todo wave.
+fn deserialize_waiting_on<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Accept `2`, `2.0`, `"2"`, `"stage 2"`, `""`, or `null` for a todo stage.
 /// Zero and unparseable values read as absent rather than failing the whole
-/// todo write, so a sloppy wave can never cost the model its plan.
-fn deserialize_optional_wave<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+/// todo write, so a sloppy stage can never cost the model its plan.
+fn deserialize_optional_stage<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| parse_wave_value(&value)))
+    Ok(value.and_then(|value| parse_stage_value(&value)))
 }
 
-pub fn parse_wave_value(value: &serde_json::Value) -> Option<u32> {
-    let wave = match value {
+pub fn parse_stage_value(value: &serde_json::Value) -> Option<u32> {
+    let stage = match value {
         serde_json::Value::Number(n) => n
             .as_u64()
             .or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f.round() as u64)),
@@ -500,7 +526,7 @@ pub fn parse_wave_value(value: &serde_json::Value) -> Option<u32> {
         }
         _ => None,
     }?;
-    u32::try_from(wave).ok().filter(|wave| *wave > 0)
+    u32::try_from(stage).ok().filter(|stage| *stage > 0)
 }
 
 /// Plan-level understanding of what the user actually wants, covering the
@@ -706,6 +732,37 @@ pub struct CatchupBrief {
 #[cfg(test)]
 mod semantic_state_tests {
     use super::*;
+
+    #[test]
+    fn todo_waiting_on_is_backward_compatible_and_nullable() {
+        let old =
+            serde_json::json!({"id":"a", "content":"A", "status":"pending", "priority":"high"});
+        let todo: TodoItem = serde_json::from_value(old.clone()).unwrap();
+        assert!(todo.waiting_on.is_empty());
+        assert!(
+            serde_json::to_value(&todo)
+                .unwrap()
+                .get("waiting_on")
+                .is_none()
+        );
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!(["task-a"]),
+        ] {
+            let mut payload = old.clone();
+            payload["waiting_on"] = value.clone();
+            let todo: TodoItem = serde_json::from_value(payload).unwrap();
+            assert_eq!(
+                todo.waiting_on,
+                if value.is_null() {
+                    vec![]
+                } else {
+                    serde_json::from_value::<Vec<String>>(value).unwrap()
+                }
+            );
+        }
+    }
 
     #[test]
     fn states_serialize_as_snake_case_strings() {

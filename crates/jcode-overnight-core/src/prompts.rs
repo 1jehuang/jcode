@@ -108,7 +108,7 @@ Operating contract:
 - Avoid taste-based work, vague product decisions, broad rewrites, risky migrations, payments, sending email, pushing to remotes, deleting data, or other external side effects unless explicitly allowed by the user.
 - If a bug is found, reproduce/prove it before fixing it.
 - Only fix issues that are important, bounded, and verifiable. Otherwise draft a high-quality issue in `{issue_drafts}`.
-- You own the run. Spawn swarm/helper agents only if the expected value exceeds usage/resource cost. Default to one coordinator plus at most one helper. Read-only scouts/verifiers are preferred over multiple editors.
+- You own the run. Spawn swarm/helper agents only if the expected value exceeds usage/resource cost. Default to one coordinator plus at most one helper. Helpers should implement scoped, verifiable changes with clear file ownership. Do not spawn reviewer, auditor, or verifier agents. Verify helper work yourself.
 - Be aware of RAM/load/battery, especially around compiles, browser automation, indexing, and full test suites. Do not run multiple heavy activities at once unless resources are clearly healthy.
 - Do not wait for the user. If you need user judgment/credentials/taste, record it and switch to another useful task.
 - Continue finding useful verified work until the target wake/report time unless usage/resources make that unreasonable.
@@ -170,7 +170,7 @@ Operating contract:
 - Do not wait for the user. If you need user judgment/credentials/taste, record it and switch to another useful task.
 - Optimize for verified, low-risk progress. Prefer objective bugs, repros, regression tests, bounded quality fixes, and clear validation.
 - Avoid broad rewrites, taste-based decisions, risky migrations, payments, sending email, pushing to remotes, deleting data, or external side effects unless explicitly allowed.
-- Spawn helper/swarm agents only when valuable, and keep their work headed/visible from this session. Prefer read-only scouts/verifiers over many editors.
+- Spawn helper/swarm agents only when valuable, and keep their work headed/visible from this session. Use helpers for scoped implementation work, not reviewers, auditors, or verifiers. Verify their work yourself.
 - Watch RAM/load/battery and avoid concurrent heavy builds or tests unless resources are clearly healthy.
 
 Review/log requirements:

@@ -3,15 +3,17 @@
 //! The todo list is the single source of truth for what the coordinator is
 //! doing. Two directions:
 //!
-//! * Todos -> plan: [`plan_items_from_todos`] turns open todos into plan items.
-//!   Waves become dependency stages, so the model never writes `blocked_by`
-//!   ids by hand (no cycles, no dangling references).
-//! * Plan -> todos: [`link_assignment`] and [`sync_task_status`] write the
-//!   worker session and task status back onto the matching todo, which drives
-//!   the agent emoji in the pinned todo band.
+//! * Todos -> plan: [`plan_items_from_todos`] turns each lane of open todos
+//!   into one plan item (`lane:<stage>:<group>`), so one agent owns a lane.
+//!   Stages become dependencies, so the model never writes `blocked_by` ids.
+//! * Assignment: [`link_assignment`] tags the lane's todos with the worker and
+//!   seeds the worker's own todo list with the lane. From then on every save
+//!   on either side mirrors into the other (see `todo::link_worker_lane`).
+//! * Plan -> todos: [`sync_plan`] completes a lane's todos when its plan item
+//!   completes.
 //!
-//! Matching is by id first, then by trimmed case-insensitive content, so a
-//! plan proposed by hand still lights up the matching todo.
+//! Hand-written plan items (not `lane:` ids) still match todos by id, then by
+//! trimmed case-insensitive content.
 
 use crate::plan::PlanItem;
 use crate::todo::TodoItem;
@@ -20,39 +22,65 @@ fn is_open(todo: &TodoItem) -> bool {
     !matches!(todo.status.as_str(), "completed" | "cancelled")
 }
 
-/// Convert open todos into swarm plan items.
+use crate::todo::stages::{LANE_ID_PREFIX, lane_id};
+
+fn is_lane_task(task_id: &str) -> bool {
+    task_id.starts_with(LANE_ID_PREFIX)
+}
+
+/// Convert open todos into swarm plan items: one item per lane.
 ///
-/// Consecutive todos that share a `wave` form one stage; a todo without a wave
-/// is a stage of its own. Every item depends on all items of the previous
-/// stage, which gives "wave 2 starts after wave 1" without exposing ids to the
-/// model. Completed and cancelled todos are skipped and never block anything.
+/// Layout comes from [`crate::todo::stages::stage_layout`]: stages run in
+/// order, and inside a stage each group is a lane. A whole lane is one plan
+/// item, so one agent owns it end to end and keeps its context; that agent's
+/// own todo list is the lane. Every lane waits for every lane of the previous
+/// stage. The model never writes ids (no cycles, no dangling references).
+/// Completed and cancelled todos are skipped; a lane with nothing open is
+/// skipped and never blocks.
 pub(crate) fn plan_items_from_todos(todos: &[TodoItem]) -> Vec<PlanItem> {
+    let open: Vec<&TodoItem> = todos.iter().filter(|todo| is_open(todo)).collect();
     let mut items = Vec::new();
     let mut previous_stage: Vec<String> = Vec::new();
-    let mut current_stage: Vec<String> = Vec::new();
-    let mut current_wave: Option<u32> = None;
-    let mut first = true;
-
-    for todo in todos.iter().filter(|todo| is_open(todo)) {
-        let continues_stage = !first && todo.wave.is_some() && todo.wave == current_wave;
-        if !continues_stage && !first {
-            previous_stage = std::mem::take(&mut current_stage);
+    for stage in crate::todo::stages::stage_layout(&open) {
+        let mut this_stage = Vec::new();
+        for lane in &stage.lanes {
+            let lane_todos: Vec<&TodoItem> = lane.items.iter().map(|&i| open[i]).collect();
+            let first = lane_todos[0];
+            let id = lane_id(first);
+            let content = match &lane.group {
+                Some(group) => format!(
+                    "{group}: {}",
+                    lane_todos
+                        .iter()
+                        .map(|todo| todo.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => first.content.clone(),
+            };
+            items.push(PlanItem {
+                content,
+                status: "queued".to_string(),
+                priority: first.priority.clone(),
+                id: id.clone(),
+                subsystem: lane.group.clone(),
+                file_scope: Vec::new(),
+                blocked_by: previous_stage.clone(),
+                assigned_to: None,
+            });
+            this_stage.push(id);
         }
-        first = false;
-        current_wave = todo.wave;
-        current_stage.push(todo.id.clone());
-        items.push(PlanItem {
-            content: todo.content.clone(),
-            status: "queued".to_string(),
-            priority: todo.priority.clone(),
-            id: todo.id.clone(),
-            subsystem: todo.group.clone(),
-            file_scope: Vec::new(),
-            blocked_by: previous_stage.clone(),
-            assigned_to: None,
-        });
+        previous_stage = this_stage;
     }
     items
+}
+
+/// The coordinator's open todos that make up plan lane `task_id`, in order.
+fn lane_todos_mut<'a>(todos: &'a mut [TodoItem], task_id: &str) -> Vec<&'a mut TodoItem> {
+    todos
+        .iter_mut()
+        .filter(|todo| is_open(todo) && lane_id(todo) == task_id)
+        .collect()
 }
 
 fn normalize(text: &str) -> String {
@@ -93,6 +121,18 @@ pub(crate) fn apply_assignment(
     content: &str,
     worker_session: &str,
 ) -> bool {
+    if is_lane_task(task_id) {
+        // The worker owns the whole lane; its own todo list drives each
+        // item's status, so only the owner is recorded here.
+        let mut changed = false;
+        for todo in lane_todos_mut(todos, task_id) {
+            if todo.assigned_to.as_deref() != Some(worker_session) {
+                todo.assigned_to = Some(worker_session.to_string());
+                changed = true;
+            }
+        }
+        return changed;
+    }
     let Some(todo) = find_todo(todos, task_id, content) else {
         return false;
     };
@@ -120,6 +160,17 @@ pub(crate) fn apply_task_status(
     content: &str,
     plan_status: &str,
 ) -> bool {
+    if is_lane_task(task_id) {
+        if !crate::plan::is_completed_status(plan_status) {
+            return false;
+        }
+        let mut changed = false;
+        for todo in lane_todos_mut(todos, task_id) {
+            todo.status = "completed".to_string();
+            changed = true;
+        }
+        return changed;
+    }
     let Some(todo) = find_todo(todos, task_id, content) else {
         return false;
     };
@@ -128,6 +179,58 @@ pub(crate) fn apply_task_status(
         return true;
     }
     false
+}
+
+/// Extra context for a worker's assignment message.
+///
+/// For a lane, the worker's own todo list has just been set to the lane, so
+/// the brief lists those todos with their details and the editing rules. For
+/// a hand-written plan item, it is that todo's `details`.
+pub(crate) fn assignment_brief(
+    coordinator_session: &str,
+    task_id: &str,
+    content: &str,
+) -> Option<String> {
+    let mut todos = crate::todo::load_todos(coordinator_session).ok()?;
+    if !is_lane_task(task_id) {
+        return details_for(&mut todos, task_id, content);
+    }
+    let lane = crate::todo::stages::lane_todos_for_worker(&todos, task_id);
+    if lane.is_empty() {
+        return None;
+    }
+    Some(lane_brief(&lane))
+}
+
+fn lane_brief(lane: &[TodoItem]) -> String {
+    let mut brief = String::from(
+        "Your todo list is this lane, in order. It stays in sync with the coordinator: \
+         update it with the todo tool as you work (mark items in progress and done, add \
+         details, split or add steps). Keep to this lane; message the coordinator for \
+         anything outside it.\n",
+    );
+    for todo in lane {
+        brief.push_str(&format!("- [{}] {}", todo.status, todo.content));
+        if let Some(details) = todo
+            .details
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            brief.push_str(&format!(": {details}"));
+        }
+        brief.push('\n');
+    }
+    brief.trim_end().to_string()
+}
+
+fn details_for(todos: &mut [TodoItem], task_id: &str, content: &str) -> Option<String> {
+    find_todo(todos, task_id, content)?
+        .details
+        .as_deref()
+        .map(str::trim)
+        .filter(|details| !details.is_empty())
+        .map(str::to_string)
 }
 
 fn update_todos(session_id: &str, update: impl FnOnce(&mut Vec<TodoItem>) -> bool) {
@@ -155,6 +258,14 @@ pub(crate) fn link_assignment(
     update_todos(coordinator_session, |todos| {
         apply_assignment(todos, task_id, content, worker_session)
     });
+    if is_lane_task(task_id)
+        && let Err(error) =
+            crate::todo::link_worker_lane(coordinator_session, worker_session, task_id)
+    {
+        crate::logging::warn(&format!(
+            "swarm todo link: failed to seed {worker_session} with {task_id}: {error}"
+        ));
+    }
 }
 
 /// Pure whole-plan reconcile: complete todos whose plan item is done and
@@ -163,8 +274,14 @@ pub(crate) fn apply_plan(todos: &mut [TodoItem], items: &[PlanItem]) -> bool {
     let mut changed = false;
     for item in items {
         if let Some(worker) = item.assigned_to.as_deref() {
-            let already = find_todo(todos, &item.id, &item.content)
-                .is_some_and(|todo| todo.assigned_to.is_some());
+            let already = if is_lane_task(&item.id) {
+                lane_todos_mut(todos, &item.id)
+                    .iter()
+                    .all(|todo| todo.assigned_to.as_deref() == Some(worker))
+            } else {
+                find_todo(todos, &item.id, &item.content)
+                    .is_some_and(|todo| todo.assigned_to.is_some())
+            };
             if !already {
                 changed |= apply_assignment(todos, &item.id, &item.content, worker);
             }
@@ -188,15 +305,21 @@ pub(crate) fn sync_plan(coordinator_session: &str, items: &[PlanItem]) {
 mod tests {
     use super::*;
 
-    fn todo(id: &str, status: &str, wave: Option<u32>) -> TodoItem {
+    fn todo(id: &str, status: &str, stage: Option<u32>) -> TodoItem {
         TodoItem {
             id: id.to_string(),
             content: format!("task {id}"),
             status: status.to_string(),
             priority: "high".to_string(),
-            wave,
+            stage,
             ..Default::default()
         }
+    }
+
+    fn laned(id: &str, stage: u32, group: &str) -> TodoItem {
+        let mut item = todo(id, "pending", Some(stage));
+        item.group = Some(group.to_string());
+        item
     }
 
     fn deps(items: &[PlanItem]) -> Vec<(String, Vec<String>)> {
@@ -212,12 +335,40 @@ mod tests {
             plan_items_from_todos(&[todo("a", "pending", None), todo("b", "pending", None)]);
         assert_eq!(
             deps(&items),
-            vec![("a".into(), vec![]), ("b".into(), vec!["a".to_string()])]
+            vec![
+                ("lane:todo:a".into(), vec![]),
+                ("lane:todo:b".into(), vec!["lane:todo:a".to_string()])
+            ]
         );
     }
 
     #[test]
-    fn waves_become_stages_and_completed_todos_are_skipped() {
+    fn each_lane_is_one_item_and_stages_chain() {
+        let items = plan_items_from_todos(&[
+            laned("p1", 1, "parser"),
+            laned("u1", 1, "ui"),
+            laned("p2", 1, "parser"),
+            laned("i1", 2, "integration"),
+            laned("i2", 2, "integration"),
+            laned("r1", 2, "release"),
+        ]);
+        let stage_one = vec!["lane:1:parser".to_string(), "lane:1:ui".to_string()];
+        assert_eq!(
+            deps(&items),
+            vec![
+                ("lane:1:parser".into(), vec![]),
+                ("lane:1:ui".into(), vec![]),
+                ("lane:2:integration".into(), stage_one.clone()),
+                ("lane:2:release".into(), stage_one),
+            ]
+        );
+        // One agent gets the whole lane, so the item names every step.
+        assert_eq!(items[0].content, "parser: task p1, task p2");
+        assert_eq!(items[0].subsystem.as_deref(), Some("parser"));
+    }
+
+    #[test]
+    fn stages_order_and_completed_todos_are_skipped() {
         let items = plan_items_from_todos(&[
             todo("done", "completed", Some(1)),
             todo("a", "pending", Some(1)),
@@ -226,16 +377,41 @@ mod tests {
             todo("d", "pending", Some(3)),
             todo("x", "cancelled", Some(3)),
         ]);
+        let lane = |id: &str| format!("lane:todo:{id}");
         assert_eq!(
             deps(&items),
             vec![
-                ("a".into(), vec![]),
-                ("b".into(), vec!["a".to_string()]),
-                ("c".into(), vec!["a".to_string()]),
-                ("d".into(), vec!["b".to_string(), "c".to_string()]),
+                (lane("a"), vec![]),
+                (lane("b"), vec![lane("a")]),
+                (lane("c"), vec![lane("a")]),
+                (lane("d"), vec![lane("b"), lane("c")]),
             ]
         );
         assert!(items.iter().all(|item| item.status == "queued"));
+    }
+
+    #[test]
+    fn details_reach_the_matching_todo_only() {
+        let mut todos = vec![todo("a", "pending", None), todo("b", "pending", None)];
+        todos[0].details = Some("  Edit src/x.rs; keep API stable.  ".into());
+        assert_eq!(
+            details_for(&mut todos, "a", "task a").as_deref(),
+            Some("Edit src/x.rs; keep API stable.")
+        );
+        assert_eq!(details_for(&mut todos, "b", "task b"), None);
+        todos[1].details = Some("   ".into());
+        assert_eq!(details_for(&mut todos, "b", "task b"), None);
+    }
+
+    #[test]
+    fn plain_plan_items_keep_details_brief() {
+        let mut todos = vec![todo("plain", "pending", None)];
+        todos[0].details = Some("Edit src/a.rs only.".into());
+        assert!(!is_lane_task("plain"));
+        assert_eq!(
+            details_for(&mut todos, "plain", "task plain").as_deref(),
+            Some("Edit src/a.rs only.")
+        );
     }
 
     #[test]
@@ -270,19 +446,73 @@ mod tests {
     }
 
     #[test]
-    fn plan_reconcile_links_and_completes_idempotently() {
-        let mut todos = vec![todo("a", "pending", Some(1)), todo("b", "pending", Some(1))];
+    fn plan_reconcile_links_lanes_and_completes_idempotently() {
+        let mut todos = vec![
+            laned("p1", 1, "parser"),
+            laned("p2", 1, "parser"),
+            laned("u1", 1, "ui"),
+        ];
         let mut items = plan_items_from_todos(&todos);
         items[0].assigned_to = Some("session_fox_1".into());
         items[0].status = "done".into();
         items[1].assigned_to = Some("session_ox_2".into());
         items[1].status = "running".into();
         assert!(apply_plan(&mut todos, &items));
+        // A finished lane completes every todo in it, owned by one worker.
         assert_eq!(todos[0].status, "completed");
+        assert_eq!(todos[1].status, "completed");
         assert_eq!(todos[0].assigned_to.as_deref(), Some("session_fox_1"));
-        assert_eq!(todos[1].status, "in_progress");
-        assert_eq!(todos[1].assigned_to.as_deref(), Some("session_ox_2"));
+        assert_eq!(todos[1].assigned_to.as_deref(), Some("session_fox_1"));
+        // A running lane's status is driven by the worker's own todo list,
+        // so assignment only records the owner.
+        assert_eq!(todos[2].status, "pending");
+        assert_eq!(todos[2].assigned_to.as_deref(), Some("session_ox_2"));
         assert!(!apply_plan(&mut todos, &items), "second pass is a no-op");
+    }
+
+    #[test]
+    fn lane_plan_resyncs_from_todos_keeping_running_state() {
+        let mut todos = vec![laned("p1", 1, "parser"), laned("u1", 1, "ui")];
+        let mut plan = plan_items_from_todos(&todos);
+        plan[0].status = "running".into();
+        plan[0].assigned_to = Some("session_fox_1".into());
+        // A lane added mid-run shows up; the running lane keeps its state.
+        todos.push(laned("d1", 1, "docs"));
+        let next = resync_lane_plan(&todos, &plan).expect("plan changed");
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["lane:1:parser", "lane:1:ui", "lane:1:docs"]);
+        assert_eq!(next[0].status, "running");
+        assert_eq!(next[0].assigned_to.as_deref(), Some("session_fox_1"));
+        // Same todos again: nothing to do.
+        assert_eq!(resync_lane_plan(&todos, &next), None);
+        // A finished lane leaving the open todos is kept as done.
+        let mut done = next.clone();
+        done[1].status = "done".into();
+        todos.retain(|t| t.id != "u1");
+        let after = resync_lane_plan(&todos, &done).expect("plan changed");
+        assert!(
+            after
+                .iter()
+                .any(|i| i.id == "lane:1:ui" && i.status == "done")
+        );
+        // Hand-written plans are left alone.
+        let mut hand = plan.clone();
+        hand[0].id = "custom".into();
+        assert_eq!(resync_lane_plan(&todos, &hand), None);
+    }
+
+    #[test]
+    fn lane_brief_lists_steps_with_details_and_rules() {
+        let mut todos = vec![laned("p1", 1, "parser"), laned("p2", 1, "parser")];
+        todos[1].details = Some("touch src/lexer.rs".into());
+        let lane = crate::todo::stages::lane_todos_for_worker(&todos, "lane:1:parser");
+        let brief = lane_brief(&lane);
+        assert!(brief.starts_with("Your todo list is this lane"), "{brief}");
+        assert!(brief.contains("- [pending] task p1\n"), "{brief}");
+        assert!(
+            brief.ends_with("- [pending] task p2: touch src/lexer.rs"),
+            "{brief}"
+        );
     }
 
     #[test]
@@ -335,4 +565,68 @@ mod tests {
         apply_plan(&mut todos, &items);
         assert_eq!(todos[0].status, "completed");
     }
+}
+
+/// Re-derive a lane plan from the coordinator's todos, keeping the status and
+/// owner of lanes already in `existing`. `None` when `existing` is not a lane
+/// plan (hand-written plans stay authoritative) or nothing changed.
+pub(crate) fn resync_lane_plan(todos: &[TodoItem], existing: &[PlanItem]) -> Option<Vec<PlanItem>> {
+    if existing.is_empty() || !existing.iter().all(|item| is_lane_task(&item.id)) {
+        return None;
+    }
+    let mut items = plan_items_from_todos(todos);
+    for item in &mut items {
+        if let Some(previous) = existing.iter().find(|previous| previous.id == item.id) {
+            item.status = previous.status.clone();
+            item.assigned_to = previous.assigned_to.clone();
+        }
+    }
+    // Keep finished lanes that dropped out of the open todos, so a completed
+    // lane is not forgotten and its dependants stay satisfied.
+    for previous in existing {
+        if !items.iter().any(|item| item.id == previous.id)
+            && crate::plan::is_completed_status(&previous.status)
+        {
+            items.push(previous.clone());
+        }
+    }
+    (items.as_slice() != existing).then_some(items)
+}
+
+/// Keep a running lane plan mirroring the coordinator's todo list on every
+/// todo save, so lanes added or reshaped mid-run are picked up without a
+/// relaunch. Returns the swarm id when the plan changed.
+pub(crate) async fn resync_plan_after_todo_save(
+    session_id: &str,
+    todos: &[TodoItem],
+    swarm_members: &std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, super::SwarmMember>>,
+    >,
+    swarm_plans: &std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, super::VersionedPlan>>,
+    >,
+    swarm_coordinators: &std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    >,
+) -> Option<String> {
+    let swarm_id = swarm_members
+        .read()
+        .await
+        .get(session_id)
+        .and_then(|member| member.swarm_id.clone())?;
+    if swarm_coordinators
+        .read()
+        .await
+        .get(&swarm_id)
+        .map(String::as_str)
+        != Some(session_id)
+    {
+        return None;
+    }
+    let mut plans = swarm_plans.write().await;
+    let plan = plans.get_mut(&swarm_id)?;
+    let items = resync_lane_plan(todos, &plan.items)?;
+    plan.replace_items(items);
+    plan.version += 1;
+    Some(swarm_id)
 }

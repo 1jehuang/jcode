@@ -119,6 +119,7 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.auto_poke_attempts = 0;
     app.last_todo_ownership_fingerprint = None;
     app.todo_gate_digest_delivered = false;
     cleared
@@ -252,6 +253,7 @@ pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.auto_poke_attempts = 0;
     app.last_todo_ownership_fingerprint = None;
     // Re-arming starts a fresh review cycle, so the deferred quality digest is
     // eligible to be delivered again for the upcoming work.
@@ -368,7 +370,12 @@ pub(super) fn create_transfer_session_from_parent(
     parent: &crate::session::Session,
     compaction: Option<crate::session::StoredCompactionState>,
 ) -> anyhow::Result<(String, String)> {
-    let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
+    let mut todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
+    // Background task IDs belong to the parent session. Transfer the work,
+    // not foreign dependencies, and leave the parent's durable todos intact.
+    for todo in &mut todos {
+        todo.waiting_on.clear();
+    }
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
     child.compaction = compaction;
@@ -1692,6 +1699,16 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if super::commands_cloud::parse_cloud_command(trimmed).is_some() {
         let session_id = active_session_id(app);
+        if matches!(
+            super::commands_cloud::parse_cloud_command(trimmed),
+            Some(super::commands_cloud::CloudCommand::Move { .. })
+        ) && let Err(error) = app.session.save_prepared()
+        {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Could not save this session before moving it: {error}. Nothing moved."
+            )));
+            return true;
+        }
         super::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
         return true;
     }
@@ -2749,7 +2766,7 @@ pub(super) fn incomplete_poke_todos(app: &App) -> Vec<crate::todo::TodoItem> {
 }
 
 pub(super) fn build_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
-    crate::todo::build_auto_poke_message(incomplete.len())
+    crate::todo::build_actionable_poke_message(incomplete)
 }
 
 fn todo_confidence_weight(priority: &str) -> u32 {
@@ -2821,14 +2838,6 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
         confidence_spike_detected,
         needs_more_work,
     }
-}
-
-pub(super) fn format_todo_completion_confidence(summary: TodoConfidenceSummary) -> String {
-    summary
-        .completion_average
-        .map(crate::todo::ConfidenceState::from_legacy_score)
-        .map(|state| state.as_str().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {
@@ -3028,6 +3037,59 @@ fn handle_show_agentgrep_output_command(app: &mut App, trimmed: &str) -> bool {
         ))),
     }
 
+    true
+}
+
+pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = slash_command_rest(trimmed, "/latex") else {
+        return false;
+    };
+    let arg = rest.trim();
+
+    let current = crate::config::config().display.latex_rendering;
+    if arg.is_empty() || arg.eq_ignore_ascii_case("status") {
+        app.push_display_message(DisplayMessage::system(format!(
+            "LaTeX rendering: {} (use /latex [on|off|none|unicode|image|status])\n\n  none    - keep raw $...$ source\n  unicode - terminal-friendly text math\n  image   - typeset PNG per formula (needs latex+dvipng or pdflatex+pdftocairo)",
+            current.as_str()
+        )));
+        return true;
+    }
+
+    let mode = match arg.to_ascii_lowercase().as_str() {
+        "on" => Some(crate::config::LatexRenderingMode::Image),
+        "off" => Some(crate::config::LatexRenderingMode::Unicode),
+        _ => crate::config::LatexRenderingMode::parse(arg),
+    };
+    let Some(mode) = mode else {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /latex [on|off|none|unicode|image|status]".to_string(),
+        ));
+        return true;
+    };
+
+    match crate::config::Config::set_latex_rendering(mode) {
+        Ok(()) => {
+            let effective = crate::config::config().display.latex_rendering;
+            app.set_status_notice(format!("LaTeX rendering: {}", effective.as_str()));
+            let override_note = if effective != mode {
+                " JCODE_LATEX_RENDERING overrides the saved mode."
+            } else {
+                ""
+            };
+            app.push_display_message(DisplayMessage::system(format!(
+                "Saved LaTeX rendering: {}. Effective mode: {}.{}",
+                mode.as_str(),
+                effective.as_str(),
+                override_note
+            )))
+        }
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Failed to set LaTeX rendering to {}: {}. Nothing changed; the session keeps {}.",
+            mode.as_str(),
+            error,
+            crate::config::config().display.latex_rendering.as_str()
+        ))),
+    }
     true
 }
 
@@ -3896,8 +3958,8 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-/// `/telemetry [everything|no-prompts|nothing]` - show or change the same
-/// three-way telemetry level offered by the onboarding "Telemetry settings"
+/// `/telemetry [all|none|<category> on|off]` - show or change the same
+/// per-category telemetry choices offered by the onboarding "Telemetry settings"
 /// page, so the promise made there ("change this later with /telemetry") holds.
 pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/telemetry") else {
@@ -3913,39 +3975,64 @@ pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
-    use crate::tui::app::onboarding_flow::TelemetryLevel;
-    let arg = rest.trim().to_ascii_lowercase();
-    let level = match arg.as_str() {
-        "" => {
-            let current = TelemetryLevel::current();
-            let detail = match current {
-                TelemetryLevel::Everything => {
-                    "Sending usage stats, provider account email, crash reports, prompts, and transcripts. Thank you."
-                }
-                TelemetryLevel::NoContent => {
-                    "Sending usage stats, provider account email, and crash reports. No prompts or transcripts."
-                }
-                TelemetryLevel::Nothing => "Sending nothing.",
-            };
-            app.push_display_message(DisplayMessage::system(format!(
-                "{detail}\nChange it with /telemetry everything | no-prompts | nothing."
-            )));
-            app.set_status_notice(current.status_label());
-            return true;
-        }
-        "everything" | "all" => TelemetryLevel::Everything,
-        "no-prompts" | "no-content" | "usage" => TelemetryLevel::NoContent,
-        "nothing" | "off" | "none" => TelemetryLevel::Nothing,
-        other => {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Unknown telemetry level \"{other}\". Use everything, no-prompts, or nothing."
-            )));
-            return true;
-        }
+    use crate::telemetry::TelemetryCategory;
+    use crate::tui::app::onboarding_flow::status_label_for;
+    let args: Vec<String> = rest
+        .split_whitespace()
+        .map(|a| a.to_ascii_lowercase())
+        .collect();
+    let mut checked = crate::telemetry::category_settings();
+    let parse_on = |v: &str| match v {
+        "on" | "yes" | "true" | "1" => Some(true),
+        "off" | "no" | "false" | "0" => Some(false),
+        _ => None,
     };
-    level.persist();
-    app.push_display_message(DisplayMessage::system(level.status_label().to_string()));
-    app.set_status_notice(level.status_label());
+    let usage = "Usage: /telemetry [all|none] or /telemetry <category> on|off. Categories: content, usage, crashes, features, cost, accounts.";
+    match args.as_slice() {
+        [] => {
+            let mut text = String::from("Telemetry settings:\n");
+            for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
+                text.push_str(&format!(
+                    "  [{}] {} ({}): {}\n",
+                    if checked[i] { "x" } else { " " },
+                    category.label(),
+                    category.key(),
+                    category.caption()
+                ));
+            }
+            if crate::telemetry::opt_out_forced_by_env() {
+                text.push_str("Your environment disables all telemetry (JCODE_NO_TELEMETRY / DO_NOT_TRACK).\n");
+            }
+            text.push_str(usage);
+            app.push_display_message(DisplayMessage::system(text));
+            app.set_status_notice(status_label_for(checked));
+            return true;
+        }
+        [all] if matches!(all.as_str(), "all" | "everything" | "on") => checked = [true; 6],
+        [none] if matches!(none.as_str(), "none" | "nothing" | "off") => checked = [false; 6],
+        [all, value] if all == "all" && parse_on(value).is_some() => {
+            checked = [parse_on(value).unwrap_or(false); 6]
+        }
+        [key, value] => match (TelemetryCategory::from_key(key), parse_on(value)) {
+            (Some(category), Some(on)) => {
+                if let Some(i) = TelemetryCategory::ALL.iter().position(|c| *c == category) {
+                    checked[i] = on;
+                }
+            }
+            _ => {
+                app.push_display_message(DisplayMessage::error(usage.to_string()));
+                return true;
+            }
+        },
+        _ => {
+            app.push_display_message(DisplayMessage::error(usage.to_string()));
+            return true;
+        }
+    }
+    crate::telemetry::set_category_settings(checked);
+    let label = status_label_for(checked);
+    app.push_display_message(DisplayMessage::system(label.clone()));
+    app.set_status_notice(label);
     true
 }
 

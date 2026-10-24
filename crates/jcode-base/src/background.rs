@@ -35,8 +35,8 @@ use model::{
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
-    /// Serializes progress status read-modify-write cycles so concurrent output
-    /// readers cannot overwrite a newer high-water mark with a stale update.
+    /// Serializes status updates, including completion and delivery flag capture,
+    /// so stale Running snapshots cannot replace terminal status.
     progress_updates: Arc<Mutex<()>>,
     /// Live stall watchdogs by task id. Each entry is a spawned monitor that
     /// fires a [`BusEvent::BackgroundTaskStalled`] after its task produces no
@@ -489,6 +489,7 @@ impl BackgroundTaskManager {
         let started_at = Instant::now();
         let started_at_rfc3339_for_task = started_at_rfc3339.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
+        let status_updates = Arc::clone(&self.progress_updates);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -512,6 +513,7 @@ impl BackgroundTaskManager {
                 Err(e) => (BackgroundTaskStatus::Failed, None, Some(e.to_string())),
             };
 
+            let status_guard = status_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
             let prior_status = tokio::fs::read_to_string(&status_path_clone)
                 .await
@@ -562,6 +564,7 @@ impl BackgroundTaskManager {
             // rely on. Awaiting registration first means a task that finishes
             // instantly cannot race the insert below and leave a permanent
             // phantom entry in the map.
+            drop(status_guard);
             let _ = registered_rx.await;
             tasks_for_prune.write().await.remove(&task_id_clone);
 
@@ -648,6 +651,7 @@ impl BackgroundTaskManager {
         wake: bool,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
+        let mut handle = model::AbortAdoptedTask(handle);
         // Reserve before the foreground caller can release its turn/tool guard.
         let runtime_activity = crate::runtime_activity::global().enter().await;
         let (notify, wake) = normalize_delivery(notify, wake);
@@ -702,12 +706,12 @@ impl BackgroundTaskManager {
         let started_at_rfc3339 = initial_status.started_at.clone();
         let display_name_owned = initial_status.display_name.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
+        let status_updates = Arc::clone(&self.progress_updates);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
-
         let wrapper_handle = tokio::spawn(async move {
             let _runtime_activity = runtime_activity;
-            let tool_result = handle.await;
+            let tool_result = (&mut handle.0).await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
             let (status, exit_code, error, output_text) = match tool_result {
@@ -735,6 +739,7 @@ impl BackgroundTaskManager {
                 let _ = file.write_all(output_text.as_bytes()).await;
             }
 
+            let status_guard = status_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
             let prior_status = tokio::fs::read_to_string(&status_path_clone)
                 .await
@@ -779,6 +784,7 @@ impl BackgroundTaskManager {
             // Prune the live-map entry only after the terminal status file is
             // persisted (and after registration below, so instant completions
             // cannot race the insert and leave a phantom entry).
+            drop(status_guard);
             let _ = registered_rx.await;
             tasks_for_prune.write().await.remove(&task_id_clone);
 
@@ -1140,6 +1146,7 @@ impl BackgroundTaskManager {
     /// Returns the effective (clamped) window, or `None` when the task does
     /// not exist or is no longer running.
     pub async fn arm_stall_watchdog(&self, task_id: &str, stall_wake_seconds: u64) -> Option<u64> {
+        let status_guard = self.progress_updates.lock().await;
         let stall_wake_seconds = stall_wake_seconds.max(Self::MIN_STALL_WAKE_SECONDS);
         let status_path = self.status_path_for(task_id);
         let mut status = self.read_status_file(&status_path).await?;
@@ -1148,6 +1155,7 @@ impl BackgroundTaskManager {
         }
         status.stall_wake_seconds = Some(stall_wake_seconds);
         self.write_status_file(&status_path, &status).await;
+        drop(status_guard);
 
         let task_id_owned = task_id.to_string();
         let output_path = self.output_path_for(task_id);
@@ -1269,6 +1277,7 @@ impl BackgroundTaskManager {
         if let Some(handle) = removed {
             handle.abort();
         }
+        let _status_guard = self.progress_updates.lock().await;
         let status_path = self.status_path_for(task_id);
         if let Some(mut status) = self.read_status_file(&status_path).await
             && status.stall_wake_seconds.is_some()
@@ -1289,6 +1298,7 @@ impl BackgroundTaskManager {
         notify: bool,
         wake: bool,
     ) -> Result<Option<TaskStatusFile>> {
+        let _status_guard = self.progress_updates.lock().await;
         let (notify, wake) = normalize_delivery(notify, wake);
         let status_path = self.status_path_for(task_id);
         let Some(mut status) = self.read_status_file(&status_path).await else {
@@ -1332,9 +1342,13 @@ impl BackgroundTaskManager {
         task_id: &str,
         _graceful_timeout: std::time::Duration,
     ) -> Result<bool> {
-        let mut tasks = self.tasks.write().await;
-        if let Some(task) = tasks.remove(task_id) {
+        // Never hold the map or status lock while awaiting the task: completion
+        // needs both locks before it can exit.
+        let task = self.tasks.write().await.remove(task_id);
+        if let Some(mut task) = task {
             task.handle.abort();
+            let _ = (&mut task.handle).await;
+            let _status_guard = self.progress_updates.lock().await;
 
             // Update status file
             let (notify_flag, wake_flag) = *task.delivery_flags.borrow();
@@ -1372,7 +1386,7 @@ impl BackgroundTaskManager {
 
             Ok(true)
         } else {
-            drop(tasks);
+            let _status_guard = self.progress_updates.lock().await;
 
             let status_path = self.status_path_for(task_id);
             let Some(mut status) = self.read_status_file(&status_path).await else {

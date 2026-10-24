@@ -378,6 +378,12 @@ impl Agent {
         self.session.provider_key = provider_key;
     }
 
+    /// Persist the session immediately, including a fresh one with no
+    /// messages, so other processes can load it by id.
+    pub fn persist_session_now(&mut self) -> Result<()> {
+        self.session.save_prepared()
+    }
+
     /// Bookmark or unbookmark the session, returning the effective label.
     pub fn set_session_saved(
         &mut self,

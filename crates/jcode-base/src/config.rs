@@ -29,6 +29,28 @@ const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
 
 #[cfg(test)]
 #[test]
+fn kagi_websearch_documented_config_parses() {
+    let docs = include_str!("../../../docs/kagi-web-search.md");
+    let example = docs
+        .split("```toml\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let config: Config = toml::from_str(example).unwrap();
+    assert_eq!(config.websearch.engine, WebSearchEngine::Kagi);
+    assert!(!config.websearch.native_enabled());
+    assert!(config.websearch.fallback_engines.is_empty());
+    assert_eq!(config.websearch.kagi_api_key_env, "KAGI_API_KEY");
+    let encoded = toml::to_string(&config.websearch).unwrap();
+    let decoded: WebSearchConfig = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded.engine, WebSearchEngine::Kagi);
+    assert_eq!(decoded.kagi_api_key_env, "KAGI_API_KEY");
+}
+
+#[cfg(test)]
+#[test]
 fn custom_websearch_config_toml_roundtrip() {
     let input = r#"
 engine = "custom"
@@ -720,7 +742,7 @@ impl Default for AcpConfig {
 pub enum McpToolsMode {
     /// Never change the cached tool list for MCP changes. Providers with
     /// native deferred loading (Claude, OpenAI gpt-5.4+) get MCP tools as
-    /// deferred definitions; others get the fixed `mcp_search`/`mcp_call`
+    /// deferred definitions; others get the fixed `mcp` search/call
     /// surface, with new tools described in the transcript.
     #[default]
     Auto,
@@ -774,9 +796,9 @@ pub struct ToolConfig {
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
-    /// Opt-in Codemode: expose a `codemode` tool that runs model-written
+    /// Codemode: expose a `codemode` tool that runs model-written
     /// JavaScript in an embedded QuickJS sandbox able to call every other
-    /// tool (including MCP tools). Off by default.
+    /// tool (including MCP tools). Enabled by default.
     pub codemode: bool,
 }
 
@@ -789,7 +811,7 @@ impl Default for ToolConfig {
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
-            codemode: false,
+            codemode: true,
         }
     }
 }
@@ -854,7 +876,6 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "replace",
                     "apply_patch",
                     "agentgrep",
                     "ls",
@@ -872,7 +893,6 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "replace",
                     "apply_patch",
                     "agentgrep",
                     "ls",

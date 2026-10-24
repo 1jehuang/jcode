@@ -106,6 +106,10 @@ fn remote_oauth_widget_usage(
     };
     UsageInfo {
         provider,
+        account_hint: snapshot
+            .email
+            .as_deref()
+            .map(crate::tui::app::helpers::mask_email),
         primary_limit_label: snapshot.five_hour_ratio.and(snapshot.primary_label.clone()),
         five_hour: snapshot.five_hour_ratio.unwrap_or_default(),
         // The wire snapshot has one reset timestamp, belonging to the primary
@@ -475,7 +479,45 @@ impl App {
         }
     }
 
+    /// Masked email of the OAuth account this session's requests use. Comes
+    /// from the session's own credential, never the global active login.
+    fn widget_account_hint(&self, provider: WidgetProviderKind) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        let email = if self.is_remote {
+            self.remote_provider_oauth_email
+                .as_ref()
+                .map(|email| email.as_str().to_string())
+        } else if provider == WidgetProviderKind::OpenAI {
+            // Same lookup the local OpenAI usage path already performs.
+            self.openai_widget_account_email()
+        } else {
+            None
+        };
+        email
+            .filter(|email| !email.trim().is_empty())
+            .map(|email| crate::tui::app::helpers::mask_email(&email))
+    }
+
     fn widget_usage_info(
+        &self,
+        route: WidgetRouteInfo,
+        auth_method: crate::tui::info_widget::AuthMethod,
+    ) -> Option<crate::tui::info_widget::UsageInfo> {
+        let mut info = self.widget_usage_info_inner(route, auth_method)?;
+        if matches!(
+            info.provider,
+            crate::tui::info_widget::UsageProvider::OpenAI
+                | crate::tui::info_widget::UsageProvider::Anthropic
+        ) && let Some(hint) = self.widget_account_hint(route.provider)
+        {
+            info.account_hint = Some(hint);
+        }
+        Some(info)
+    }
+
+    fn widget_usage_info_inner(
         &self,
         route: WidgetRouteInfo,
         auth_method: crate::tui::info_widget::AuthMethod,
@@ -521,6 +563,7 @@ impl App {
             output_tps,
             limit_reached: false,
             available: true,
+            account_hint: None,
         };
 
         match route.provider {
@@ -542,6 +585,7 @@ impl App {
                 output_tps,
                 limit_reached: false,
                 available: display_input_tokens > 0 || display_output_tokens > 0,
+                account_hint: None,
             }),
             WidgetProviderKind::Anthropic => {
                 match auth_method {
@@ -590,6 +634,7 @@ impl App {
                     output_tps,
                     limit_reached: false,
                     available: usage.last_error.is_none(),
+                    account_hint: None,
                 })
             }
             WidgetProviderKind::OpenAI => {
@@ -668,6 +713,7 @@ impl App {
                     limit_reached: openai_usage.hard_limit_reached
                         || self.usage_reset.openai_quota_rejected,
                     available: openai_usage.has_limits() && openai_usage.last_error.is_none(),
+                    account_hint: None,
                 })
             }
             WidgetProviderKind::Gemini => None,
@@ -1505,28 +1551,6 @@ impl crate::tui::TuiState for App {
     }
 
     fn info_widget_data(&self) -> crate::tui::info_widget::InfoWidgetData {
-        let session_id = if self.is_remote {
-            self.remote_session_id.as_deref()
-        } else {
-            Some(self.session.id.as_str())
-        };
-
-        let todos_are_swarm_plan = self.swarm_enabled && !self.swarm_plan_items.is_empty();
-        let (todos, todo_goals) =
-            if crate::config::config().display.pin_todos && !todos_are_swarm_plan {
-                // The pinned band is the single source of truth while enabled. Do
-                // not duplicate the same session todos in a margin or overview
-                // info widget.
-                (Vec::new(), Vec::new())
-            } else if todos_are_swarm_plan {
-                (
-                    crate::tui::info_widget::swarm_plan_todos(&self.swarm_plan_items),
-                    Vec::new(),
-                )
-            } else {
-                gather_todos_and_goals_for_session(session_id)
-            };
-
         let context_snapshot = self.context_snapshot();
         let context_info = if let Some(context_info) = context_snapshot.info.clone() {
             (context_info.total_chars > 0).then_some(context_info)
@@ -1652,7 +1676,7 @@ impl crate::tui::TuiState for App {
             };
 
             // Dock data: the agents this session actually manages (spawn
-            // subtree), the shared panel selection/focus, and plan progress.
+            // subtree) and the shared panel selection/focus.
             // This is what the SwarmStatus widget renders. Computed outside
             // the activity gate: managing agents is itself "interesting".
             let managed_members = self.inline_swarm_members();
@@ -1663,22 +1687,6 @@ impl crate::tui::TuiState for App {
                 || client_count.is_some()
                 || !managed_members.is_empty()
             {
-                let plan_progress = if self.swarm_plan_items.is_empty() {
-                    None
-                } else {
-                    let total = self.swarm_plan_items.len() as u32;
-                    let done = self
-                        .swarm_plan_items
-                        .iter()
-                        .filter(|item| matches!(item.status.as_str(), "completed" | "done"))
-                        .count() as u32;
-                    let running = self
-                        .swarm_plan_items
-                        .iter()
-                        .filter(|item| matches!(item.status.as_str(), "running" | "running_stale"))
-                        .count() as u32;
-                    Some((done, running, total))
-                };
                 Some(crate::tui::info_widget::SwarmInfo {
                     session_count,
                     subagent_status,
@@ -1692,7 +1700,6 @@ impl crate::tui::TuiState for App {
                             .min(managed_members.len().saturating_sub(1))
                     },
                     focused: self.swarm_panel_focused,
-                    plan_progress,
                     spinner_frame: (self.animation_elapsed()
                         * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
                         as usize,
@@ -1828,9 +1835,6 @@ impl crate::tui::TuiState for App {
                 self.remote_startup_phase.is_some(),
                 crate::usage::remote_account_usage_received(),
             ),
-            todos,
-            todo_goals,
-            todos_are_swarm_plan,
             context_info,
             context_info_stale: !context_snapshot.fresh,
             queue_mode: Some(self.queue_mode),
@@ -1910,6 +1914,13 @@ impl crate::tui::TuiState for App {
                 false
             },
             git_info: gather_git_info(),
+            cloud_info: crate::tui::cloud_status::gather(),
+            cloud_connection: self.remote_startup_phase.as_ref().map(|phase| match phase {
+                super::RemoteStartupPhase::Reconnecting { .. } => "Reconnecting".to_string(),
+                _ => "Connecting".to_string(),
+            }),
+            cloud_working: self.is_processing,
+            dual_git_info: crate::tui::cloud_git::gather(),
             agent_edited: self.agent_edited_paths(),
         }
     }
@@ -1995,31 +2006,20 @@ impl crate::tui::TuiState for App {
     }
 
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        if self.debug_force_inline_gallery {
-            return self.remote_swarm_members.clone();
+        let mut members = self.inline_swarm_members_unticked();
+        // Server snapshots only arrive on state changes, so advance active
+        // workers' stopwatches locally to make them tick every second.
+        if let Some(received_at) = self.remote_swarm_members_received_at {
+            let since = received_at.elapsed().as_secs();
+            for member in &mut members {
+                if jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+                    && let Some(elapsed) = member.runtime.elapsed_secs.as_mut()
+                {
+                    *elapsed = elapsed.saturating_add(since);
+                }
+            }
         }
-        if !self.swarm_enabled {
-            return Vec::new();
-        }
-        // Scope the inline gallery to the subtree this session actually spawned.
-        // Other sessions can share the same swarm (e.g. same repo) without this
-        // session having spawned them; showing those would be noise. The spawn
-        // tree is reconstructed from each member's `report_back_to_session_id`
-        // parent edge.
-        let self_id = if self.is_remote {
-            self.remote_session_id.as_deref()
-        } else {
-            Some(self.session.id.as_str())
-        };
-        match self_id {
-            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
-            // Session identity is not known yet (e.g. right after connect,
-            // before the History event sets `remote_session_id`). Showing all
-            // swarm members here caused the inline strip to flash on startup
-            // and then disappear once the subtree filter kicked in. Hide the
-            // strip until we know who we are.
-            None => Vec::new(),
-        }
+        members
     }
 
     fn swarm_members_for_transcript(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
@@ -2875,5 +2875,35 @@ mod inline_swarm_subtree_tests {
             ids(filter_inline_swarm_subtree(&members, "me")),
             vec!["child"]
         );
+    }
+}
+
+impl App {
+    fn inline_swarm_members_unticked(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        if self.debug_force_inline_gallery {
+            return self.remote_swarm_members.clone();
+        }
+        if !self.swarm_enabled {
+            return Vec::new();
+        }
+        // Scope the inline gallery to the subtree this session actually spawned.
+        // Other sessions can share the same swarm (e.g. same repo) without this
+        // session having spawned them; showing those would be noise. The spawn
+        // tree is reconstructed from each member's `report_back_to_session_id`
+        // parent edge.
+        let self_id = if self.is_remote {
+            self.remote_session_id.as_deref()
+        } else {
+            Some(self.session.id.as_str())
+        };
+        match self_id {
+            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
+            // Session identity is not known yet (e.g. right after connect,
+            // before the History event sets `remote_session_id`). Showing all
+            // swarm members here caused the inline strip to flash on startup
+            // and then disappear once the subtree filter kicked in. Hide the
+            // strip until we know who we are.
+            None => Vec::new(),
+        }
     }
 }

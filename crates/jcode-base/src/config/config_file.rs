@@ -276,6 +276,18 @@ impl Config {
         Ok(())
     }
 
+    /// Update the persisted LaTeX rendering mode.
+    pub fn set_latex_rendering(mode: LatexRenderingMode) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.display.latex_rendering = mode;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.latex_rendering to config: {}",
+            mode.as_str()
+        ));
+        Ok(())
+    }
+
     /// Update the persisted tool-call-details preference.
     pub fn set_tool_call_details(show: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;

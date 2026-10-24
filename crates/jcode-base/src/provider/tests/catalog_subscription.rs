@@ -881,6 +881,31 @@ fn test_anthropic_pro_no_catalog_and_explicit_long_context_keep_legacy_gates() {
         assert_eq!(anthropic_oauth_route_availability(model), expected);
     });
 }
+#[test]
+fn test_jcode_provider_model_switch_does_not_require_openrouter_key() {
+    with_clean_provider_test_env(|| {
+        crate::env::set_var("JCODE_API_KEY", "jcode-test-subscription-key");
+        crate::env::remove_var("OPENROUTER_API_KEY");
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime.block_on(async {
+            let provider = crate::provider::jcode::JcodeProvider::new();
+            for model in ["claude-haiku-5-5", "gpt-6.1-sol", "claude-opus-5-5"] {
+                provider.set_model(model).expect("managed model switch");
+                assert_eq!(provider.model(), model);
+                assert_eq!(
+                    std::env::var("JCODE_OPENROUTER_TRANSPORT_STATE").as_deref(),
+                    Ok("jcode-subscription")
+                );
+                assert_eq!(
+                    std::env::var("JCODE_OPENROUTER_API_KEY_NAME").as_deref(),
+                    Ok("JCODE_API_KEY")
+                );
+            }
+            assert!(std::env::var_os("OPENROUTER_API_KEY").is_none());
+        });
+        crate::env::remove_var("JCODE_API_KEY");
+    });
+}
 
 /// Rendering the route catalog must never schedule network work.
 ///

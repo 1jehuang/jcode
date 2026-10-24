@@ -63,6 +63,58 @@ fn stored_refresh_token(label: &str) -> Option<String> {
 }
 
 #[tokio::test]
+async fn rejected_cached_token_does_not_block_newly_imported_account() {
+    let _sandbox = sandbox();
+    let label = seed_account("newly-imported-refresh");
+    crate::auth::codex::update_account_tokens(
+        &label,
+        "old-access",
+        "newly-imported-refresh",
+        Some("original-id-token".into()),
+        Some("original-account-id".into()),
+        Some(1),
+    )
+    .unwrap();
+    crate::auth::codex::update_account_profile(&label, Some("test@example.invalid".into()))
+        .unwrap();
+    crate::auth::refresh_state::record_permanent_rejection(
+        "openai",
+        "old-daemon-refresh",
+        "invalid_grant",
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = token_url(&listener);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut stream).await;
+        assert!(request.contains("newly-imported-refresh"));
+        assert!(!request.contains("old-daemon-refresh"));
+        let response = http_response(200, &success_body("new-access", "new-refresh"));
+        stream.write_all(response.as_bytes()).await.unwrap();
+    });
+    let tokens = refresh_openai_tokens_at(
+        &url,
+        Duration::from_secs(2),
+        "old-daemon-refresh",
+        Some(label.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(tokens.access_token, "new-access");
+    assert_eq!(stored_refresh_token(&label).as_deref(), Some("new-refresh"));
+    let account = crate::auth::codex::list_accounts()
+        .unwrap()
+        .into_iter()
+        .find(|account| account.label == label)
+        .unwrap();
+    assert_eq!(account.account_id.as_deref(), Some("original-account-id"));
+    assert_eq!(account.email.as_deref(), Some("test@example.invalid"));
+    assert_eq!(account.id_token.as_deref(), Some("original-id-token"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn refresh_deadline_bounds_withheld_headers() {
     let _sandbox = sandbox();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

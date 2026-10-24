@@ -1,4 +1,5 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+mod tool_duration;
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
@@ -50,10 +51,15 @@ include!("tests/reasoning_region.rs");
 include!("tests/smoothness_benchmark.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
+include!("tests/background_todo_dependencies.rs");
+include!("tests/todo_completion.rs");
+include!("tests/final_response_followup.rs");
+include!("tests/reload_recovery_replay.rs");
 include!("tests/issue_496_input_routing.rs");
 include!("tests/oauth_login_progress.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/keybinding_hot_reload.rs");
+include!("tests/latex_command.rs");
 include!("tests/terminal_setup_command.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
 include!("tests/issue_699_ctrl_d_delete.rs");

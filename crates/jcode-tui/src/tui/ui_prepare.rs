@@ -180,7 +180,9 @@ pub(super) fn compute_image_regions(
             // follows so a wrapped/truncated placeholder can never claim
             // non-blank lines below it.
             let available = (1 + blank_run[idx + 1]).min(u16::MAX as usize) as u16;
-            let height = rows.max(1).min(available);
+            // Zero-height markers anchor collapsed tool-image labels for
+            // click-to-expand without creating a drawable image region.
+            let height = rows.min(available);
             image_regions.push(ImageRegion {
                 abs_line_idx: idx,
                 end_line: idx + height as usize,
@@ -626,6 +628,7 @@ pub(super) fn prepare_messages(
         inline_images_visible: app.inline_images_visible(),
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
+        latex_rendering: crate::config::config().display.latex_rendering,
     };
 
     super::note_full_prep_request();
@@ -1078,6 +1081,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         images_signature: app.side_pane_images_signature(),
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
+        latex_rendering: crate::config::config().display.latex_rendering,
     };
     let msg_count = app.display_messages().len();
     let cache_lookup_start = Instant::now();
@@ -1678,27 +1682,32 @@ fn render_message_into(
                 acc.copy_targets
                     .push(offset_copy_target(target, error_start_line));
             }
-            let raw_line = acc.raw_plain_lines.len();
-            acc.raw_plain_lines.push(msg.content.clone());
-            let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
-            let prefix_width =
-                unicode_width::UnicodeWidthStr::width(if centered { "✗ " } else { "  ✗ " });
-            acc.lines.push(
-                Line::from(vec![
-                    Span::styled(
-                        if centered { "✗ " } else { "  ✗ " },
-                        Style::default().fg(Color::Red),
-                    ),
-                    Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
-                ])
-                .alignment(align),
-            );
-            acc.line_raw_overrides.push(Some(WrappedLineMap {
-                raw_line,
-                start_col: 0,
-                end_col: raw_width,
-            }));
-            acc.line_copy_offsets.push(prefix_width);
+            // Multi-line diagnostics (cloud failures, error chains) keep one
+            // logical line per row instead of collapsing into a single row.
+            let prefix = if centered { "✗ " } else { "  ✗ " };
+            let continuation = if centered { "  " } else { "    " };
+            let prefix_width = unicode_width::UnicodeWidthStr::width(prefix);
+            for (index, text) in msg.content.lines().enumerate() {
+                let raw_line = acc.raw_plain_lines.len();
+                acc.raw_plain_lines.push(text.to_string());
+                let raw_width = unicode_width::UnicodeWidthStr::width(text);
+                acc.lines.push(
+                    Line::from(vec![
+                        Span::styled(
+                            if index == 0 { prefix } else { continuation },
+                            Style::default().fg(Color::Red),
+                        ),
+                        Span::styled(text.to_string(), Style::default().fg(Color::Red)),
+                    ])
+                    .alignment(align),
+                );
+                acc.line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: raw_width,
+                }));
+                acc.line_copy_offsets.push(prefix_width);
+            }
         }
         _ => {}
     }

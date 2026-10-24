@@ -36,6 +36,64 @@ fn todo_payload() -> String {
     .to_string()
 }
 
+#[test]
+fn pinned_todos_share_top_band_with_swarm_only_on_wide_terminals() {
+    let _render_lock = viewport_snapshot_test_lock();
+    with_pinned_todos_config(|| {
+        let member = crate::protocol::SwarmMemberStatus {
+            session_id: "test-worker".into(),
+            friendly_name: Some("placement-worker".into()),
+            status: "running".into(),
+            detail: Some("Checking layout".into()),
+            task_label: None,
+            role: None,
+            is_headless: Some(true),
+            live_attachments: None,
+            status_age_secs: Some(1),
+            output_tail: None,
+            report_back_to_session_id: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: Default::default(),
+        };
+        let state = TestState {
+            pinned_todos_payload: Some(todo_payload()),
+            swarm_members: vec![member],
+            ..Default::default()
+        };
+        for width in [80, 119, 120, 160, 240] {
+            let (lines, _) = viewport::pinned_todo_band_lines(&state, width, 36);
+            let text = lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                text.contains("placement-worker"),
+                width >= 120,
+                "{width}: {text}"
+            );
+            assert!(lines.iter().all(|line| line.width() <= width as usize));
+            if width >= 120 {
+                let row = lines
+                    .iter()
+                    .find(|line| line.to_string().contains("placement-worker"))
+                    .unwrap();
+                let text = row.to_string();
+                let prefix = text.split("placement-worker").next().unwrap();
+                assert!(unicode_width::UnicodeWidthStr::width(prefix) >= width as usize / 2);
+            }
+        }
+        clear_flicker_frame_history_for_tests();
+        let mut terminal = Terminal::new(TestBackend::new(160, 36)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .unwrap();
+        let text = terminal_text(&terminal);
+        assert_eq!(text.matches("placement-worker").count(), 1, "{text}");
+    });
+}
+
 fn hidden_todo(payload: &str) -> DisplayMessage {
     DisplayMessage {
         role: "tool".into(),

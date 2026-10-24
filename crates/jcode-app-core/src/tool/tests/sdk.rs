@@ -315,7 +315,13 @@ async fn sdk_nested_alias_and_deferred_mcp_use_callbacks() {
     registry
         .register(
             "mcp_call".into(),
-            Arc::new(mcp::McpCallTool::new(manager).with_registry(registry.clone())),
+            Arc::new(mcp::McpCallTool::new(manager.clone()).with_registry(registry.clone())),
+        )
+        .await;
+    registry
+        .register(
+            "mcp".into(),
+            Arc::new(mcp::McpManagementTool::new(manager).with_registry(registry.clone())),
         )
         .await;
     let mut config = SessionToolConfig {
@@ -338,6 +344,11 @@ async fn sdk_nested_alias_and_deferred_mcp_use_callbacks() {
         (
             "mcp_call",
             json!({"server":"sdk","tool":"echo","arguments":{"value":42}}),
+            "mcp__sdk__echo",
+        ),
+        (
+            "mcp",
+            json!({"action":"call","server":"sdk","tool":"echo","arguments":{"value":42}}),
             "mcp__sdk__echo",
         ),
     ] {
@@ -381,6 +392,15 @@ async fn sdk_nested_alias_and_deferred_mcp_use_callbacks() {
         .execute(
             "mcp_call",
             json!({"server":"sdk","tool":"echo","arguments":{}}),
+            ctx(session),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not allowed"));
+    let error = registry
+        .execute(
+            "mcp",
+            json!({"action":"call","server":"sdk","tool":"echo","arguments":{}}),
             ctx(session),
         )
         .await

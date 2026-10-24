@@ -659,6 +659,9 @@ pub struct SwarmMemberStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberRuntime {
+    /// Full ordered todo statuses, independent of the capped detail snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todo_statuses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -670,15 +673,33 @@ pub struct SwarmMemberRuntime {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_secs: Option<u64>,
+    /// Seconds since the worker's last tool event or token, so clients can
+    /// tell a working agent from one that has gone quiet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_age_secs: Option<u64>,
+    /// Tokens in the worker's context window as of its latest response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    /// Context window size for the worker's model, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit: Option<u64>,
+    /// Cumulative output tokens produced by the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
 }
 
 impl SwarmMemberRuntime {
     fn is_empty(&self) -> bool {
-        self.model.is_none()
+        self.todo_statuses.is_empty()
+            && self.model.is_none()
             && self.provider.is_none()
             && self.auth_method.is_none()
             && self.effort.is_none()
             && self.elapsed_secs.is_none()
+            && self.activity_age_secs.is_none()
+            && self.context_tokens.is_none()
+            && self.context_limit.is_none()
+            && self.output_tokens.is_none()
     }
 }
 
@@ -778,6 +799,7 @@ impl Request {
             Request::SetCompactionMode { id, .. } => *id,
             Request::RenameSession { id, .. } => *id,
             Request::SetSessionSaved { id, .. } => *id,
+            Request::PersistSession { id } => *id,
             Request::Split { id } => *id,
             Request::Transfer { id } => *id,
             Request::Compact { id } => *id,

@@ -1007,9 +1007,39 @@ fn history_reload_recovery_does_not_mark_delivered_until_continuation_is_accepte
         !super::super::reload_recovery::has_pending_for_session(session_id),
         "accepted continuation should consume the durable pending intent"
     );
+    // Leftover initiating context and interrupted-session evidence must not
+    // recreate a continuation that the durable store says was consumed.
+    crate::tool::selfdev::ReloadContext {
+        task_context: Some("finish reload task".to_string()),
+        version_before: "before".to_string(),
+        version_after: "after".to_string(),
+        session_id: session_id.to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    }
+    .save()?;
+    assert!(
+        super::history_reload_recovery_snapshot(session_id, Some(true)).is_none(),
+        "delivered intent must override leftover context and interruption evidence"
+    );
     assert!(
         super::history_reload_recovery_snapshot(session_id, None).is_none(),
         "delivered server-owned recovery intent should no longer be emitted"
+    );
+    super::super::reload_recovery::persist_intent(
+        "reload-next",
+        session_id,
+        super::super::reload_recovery::ReloadRecoveryRole::Initiator,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: "new reload continuation".to_string(),
+        },
+        "next reload",
+    )?;
+    assert_eq!(
+        super::history_reload_recovery_snapshot(session_id, None)
+            .unwrap()
+            .continuation_message,
+        "new reload continuation"
     );
     Ok(())
 }

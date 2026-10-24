@@ -390,9 +390,10 @@ pub(crate) async fn spawn_bridge_reload(session_id: &str, new_launch: BridgeLaun
         "Restarting the harness API bridge onto `{program}` as daemon background task {}. \
          It runs independently of this turn, so it completes even if this connection drops. \
          Clients going through the bridge (Desktop, SDK) reconnect automatically. You will be \
-         woken with the result. Progress: {}. Do not restart the bridge by hand from bash.",
+         woken with the result. Progress: {}. Do not restart the bridge by hand from bash.\n\n{}",
         info.task_id,
-        info.output_file.display()
+        info.output_file.display(),
+        super::BACKGROUND_WAIT_GUIDANCE
     ))
 }
 

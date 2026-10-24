@@ -6,6 +6,88 @@ use jcode_provider_antigravity::{
 use jcode_provider_core::Provider;
 use tokio_stream::StreamExt;
 
+fn context_test_provider(model: &str, limit: Option<u64>) -> AntigravityProvider {
+    let provider = AntigravityProvider::new();
+    provider.set_model(model).unwrap();
+    *provider.backend_default_model.write().unwrap() = Some("gemini-3-flash".into());
+    *provider.fetched_catalog.write().unwrap() = vec![CatalogModel {
+        id: "gemini-3-flash".into(),
+        display_name: None,
+        reset_time: None,
+        tag_title: None,
+        model_provider: None,
+        max_tokens: limit,
+        max_output_tokens: Some(8_192),
+        recommended: true,
+        available: true,
+        remaining_fraction_milli: None,
+    }];
+    provider
+}
+
+#[test]
+fn context_window_uses_route_catalog_instead_of_family_maximum() {
+    let provider = context_test_provider("gemini-3-flash", Some(128_000));
+    assert_eq!(provider.context_window(), 128_000);
+    assert!(provider.supports_compaction());
+    assert!(provider.uses_jcode_compaction());
+}
+
+#[test]
+fn context_window_resolves_default_alias_before_lookup() {
+    let provider = context_test_provider("default", Some(128_000));
+    assert_eq!(provider.context_window(), 128_000);
+    provider.set_model("antigravity:default").unwrap();
+    assert_eq!(provider.context_window(), 128_000);
+}
+
+#[test]
+fn context_window_missing_or_zero_catalog_limit_uses_resolved_family() {
+    for limit in [None, Some(0)] {
+        let provider = context_test_provider("default", limit);
+        assert_eq!(provider.context_window(), 1_000_000);
+    }
+}
+
+#[test]
+fn context_window_prefers_remapped_model_catalog_limit() {
+    let provider = context_test_provider("gemini-3.1-pro-high", Some(128_000));
+    let mut source = provider.fetched_catalog()[0].clone();
+    source.id = "gemini-3.1-pro-high".into();
+    let mut target = source.clone();
+    target.id = "gemini-pro-agent".into();
+    target.max_tokens = Some(256_000);
+    *provider.fetched_catalog.write().unwrap() = vec![source.clone(), target];
+    assert_eq!(provider.context_window(), 256_000);
+    *provider.fetched_catalog.write().unwrap() = vec![source];
+    assert_eq!(provider.context_window(), 128_000);
+    provider.set_model("unknown-test-model").unwrap();
+    assert_eq!(provider.context_window(), 200_000);
+}
+
+#[test]
+fn antigravity_usage_counts_cached_prompt_once_and_includes_tool_prompts() {
+    let usage: jcode_provider_gemini::GeminiUsageMetadata =
+        serde_json::from_value(serde_json::json!({
+            "promptTokenCount": 110_000,
+            "cachedContentTokenCount": 90_000,
+            "toolUsePromptTokenCount": 2_000,
+            "candidatesTokenCount": 500,
+            "thoughtsTokenCount": 1_000
+        }))
+        .unwrap();
+    let observed = jcode_base::compaction::effective_context_tokens_from_usage(
+        "antigravity",
+        usage.input_token_count().unwrap(),
+        usage.cached_content_token_count,
+        None,
+    );
+    assert_eq!(observed, 112_000);
+    assert_eq!(usage.output_token_count(), Some(1_500));
+    let provider = context_test_provider("gemini-3-flash", Some(128_000));
+    assert!(observed as f64 / provider.context_window() as f64 > 0.8);
+}
+
 #[test]
 fn parse_fetch_available_models_response_discovers_metadata_and_priority_order() {
     let response: FetchAvailableModelsResponse = serde_json::from_value(serde_json::json!({

@@ -424,9 +424,11 @@ mod tests {
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),
+            waiting_on: Vec::new(),
             blocked_by: blocked_by.iter().map(|s| s.to_string()).collect(),
             assigned_to: None,
-            wave: None,
+            stage: None,
+            details: None,
         }
     }
 

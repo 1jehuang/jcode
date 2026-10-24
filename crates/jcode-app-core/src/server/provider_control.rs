@@ -404,7 +404,7 @@ fn send_model_changed_result(
                 error: None,
                 resolved_credential,
                 provider_oauth_email: super::provider_oauth_email(agent.provider_handle().as_ref()),
-                provider_oauth_account_label: agent.provider_handle().oauth_account_label(),
+                provider_oauth_account_label: agent.provider_handle().serving_oauth_account_label(),
                 reasoning_effort,
             });
         }

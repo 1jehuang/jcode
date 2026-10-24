@@ -90,6 +90,8 @@ export interface TodoSnapshot {
   goals: Array<Record<string, unknown>>;
   gate_observations: Array<Record<string, unknown>>;
   long_session_review_due: boolean;
+  /** Session-scoped background task IDs still running. Absent on older servers. */
+  running_background_tasks?: string[];
 }
 
 /** Persistent effects of a follow-up decision. */

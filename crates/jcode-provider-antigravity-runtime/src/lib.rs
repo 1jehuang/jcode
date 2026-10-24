@@ -957,28 +957,29 @@ impl Provider for AntigravityProvider {
     }
 
     fn context_window(&self) -> usize {
-        let raw_model = self.model();
-        let resolved = self.resolve_model_for_request(&raw_model);
-        if let Some(limit) = jcode_base::provider::context_limit_for_model_with_provider(
-            &resolved,
-            Some(self.name()),
-        ) {
-            return limit;
-        }
-        let raw_trimmed = raw_model.trim();
-        if let Some(limit) = self
-            .fetched_catalog()
-            .into_iter()
-            .find(|entry| entry.id.trim() == resolved || entry.id.trim() == raw_trimmed)
-            .and_then(|entry| entry.max_tokens)
-            .and_then(|tokens| match usize::try_from(tokens) {
-                Ok(n) if n > 0 => Some(n),
-                _ => None,
+        let selected = self.model();
+        let resolved = self.resolve_model_for_request(&selected);
+        let catalog = self.fetched_catalog();
+        // Use this route's limit and resolve aliases just as inference does.
+        let limit_for = |id: &str| {
+            catalog
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.max_tokens)
+                .and_then(|limit| match usize::try_from(limit) {
+                    Ok(limit) if limit > 0 => Some(limit),
+                    _ => None,
+                })
+        };
+        limit_for(&resolved)
+            .or_else(|| limit_for(&selected))
+            .or_else(|| {
+                jcode_provider_core::models::context_limit_for_model_with_provider(
+                    &resolved,
+                    Some("antigravity"),
+                )
             })
-        {
-            return limit;
-        }
-        jcode_provider_core::DEFAULT_CONTEXT_LIMIT
+            .unwrap_or(jcode_provider_core::models::DEFAULT_CONTEXT_LIMIT)
     }
 
     fn supports_compaction(&self) -> bool {

@@ -11,8 +11,8 @@ use crate::protocol::SwarmMemberStatus;
 use jcode_tui_core::keybind::alt_chord_lower;
 use jcode_tui_render::swarm_gallery::{
     GalleryMember, SwarmStripHint, display_order, humanize_age, is_active_status, render_gallery,
-    render_swarm_dock, render_swarm_live_card, render_swarm_panel, render_swarm_strip,
-    render_swarm_strip_vertical, status_accent, status_glyph,
+    render_swarm_live_card, render_swarm_panel, render_swarm_strip, render_swarm_strip_vertical,
+    status_accent, status_glyph,
 };
 use ratatui::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -90,6 +90,9 @@ pub(crate) fn members_to_gallery(members: &[SwarmMemberStatus]) -> Vec<GalleryMe
             auth_method: member.runtime.auth_method.clone(),
             effort: member.runtime.effort.clone(),
             elapsed_secs: member.runtime.elapsed_secs,
+            context_tokens: member.runtime.context_tokens,
+            context_limit: member.runtime.context_limit,
+            output_tokens: member.runtime.output_tokens,
             todo_items: member
                 .todo_items
                 .iter()
@@ -569,33 +572,6 @@ pub(crate) fn render_swarm_strip_lines(
 /// Row cap for the vertical strip: agents beyond this collapse into a
 /// `+N more` line (the cap includes that overflow row).
 const SWARM_STRIP_VERTICAL_MAX_ROWS: usize = 4;
-
-/// Render the swarm dock widget body: a narrow vertical agent list for the
-/// info-widget margins. `plan` is the coordinator's swarm plan progress
-/// (completed, total), shown in the header when present.
-#[allow(dead_code)]
-pub(crate) fn render_swarm_dock_lines(
-    members: &[SwarmMemberStatus],
-    selected: usize,
-    focused: bool,
-    plan: Option<(u32, u32)>,
-    spinner_frame: usize,
-    width: usize,
-    max_height: usize,
-) -> Vec<Line<'static>> {
-    if members.is_empty() {
-        return Vec::new();
-    }
-    render_swarm_dock(
-        &members_to_gallery(members),
-        selected,
-        focused,
-        plan,
-        spinner_frame,
-        width,
-        max_height,
-    )
-}
 
 /// Session ids of `members` in the same order the panel/gallery displays them
 /// (coordinator first, then worktree manager, then by session id). Lets the TUI

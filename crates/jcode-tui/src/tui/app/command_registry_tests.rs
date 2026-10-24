@@ -31,6 +31,7 @@ fn known_aliases_are_registered() {
         "/resume-all",
         "/hotkeys",
         "/keys",
+        "/latex",
     ] {
         assert!(names.contains(alias), "{alias} is not registered");
     }

@@ -685,12 +685,19 @@ mod tests {
         let cases: &[(&str, serde_json::Value)] = &[
             (
                 // mcp__cirqul__correct_memory: a branch that only adds a
-                // constraint cannot satisfy strict object requirements.
+                // constraint cannot satisfy strict object requirements. Below
+                // the root, normalization keeps the combiner (root combiners
+                // are flattened away, which OpenAI requires).
                 "constraint-only anyOf branch",
                 serde_json::json!({
                     "type": "object",
-                    "properties": { "memory_id": { "type": "string" } },
-                    "anyOf": [ { "required": ["memory_id"] } ]
+                    "properties": {
+                        "target": {
+                            "type": "object",
+                            "properties": { "memory_id": { "type": "string" } },
+                            "anyOf": [ { "required": ["memory_id"] } ]
+                        }
+                    }
                 }),
             ),
             (
@@ -750,5 +757,39 @@ mod tests {
             schema_supports_strict(&openai_compatible_schema(&schema)),
             "a well-formed schema must keep strict mode"
         );
+    }
+}
+
+#[cfg(test)]
+mod root_shape_tests {
+    use super::openai_compatible_schema;
+
+    /// OpenAI 400s the whole catalog for a root combiner ("schema must have
+    /// type 'object' and not have 'oneOf'/'anyOf'/... at the top level"). The
+    /// swarm tool's spawn/non-spawn branches hit this in production.
+    #[test]
+    fn root_any_of_is_flattened_for_openai() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+                "action": { "type": "string", "enum": ["spawn", "list"] },
+                "label": { "type": "string" }
+            },
+            "anyOf": [
+                { "type": "object", "required": ["action", "label"],
+                  "properties": { "action": { "type": "string", "enum": ["spawn"] },
+                                  "label": { "type": "string" } } },
+                { "type": "object", "required": ["action"],
+                  "properties": { "action": { "type": "string", "enum": ["list"] } } }
+            ]
+        });
+        let out = openai_compatible_schema(&schema);
+        let root = out.as_object().unwrap();
+        assert_eq!(root.get("type").and_then(|t| t.as_str()), Some("object"));
+        for key in ["oneOf", "anyOf", "allOf", "enum", "const", "not"] {
+            assert!(!root.contains_key(key), "root still has {key}: {out}");
+        }
+        assert!(root["properties"].get("label").is_some(), "{out}");
     }
 }

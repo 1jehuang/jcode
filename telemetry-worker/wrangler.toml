@@ -21,6 +21,13 @@ binding = "DB"
 database_name = "jcode-telemetry"
 database_id = "abaa524c-3e90-4ba9-a569-027e78a083c6"
 
+# High-volume raw families (BULK_EVENTS in src/worker.js) live in a second
+# database so each stays under D1's 10 GB per-database cap. Same schema.sql.
+[[d1_databases]]
+binding = "DB_BULK"
+database_name = "jcode-telemetry-bulk"
+database_id = "e7bb5e59-4a72-4dd2-b2c2-bcde2ebe011a"
+
 # Separately consented prompt/transcript content. Keep this bucket private and
 # configure an R2 lifecycle rule that deletes objects after 30 days.
 [[r2_buckets]]

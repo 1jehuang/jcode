@@ -51,6 +51,28 @@ pub(super) fn set_remote_account_usage_with_age(
     }
 }
 
+/// Daemon-reported OAuth accounts `(anthropic, openai)`, once a response arrived.
+pub fn remote_account_list() -> Option<(Vec<AccountUsageSnapshot>, Vec<AccountUsageSnapshot>)> {
+    let state = REMOTE.get()?.try_lock().ok()?;
+    state.received?;
+    let convert = |list: &[jcode_protocol::AccountUsageSnapshot]| {
+        list.iter()
+            .map(|data| AccountUsageSnapshot {
+                label: data.label.clone(),
+                email: data.email.clone(),
+                exhausted: data.exhausted,
+                primary_label: data.primary_label.clone(),
+                five_hour_ratio: data.five_hour_ratio,
+                secondary_label: data.secondary_label.clone(),
+                seven_day_ratio: data.seven_day_ratio,
+                resets_at: data.resets_at.clone(),
+                error: data.error.clone(),
+            })
+            .collect()
+    };
+    Some((convert(&state.anthropic), convert(&state.openai)))
+}
+
 pub(super) fn cached(
     provider: MultiAccountProviderKind,
     label: &str,

@@ -4,6 +4,42 @@ use super::openai_stream_diagnostics::{
 };
 use super::*;
 
+#[path = "openai_ws_cancel_recovery.rs"]
+mod openai_ws_cancel_recovery;
+use openai_ws_cancel_recovery::{RecoverableAttempt, RecoveryPhase, has_unanswered_tool_calls};
+
+/// Usage of the account these credentials authenticate as, plus its label for
+/// logs. Unbound sessions keep the credentials they loaded, so the global
+/// active login can be a different account with different quota.
+pub(super) fn serving_account_usage(
+    credentials: &CodexCredentials,
+) -> (Option<String>, jcode_base::usage::OpenAIUsageData) {
+    let label = jcode_base::auth::codex::list_accounts()
+        .ok()
+        .and_then(|accounts| {
+            jcode_base::auth::codex::account_label_for_credentials(&accounts, credentials)
+        });
+    let usage = match label.as_deref() {
+        Some(label) => jcode_base::usage::get_openai_usage_for_label_sync(label),
+        // Not a saved login (legacy single-account file): the active usage is it.
+        None => jcode_base::usage::get_openai_usage_sync(),
+    };
+    (label, usage)
+}
+
+/// `account=<label> <usage fields>` for limit diagnostics.
+pub(super) fn serving_account_diag(credentials: &CodexCredentials) -> (String, bool) {
+    let (label, usage) = serving_account_usage(credentials);
+    (
+        format!(
+            "account={} {}",
+            label.as_deref().unwrap_or("unknown"),
+            usage.diagnostic_fields()
+        ),
+        usage.exhausted(),
+    )
+}
+
 // Bind metadata to the immutable request, not the provider's concurrently mutable
 // preference. Both primary parser events and its pending queue pass here.
 fn bind_requested_service_tier(event: &mut StreamEvent, request_tier: &Option<String>) {
@@ -57,6 +93,18 @@ pub(super) async fn openai_access_token(
     account_label: Option<String>,
     credentials: &Arc<RwLock<CodexCredentials>>,
 ) -> anyhow::Result<String> {
+    if let Some(label) = account_label.as_deref() {
+        let is_oauth = {
+            let tokens = credentials.read().await;
+            !tokens.refresh_token.is_empty() || tokens.id_token.is_some()
+        };
+        if is_oauth {
+            // Cloud handoff/login can replace the file while this daemon keeps
+            // its provider alive. Never send or refresh the old cached copy.
+            let mut tokens = credentials.write().await;
+            *tokens = jcode_base::auth::codex::load_credentials_for_account(label)?;
+        }
+    }
     let (access_token, refresh_token, needs_refresh, is_oauth) = {
         let tokens = credentials.read().await;
         if tokens.access_token.is_empty() {
@@ -252,10 +300,9 @@ pub(super) async fn stream_response(
             ("transport", "https".to_string()),
         ],
     );
-    let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
+    let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
     jcode_base::logging::info(&format!(
-        "OpenAI limit diag: starting fresh HTTPS request usage=({})",
-        usage_snapshot.diagnostic_fields()
+        "OpenAI limit diag: starting fresh HTTPS request usage=({usage_diag})"
     ));
     emit_status_detail(&tx, initial_status_detail).await;
     emit_connection_phase(&tx, ConnectionPhase::Authenticating).await;
@@ -336,10 +383,9 @@ pub(super) async fn stream_response(
         "https_connected",
         connected_fields,
     );
-    if response.status().is_success() && usage_snapshot.exhausted() {
+    if response.status().is_success() && usage_exhausted {
         jcode_base::logging::warn(&format!(
-            "OpenAI limit diag: fresh HTTPS request accepted while local usage indicates exhausted usage=({})",
-            usage_snapshot.diagnostic_fields()
+            "OpenAI limit diag: fresh HTTPS request accepted while the serving account's usage indicates exhausted usage=({usage_diag})"
         ));
     }
 
@@ -617,7 +663,8 @@ pub(super) enum PersistentWsResult {
 }
 
 /// Try to continue a conversation on an existing persistent WebSocket connection
-/// using `previous_response_id` to send only incremental input.
+/// using `previous_response_id` to send only incremental input. A socket drained
+/// after cancellation has no response id and receives a full, independent replay.
 pub(super) async fn try_persistent_ws_continuation(
     persistent_ws: &Arc<Mutex<Option<PersistentWsState>>>,
     credentials: &Arc<RwLock<CodexCredentials>>,
@@ -626,18 +673,20 @@ pub(super) async fn try_persistent_ws_continuation(
     input_item_count: usize,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> PersistentWsResult {
-    let mut guard = persistent_ws.lock().await;
-    // Keep exclusive ownership until completion. If this future is dropped,
-    // the in-flight socket is dropped while the shared slot is already empty,
-    // before the same mutex can be acquired by a waiting request.
-    let mut attempt_state = guard.take();
+    let mut guard = Arc::clone(persistent_ws).lock_owned().await;
+    let mut attempt = RecoverableAttempt {
+        state: guard.take(),
+        phase: RecoveryPhase::Idle,
+        slot: Some(guard),
+    };
     let result = continue_persistent_ws_locked(
-        &mut attempt_state,
+        &mut attempt.state,
         credentials,
         request,
         input,
         input_item_count,
         tx,
+        &mut attempt.phase,
     )
     .await;
     // Invalidate under the same lock that protected the attempt. Clearing in
@@ -655,8 +704,9 @@ pub(super) async fn try_persistent_ws_continuation(
                 ("reason", "persistent_reuse_failed".to_string()),
             ],
         );
-    } else {
-        *guard = attempt_state;
+        attempt.phase = RecoveryPhase::Idle;
+    } else if attempt.phase == RecoveryPhase::Idle {
+        **attempt.slot.as_mut().unwrap() = attempt.state.take();
     }
     result
 }
@@ -668,6 +718,7 @@ async fn continue_persistent_ws_locked(
     input: &[Value],
     input_item_count: usize,
     tx: &mpsc::Sender<Result<StreamEvent>>,
+    recovery_phase: &mut RecoveryPhase,
 ) -> PersistentWsResult {
     let request_model = openai_request_model(request);
     let state = match guard.as_mut() {
@@ -786,7 +837,9 @@ async fn continue_persistent_ws_locked(
     // The input array must be strictly growing for continuation to make sense.
     // If the input_item_count is less than or equal to last time, the conversation
     // was reset (e.g., after compaction) - we need a fresh connection.
-    if input_item_count <= state.last_input_item_count {
+    let full_replay = state.last_response_id.is_empty()
+        || has_unanswered_tool_calls(&state.last_response_output, input);
+    if !full_replay && input_item_count <= state.last_input_item_count {
         let last_input_item_count = state.last_input_item_count;
         jcode_base::logging::info(&format!(
             "Input items didn't grow ({} <= {}); conversation may have been compacted, reconnecting",
@@ -810,8 +863,9 @@ async fn continue_persistent_ws_locked(
     // when the input grows. Slicing by count would silently omit that output.
     // Replay the full normalized history unless the prior input is unchanged.
     let input_item_hashes = persistent_ws_input_item_hashes(input);
-    if state.last_input_item_hashes.len() != state.last_input_item_count
-        || !input_item_hashes.starts_with(&state.last_input_item_hashes)
+    if !full_replay
+        && (state.last_input_item_hashes.len() != state.last_input_item_count
+            || !input_item_hashes.starts_with(&state.last_input_item_hashes))
     {
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Info,
@@ -839,7 +893,7 @@ async fn continue_persistent_ws_locked(
     // rs_...". The full input still needs reasoning items for fresh requests,
     // but deltas must only contain genuinely new client-side input/tool
     // callbacks.
-    let (incremental_items, skipped_output_items) = if state.message_count == 0 {
+    let (incremental_items, skipped_output_items) = if full_replay || state.message_count == 0 {
         // A generate:false warmup has no model output in its context. Preserve
         // all history (including encrypted reasoning) for its first generation.
         (input.to_vec(), 0)
@@ -878,15 +932,19 @@ async fn continue_persistent_ws_locked(
     if state.message_count > 0 && incremental_stats.function_call_items > 0 {
         log_ws_replayed_calls(&incremental_items, &state.last_response_output);
     }
-    let previous_response_id = state.last_response_id.clone();
+    let previous_response_id = if full_replay {
+        String::new()
+    } else {
+        state.last_response_id.clone()
+    };
     let request_prompt_cache_key_hash = request
         .get("prompt_cache_key")
         .map(jcode_provider_core::fingerprint::stable_hash_json);
-    let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
+    let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
     jcode_base::logging::info(&format!(
         "OpenAI limit diag: attempting persistent WS reuse previous_response_id_present={} usage=({}) state=({})",
         !previous_response_id.is_empty(),
-        usage_snapshot.diagnostic_fields(),
+        usage_diag,
         state.diag_snapshot().log_fields()
     ));
     jcode_base::logging::info(&format!(
@@ -920,8 +978,24 @@ async fn continue_persistent_ws_locked(
                 "tool_callback",
                 (incremental_stats.tool_callback_count() > 0).to_string(),
             ),
-            ("request_kind", "ws_delta".to_string()),
-            ("cache_namespace", "previous_response_delta".to_string()),
+            (
+                "request_kind",
+                if full_replay {
+                    "ws_cancel_full_replay"
+                } else {
+                    "ws_delta"
+                }
+                .to_string(),
+            ),
+            (
+                "cache_namespace",
+                if full_replay {
+                    "full_request"
+                } else {
+                    "previous_response_delta"
+                }
+                .to_string(),
+            ),
             (
                 "prompt_cache_key_present",
                 request.get("prompt_cache_key").is_some().to_string(),
@@ -991,6 +1065,20 @@ async fn continue_persistent_ws_locked(
     continuation_request["store"] = serde_json::json!(false);
     continuation_request["parallel_tool_calls"] = serde_json::json!(false);
 
+    if full_replay {
+        // A drained cancelled response may contain unseen tool calls. Reuse
+        // only its transport, never its server-side conversation context.
+        continuation_request = request.clone();
+        let Some(object) = continuation_request.as_object_mut() else {
+            return PersistentWsResult::Failed("invalid full replay request".into());
+        };
+        object.insert("type".into(), serde_json::json!("response.create"));
+        object.insert("input".into(), Value::Array(input.to_vec()));
+        object.remove("previous_response_id");
+        object.remove("stream");
+        object.remove("background");
+    }
+
     let continuation_tools = continuation_request
         .get("tools")
         .cloned()
@@ -1026,7 +1114,11 @@ async fn continue_persistent_ws_locked(
     jcode_provider_core::fingerprint::log_provider_canonical_input(
         "openai",
         model_for_fingerprint,
-        "openai_responses_ws_delta",
+        if full_replay {
+            "openai_responses_ws_cancel_full_replay"
+        } else {
+            "openai_responses_ws_delta"
+        },
         &continuation_payload,
         &incremental_items,
         continuation_instructions.as_ref(),
@@ -1046,8 +1138,24 @@ async fn continue_persistent_ws_locked(
                 "incremental_item_count",
                 incremental_items.len().to_string(),
             ),
-            ("request_kind", "ws_delta".to_string()),
-            ("cache_namespace", "previous_response_delta".to_string()),
+            (
+                "request_kind",
+                if full_replay {
+                    "ws_cancel_full_replay"
+                } else {
+                    "ws_delta"
+                }
+                .to_string(),
+            ),
+            (
+                "cache_namespace",
+                if full_replay {
+                    "full_request"
+                } else {
+                    "previous_response_delta"
+                }
+                .to_string(),
+            ),
             ("transport_mode", "websocket".to_string()),
             (
                 "prompt_cache_key_present",
@@ -1117,6 +1225,7 @@ async fn continue_persistent_ws_locked(
         return PersistentWsResult::Failed(format!("send error: {}", e));
     }
     drop(send_credentials);
+    *recovery_phase = RecoveryPhase::InFlight;
     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await;
     state.last_activity_at = Instant::now();
     jcode_base::logging::info(&format!(
@@ -1200,6 +1309,15 @@ async fn continue_persistent_ws_locked(
         match result {
             Ok(WsMessage::Text(text)) => {
                 let text = text.to_string();
+                if text.contains("response.completed")
+                    && serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .is_some_and(|event| {
+                            event.get("type").and_then(Value::as_str) == Some("response.completed")
+                        })
+                {
+                    *recovery_phase = RecoveryPhase::Completed;
+                }
                 if !logged_first_server_event {
                     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::Streaming)
                         .await;
@@ -1238,11 +1356,10 @@ async fn continue_persistent_ws_locked(
                         id,
                         incremental_stats.log_fields(),
                     ));
-                    let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
-                    if usage_snapshot.exhausted() {
+                    if usage_exhausted {
                         jcode_base::logging::warn(&format!(
-                            "OpenAI limit diag: persistent WS reuse accepted request while local usage indicates exhausted usage=({}) state=({})",
-                            usage_snapshot.diagnostic_fields(),
+                            "OpenAI limit diag: persistent WS reuse accepted request while the serving account's usage indicates exhausted usage=({}) state=({})",
+                            usage_diag,
                             state.diag_snapshot().log_fields()
                         ));
                     }
@@ -1352,14 +1469,12 @@ async fn continue_persistent_ws_locked(
         }
     }
 
-    // A soft interrupt drops the stream consumer while OpenAI may already have
-    // created a response containing tool calls. That response cannot safely be
-    // used as `previous_response_id`: any unseen tool call would remain open on
-    // the server, and the next continuation would fail with "No tool output
-    // found for function call ...". Only completed responses are reusable.
-    if !saw_response_completed {
+    // A soft interrupt may leave unseen tool calls, even when completion has
+    // already arrived. The owner will bounded-drain if needed and preserve only
+    // the transport, never this response's implicit continuation context.
+    if consumer_dropped || !saw_response_completed {
         jcode_base::logging::info(
-            "Persistent WS consumer dropped before response.completed; clearing response chain",
+            "Persistent WS consumer dropped; recovering transport without response chain",
         );
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Info,
@@ -1368,12 +1483,11 @@ async fn continue_persistent_ws_locked(
                 ("model", request_model),
                 (
                     "reason",
-                    "consumer_dropped_before_response_completed".to_string(),
+                    "consumer_dropped_response_chain_discarded".to_string(),
                 ),
                 ("consumer_dropped", consumer_dropped.to_string()),
             ],
         );
-        *guard = None;
         return PersistentWsResult::Success;
     }
 
@@ -1405,6 +1519,7 @@ async fn continue_persistent_ws_locked(
                 ),
             ],
         );
+        *recovery_phase = RecoveryPhase::Idle;
         PersistentWsResult::Success
     } else {
         // Got response but no response_id - can't chain further
@@ -1486,10 +1601,9 @@ async fn stream_response_websocket_authenticated(
         ],
     );
 
-    let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
+    let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
     jcode_base::logging::info(&format!(
-        "OpenAI limit diag: opening fresh persistent WS request usage=({})",
-        usage_snapshot.diagnostic_fields()
+        "OpenAI limit diag: opening fresh persistent WS request usage=({usage_diag})"
     ));
     emit_status_detail(&tx, "opening websocket").await;
     let creds = credentials.read().await;
@@ -1744,10 +1858,9 @@ async fn stream_response_websocket_authenticated(
                             id,
                             request_input_stats.log_fields(),
                         ));
-                        if usage_snapshot.exhausted() {
+                        if usage_exhausted {
                             jcode_base::logging::warn(&format!(
-                                "OpenAI limit diag: fresh WS request accepted while local usage indicates exhausted usage=({})",
-                                usage_snapshot.diagnostic_fields()
+                                "OpenAI limit diag: fresh WS request accepted while the serving account's usage indicates exhausted usage=({usage_diag})"
                             ));
                         }
                     }

@@ -2,8 +2,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use super::provider_init::ProviderChoice;
 
+mod cloud_ephemeral;
 mod google;
 mod mcp;
+pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
@@ -719,15 +721,31 @@ pub(crate) enum ServerCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CloudCommand {
+    /// Manage disposable remote machines with mandatory automatic expiry.
+    Ephemeral {
+        #[command(subcommand)]
+        action: CloudEphemeralCommand,
+    },
     /// Upload, list, verify, and view cloud-synced sessions
     Sessions {
         #[command(subcommand)]
         action: CloudSessionsCommand,
     },
 
+    /// Prepare the destination without reading or moving a live session.
+    #[command(hide = true)]
+    Prepare {
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Move a live session (transcript, repo state, env notes) to a cloud host
     /// and keep working there. Your local files stay editable. Git reconciles
     /// both sides when the session comes back with `jcode cloud return`.
+    /// Copies the session's Jcode-owned OpenAI/Claude OAuth login securely to
+    /// the chosen host. Other accounts and external credentials stay local.
     Move {
         /// Session ID or name. Defaults to the session this command runs in.
         #[arg(long)]
@@ -778,6 +796,34 @@ pub(crate) enum CloudCommand {
         session: Option<String>,
     },
 
+    /// Show, wake, or stop the Jcode Cloud machine included with your Jcode
+    /// subscription. Its disk persists while it sleeps.
+    Machine {
+        #[arg(value_enum, default_value = "status")]
+        action: CloudMachineAction,
+    },
+
+    /// Internal: SSH ProxyCommand that wakes and authorizes the managed machine.
+    #[command(hide = true)]
+    Proxy,
+
+    /// Internal: transfer one named OAuth account over the private SSH channel.
+    #[command(hide = true)]
+    Credentials {
+        #[arg(long = "provider", id = "cloud_credential_provider")]
+        provider: String,
+        #[arg(long = "account", id = "cloud_credential_account")]
+        account: String,
+        /// Export to stdout instead of importing from stdin.
+        #[arg(long)]
+        export: bool,
+    },
+
+    /// Internal: import the account router's API keys, provider token stores
+    /// and auto-switch pool from stdin over the private SSH channel.
+    #[command(hide = true)]
+    RouterCredentials,
+
     /// Internal: remote side of `cloud move` (reads a bundle tarball on stdin).
     #[command(hide = true)]
     Receive {
@@ -802,12 +848,28 @@ pub(crate) enum CloudCommand {
         #[arg(long)]
         epoch: u64,
     },
+
+    /// Internal: restore cloud ownership after a rejected credential return.
+    #[command(hide = true)]
+    CancelReturn {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
+    },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub(crate) enum CloudMachineAction {
+    Status,
+    Wake,
+    Stop,
 }
 
 #[derive(Parser, Debug, Clone, Default)]
 pub(crate) struct CloudMoveTarget {
-    /// SSH host alias for the cloud machine. Defaults to [cloud] host in config
-    /// or $JCODE_CLOUD_HOST.
+    /// SSH host alias for the cloud machine. Defaults to $JCODE_CLOUD_HOST,
+    /// else your subscription's managed Jcode Cloud machine (`jcode-cloud`).
     #[arg(long)]
     pub(crate) host: Option<String>,
     /// Remote jcode binary (name or path). Defaults to `jcode`.

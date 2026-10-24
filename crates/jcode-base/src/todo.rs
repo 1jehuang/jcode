@@ -29,7 +29,15 @@ pub fn todos_exist(session_id: &str) -> Result<bool> {
     Ok(todo_path(session_id)?.exists())
 }
 
+/// Save a session's todos and mirror the change across any swarm lane links.
 pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
+    write_todos(session_id, todos)?;
+    sync_lanes_after_save(session_id, todos);
+    Ok(())
+}
+
+/// Save without lane mirroring (used by the mirror itself).
+fn write_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(session_id)?;
     storage::write_json_fast(&path, todos)?;
     if let Err(error) = crate::recent_session_index::refresh_todo_title(session_id) {
@@ -296,8 +304,10 @@ mod tests {
             completion_confidence: None,
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
+            waiting_on: Vec::new(),
             assigned_to: None,
-            wave: None,
+            stage: None,
+            details: None,
         }
     }
 
@@ -362,6 +372,277 @@ mod tests {
 
         let loaded = load_plan("user-intention-round-trip").expect("load plan");
         assert_eq!(loaded, plan);
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Swarm lane sync
+//
+// A launched lane is owned by one worker. The worker's own todo list *is* the
+// lane: it is seeded from the coordinator's lane todos, and every save on
+// either side mirrors into the other (last save wins). Links are stored on
+// both sessions so either save can find its counterpart without the swarm
+// server's in-memory state.
+// ---------------------------------------------------------------------------
+
+fn load_lane_links(session_id: &str) -> Vec<stages::LaneLink> {
+    todo_state_path(session_id, TodoFile::LaneLinks)
+        .ok()
+        .filter(|path| path.exists())
+        .and_then(|path| storage::read_json(&path).ok())
+        .unwrap_or_default()
+}
+
+fn save_lane_links(session_id: &str, links: &[stages::LaneLink]) -> Result<()> {
+    storage::write_json_fast(&todo_state_path(session_id, TodoFile::LaneLinks)?, links)
+}
+
+/// Give `worker` ownership of `lane` from `coordinator`'s todo list: seed the
+/// worker's todos with the lane and record the link on both sides. Returns the
+/// seeded todos (empty when the lane no longer exists).
+pub fn link_worker_lane(coordinator: &str, worker: &str, lane: &str) -> Result<Vec<TodoItem>> {
+    let seeded = stages::lane_todos_for_worker(&load_todos(coordinator)?, lane);
+    if seeded.is_empty() {
+        return Ok(seeded);
+    }
+    let link = stages::LaneLink {
+        coordinator: coordinator.to_string(),
+        worker: worker.to_string(),
+        lane: lane.to_string(),
+    };
+    for session in [coordinator, worker] {
+        let mut links = load_lane_links(session);
+        links.retain(|existing| {
+            !(existing.lane == link.lane && existing.coordinator == link.coordinator)
+                && !(session == worker && existing.worker == worker)
+        });
+        links.push(link.clone());
+        save_lane_links(session, &links)?;
+    }
+    write_todos(worker, &seeded)?;
+    Ok(seeded)
+}
+
+/// Mirror a just-saved todo list across its lane links. A worker's save
+/// rewrites its lane in the coordinator's list; a coordinator's save reseeds
+/// each linked worker whose lane changed. Writes go through [`write_todos`],
+/// so mirroring never echoes back.
+fn sync_lanes_after_save(session_id: &str, todos: &[TodoItem]) {
+    for link in load_lane_links(session_id) {
+        let result = if link.worker == session_id {
+            load_todos(&link.coordinator).and_then(|coordinator_todos| {
+                match stages::merge_worker_lane(&coordinator_todos, &link, todos) {
+                    Some(merged) => {
+                        write_todos(&link.coordinator, &merged)?;
+                        publish_todos(&link.coordinator, merged);
+                        Ok(())
+                    }
+                    None => Ok(()),
+                }
+            })
+        } else if link.coordinator == session_id {
+            let mut lane = stages::lane_todos_for_worker(todos, &link.lane);
+            load_todos(&link.worker).and_then(|current| {
+                for todo in &mut lane {
+                    todo.waiting_on = current
+                        .iter()
+                        .find(|old| old.id == todo.id)
+                        .map(|old| old.waiting_on.clone())
+                        .unwrap_or_default();
+                }
+                if lane.is_empty() || current == lane {
+                    return Ok(());
+                }
+                write_todos(&link.worker, &lane)?;
+                let summary = lane_change_summary(&current, &lane);
+                publish_todos(&link.worker, lane);
+                crate::bus::Bus::global().publish(crate::bus::BusEvent::LaneEdited(
+                    crate::bus::LaneEdited {
+                        coordinator: link.coordinator.clone(),
+                        worker: link.worker.clone(),
+                        lane: link.lane.clone(),
+                        summary,
+                    },
+                ));
+                Ok(())
+            })
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            crate::logging::warn(&format!(
+                "lane sync {} -> {}: {error}",
+                session_id, link.lane
+            ));
+        }
+    }
+}
+
+/// Let live views (swarm strip, pinned todos, plan resync) see a mirrored
+/// rewrite exactly like a direct todo-tool save.
+fn publish_todos(session_id: &str, todos: Vec<TodoItem>) {
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::TodoUpdated(crate::bus::TodoEvent {
+        session_id: session_id.to_string(),
+        todos,
+    }));
+}
+
+/// One-line description of how the coordinator changed a worker's lane.
+pub fn lane_change_summary(before: &[TodoItem], after: &[TodoItem]) -> String {
+    let mut parts = Vec::new();
+    let added: Vec<&str> = after
+        .iter()
+        .filter(|todo| !before.iter().any(|old| old.id == todo.id))
+        .map(|todo| todo.content.as_str())
+        .collect();
+    let removed: Vec<&str> = before
+        .iter()
+        .filter(|todo| !after.iter().any(|new| new.id == todo.id))
+        .map(|todo| todo.content.as_str())
+        .collect();
+    let changed: Vec<&str> = after
+        .iter()
+        .filter(|todo| {
+            before
+                .iter()
+                .find(|old| old.id == todo.id)
+                .is_some_and(|old| old != *todo)
+        })
+        .map(|todo| todo.content.as_str())
+        .collect();
+    for (label, items) in [("added", added), ("removed", removed), ("changed", changed)] {
+        if !items.is_empty() {
+            parts.push(format!("{label}: {}", items.join(", ")));
+        }
+    }
+    if parts.is_empty() {
+        "reordered".to_string()
+    } else {
+        parts.join("; ")
+    }
+}
+
+#[cfg(test)]
+mod lane_sync_tests {
+    use super::*;
+
+    fn laned(id: &str, stage: u32, group: &str) -> TodoItem {
+        TodoItem {
+            id: id.into(),
+            content: format!("task {id}"),
+            status: "pending".into(),
+            priority: "high".into(),
+            stage: Some(stage),
+            group: Some(group.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lane_change_summary_names_added_removed_and_changed() {
+        let a = laned("a", 1, "g");
+        let mut b = laned("b", 1, "g");
+        let c = laned("c", 1, "g");
+        let before = vec![a.clone(), b.clone()];
+        b.status = "completed".into();
+        let after = vec![b, c];
+        assert_eq!(
+            lane_change_summary(&before, &after),
+            "added: task c; removed: task a; changed: task b"
+        );
+        assert_eq!(lane_change_summary(&before, &before), "reordered");
+    }
+
+    #[test]
+    fn launched_lane_mirrors_both_ways_through_real_todo_files() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::tempdir().unwrap();
+        crate::env::set_var("JCODE_HOME", dir.path());
+
+        let boss = "session_boss_1";
+        let fox = "session_fox_2";
+        let mut initial = vec![
+            laned("p1", 1, "parser"),
+            laned("u1", 1, "ui"),
+            laned("p2", 1, "parser"),
+        ];
+        initial[0].waiting_on = vec!["boss-task".into()];
+        save_todos(boss, &initial).unwrap();
+
+        // Seeding: the worker's todo list becomes exactly its lane.
+        let seeded = link_worker_lane(boss, fox, "lane:1:parser").unwrap();
+        assert_eq!(seeded.len(), 2);
+        assert_eq!(load_todos(fox).unwrap(), seeded);
+        assert!(seeded.iter().all(|todo| todo.waiting_on.is_empty()));
+
+        // Worker edits flow back to the coordinator, in place, tagged.
+        let mut mine = load_todos(fox).unwrap();
+        mine[0].status = "completed".into();
+        mine[1].status = "in_progress".into();
+        mine[0].waiting_on = vec!["fox-task-1".into()];
+        mine[1].waiting_on = vec!["fox-task-2".into()];
+        mine.push(TodoItem {
+            id: "p3".into(),
+            content: "add lexer tests".into(),
+            status: "pending".into(),
+            priority: "high".into(),
+            waiting_on: vec!["fox-new-task".into()],
+            ..Default::default()
+        });
+        save_todos(fox, &mine).unwrap();
+        let boss_view = load_todos(boss).unwrap();
+        let ids: Vec<&str> = boss_view.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["p1", "p2", "p3", "u1"]);
+        assert_eq!(boss_view[0].status, "completed");
+        assert_eq!(boss_view[0].waiting_on, vec!["boss-task"]);
+        assert!(
+            boss_view[1..3]
+                .iter()
+                .all(|todo| todo.waiting_on.is_empty())
+        );
+        assert_eq!(boss_view[2].group.as_deref(), Some("parser"));
+        assert!(
+            boss_view[..3]
+                .iter()
+                .all(|t| t.assigned_to.as_deref() == Some(fox))
+        );
+
+        // Coordinator edits to the lane reach the worker (last save wins).
+        let mut edited = load_todos(boss).unwrap();
+        edited[2].content = "add lexer + parser tests".into();
+        edited[3].status = "completed".into(); // other lane: worker unaffected
+        edited.swap(0, 1); // references must follow IDs, not list positions
+        save_todos(boss, &edited).unwrap();
+        let worker_view = load_todos(fox).unwrap();
+        assert_eq!(worker_view.len(), 3);
+        assert_eq!(worker_view[2].content, "add lexer + parser tests");
+        assert!(worker_view.iter().all(|t| t.id != "u1"));
+        for (id, dependency) in [
+            ("p1", "fox-task-1"),
+            ("p2", "fox-task-2"),
+            ("p3", "fox-new-task"),
+        ] {
+            assert_eq!(
+                worker_view
+                    .iter()
+                    .find(|todo| todo.id == id)
+                    .unwrap()
+                    .waiting_on,
+                vec![dependency]
+            );
+        }
+        // No echo: the coordinator list is exactly what it saved.
+        assert_eq!(load_todos(boss).unwrap(), edited);
+        assert_eq!(
+            lane_change_summary(&mine, &worker_view),
+            "changed: add lexer + parser tests"
+        );
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),

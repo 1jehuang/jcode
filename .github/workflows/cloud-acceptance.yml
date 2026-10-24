@@ -1,0 +1,136 @@
+name: Cloud Acceptance
+
+on:
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/cloud-acceptance.yml'
+      - '.github/workflows/ci.yml'
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/**'
+      - 'crates/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'docs/cloud-acceptance.md'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/cloud-acceptance.yml'
+      - '.github/workflows/ci.yml'
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/**'
+      - 'crates/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'docs/cloud-acceptance.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JCODE_CI: '1'
+  CARGO_BUILD_RUSTC_WRAPPER: ''
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: stable
+  JUSTRUST_TOOLCHAIN: system
+  JUSTRUST_SLOTS: '0'
+  JUSTRUST_NO_TELEMETRY: '1'
+
+jobs:
+  acceptance:
+    name: Linux cloud handoff acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cloud-acceptance-linux-stable
+
+      - name: Install build and acceptance prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang mold tmux openssh-server bubblewrap util-linux python3
+          # The fixture runs its own unprivileged loopback-only sshd, not the service.
+          sudo install -d -m 0755 /run/sshd
+          # cloud_acceptance_tui.py deliberately invokes this exact absolute path.
+          if [[ ! -e /usr/bin/sshd ]]; then
+            sudo ln -s /usr/sbin/sshd /usr/bin/sshd
+          fi
+          # Ubuntu's AppArmor userns restriction blocks the fixture's unshare/mount.
+          # Change only this ephemeral hosted runner, never a developer's host.
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if [[ -e /proc/sys/kernel/unprivileged_userns_clone ]]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+
+      - name: Validate acceptance harness contracts
+        run: python3 tests/test_cloud_acceptance_harness.py
+
+      - name: Check module declarations resolve
+        run: python3 scripts/check_module_files.py
+
+      - name: Install pinned justrust
+        run: bash scripts/install_justrust_ci.sh
+
+      - name: Build acceptance binary
+        timeout-minutes: 75
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Match Linux CI's stable toolchain and clang/mold release build.
+          cat > .cargo/config.toml <<'EOF'
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+          EOF
+          RUSTC="$(rustup which rustc)"
+          export RUSTC
+          # Hosted CI has no justrust account. Use its supported local CI path.
+          justrust build --local --locked --release --target x86_64-unknown-linux-gnu -p jcode --bin jcode
+
+      - name: Run all acceptance layers twice
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          python3 scripts/test_cloud_acceptance.py \
+            --binary "$GITHUB_WORKSPACE/target/x86_64-unknown-linux-gnu/release/jcode" \
+            --repeat 2 \
+            --artifacts "$RUNNER_TEMP/cloud-acceptance"
+
+      - name: Retain acceptance evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cloud-acceptance/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7

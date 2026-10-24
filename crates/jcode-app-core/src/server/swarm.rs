@@ -774,35 +774,54 @@ async fn broadcast_swarm_status_now(
             members_guard
                 .get(sid)
                 .filter(|m| member_in_status_broadcast(m, broadcast_terminal_retention))
-                .map(|m| crate::protocol::SwarmMemberStatus {
-                    session_id: m.session_id.clone(),
-                    friendly_name: m.friendly_name.clone(),
-                    status: m.status.clone(),
-                    detail: m.detail.clone(),
-                    task_label: m.task_label.clone(),
-                    role: Some(m.role.clone()),
-                    is_headless: Some(m.is_headless),
-                    live_attachments: Some(m.event_txs.len()),
-                    status_age_secs: Some(status_age_secs(m.last_status_change)),
-                    output_tail: m.output_tail.clone(),
-                    report_back_to_session_id: m.report_back_to_session_id.clone(),
-                    todo_progress: m.todo_progress,
-                    todo_items: m.todo_items.clone(),
-                    runtime: crate::protocol::SwarmMemberRuntime {
-                        model: m.runtime.model.clone(),
-                        provider: m.runtime.provider.clone(),
-                        auth_method: m.runtime.auth_method.clone(),
-                        effort: m.runtime.effort.clone(),
-                        elapsed_secs: if matches!(
-                            m.status.as_str(),
-                            "running" | "streaming" | "thinking"
-                        ) {
-                            Some(m.joined_at.elapsed().as_secs())
-                        } else {
-                            Some(m.runtime.elapsed_secs.unwrap_or(0))
+                .map(|m| {
+                    let tokens = crate::session_metrics::token_totals(&m.session_id);
+                    let context_limit = m
+                        .runtime
+                        .model
+                        .as_deref()
+                        .and_then(crate::provider::models::context_limit_for_model)
+                        .map(|limit| limit as u64);
+                    (m, tokens, context_limit)
+                })
+                .map(
+                    |(m, tokens, context_limit)| crate::protocol::SwarmMemberStatus {
+                        session_id: m.session_id.clone(),
+                        friendly_name: m.friendly_name.clone(),
+                        status: m.status.clone(),
+                        detail: m.detail.clone(),
+                        task_label: m.task_label.clone(),
+                        role: Some(m.role.clone()),
+                        is_headless: Some(m.is_headless),
+                        live_attachments: Some(m.event_txs.len()),
+                        status_age_secs: Some(status_age_secs(m.last_status_change)),
+                        output_tail: m.output_tail.clone(),
+                        report_back_to_session_id: m.report_back_to_session_id.clone(),
+                        todo_progress: m.todo_progress,
+                        todo_items: m.todo_items.clone(),
+                        runtime: crate::protocol::SwarmMemberRuntime {
+                            todo_statuses: m.runtime.todo_statuses.clone(),
+                            model: m.runtime.model.clone(),
+                            provider: m.runtime.provider.clone(),
+                            auth_method: m.runtime.auth_method.clone(),
+                            effort: m.runtime.effort.clone(),
+                            elapsed_secs: if matches!(
+                                m.status.as_str(),
+                                "running" | "streaming" | "thinking"
+                            ) {
+                                Some(m.joined_at.elapsed().as_secs())
+                            } else {
+                                Some(m.runtime.elapsed_secs.unwrap_or(0))
+                            },
+                            activity_age_secs: crate::session_metrics::last_activity_age_secs(
+                                &m.session_id,
+                            ),
+                            context_tokens: tokens.map(|(context, _)| context).filter(|t| *t > 0),
+                            context_limit,
+                            output_tokens: tokens.map(|(_, output)| output).filter(|t| *t > 0),
                         },
                     },
-                })
+                )
         })
         .collect();
 

@@ -1301,9 +1301,15 @@ fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_inherit() {
         resolve_swarm_spawn_effort(Some("  "), Some(" medium ")),
         Some("medium".to_string())
     );
-    // With neither, the worker inherits the provider-wide effort.
-    assert_eq!(resolve_swarm_spawn_effort(None, None), None);
-    assert_eq!(resolve_swarm_spawn_effort(Some(""), Some("")), None);
+    // With neither, workers default to low effort.
+    assert_eq!(
+        resolve_swarm_spawn_effort(None, None),
+        Some("low".to_string())
+    );
+    assert_eq!(
+        resolve_swarm_spawn_effort(Some(""), Some("")),
+        Some("low".to_string())
+    );
 }
 
 #[test]

@@ -376,6 +376,38 @@ mod tests {
         assert_eq!(out["required"], json!(["action"]));
     }
 
+    #[test]
+    fn gemini_prunes_required_without_properties_in_array_items() {
+        // The original todo.add schema rejected every Antigravity Gemini turn.
+        for properties in [None, Some(json!({}))] {
+            let mut item = json!({
+                "type": "object",
+                "required": ["content", "status", "priority", "id", "confidence"],
+                "additionalProperties": true
+            });
+            if let Some(properties) = properties {
+                item["properties"] = properties;
+            }
+            let schema = json!({
+                "type": "object",
+                "properties": { "add": { "type": "array", "items": item } }
+            });
+            let errors = must_not_contain_unsupported_constructs(&schema, &registry::GEMINI);
+            assert_eq!(
+                errors
+                    .iter()
+                    .filter(|e| e.message.contains("`required` names"))
+                    .count(),
+                5,
+                "{errors:?}"
+            );
+            let out = dialect::apply(&schema, &registry::GEMINI);
+            assert!(out["properties"]["add"]["items"].get("required").is_none());
+            assert!(must_not_contain_unsupported_constructs(&out, &registry::GEMINI).is_empty());
+            assert_eq!(dialect::apply(&out, &registry::GEMINI), out);
+        }
+    }
+
     /// The regression that made #754 a bug in the first place: a top-level-only
     /// filter left the nested copy in place.
     #[test]

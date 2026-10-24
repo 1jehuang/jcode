@@ -81,15 +81,7 @@ pub fn has_openrouter_credentials() -> bool {
 pub fn get_api_key() -> Option<String> {
     let key_name = configured_api_key_name();
     let env_file = configured_env_file_name();
-    if key_name == crate::auth::muse::API_KEY_ENV
-        && env_file == crate::auth::muse::ENV_FILE
-        && configured_api_base() == crate::auth::muse::EXPECTED_API_BASE_URL
-        && crate::auth::muse::ensure_enabled().is_ok()
-        && let Ok(credentials) = crate::auth::muse::load_credentials()
-    {
-        return Some(credentials.api_key);
-    }
-    load_api_key_from_env_or_config(&key_name, &env_file)
+    crate::provider_catalog::load_runtime_api_key(&key_name, &env_file)
 }
 
 /// OpenRouter API base URL

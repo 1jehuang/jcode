@@ -572,9 +572,10 @@ async fn register_visible_spawned_member(
 
 /// Resolve the reasoning effort for a spawned swarm worker (#1165).
 ///
-/// Precedence mirrors the model path: an explicit `effort` on the spawn call
-/// wins, then the `agents.swarm_effort` config pin, and only then does the
-/// worker inherit the provider-wide reasoning effort (`None`).
+/// The swarm tool no longer lets agents choose worker effort, so
+/// `requested_effort` only arrives from direct protocol clients (SDK). It wins
+/// when present, then the user's `agents.swarm_effort` config pin, and
+/// otherwise workers run at [`DEFAULT_SWARM_WORKER_EFFORT`].
 pub(super) fn resolve_swarm_spawn_effort(
     requested_effort: Option<&str>,
     configured_swarm_effort: Option<&str>,
@@ -585,8 +586,14 @@ pub(super) fn resolve_swarm_spawn_effort(
             .filter(|effort| !effort.is_empty())
             .map(str::to_string)
     };
-    clean(requested_effort).or_else(|| clean(configured_swarm_effort))
+    clean(requested_effort)
+        .or_else(|| clean(configured_swarm_effort))
+        .or_else(|| Some(DEFAULT_SWARM_WORKER_EFFORT.to_string()))
 }
+
+/// Reasoning effort for spawned swarm workers when neither the request nor
+/// `agents.swarm_effort` sets one.
+pub(super) const DEFAULT_SWARM_WORKER_EFFORT: &str = "low";
 
 /// Spawn mode for one swarm spawn. An explicit per-call mode wins, except
 /// `auto`: a model passing `auto` expresses no preference, so the user's
@@ -1167,6 +1174,20 @@ pub(super) async fn handle_comm_stop(
                     sid,
                     working_dir,
                 );
+            }
+        } else {
+            // The agent was mid-turn so its lock was busy; still record that
+            // the session is closed, or it looks alive on disk forever (and
+            // reload keeps re-announcing awaits on it).
+            if let Ok(mut session) = crate::session::Session::load(&target_session) {
+                session.mark_closed();
+                // save_prepared: a worker stopped before it wrote any message
+                // must still persist Closed (plain save skips empty sessions).
+                if let Err(error) = session.save_prepared() {
+                    crate::logging::warn(&format!(
+                        "stop {target_session}: failed to persist closed status: {error}"
+                    ));
+                }
             }
         }
     }

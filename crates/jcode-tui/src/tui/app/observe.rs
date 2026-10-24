@@ -94,7 +94,7 @@ impl App {
     /// React to a completed tool by forcing the info-widget caches it may have
     /// dirtied to refetch on the next frame, instead of waiting out their TTLs.
     ///
-    /// The info widget's git-status and todos panels are stale-while-revalidate
+    /// The info widget's git-status panel is stale-while-revalidate
     /// caches (5s / 1s TTL). The agent's own tools are exactly what mutate those
     /// underlying sources, so without an explicit nudge the widget would show the
     /// repo/todo state from *before* the tool ran for a full TTL. This keeps the

@@ -25,7 +25,7 @@ fn browser_tool_description_text() -> &'static str {
     if browser_handoff_disabled() {
         return "Control the browser using direct actions. Check action='status' first; run setup only if not ready. Browser handoff is disabled for this process. Complete browser tasks with direct actions in the requested tab.";
     }
-    "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks: the fast Jev browser agent owns the entire task in an explicit tab through an iterative observation/action/results loop until done or genuinely blocked. Supply a goal, tab_id, and optional trusted context with background and completion criteria. A hand_back with requested_help=script/text asks the main agent to supply exact executable script candidates or exact text_values and resume the same task. Navigation alone is not completion unless it satisfies the entire goal. Reserve direct actions for setup, tab discovery/creation, or when handoff cannot complete the task. list_tabs shows every window, including the user's already signed-in tabs; pass tab_id to work in one. requested_help=user_login means ask the user to sign in or finish 2FA in that tab, wait for them, then re-run the same handoff."
+    "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks with goal, tab_id, and optional trusted context. Jev handles the entire task until complete or genuinely blocked; navigation alone is not completion. Direct actions are for setup, tab discovery/creation, or blocked handoffs. list_tabs includes signed-in tabs across windows. On requested_help=script/text, supply exact executable script candidates or exact text_values and resume. On requested_help=user_login, ask the user to complete the CAPTCHA in that tab, wait, then resume the handoff."
 }
 
 /// Opt-in process-local control for direct-only benchmark arms. Normal sessions
@@ -268,7 +268,7 @@ impl Tool for BrowserTool {
             ),
             (
                 "text_values",
-                json!({"type":"array", "maxItems":16, "items":{"type":"string", "maxLength":2000}, "description":"Exact non-sensitive text to type. Never passwords, OTPs, or payment credentials."}),
+                json!({"type":"array", "maxItems":16, "items":{"type":"string", "maxLength":2000}, "description":"Exact text to type. Never payment credentials."}),
             ),
             (
                 "candidates",
@@ -1235,15 +1235,18 @@ mod task_contract_tests {
         let description = browser_tool_description_text();
         for clause in [
             "entire task",
-            "observation/action/results loop",
+            "navigation alone is not completion",
             "genuinely blocked",
             "exact executable script candidates",
             "exact text_values",
+            "requested_help=user_login",
+            "wait, then resume the handoff",
         ] {
             assert!(
                 description.contains(clause),
                 "Missing task contract: {clause}"
             );
         }
+        assert!(description.len() <= 700);
     }
 }

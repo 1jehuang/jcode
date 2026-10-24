@@ -16,6 +16,7 @@
 //! This provides better control and eliminates the Python dependency.
 
 mod reasoning_request;
+mod usage_recording;
 
 use jcode_base::auth;
 use jcode_base::auth::oauth;
@@ -802,9 +803,7 @@ impl AnthropicProvider {
     /// cheaper models stay cheap.
     fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
         let key = Self::normalized_model_key(model);
-        if key.contains("claude-opus-5-5") {
-            Some("medium".to_string())
-        } else if key.contains("claude-opus-5") {
+        if key.contains("claude-opus-5") {
             Some("low".to_string())
         } else if key.contains("claude-opus") {
             Some(if Self::model_supports_xhigh_effort(model) {
@@ -1059,7 +1058,17 @@ impl AnthropicProvider {
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
         // A removed explicit account must fail closed, even with a fresh cache.
         if let Some(label) = self.oauth_account_label() {
-            auth::claude::load_credentials_for_account(&label)?;
+            let mut cached = self.credentials.write().await;
+            let stored = auth::claude::load_credentials_for_account(&label)?;
+            if cached.as_ref().is_some_and(|old| {
+                old.access_token != stored.access_token
+                    || old.refresh_token != stored.refresh_token
+                    || old.expires_at != stored.expires_at
+            }) {
+                // /cloud imports happen in another process. Discard the old
+                // daemon snapshot and validate the newly stored account below.
+                *cached = None;
+            }
         }
         // Check cached credentials
         {
@@ -1896,6 +1905,7 @@ async fn run_stream_with_retries(
     direct_transport: DirectTransportConfig,
     retry_settings: reasoning_request::RetrySettings,
 ) {
+    let usage_label = usage_recording::credential_label(is_oauth, &initial_token);
     let mut token = initial_token;
     let mut last_error = None;
     let mut next_retry_delay = None;
@@ -1958,6 +1968,7 @@ async fn run_stream_with_retries(
             &oauth_session_id,
             &direct_transport,
             &mut response_accepted,
+            usage_label.as_deref(),
         )
         .await
         {
@@ -2254,6 +2265,7 @@ async fn stream_response(
     oauth_session_id: &str,
     direct_transport: &DirectTransportConfig,
     response_accepted: &mut bool,
+    usage_label: Option<&str>,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let requested_model_base = strip_1m_suffix(&request.model).to_ascii_lowercase();
@@ -2418,6 +2430,11 @@ async fn stream_response(
         // Process complete SSE events
         while let Some(event) = parse_sse_event(&mut buffer) {
             let events = process_sse_event(&event, &mut sse_state, is_oauth);
+            if event.event_type == "message_stop" {
+                usage_recording::record(usage_label, &request.model, &sse_state).await;
+                usage_recording::send_final_usage(&tx, &sse_state).await;
+                return Ok(());
+            }
             for stream_event in events {
                 if let StreamEvent::Error { ref message, .. } = stream_event
                     && is_retryable_error(&message.to_lowercase())
@@ -2431,27 +2448,7 @@ async fn stream_response(
         }
     }
 
-    // Send final token usage if we have it
-    if sse_state.input_tokens.is_some() || sse_state.output_tokens.is_some() {
-        // Log cache usage for debugging
-        if sse_state.cache_read_input_tokens.is_some()
-            || sse_state.cache_creation_input_tokens.is_some()
-        {
-            jcode_base::logging::info(&format!(
-                "Prompt cache: read={:?} created={:?}",
-                sse_state.cache_read_input_tokens, sse_state.cache_creation_input_tokens
-            ));
-        }
-        let _ = tx
-            .send(Ok(StreamEvent::TokenUsage {
-                input_tokens: sse_state.input_tokens,
-                output_tokens: sse_state.output_tokens,
-                cache_read_input_tokens: sse_state.cache_read_input_tokens,
-                cache_creation_input_tokens: sse_state.cache_creation_input_tokens,
-            }))
-            .await;
-    }
-
+    usage_recording::send_final_usage(&tx, &sse_state).await;
     Ok(())
 }
 
@@ -2516,6 +2513,10 @@ struct SseStreamState {
     output_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
+    served_model: Option<String>,
+    service_tier: Option<String>,
+    cache_creation_5m: Option<u64>,
+    cache_creation_1h: Option<u64>,
     /// Lowercased base id of the model we asked for, so `message_start` can flag
     /// a silent server-side substitution (e.g. an unavailable id aliased to a
     /// different model). Empty when unknown (e.g. in unit tests).
@@ -2540,6 +2541,7 @@ fn process_sse_event(
                 // Log it so we can confirm there was no silent server-side
                 // substitution (and surface it under JCODE_LOG_SERVED_MODEL).
                 if let Some(served) = parsed.message.model.as_deref() {
+                    state.served_model = Some(served.to_string());
                     jcode_base::logging::info(&format!("Anthropic served model={}", served));
                     if std::env::var("JCODE_LOG_SERVED_MODEL").is_ok() {
                         eprintln!("[anthropic] served model={served}");
@@ -2568,19 +2570,7 @@ fn process_sse_event(
                     }
                 }
                 if let Some(usage) = parsed.message.usage {
-                    state.input_tokens = usage.input_tokens.map(|t| t as u64);
-                    state.cache_read_input_tokens = usage.cache_read_input_tokens.map(|t| t as u64);
-                    state.cache_creation_input_tokens =
-                        usage.cache_creation_input_tokens.map(|t| t as u64);
-                    if let Some(tier) = usage.service_tier.as_deref() {
-                        jcode_base::logging::info(&format!(
-                            "Anthropic granted service_tier={}",
-                            tier
-                        ));
-                        if std::env::var("JCODE_LOG_SERVICE_TIER").is_ok() {
-                            eprintln!("[anthropic] granted service_tier={tier}");
-                        }
-                    }
+                    usage_recording::update_usage(state, usage);
                 }
             }
         }
@@ -2686,7 +2676,7 @@ fn process_sse_event(
         "message_delta" => {
             if let Ok(parsed) = serde_json::from_str::<MessageDeltaEvent>(&event.data) {
                 if let Some(usage) = parsed.usage {
-                    state.output_tokens = usage.output_tokens.map(|t| t as u64);
+                    usage_recording::update_usage(state, usage);
                 }
                 if let Some(stop_reason) = parsed.delta.stop_reason {
                     events.push(StreamEvent::MessageEnd {

@@ -21,6 +21,7 @@ fn header_invalidation_discards_composed_account_quota_frames() {
         inline_images_visible: true,
         expanded_images_version: 0,
         swarm_members_signature: 0,
+        latex_rendering: crate::config::LatexRenderingMode::default(),
     };
     {
         let mut cache = full_prep_cache().lock().unwrap();
