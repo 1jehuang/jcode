@@ -256,6 +256,7 @@ fn test_streaming_tokens() {
 
 #[test]
 fn test_build_turn_footer_uses_compact_duration_labels() {
+    let _env_guard = crate::storage::lock_test_env();
     let app = create_test_app();
 
     assert_eq!(
