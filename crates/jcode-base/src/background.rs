@@ -32,6 +32,17 @@ use model::{
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
+/// Own an adopted task rather than detaching it when its wrapper is aborted.
+/// Construct before the first await, including before spawning the wrapper, so
+/// cancellation during registration or before its first poll is also safe.
+struct AbortAdoptedTask<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortAdoptedTask<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
@@ -648,6 +659,7 @@ impl BackgroundTaskManager {
         wake: bool,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
+        let mut handle = AbortAdoptedTask(handle);
         // Reserve before the foreground caller can release its turn/tool guard.
         let runtime_activity = crate::runtime_activity::global().enter().await;
         let (notify, wake) = normalize_delivery(notify, wake);
@@ -707,7 +719,7 @@ impl BackgroundTaskManager {
 
         let wrapper_handle = tokio::spawn(async move {
             let _runtime_activity = runtime_activity;
-            let tool_result = handle.await;
+            let tool_result = (&mut handle.0).await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
             let (status, exit_code, error, output_text) = match tool_result {
