@@ -1222,6 +1222,7 @@ async fn continue_persistent_ws_locked(
                         if is_retryable_error(&lower)
                             || lower.contains("previous_response_not_found")
                             || lower.contains("no tool output found for function call")
+                            || is_websocket_request_rejection(message)
                         {
                             return PersistentWsResult::Failed(format!(
                                 "stream error: {}",
@@ -1247,6 +1248,7 @@ async fn continue_persistent_ws_locked(
                         if is_retryable_error(&lower)
                             || lower.contains("previous_response_not_found")
                             || lower.contains("no tool output found for function call")
+                            || is_websocket_request_rejection(message)
                         {
                             return PersistentWsResult::Failed(format!(
                                 "stream error: {}",
@@ -1734,6 +1736,12 @@ async fn stream_response_websocket_authenticated(
                                     message,
                                 );
                             }
+                            if !saw_api_activity && is_websocket_request_rejection(message) {
+                                return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                                    "websocket request rejected, retrying over https: {}",
+                                    message
+                                )));
+                            }
                             if is_retryable_error(&message.to_lowercase()) {
                                 return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                                     "Stream error: {}",
@@ -1775,6 +1783,12 @@ async fn stream_response_websocket_authenticated(
                                     model_name,
                                     message,
                                 );
+                            }
+                            if !saw_api_activity && is_websocket_request_rejection(message) {
+                                return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                                    "websocket request rejected, retrying over https: {}",
+                                    message
+                                )));
                             }
                             if is_retryable_error(&message.to_lowercase()) {
                                 return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -2022,3 +2036,13 @@ pub(super) fn is_retryable_error(error_str: &str) -> bool {
 #[cfg(test)]
 #[path = "openai_stream_runtime/stream_runtime_tests.rs"]
 mod stream_runtime_tests;
+
+/// The server rejected a WebSocket request outright (for example after a
+/// prefix mismatch on a very large delta). The same request is normally
+/// accepted over HTTPS, so Auto should fall back instead of surfacing it.
+fn is_websocket_request_rejection(message: &str) -> bool {
+    // Only the bare, detail-free rejection. Errors that say what is wrong
+    // (an invalid tool schema, a bad parameter) are real and must surface.
+    let lower = message.trim().to_lowercase();
+    lower == "invalid request" || lower == "invalid_request_error: invalid request"
+}

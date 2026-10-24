@@ -280,3 +280,19 @@ fn cache_affinity_https_matches_websocket_session_header() {
         }
     }
 }
+
+#[test]
+fn websocket_invalid_request_falls_back_to_https() {
+    assert!(super::is_websocket_request_rejection(
+        "invalid_request_error: Invalid request"
+    ));
+    assert!(super::is_websocket_request_rejection("Invalid request"));
+    assert!(!super::is_websocket_request_rejection("rate limit reached"));
+}
+
+#[test]
+fn websocket_detailed_invalid_request_is_not_swallowed() {
+    assert!(!super::is_websocket_request_rejection(
+        "invalid_request_error: Invalid tool schema."
+    ));
+}
