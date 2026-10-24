@@ -43,17 +43,20 @@ fn rendered_first_row(msg: &DisplayMessage, width: u16) -> String {
 #[test]
 fn test_tool_row_stamp_renders_when_enabled() {
     let _lock = viewport_snapshot_test_lock();
-    let _config = isolate_config_home_with("[display]\nshow_tool_timestamp = true\n");
+    // Pin the zone so the expected stamp text does not depend on the
+    // machine's local timezone.
+    let _config = isolate_config_home_with(
+        "[display]\nshow_tool_timestamp = true\ntimestamp_tz = \"UTC+0\"\n",
+    );
     let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:23:35Z")
         .expect("parse stamp")
         .with_timezone(&chrono::Utc);
     let msg = time_tool_msg(Some(stamp), Some(48_300));
 
     let row = rendered_first_row(&msg, 200);
-    let expected = stamp
-        .with_timezone(&chrono::Local)
-        .format("%H:%M:%S")
-        .to_string();
+    // timestamp_tz = "UTC+0" pins the rendered stamp regardless of the
+    // machine's local timezone.
+    let expected = "20:23:35".to_string();
     assert!(row.contains(&expected), "stamp missing from row: {row}");
     assert!(row.contains("48.3s"), "duration badge missing: {row}");
     assert!(row.contains("tok"), "token badge must stay: {row}");
@@ -132,7 +135,11 @@ fn test_tool_row_utc3_exact_offset_arithmetic_across_day_boundary() {
 #[test]
 fn test_tool_row_stamp_stays_neutral_for_any_duration_severity() {
     let _lock = viewport_snapshot_test_lock();
-    let _config = isolate_config_home_with("[display]\nshow_tool_timestamp = true\n");
+    // Pin the zone so the expected stamp text does not depend on the
+    // machine's local timezone.
+    let _config = isolate_config_home_with(
+        "[display]\nshow_tool_timestamp = true\ntimestamp_tz = \"UTC+0\"\n",
+    );
     let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:15:42Z")
         .expect("parse stamp")
         .with_timezone(&chrono::Utc);
