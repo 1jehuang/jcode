@@ -12,12 +12,10 @@ pub struct JcodeProvider {
 
 impl JcodeProvider {
     fn runtime_model_spec(model: &str) -> String {
-        // Subscription model ids overlap with direct providers (for example,
-        // `claude-*` and `gpt-*`). Passing a bare id to MultiProvider lets its
-        // family heuristic escape to the user's Anthropic/OpenAI credentials.
-        // Pin the managed OpenRouter slot, whose transport is configured below
-        // as `jcode-subscription`, for every curated model.
-        format!("openrouter:{}", model.trim())
+        // Use the explicit managed-subscription route. `openrouter:` denotes
+        // BYOK and deliberately rebinds the shared slot to an OpenRouter key,
+        // even if the slot previously held a managed subscription runtime.
+        format!("jcode:{}", model.trim())
     }
 
     pub fn new() -> Self {
@@ -337,15 +335,15 @@ mod tests {
     fn jcode_models_are_pinned_to_the_managed_transport() {
         assert_eq!(
             JcodeProvider::runtime_model_spec("claude-opus-5-5"),
-            "openrouter:claude-opus-5-5"
+            "jcode:claude-opus-5-5"
         );
         assert_eq!(
             JcodeProvider::runtime_model_spec("claude-haiku-5-5"),
-            "openrouter:claude-haiku-5-5"
+            "jcode:claude-haiku-5-5"
         );
         assert_eq!(
             JcodeProvider::runtime_model_spec("gpt-6.1-sol"),
-            "openrouter:gpt-6.1-sol"
+            "jcode:gpt-6.1-sol"
         );
     }
 
