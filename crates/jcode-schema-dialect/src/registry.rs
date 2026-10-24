@@ -103,6 +103,8 @@ pub const GEMINI: DialectSpec = DialectSpec {
         prune_dangling_required: true,
         const_as_enum: true,
         one_of_as_any_of: true,
+        merge_all_of_branches: true,
+        scalar_type_only: true,
         ..DEFAULT_TRANSFORMS
     },
 };
@@ -196,6 +198,7 @@ pub const ANTIGRAVITY_CLAUDE: DialectSpec = DialectSpec {
         prune_dangling_required: true,
         const_as_enum: true,
         one_of_as_any_of: true,
+        scalar_type_only: true,
         ..DEFAULT_TRANSFORMS
     },
 };
@@ -226,6 +229,7 @@ pub const ANTIGRAVITY_BRIDGE: DialectSpec = DialectSpec {
         prune_dangling_required: true,
         const_as_enum: true,
         one_of_as_any_of: true,
+        scalar_type_only: true,
         ..DEFAULT_TRANSFORMS
     },
 };
@@ -238,6 +242,7 @@ const DEFAULT_TRANSFORMS: DialectTransforms = DialectTransforms {
     const_as_enum: false,
     one_of_as_any_of: false,
     merge_all_of_branches: false,
+    scalar_type_only: false,
 };
 
 /// Every registered dialect, for conformance sweeps.
