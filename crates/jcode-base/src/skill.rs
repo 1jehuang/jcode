@@ -17,8 +17,9 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
-    /// `disable-model-invocation: true`: the user can still run the skill via
-    /// `/name`, but it is kept out of every model-facing skill listing.
+    /// `disable-model-invocation: true`: only the user can invoke the skill,
+    /// via `/name`. It is kept out of every model-facing skill listing and
+    /// `skill_manage` refuses to load or read it.
     pub disable_model_invocation: bool,
     pub content: String,
     pub path: PathBuf,
@@ -597,9 +598,9 @@ impl SkillRegistry {
         skills
     }
 
-    /// Skills the model may discover: [`Self::list`] minus skills that set
-    /// `disable-model-invocation`. Slash invocation, autocomplete and `/skills`
-    /// keep using [`Self::list`] and [`Self::get`].
+    /// Skills the model may discover and load: [`Self::list`] minus skills that
+    /// set `disable-model-invocation`. Slash invocation, autocomplete and
+    /// `/skills` keep using [`Self::list`] and [`Self::get`].
     pub fn list_model_invocable(&self) -> Vec<&Skill> {
         let mut skills = self.list();
         skills.retain(|skill| !skill.disable_model_invocation);
@@ -1171,6 +1172,12 @@ mod tests {
                 prompt: Some("run it"),
             })
         );
+        let prompt = registry
+            .get("manual-only")
+            .expect("slash invocation resolves the hidden skill")
+            .get_prompt();
+        assert!(prompt.contains("# Skill: manual-only"), "{prompt}");
+        assert!(prompt.contains("Body"), "{prompt}");
     }
 
     #[test]

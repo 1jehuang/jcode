@@ -143,6 +143,9 @@ impl SkillTool {
                 anyhow::anyhow!("Skill '{}' not found", name)
             }
         })?;
+        if skill.disable_model_invocation {
+            return Err(model_invocation_disabled(&skill.name));
+        }
 
         let base_dir = skill
             .path
@@ -289,6 +292,9 @@ impl SkillTool {
         let registry = self.effective_registry(working_dir).await;
 
         if let Some(skill) = registry.get(&name) {
+            if skill.disable_model_invocation {
+                return Err(model_invocation_disabled(&skill.name));
+            }
             let mut output = format!("# Skill: {}\n\n", skill.name);
             output.push_str(&format!("**Description:** {}\n", skill.description));
             output.push_str(&format!("**Path:** {}\n", skill.path.display()));
@@ -362,6 +368,12 @@ fn append_endorsed_skills(output: &mut String, installed: &std::collections::Has
     output.push_str(
         "NVIDIA CUDA-X skills come from the official catalog at https://github.com/NVIDIA/skills.\n",
     );
+}
+
+fn model_invocation_disabled(name: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Skill '{name}' sets disable-model-invocation, so it can only be invoked by the user with /{name}."
+    )
 }
 
 fn normalize_skill_name(name: Option<String>, action: &str) -> Result<String> {
@@ -688,28 +700,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_disable_model_invocation_skill_still_loads_and_reads_by_name() {
+    async fn test_disable_model_invocation_skill_is_refused_for_model_load_and_read() {
         let tool = create_test_tool();
         let repo = tempfile::tempdir().unwrap();
         write_manual_only_project_skill(repo.path(), "manual-only-skill");
 
+        let requests = [
+            json!({"action": "load", "name": "manual-only-skill"}),
+            json!({"action": "read", "name": "manual-only-skill"}),
+            json!({"skill": "manual-only-skill", "args": "do it"}),
+        ];
+        for request in requests {
+            let label = request.to_string();
+            let error = match tool
+                .execute(request, context_with_working_dir(repo.path()))
+                .await
+            {
+                Ok(output) => panic!(
+                    "{label} must refuse a disable-model-invocation skill, got: {}",
+                    output.output
+                ),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("manual-only-skill"), "{label}: {error}");
+            assert!(error.contains("/manual-only-skill"), "{label}: {error}");
+            assert!(!error.contains("Manual body."), "{label}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_model_invocable_skill_still_loads_and_reads_through_skill_manage() {
+        let tool = create_test_tool();
+        let repo = tempfile::tempdir().unwrap();
+        write_project_skill(repo.path(), "model-visible-skill");
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+
         let load = tool
             .execute(
-                json!({"action": "load", "name": "manual-only-skill"}),
+                json!({"action": "load", "name": "model-visible-skill"}),
                 context_with_working_dir(repo.path()),
             )
             .await
             .unwrap();
-        assert!(load.output.contains("## Skill: manual-only-skill"));
-        assert!(load.output.contains("Manual body."));
+        assert!(load.output.contains("## Skill: model-visible-skill"));
+        assert!(load.output.contains("Body."));
 
         let read = tool
             .execute(
-                json!({"action": "read", "name": "manual-only-skill"}),
+                json!({"action": "read", "name": "model-visible-skill"}),
                 context_with_working_dir(repo.path()),
             )
             .await
             .unwrap();
-        assert!(read.output.contains("Manual only skill manual-only-skill"));
+        assert!(read.output.contains("Project skill model-visible-skill"));
     }
 }
