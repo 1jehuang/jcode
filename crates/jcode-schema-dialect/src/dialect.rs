@@ -144,13 +144,16 @@ pub fn apply(schema: &Value, spec: &DialectSpec) -> Value {
 
 /// [`apply`], additionally honoring keywords learned from live rejections.
 pub fn apply_with_quirks(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
-    let mut out = walk(schema, spec, quirks);
-
-    if spec.transforms.flatten_all_combiners {
-        out = flatten_all_combiners(&out);
-    } else if spec.transforms.flatten_top_level_combiners {
+    let mut out = if spec.transforms.flatten_all_combiners {
+        flatten_all_combiners(schema)
+    } else {
+        schema.clone()
+    };
+    if !spec.transforms.flatten_all_combiners && spec.transforms.flatten_top_level_combiners {
         flatten_top_level_combiners(&mut out);
     }
+
+    out = walk(&out, spec, quirks);
 
     // A tool with no parameters is `{}` or a non-object in some MCP servers;
     // strict validators want an object schema (#446).
@@ -189,7 +192,12 @@ fn walk(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
                 // Load-bearing keywords survive even a learned rejection: if a
                 // provider truly rejects `type`, dropping it would produce a
                 // meaningless tool, and the right answer is a real fix.
-                if (!spec.supports(out_key) || dropped_by_quirk) && is_droppable(key) {
+                // Likewise, `allOf` is retained until `merge_all_of_branches`
+                // folds its branches into the enclosing object.
+                if (!spec.supports(out_key) || dropped_by_quirk)
+                    && is_droppable(key)
+                    && !(key == "allOf" && spec.transforms.merge_all_of_branches)
+                {
                     if key == "const" && spec.transforms.const_as_enum {
                         out.insert(
                             "enum".into(),
@@ -430,6 +438,37 @@ fn flatten_all_combiners(schema: &Value) -> Value {
                         Value::Object(branch) => branch,
                         other => return other,
                     };
+                    if combiner == "allOf" {
+                        for rest_branch in branches.iter().skip(1) {
+                            let Value::Object(rest_map) = flatten_all_combiners(rest_branch) else {
+                                continue;
+                            };
+                            for (key, val) in rest_map {
+                                match (flattened.get_mut(&key), val) {
+                                    (Some(Value::Object(existing)), Value::Object(incoming))
+                                        if key == "properties" =>
+                                    {
+                                        for (name, property) in incoming {
+                                            existing.entry(name).or_insert(property);
+                                        }
+                                    }
+                                    (Some(Value::Array(existing)), Value::Array(incoming))
+                                        if key == "required" =>
+                                    {
+                                        for req in incoming {
+                                            if !existing.contains(&req) {
+                                                existing.push(req);
+                                            }
+                                        }
+                                    }
+                                    (Some(_), _) => {}
+                                    (None, val) => {
+                                        flattened.insert(key, val);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for (key, value) in map {
                         if key == combiner {
                             continue;
@@ -527,6 +566,11 @@ fn merge_all_of_branches(out: &mut Map<String, Value>) {
             && let Some(branch_type) = branch.get("type")
         {
             out.insert("type".to_string(), branch_type.clone());
+        }
+        if !out.contains_key("nullable")
+            && let Some(branch_nullable) = branch.get("nullable")
+        {
+            out.insert("nullable".to_string(), branch_nullable.clone());
         }
         if let Some(branch_properties) = branch.get("properties").and_then(Value::as_object) {
             for (name, property) in branch_properties {

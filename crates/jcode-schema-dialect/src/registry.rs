@@ -103,6 +103,7 @@ pub const GEMINI: DialectSpec = DialectSpec {
         prune_dangling_required: true,
         const_as_enum: true,
         one_of_as_any_of: true,
+        merge_all_of_branches: true,
         scalar_type_only: true,
         ..DEFAULT_TRANSFORMS
     },
