@@ -1,6 +1,7 @@
 #[test]
 fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
     with_temp_jcode_home(|| {
+        assert!(!crate::config::config().features.todo_gate_digest);
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
         app.auto_poke_default_on = true;
@@ -188,14 +189,11 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         changed.completion_confidence = Some(crate::todo::ConfidenceState::Plausible);
         crate::todo::save_todos(&app.session.id, &[changed]).expect("save changed todo");
         assert!(app.schedule_auto_poke_followup_if_needed());
-        assert!(app.queued_messages[0].starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
-        assert!(!app.todo_final_response_requested);
-        app.queued_messages.clear();
-        app.pending_queued_dispatch = false;
-        assert!(app.schedule_auto_poke_followup_if_needed());
+        // Disabling the aggregate digest must not disable completion validation.
         assert!(
             app.queued_messages[0].starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE)
         );
+        assert!(!app.todo_final_response_requested);
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save validated");
