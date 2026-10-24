@@ -1664,6 +1664,65 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
 }
 
 #[tokio::test]
+async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&[
+        "JCODE_HOME",
+        "JCODE_RUN_AUTO_POKE",
+        "JCODE_RUN_AUTO_POKE_MAX_TURNS",
+    ]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    // A generous global cap must not override the per-state cap.
+    crate::env::set_var("JCODE_RUN_AUTO_POKE_MAX_TURNS", "10");
+    for enabled in [true, false] {
+        crate::env::set_var("JCODE_RUN_AUTO_POKE", if enabled { "1" } else { "0" });
+        for mode in ["plain", "capture", "ndjson"] {
+            let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+            let registry = Registry::new(provider.clone()).await;
+            let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+            crate::todo::save_todos(
+                agent.session_id(),
+                &[test_todo("open", "pending", "high", None, None)],
+            )
+            .unwrap();
+            match mode {
+                "plain" => run_single_message_command_plain_with_auto_poke(&mut agent, "go")
+                    .await
+                    .unwrap(),
+                "capture" => {
+                    run_single_message_command_capture_with_auto_poke(&mut agent, "go")
+                        .await
+                        .unwrap();
+                }
+                _ => run_single_message_command_ndjson(&mut agent, provider, "go")
+                    .await
+                    .unwrap(),
+            }
+            let session = crate::session::Session::load(agent.session_id()).unwrap();
+            let followups = session
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == crate::message::Role::User
+                        && message.content.iter().any(|block| {
+                            matches!(block,
+                                crate::message::ContentBlock::Text { text, .. }
+                                    if crate::todo::is_auto_poke_message(text)
+                            )
+                        })
+                })
+                .count();
+            assert_eq!(
+                followups,
+                if enabled { 3 } else { 0 },
+                "{mode}, enabled={enabled}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn one_shot_output_modes_close_sessions_and_clear_active_pid_markers() {
     let _guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);

@@ -2987,6 +2987,7 @@ async fn run_single_message_command_plain_with_auto_poke(
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
+    let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
         agent.run_once(&next_message).await?;
         turns_completed += 1;
@@ -2994,6 +2995,13 @@ async fn run_single_message_command_plain_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
+        if !incomplete_budget.allow_follow_up(&todos) {
+            eprintln!(
+                "We stopped poking after {} attempts without todo progress; unfinished todos remain.",
+                crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS
+            );
+            break;
+        }
         let gate_digest = take_run_gate_digest_if_turn_ended(
             agent.session_id(),
             gate_digest_delivered,
@@ -3074,6 +3082,7 @@ async fn run_single_message_command_capture_with_auto_poke(
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
+    let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
         outputs.push(agent.run_once_capture(&next_message).await?);
         turns_completed += 1;
@@ -3081,6 +3090,13 @@ async fn run_single_message_command_capture_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
+        if !incomplete_budget.allow_follow_up(&todos) {
+            eprintln!(
+                "We stopped poking after {} attempts without todo progress; unfinished todos remain.",
+                crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS
+            );
+            break;
+        }
         let gate_digest = take_run_gate_digest_if_turn_ended(
             agent.session_id(),
             gate_digest_delivered,
@@ -3184,6 +3200,7 @@ async fn run_single_message_command_ndjson(
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
+    let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
         let turn_result = {
             let mut run_future = std::pin::pin!(agent.run_once_streaming_mpsc(
@@ -3224,6 +3241,19 @@ async fn run_single_message_command_ndjson(
             break;
         }
         let todos = run_todos(&session_id);
+        if !incomplete_budget.allow_follow_up(&todos) {
+            writeln!(
+                stdout,
+                "{}",
+                serde_json::json!({
+                    "type": "auto_poke_stopped",
+                    "reason": "unchanged_todos",
+                    "max_attempts": crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS,
+                    "incomplete_todos": todos.iter().filter(|todo| crate::todo::is_incomplete_todo(todo)).count(),
+                })
+            )?;
+            break;
+        }
         let gate_digest = take_run_gate_digest_if_turn_ended(
             agent.session_id(),
             gate_digest_delivered,

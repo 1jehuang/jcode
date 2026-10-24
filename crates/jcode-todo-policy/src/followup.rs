@@ -25,6 +25,42 @@ use serde::{Deserialize, Serialize};
 /// than loop on a gate the model is no longer making progress on.
 pub const MAX_GATE_ATTEMPTS: u8 = 5;
 
+/// Automatic incomplete-todo follow-ups allowed for one unchanged open state.
+pub const INCOMPLETE_TODO_MAX_ATTEMPTS: u8 = 3;
+
+/// Shared retry budget for clients that handle their own turn-end loop.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IncompleteTodoBudget {
+    fingerprint: Option<String>,
+    attempts: u8,
+}
+
+impl IncompleteTodoBudget {
+    /// Consume an incomplete follow-up attempt. Completed/empty lists clear
+    /// the cycle and return true so unrelated completion gates can proceed.
+    pub fn allow_follow_up(&mut self, todos: &[TodoItem]) -> bool {
+        let incomplete: Vec<_> = todos
+            .iter()
+            .filter(|todo| is_incomplete_todo(todo))
+            .collect();
+        if incomplete.is_empty() {
+            *self = Self::default();
+            return true;
+        }
+        let fingerprint =
+            serde_json::to_string(&incomplete).expect("todo items must serialize to JSON");
+        if self.fingerprint.as_ref() != Some(&fingerprint) {
+            self.fingerprint = Some(fingerprint);
+            self.attempts = 0;
+        }
+        if self.attempts >= INCOMPLETE_TODO_MAX_ATTEMPTS {
+            return false;
+        }
+        self.attempts += 1;
+        true
+    }
+}
+
 /// Everything the policy reads about a session's todo state at turn end.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TodoSnapshot {
@@ -116,7 +152,7 @@ pub struct FollowUpPolicy {
     gate_attempts: u8,
     spike_challenged: bool,
     last_ownership_fingerprint: Option<String>,
-    last_poke_fingerprint: Option<String>,
+    incomplete_budget: IncompleteTodoBudget,
     gate_digest_enabled: bool,
     gate_digest_delivered: bool,
 }
@@ -217,7 +253,7 @@ impl FollowUpPolicy {
         }
 
         // Completing or removing the list ends the prior poke cycle.
-        self.last_poke_fingerprint = None;
+        self.incomplete_budget = IncompleteTodoBudget::default();
         if todos.is_empty() {
             // Stay armed: a todo-free turn must not disable poking for later
             // turns that do leave work open.
@@ -331,16 +367,15 @@ impl FollowUpPolicy {
         self.spike_challenged = false;
         self.last_ownership_fingerprint = None;
         let message = build_auto_poke_message(incomplete.len());
-        let fingerprint = serde_json::to_string(incomplete).unwrap_or_else(|_| message.clone());
-        if self.last_poke_fingerprint.as_ref() == Some(&fingerprint) {
-            // Same open work as the last poke: the model is stalled, not
-            // progressing. Do not loop.
+        let todos: Vec<_> = incomplete.iter().map(|todo| (*todo).clone()).collect();
+        if !self.incomplete_budget.allow_follow_up(&todos) {
+            // Stop after three automatic retries without progress. Keep the
+            // configured enablement so changed work can start a fresh budget.
             return Decision::default();
         }
         // Open todos mean the model is iterating; gate exhaustion only trips
         // when the gate itself stops moving.
         self.gate_attempts = 0;
-        self.last_poke_fingerprint = Some(fingerprint);
         let count = incomplete.len();
         Decision::send(
             FollowUpKind::IncompleteTodos,

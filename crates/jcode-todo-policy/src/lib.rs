@@ -12,8 +12,9 @@ pub mod followup;
 pub mod store;
 
 pub use followup::{
-    ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy, MAX_GATE_ATTEMPTS,
-    TodoEffects, TodoSnapshot, is_incomplete_todo,
+    ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy,
+    INCOMPLETE_TODO_MAX_ATTEMPTS, IncompleteTodoBudget, MAX_GATE_ATTEMPTS, TodoEffects,
+    TodoSnapshot, is_incomplete_todo,
 };
 
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers

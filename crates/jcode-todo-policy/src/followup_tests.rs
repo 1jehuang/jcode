@@ -46,7 +46,7 @@ fn disabled_policy_never_follows_up() {
 }
 
 #[test]
-fn pokes_open_work_once_per_distinct_state() {
+fn pokes_open_work_three_times_per_distinct_state() {
     let mut policy = FollowUpPolicy::new(true);
     let open = snapshot(vec![todo("a", "pending"), todo("b", "in_progress")]);
     let first = policy.decide(&open);
@@ -54,14 +54,80 @@ fn pokes_open_work_once_per_distinct_state() {
     assert_eq!(follow_up.kind, FollowUpKind::IncompleteTodos);
     assert!(is_auto_poke_message(&follow_up.message));
     assert!(follow_up.notice.contains("2 incomplete todos"));
-    // Unchanged open work means the model is stalled: no loop.
+    for _ in 1..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&open)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+    // Three attempts without progress exhaust the budget, without disabling it.
     assert_eq!(policy.decide(&open), Decision::default());
+    assert_eq!(policy.decide(&open), Decision::default());
+    assert!(policy.is_enabled());
     // Progress re-arms the poke.
     let progressed = snapshot(vec![todo("a", "completed"), todo("b", "in_progress")]);
     assert_eq!(
         kind(&policy.decide(&progressed)),
         Some(FollowUpKind::IncompleteTodos)
     );
+}
+
+#[test]
+fn incomplete_budget_resets_after_clear_and_explicit_cycle_reset() {
+    let open = snapshot(vec![todo("a", "pending")]);
+    let mut policy = FollowUpPolicy::new(true);
+    for clear in [
+        TodoSnapshot::default(),
+        snapshot(vec![done("a", ConfidenceState::Verified)]),
+    ] {
+        for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+            assert_eq!(
+                kind(&policy.decide(&open)),
+                Some(FollowUpKind::IncompleteTodos)
+            );
+        }
+        assert_eq!(policy.decide(&open), Decision::default());
+        policy.decide(&clear);
+    }
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&open)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+    assert_eq!(policy.decide(&open), Decision::default());
+    policy.reset_cycle();
+    assert_eq!(
+        kind(&policy.decide(&open)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+    policy.disable();
+    policy.reset_cycle();
+    assert_eq!(policy.decide(&open), Decision::default());
+    let changed = snapshot(vec![todo("changed", "pending")]);
+    assert_eq!(policy.decide(&changed), Decision::default());
+}
+
+#[test]
+fn incomplete_budget_tracks_open_item_state_not_just_count() {
+    let mut budget = IncompleteTodoBudget::default();
+    let mut todos = vec![todo("a", "pending"), done("b", ConfidenceState::Verified)];
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert!(budget.allow_follow_up(&todos));
+    }
+    assert!(!budget.allow_follow_up(&todos));
+    // Unrelated completed-item wording does not buy more retries.
+    todos[1].content = "new completed wording".into();
+    assert!(!budget.allow_follow_up(&todos));
+    todos[0].status = "in_progress".into();
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert!(budget.allow_follow_up(&todos));
+    }
+    assert!(!budget.allow_follow_up(&todos));
+    todos[0].status = "cancelled".into();
+    assert!(budget.allow_follow_up(&todos));
+    todos[0].status = "in_progress".into();
+    assert!(budget.allow_follow_up(&todos));
 }
 
 #[test]
