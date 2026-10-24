@@ -32,6 +32,7 @@ struct JemallocProfilingMibs {
 pub struct ProcessMemorySnapshot {
     pub rss_bytes: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
+    /// Total virtual address space size, when available. Not private commit.
     pub virtual_bytes: Option<u64>,
     /// Number of OS threads (`Threads:` in `/proc/self/status`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,6 +48,10 @@ pub struct ProcessMemorySnapshot {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct OsProcessMemoryInfo {
+    /// Windows private committed memory (`PROCESS_MEMORY_COUNTERS_EX.PrivateUsage`).
+    /// Includes nonresident memory and is not virtual address space size or RSS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_commit_bytes: Option<u64>,
     pub pss_bytes: Option<u64>,
     /// Proportional set size of anonymous mappings (`Pss_Anon:` in
     /// smaps_rollup): heap + thread stacks + other private anon memory.
@@ -135,12 +140,6 @@ fn memory_history() -> &'static Mutex<VecDeque<ProcessMemoryHistoryEntry>> {
     MEMORY_HISTORY.get_or_init(|| Mutex::new(VecDeque::with_capacity(MAX_HISTORY_SAMPLES)))
 }
 
-#[cfg(target_os = "linux")]
-pub fn snapshot() -> ProcessMemorySnapshot {
-    snapshot_with_source("snapshot")
-}
-
-#[cfg(not(target_os = "linux"))]
 pub fn snapshot() -> ProcessMemorySnapshot {
     snapshot_with_source("snapshot")
 }
@@ -177,7 +176,59 @@ pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot 
     snapshot
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let source = source.into();
+    // SAFETY: This C structure contains only integer fields, so zero is valid.
+    let mut counters: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+    // SAFETY: GetCurrentProcess returns a borrowed pseudo-handle (do not close it).
+    // The API accepts an EX structure through the base pointer, with its full size.
+    let success = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
+            counters.cb,
+        )
+    };
+    let snapshot = if success != 0 {
+        windows_memory_snapshot(
+            counters.WorkingSetSize as u64,
+            counters.PeakWorkingSetSize as u64,
+            counters.PrivateUsage as u64,
+        )
+    } else {
+        let error = std::io::Error::last_os_error();
+        logging::warn(&format!(
+            "process memory snapshot source={source} GetProcessMemoryInfo failed: {error}"
+        ));
+        ProcessMemorySnapshot::default()
+    };
+    record_snapshot(source, snapshot.clone());
+    snapshot
+}
+
+#[cfg(any(windows, test))]
+fn windows_memory_snapshot(rss: u64, peak_rss: u64, private_commit: u64) -> ProcessMemorySnapshot {
+    ProcessMemorySnapshot {
+        rss_bytes: Some(rss),
+        peak_rss_bytes: Some(peak_rss),
+        // GetProcessMemoryInfo reports private commit, not total virtual space.
+        virtual_bytes: None,
+        os: Some(OsProcessMemoryInfo {
+            private_commit_bytes: Some(private_commit),
+            ..OsProcessMemoryInfo::default()
+        }),
+        ..ProcessMemorySnapshot::default()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
     let source = source.into();
     logging::debug(&format!(
@@ -693,6 +744,7 @@ fn record_snapshot(source: String, snapshot: ProcessMemorySnapshot) {
 fn read_linux_memory_info(status: &str) -> Option<OsProcessMemoryInfo> {
     let smaps = std::fs::read_to_string("/proc/self/smaps_rollup").ok();
     let info = OsProcessMemoryInfo {
+        private_commit_bytes: None,
         pss_bytes: smaps
             .as_deref()
             .and_then(|text| parse_proc_value_bytes(text, "Pss:")),
@@ -928,6 +980,55 @@ fn parse_proc_value_bytes(status: &str, key: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_memory_metrics_keep_private_commit_separate() {
+        let snapshot = windows_memory_snapshot(4096, 8192, 16384);
+        assert_eq!(snapshot.rss_bytes, Some(4096));
+        assert_eq!(snapshot.peak_rss_bytes, Some(8192));
+        assert_eq!(snapshot.virtual_bytes, None);
+        assert_eq!(snapshot.thread_count, None);
+        assert_eq!(snapshot.main_stack_bytes, None);
+        let os = snapshot.os.as_ref().expect("Windows memory details");
+        assert_eq!(os.private_commit_bytes, Some(16384));
+        assert_eq!(os.private_dirty_bytes, None);
+        assert_eq!(os.pss_bytes, None);
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json["os"]["private_commit_bytes"], 16384);
+        assert!(json["virtual_bytes"].is_null());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_snapshot_reports_working_set_and_records_history() {
+        let source = "windows_native_memory_smoke";
+        let snapshot = snapshot_with_source(source);
+        let rss = snapshot.rss_bytes.expect("current working set");
+        assert!(rss > 0);
+        assert!(snapshot.peak_rss_bytes.expect("peak working set") >= rss);
+        assert!(snapshot.os.as_ref().unwrap().private_commit_bytes.unwrap() > 0);
+        assert_eq!(snapshot.virtual_bytes, None);
+        assert!(history(MAX_HISTORY_SAMPLES).iter().any(|entry| {
+            entry.source == source && entry.snapshot.rss_bytes == snapshot.rss_bytes
+        }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_snapshot_preserves_resident_virtual_and_history_metrics() {
+        let source = "linux_memory_regression";
+        let snapshot = snapshot_with_source(source);
+        assert!(snapshot.rss_bytes.expect("VmRSS") > 0);
+        assert!(snapshot.peak_rss_bytes.expect("VmHWM") >= snapshot.rss_bytes.unwrap());
+        assert!(snapshot.virtual_bytes.expect("VmSize") >= snapshot.rss_bytes.unwrap());
+        let os = snapshot.os.as_ref().expect("Linux memory details");
+        assert_eq!(os.private_commit_bytes, None);
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert!(json["os"].get("private_commit_bytes").is_none());
+        assert!(history(MAX_HISTORY_SAMPLES).iter().any(|entry| {
+            entry.source == source && entry.snapshot.virtual_bytes == snapshot.virtual_bytes
+        }));
+    }
 
     #[test]
     fn estimate_json_bytes_matches_serialized_length_without_buffering_output() {
