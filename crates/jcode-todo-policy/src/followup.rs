@@ -13,7 +13,7 @@
 
 use crate::{
     ConfidenceState, GateObservation, TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
-    TODO_LONG_SESSION_REVIEW_MESSAGE, TodoGoal, TodoItem, TodoPlan, build_auto_poke_message,
+    TODO_LONG_SESSION_REVIEW_MESSAGE, TodoGoal, TodoItem, TodoPlan, build_actionable_poke_message,
     build_todo_completion_continuation_message, build_todo_confidence_spike_continuation_message,
     build_todo_ownership_continuation_message, completed_groups_have_sufficient_delivery,
     completion_confidence_passes, spike_completed_todos, todo_status_is_cancelled,
@@ -76,6 +76,20 @@ pub struct TodoSnapshot {
     /// The private one-shot long-session review is due and not yet delivered.
     #[serde(default)]
     pub long_session_review_due: bool,
+    /// Session-scoped background tasks confirmed to still be running. Missing
+    /// or terminal task IDs must not suppress actionable work.
+    #[serde(default)]
+    pub running_background_tasks: Vec<String>,
+}
+
+/// A dependency blocks a todo only while the referenced task is running.
+/// Keeping the runtime lookup outside this pure helper lets every client use
+/// the same rule without guessing from the todo's status or model prose.
+pub fn todo_waits_on_running_task(
+    todo: &TodoItem,
+    mut is_running: impl FnMut(&str) -> bool,
+) -> bool {
+    todo.waiting_on.iter().any(|task_id| is_running(task_id))
 }
 
 /// Persistent side effects a decision requires. Apply them whether or not a
@@ -247,6 +261,26 @@ impl FollowUpPolicy {
             self.last_ownership_fingerprint = None;
         }
 
+        let incomplete: Vec<&TodoItem> = todos.iter().filter(|t| is_incomplete_todo(t)).collect();
+        let actionable: Vec<&TodoItem> = incomplete
+            .iter()
+            .copied()
+            .filter(|todo| {
+                !todo_waits_on_running_task(todo, |id| {
+                    snapshot
+                        .running_background_tasks
+                        .iter()
+                        .any(|running| running == id)
+                })
+            })
+            .collect();
+        if !incomplete.is_empty() && actionable.is_empty() {
+            // Waiting is not resistance or completion. A completion wake will
+            // re-enter the policy with fresh runtime facts and a fresh budget.
+            self.incomplete_budget = IncompleteTodoBudget::default();
+            return Decision::default();
+        }
+
         if !todos.is_empty() && snapshot.long_session_review_due {
             return Decision::send(
                 FollowUpKind::LongSessionReview,
@@ -259,9 +293,8 @@ impl FollowUpPolicy {
             });
         }
 
-        let incomplete: Vec<&TodoItem> = todos.iter().filter(|t| is_incomplete_todo(t)).collect();
         if !incomplete.is_empty() {
-            return self.poke_incomplete(&incomplete);
+            return self.poke_incomplete(&actionable);
         }
 
         // Completing or removing the list ends the prior poke cycle.
@@ -381,8 +414,8 @@ impl FollowUpPolicy {
         self.gate_digest_delivered = false;
         self.spike_challenged = false;
         self.last_ownership_fingerprint = None;
-        let message = build_auto_poke_message(incomplete.len());
         let todos: Vec<_> = incomplete.iter().map(|todo| (*todo).clone()).collect();
+        let message = build_actionable_poke_message(&todos);
         if !self.incomplete_budget.allow_follow_up(&todos) {
             // Stop after three automatic retries without progress. Keep the
             // configured enablement so changed work can start a fresh budget.

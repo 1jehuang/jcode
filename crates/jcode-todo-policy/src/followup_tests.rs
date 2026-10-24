@@ -32,6 +32,75 @@ fn kind(decision: &Decision) -> Option<FollowUpKind> {
 }
 
 #[test]
+fn running_dependencies_pause_without_consuming_budget_or_reviews() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![TodoItem {
+        waiting_on: vec!["build".into()],
+        ..todo("validate", "in_progress")
+    }]);
+    // First exhaust the actionable budget, then explicitly wait. Resolution
+    // must get a fresh budget even though the todo payload did not change.
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&state)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+    assert_eq!(policy.decide(&state), Decision::default());
+    state.running_background_tasks = vec!["build".into()];
+    state.long_session_review_due = true;
+    for _ in 0..10 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    state.running_background_tasks.clear();
+    state.long_session_review_due = false;
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&state)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+}
+
+#[test]
+fn mixed_dependencies_poke_only_actionable_todos() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![
+        TodoItem {
+            waiting_on: vec!["build".into()],
+            ..todo("blocked-validation", "pending")
+        },
+        todo("write-tests", "in_progress"),
+    ]);
+    state.running_background_tasks = vec!["build".into()];
+    let decision = policy.decide(&state);
+    let follow_up = decision
+        .follow_up
+        .expect("independent work should continue");
+    assert_eq!(follow_up.kind, FollowUpKind::IncompleteTodos);
+    assert!(follow_up.message.starts_with("You have 1 incomplete todo."));
+    assert!(follow_up.message.contains("write-tests"));
+    assert!(!follow_up.message.contains("blocked-validation"));
+    assert!(is_auto_poke_message(&follow_up.message));
+}
+
+#[test]
+fn dependencies_only_block_when_runtime_confirms_running() {
+    let todo = TodoItem {
+        waiting_on: vec!["first".into(), "second".into()],
+        ..todo("work", "pending")
+    };
+    assert!(!todo_waits_on_running_task(&todo, |_| false));
+    assert!(todo_waits_on_running_task(&todo, |id| id == "second"));
+    assert!(!todo_waits_on_running_task(&todo, |id| id == "unrelated"));
+    let mut policy = FollowUpPolicy::new(true);
+    assert_eq!(
+        kind(&policy.decide(&snapshot(vec![todo]))),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+}
+
+#[test]
 fn disabled_policy_never_follows_up() {
     let mut policy = FollowUpPolicy::new(false);
     assert_eq!(
