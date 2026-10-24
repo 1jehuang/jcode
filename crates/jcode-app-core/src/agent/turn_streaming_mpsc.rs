@@ -51,6 +51,55 @@ async fn wait_for_tool_handoff(
 mod handoff_tests {
     use super::*;
 
+    struct WaitProbe;
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for WaitProbe {
+        fn name(&self) -> &str {
+            "bg"
+        }
+        fn description(&self) -> &str {
+            "Wait probe"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: ToolContext,
+        ) -> Result<crate::tool::ToolOutput> {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            Ok(crate::tool::ToolOutput::new("wait finished"))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nonstreaming_background_wait_returns_original_result_after_budget() {
+        let registry = Registry::empty();
+        registry.register("bg".into(), Arc::new(WaitProbe)).await;
+        let ctx = ToolContext {
+            session_id: "foreground-wait-probe".into(),
+            message_id: "message".into(),
+            tool_call_id: "wait-probe".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+        let start = tokio::time::Instant::now();
+        let result = execute_with_background(
+            registry,
+            "bg".into(),
+            serde_json::json!({"action":"wait"}),
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.output, "wait finished");
+        assert_eq!(start.elapsed(), Duration::from_secs(8));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn background_wait_is_not_automatically_backgrounded() {
         let input = serde_json::json!({"action": "wait", "task_id": "task"});
