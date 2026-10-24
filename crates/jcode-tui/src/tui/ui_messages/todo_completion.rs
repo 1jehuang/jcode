@@ -25,22 +25,8 @@ pub(super) fn render(
         return None;
     }
     let width = width.max(1) as usize;
-    let mut header = vec![Span::styled(
-        "Todo completion",
-        Style::default().fg(todo_score_color()).bold(),
-    )];
-    if !snapshot.todos.is_empty() && width > "Todo completion  ".len() {
-        header.push(Span::raw("  "));
-        push_todo_status_pips(
-            &mut header,
-            &snapshot.todos,
-            width.saturating_sub("Todo completion  ".len()),
-        );
-    }
-    let mut lines = vec![super::super::truncate_line_with_ellipsis_to_width(
-        &Line::from(header),
-        width,
-    )];
+    let mut lines =
+        render_finished_todo_summary(&snapshot.todos, "", width, Some("Todo completion"));
     lines.extend(render_gate_categories(&snapshot.observations, width));
     Some(lines)
 }
@@ -189,8 +175,6 @@ mod tests {
                 let header = lines[0].to_string();
                 if width >= 24 {
                     assert_eq!(header, "Todo completion  ●");
-                } else if width < 15 {
-                    assert!(header.ends_with('…'));
                 }
                 let text = lines
                     .iter()
@@ -251,6 +235,40 @@ mod tests {
                 assert_eq!(lines[0].to_string(), "Todo completion  ●○");
             }
         }
+    }
+
+    #[test]
+    fn todo_completion_groups_finished_tasks_by_lane_without_item_or_intent_text() {
+        let mut msg = DisplayMessage::system(serde_json::json!({
+            "todo_completion_version":1,
+            "todos":[
+                {"id":"a","content":"Hidden item A","status":"completed","priority":"high","group":" Rendering 界 ","stage":1},
+                {"id":"b","content":"Hidden item B","status":"completed","priority":"high","group":"Tests","stage":1},
+                {"id":"c","content":"Hidden item C","status":"cancelled","priority":"high","group":"Rendering\n界","stage":2},
+                {"id":"d","content":"Hidden item D","status":"completed","priority":"high","group":"  "}
+            ],
+            "plan":{"user_intention":"Hidden long intention"}
+        }).to_string());
+        msg.title = Some("Todo completion".into());
+        let saved = msg.content.clone();
+        let lines = render(&msg, 80, crate::config::DiffDisplayMode::Off).unwrap();
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["Rendering 界  ●○", "Tests  ●", "other  ●"]
+        );
+        for width in 1..90 {
+            let lines = render(&msg, width, crate::config::DiffDisplayMode::Off).unwrap();
+            assert_eq!(lines.len(), 3);
+            for line in lines {
+                assert!(line.width() <= width as usize, "width={width}, {line}");
+                let text = line.to_string();
+                assert!(!text.contains("Hidden") && !text.contains("Todo completion"));
+                if width >= 4 {
+                    assert!(text.contains('●') || text.contains('○'), "{text}");
+                }
+            }
+        }
+        assert_eq!(saved, msg.content);
     }
 
     #[test]

@@ -1467,16 +1467,15 @@ fn render_todos_message_with_cap(
     let mut lines = Vec::new();
     // Finished transcript cards are a compact historical marker. Keep the
     // saved payload intact and leave the pinned/live view detailed, but omit
-    // titles, descriptions, grouping and assessment prose from this view.
+    // item titles, descriptions and assessment prose from this view. Preserve
+    // lane names so each compact dot strip still has meaningful context.
     if cap_width
         && !todos.is_empty()
         && todos
             .iter()
             .all(|todo| !crate::todo::is_incomplete_todo(todo))
     {
-        let mut spans = Vec::new();
-        push_todo_status_pips(&mut spans, &todos, inner_width);
-        lines.push(todo_card_line(spans, base_indent, inner_width));
+        lines = render_finished_todo_summary(&todos, base_indent, inner_width, None);
         if centered {
             left_pad_lines_for_centered_mode(&mut lines, width);
         }
@@ -1590,6 +1589,68 @@ fn render_todos_message_with_cap(
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
     lines
+}
+
+/// Compact finished work by existing subgroup/lane, without inventing a new
+/// plan title or repeating item text. Stage-spanning lanes share one strip.
+fn render_finished_todo_summary(
+    todos: &[crate::todo::TodoItem],
+    base_indent: &str,
+    inner_width: usize,
+    ungrouped_label: Option<&str>,
+) -> Vec<Line<'static>> {
+    let mut groups: Vec<(Option<String>, Vec<&crate::todo::TodoItem>)> = Vec::new();
+    for todo in todos {
+        let group = todo
+            .group
+            .as_deref()
+            .map(|group| group.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|group| !group.is_empty());
+        if let Some((_, items)) = groups.iter_mut().find(|(key, _)| *key == group) {
+            items.push(todo);
+        } else {
+            groups.push((group, vec![todo]));
+        }
+    }
+    if groups.is_empty() {
+        groups.push((None, Vec::new()));
+    }
+    let has_groups = groups.iter().any(|(key, _)| key.is_some());
+    groups.sort_by_key(|(key, _)| key.is_none());
+    groups
+        .into_iter()
+        .map(|(group, items)| {
+            let label = group.as_deref().or(if has_groups {
+                Some("other")
+            } else {
+                ungrouped_label
+            });
+            let mut spans = Vec::new();
+            if let Some(label) = label {
+                // Reserve visible dots even when a lane label is very long.
+                let reserved = if !items.is_empty() && inner_width >= 4 {
+                    2 + items.len().min(12).min(inner_width / 2).max(1)
+                } else {
+                    0
+                };
+                let label = super::truncate_line_with_ellipsis_to_width(
+                    &Line::styled(
+                        label.to_string(),
+                        Style::default().fg(todo_group_color()).bold(),
+                    ),
+                    inner_width.saturating_sub(reserved),
+                );
+                let label_width = label.width();
+                spans.extend(label.spans);
+                if !items.is_empty() && label_width + 2 < inner_width {
+                    spans.push(Span::raw("  "));
+                }
+            }
+            let used: usize = spans.iter().map(|span| span.content.width()).sum();
+            push_todo_status_pips(&mut spans, items, inner_width.saturating_sub(used));
+            todo_card_line(spans, base_indent, inner_width)
+        })
+        .collect()
 }
 
 fn todo_card_line(

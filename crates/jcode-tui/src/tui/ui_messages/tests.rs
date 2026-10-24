@@ -1608,7 +1608,7 @@ fn render_todos_message_uses_readable_semantic_colors() {
 }
 
 #[test]
-fn finished_chat_todo_cards_show_only_dots_without_changing_saved_data() {
+fn finished_chat_todo_cards_show_lane_names_and_dots_without_changing_saved_data() {
     use unicode_width::UnicodeWidthStr;
     for staged in [false, true] {
         let todos = serde_json::json!([
@@ -1628,13 +1628,16 @@ fn finished_chat_todo_cards_show_only_dots_without_changing_saved_data() {
             };
             let msg = DisplayMessage::todos(content.clone());
             let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-            assert_eq!(lines.len(), 1);
-            assert_eq!(extract_line_text(&lines[0]).trim(), "●○");
+            assert_eq!(lines.len(), 2);
+            assert_eq!(extract_line_text(&lines[0]).trim(), "Implementation  ●");
+            assert_eq!(extract_line_text(&lines[1]).trim(), "Validation  ○");
             for width in 0..110 {
                 let lines = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
-                assert_eq!(lines.len(), 1);
+                assert_eq!(lines.len(), 2);
                 assert!(
-                    extract_line_text(&lines[0]).width() <= width as usize,
+                    lines
+                        .iter()
+                        .all(|line| extract_line_text(line).width() <= width as usize),
                     "width={width}"
                 );
             }
