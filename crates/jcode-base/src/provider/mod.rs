@@ -18,6 +18,15 @@ mod failover;
 mod fingerprint;
 pub mod gemini;
 mod image_clamp;
+mod image_capability {
+    //! Explicit re-exports from `jcode_provider_core` used by the
+    //! app-spine failover path in this crate (the OpenAI-compatible runtime
+    //! imports the remaining items directly from `jcode_provider_core`).
+    pub use jcode_provider_core::image_capability::{
+        clear_image_input_overrides_for_provider, error_indicates_image_rejection,
+        image_input_rejected, record_image_input_rejection,
+    };
+}
 pub mod jcode;
 pub mod models;
 mod multi_provider;
@@ -129,6 +138,16 @@ pub(crate) fn new_bedrock_provider() -> bedrock::BedrockProvider {
     let provider = bedrock::BedrockProvider::new();
     promote_bedrock_placeholder_default(&provider);
     provider
+}
+
+/// Whether any message in the request carries an image block. Cheap pre-scan
+/// for the modality-rejection retry path so non-image requests never pay for
+/// the capability bookkeeping.
+fn messages_contain_images(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .any(|block| matches!(block, crate::message::ContentBlock::Image { .. }))
 }
 
 /// Register the live agent provider so background helpers (memory sidecar) can
@@ -607,6 +626,19 @@ impl MultiProvider {
         let (estimated_input_chars, estimated_input_tokens) =
             Self::estimate_request_input(messages, tools, mode);
 
+        // A recorded runtime rejection (this endpoint/model rejected image
+        // input earlier, see `image_capability`) is authoritative over the
+        // static capability answer, so a failed request can be replayed once
+        // with every image block replaced by a text marker instead of
+        // repeating the doomed request.
+        let mut retry_with_images_filtered = false;
+        let mut messages: &[Message] = messages;
+        // Owns the filtered copy for the retry attempt; kept alive until the
+        // function returns so `messages` can borrow it. Deferred-init: the
+        // only read (`as_deref` below) is always preceded by the assignment
+        // in the same iteration.
+        let mut filtered_retry_messages: Option<Vec<Message>>;
+
         for candidate in sequence {
             let label = Self::provider_label(candidate);
             let key = self.provider_runtime_cooldown_key(candidate);
@@ -679,6 +711,12 @@ impl MultiProvider {
                 continue;
             }
 
+            // One modality-retry per candidate: if the request carried image
+            // blocks and the endpoint answered "this model cannot accept
+            // images", replay the SAME candidate once with the images replaced
+            // by text markers. `continue` on the outer loop would silently
+            // fail over to a different provider, which is not the intent: the
+            // endpoint is healthy, only the image modality is unsupported.
             let attempt = match mode {
                 CompletionMode::Unified { system } => {
                     self.complete_on_provider(candidate, messages, tools, system, resume_session_id)
@@ -699,7 +737,71 @@ impl MultiProvider {
                     .await
                 }
             };
-            let attempt = self.await_account_stream_start(candidate, attempt).await;
+            let mut attempt = self.await_account_stream_start(candidate, attempt).await;
+
+            if let Err(err) = &attempt
+                && !retry_with_images_filtered
+                && messages_contain_images(messages)
+                && image_capability::error_indicates_image_rejection(&err.to_string())
+            {
+                // Record under the same capability-scoped key the lookups
+                // use (concrete runtime identity for the multiplexed
+                // OpenRouter slot), so a text-only endpoint's rejection never
+                // suppresses images for a vision-capable endpoint serving the
+                // same model name behind the same provider slot.
+                image_capability::record_image_input_rejection(
+                    Some(self.capability_key_for(candidate).as_str()),
+                    &self.candidate_model(candidate),
+                    &err.to_string(),
+                );
+                crate::logging::warn(&format!(
+                    "Provider {} rejected image input for this model; \
+                     retrying once with images replaced by text markers",
+                    label
+                ));
+                if let Some(filtered) =
+                    image_clamp::filter_unsupported_outbound_images(messages, false)
+                {
+                    retry_with_images_filtered = true;
+                    filtered_retry_messages = Some(filtered);
+                    // `as_deref` is `Some` here by construction; fall back to
+                    // an empty slice rather than panicking on the invariant.
+                    messages = filtered_retry_messages.as_deref().unwrap_or_default();
+                    attempt = match mode {
+                        CompletionMode::Unified { system } => {
+                            self.complete_on_provider(
+                                candidate,
+                                messages,
+                                tools,
+                                system,
+                                resume_session_id,
+                            )
+                            .await
+                        }
+                        CompletionMode::Split {
+                            system_static,
+                            system_dynamic,
+                        } => {
+                            self.complete_split_on_provider(
+                                candidate,
+                                messages,
+                                tools,
+                                system_static,
+                                system_dynamic,
+                                resume_session_id,
+                            )
+                            .await
+                        }
+                    };
+                    // The replayed stream must go through the same account
+                    // handshake as the first attempt: on OAuth routes the
+                    // provider hands a stream back before the server accepts,
+                    // and a quota/auth failure inside it would otherwise be
+                    // treated as a successful stream, burning the turn
+                    // instead of offering account failover.
+                    attempt = self.await_account_stream_start(candidate, attempt).await;
+                }
+            }
 
             match attempt {
                 Ok(stream) => {
@@ -733,6 +835,7 @@ impl MultiProvider {
                         summary.clone()
                     };
                     let decision = Self::classify_failover_error(&err);
+
                     crate::logging::info(&format!(
                         "Provider {} failed{}: {} (failover={} decision={})",
                         label,
@@ -767,6 +870,45 @@ impl MultiProvider {
         }
 
         Err(self.no_provider_available_error(&notes))
+    }
+
+    /// Model id the candidate runtime would serve right now, for scoping
+    /// runtime image-capability records.
+    fn candidate_model(&self, candidate: ActiveProvider) -> String {
+        match candidate {
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .map(|provider| provider.model())
+                .unwrap_or_default(),
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .map(|provider| provider.model())
+                .unwrap_or_default(),
+            ActiveProvider::Copilot => self
+                .copilot_provider()
+                .map(|provider| provider.model())
+                .unwrap_or_default(),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|provider| provider.model())
+                .unwrap_or_default(),
+            ActiveProvider::Gemini => self
+                .gemini_provider()
+                .map(|provider| provider.model())
+                .unwrap_or_default(),
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .map(|provider| provider.model())
+                .unwrap_or_default(),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .map(|provider| provider.model())
+                .unwrap_or_default(),
+            ActiveProvider::OpenRouter => self
+                .active_openrouter_execution_provider()
+                .map(|provider| provider.model())
+                .unwrap_or_default(),
+        }
     }
 
     /// Record which login/credential just served a request in the
@@ -1010,12 +1152,172 @@ impl MultiProvider {
         self.set_model_on_provider_with_credential_modes(provider, model, None, None)
     }
 
-    /// Bind the shared OpenAI-compatible slot to the managed jcode endpoint.
-    ///
-    /// Subscription model ids intentionally overlap with direct Anthropic and
-    /// OpenAI ids. A picker selection therefore cannot be reduced to a bare
-    /// model name: doing so lets `set_model`'s family heuristic spend the
-    /// user's unrelated provider credentials instead of their subscription.
+    /// Route a model switch to the concrete runtime it targets, without any
+    /// capability-record bookkeeping. [`Provider::set_model`] wraps this and
+    /// defers clearing image-input overrides until the switch succeeds.
+    fn set_model_route(&self, model: &str) -> Result<()> {
+        let requested_model = model.trim();
+        if requested_model.is_empty() {
+            anyhow::bail!("Model cannot be empty");
+        }
+
+        if let Some((prefix, target_model)) = requested_model.split_once(':')
+            && let Some((method, label)) = prefix.split_once('@')
+            && matches!(method, "claude-oauth" | "openai-oauth")
+        {
+            return self.set_model_on_saved_account(method, label, target_model);
+        }
+        // Bare model changes keep the selected login. Explicit generic routes
+        // opt back into the normal active-account preference.
+        if let Some((prefix, _)) = requested_model.split_once(':')
+            && let Some(route) =
+                jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix)
+        {
+            let runtime = match route.provider {
+                jcode_provider_core::DualAuthProvider::Anthropic => self.anthropic_provider(),
+                jcode_provider_core::DualAuthProvider::OpenAI => self.openai_provider(),
+            };
+            if let Some(runtime) = runtime {
+                runtime.set_oauth_account(None)?;
+            }
+        }
+
+        if let Some(target_model) = requested_model.strip_prefix("grok-build:") {
+            let target_model = target_model.trim();
+            if target_model.is_empty() {
+                anyhow::bail!("Grok Build model cannot be empty");
+            }
+            let registry = ProviderRegistry::new(self);
+            let provider = registry
+                .compatible_profile(GROK_BUILD_PROFILE_ID)
+                .or_else(|| {
+                    external::instantiate_expected_external_provider(external::GROK_BUILD_RUNTIME)
+                })
+                .ok_or_else(|| anyhow!("Grok Build is not authenticated"))?;
+            provider.set_model(target_model)?;
+            registry.install_compatible_profile(GROK_BUILD_PROFILE_ID, provider);
+            registry.set_active_compatible_profile(GROK_BUILD_PROFILE_ID);
+            self.set_active_provider(ActiveProvider::OpenRouter);
+            return Ok(());
+        }
+
+        // `jcode:<model>` is the explicit spec for the Jcode subscription
+        // runtime. Without this it fell through to the active provider and
+        // `--model jcode:gpt-5.5` silently stayed on the previous model.
+        if let Some(target_model) = jcode_subscription_model_prefix(requested_model) {
+            return self.set_model_on_jcode_subscription(target_model);
+        }
+
+        if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)
+        {
+            return self.set_model_on_openai_compatible_profile(profile, target_model);
+        }
+
+        // User-defined named provider profiles from config (`[providers.<name>]`).
+        // The model picker emits `<name>:<model>` specs for their routes
+        // (issue #444), so the switch must bind that profile's runtime instead
+        // of falling through to global model-name heuristics.
+        if let Some((profile_name, target_model)) =
+            Self::named_provider_profile_model_prefix(requested_model)
+        {
+            return self.set_model_on_named_provider_profile(&profile_name, &target_model);
+        }
+
+        // Provider-prefixed model names are explicit routing directives. They
+        // must never silently fall through to another provider when the target
+        // is unavailable.
+        if let Some((target, prefix, target_model)) =
+            explicit_model_provider_prefix(requested_model)
+        {
+            // The single canonical parser decides whether this prefix pins a
+            // dual-auth credential (and which provider/mode). Bare `claude:` /
+            // `openai:` prefixes route without pinning a credential.
+            let pinned = jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix);
+            let openai_credential_mode = pinned.and_then(|route| {
+                matches!(
+                    route.provider,
+                    jcode_provider_core::DualAuthProvider::OpenAI
+                )
+                .then(|| match route.mode {
+                    jcode_provider_core::AuthMode::ApiKey => openai::OpenAICredentialMode::ApiKey,
+                    jcode_provider_core::AuthMode::Oauth => openai::OpenAICredentialMode::OAuth,
+                })
+            });
+            let anthropic_credential_mode = pinned.and_then(|route| {
+                matches!(
+                    route.provider,
+                    jcode_provider_core::DualAuthProvider::Anthropic
+                )
+                .then(|| match route.mode {
+                    jcode_provider_core::AuthMode::ApiKey => {
+                        anthropic::AnthropicCredentialMode::ApiKey
+                    }
+                    jcode_provider_core::AuthMode::Oauth => {
+                        anthropic::AnthropicCredentialMode::OAuth
+                    }
+                })
+            });
+            if openai_credential_mode.is_some() || anthropic_credential_mode.is_some() {
+                return self.set_model_on_provider_with_credential_modes(
+                    target,
+                    target_model,
+                    openai_credential_mode,
+                    anthropic_credential_mode,
+                );
+            }
+            return self.set_model_on_provider(target, target_model);
+        }
+
+        // A custom OpenAI-compatible endpoint owns opaque, provider-local model
+        // IDs. Keep unprefixed names on that active endpoint, even when they
+        // resemble a globally known model family. Picker and slash-command
+        // route specs carry explicit prefixes, so the branch above can switch
+        // to any configured provider at any time.
+        if self.active_provider() == ActiveProvider::OpenRouter
+            && self
+                .active_openrouter_execution_provider()
+                .is_some_and(|provider| !provider.supports_provider_routing_features())
+        {
+            return self.set_model_on_provider(ActiveProvider::OpenRouter, requested_model);
+        }
+
+        // Normalize Copilot-style model names (dots -> hyphens) to canonical form.
+        // e.g. "claude-opus-4.6" -> "claude-opus-4-6" so Anthropic accepts it.
+        let model = if let Some(canonical) = normalize_copilot_model_name(requested_model) {
+            canonical
+        } else {
+            requested_model
+        };
+
+        if let Some((base_model, provider_pin)) = model.rsplit_once('@')
+            && !provider_pin.trim().is_empty()
+            && let Some(openrouter_model) = openrouter_catalog_model_id(base_model)
+        {
+            return self.set_model_on_provider(
+                ActiveProvider::OpenRouter,
+                &format!("{}@{}", openrouter_model, provider_pin),
+            );
+        }
+
+        // Detect which provider an unprefixed model belongs to.
+        let target_provider = provider_for_model(model);
+        if let Some(target_provider) = target_provider
+            && let Some(target) = provider_from_model_key(target_provider)
+        {
+            self.set_model_on_provider(target, model)
+        } else if let Some(profile) = self.openai_compatible_profile_owning_model(model) {
+            // Bare ids from an OpenAI-compatible catalog (`celeris-1`,
+            // `mimo-v2.5`, ...) match none of the built-in model-name
+            // heuristics. Without this, `/model <bare-id>` fell through to
+            // whichever provider happened to be active and failed with a
+            // misleading "not supported by <active provider>" error.
+            self.set_model_on_openai_compatible_profile(profile, model)
+        } else {
+            // Unknown model - try current provider.
+            self.set_model_on_provider(self.active_provider(), model)
+        }
+    }
+
     fn set_model_on_jcode_subscription(&self, model: &str) -> Result<()> {
         let model = model.trim();
         if model.is_empty() {
@@ -1999,7 +2301,21 @@ impl Provider for MultiProvider {
     }
 
     fn supports_image_input(&self) -> bool {
-        match self.active_provider() {
+        // A recorded runtime rejection is authoritative: the endpoint told us
+        // this exact model cannot accept images, so both the outbound filter
+        // and the turn loops must treat it as text-only even when the static
+        // capability answer (default-true for direct OpenAI-compatible
+        // endpoints) disagrees. The lookup is scoped the same way the
+        // record is (concrete runtime identity for the multiplexed
+        // OpenRouter slot), so a rejection on one endpoint never suppresses
+        // images for another endpoint serving the same model name.
+        let active = self.active_provider();
+        let key = self.capability_key_for(active);
+        if image_capability::image_input_rejected(&key, &self.candidate_model(active)) {
+            return false;
+        }
+
+        match active {
             ActiveProvider::Claude => self
                 .anthropic_provider()
                 .map(|provider| provider.supports_image_input())
@@ -2057,166 +2373,18 @@ impl Provider for MultiProvider {
         // the catalog on next read instead of serving the memoized copy.
         self.invalidate_routes_memo();
 
-        let requested_model = model.trim();
-        if requested_model.is_empty() {
-            anyhow::bail!("Model cannot be empty");
+        // A runtime image-input rejection is scoped to the model that earned
+        // it: a successful switch gives the new model a fresh capability
+        // answer. The clear is deferred until the switch succeeds, because a
+        // FAILED switch leaves the previous model active, and wiping its
+        // capability restriction would let the very next request ship pixels
+        // to the endpoint that just rejected them.
+        let previous_capability_key = self.capability_key_for(self.active_provider());
+        let result = self.set_model_route(model);
+        if result.is_ok() {
+            image_capability::clear_image_input_overrides_for_provider(&previous_capability_key);
         }
-
-        if let Some((prefix, target_model)) = requested_model.split_once(':')
-            && let Some((method, label)) = prefix.split_once('@')
-            && matches!(method, "claude-oauth" | "openai-oauth")
-        {
-            return self.set_model_on_saved_account(method, label, target_model);
-        }
-        // Bare model changes keep the selected login. Explicit generic routes
-        // opt back into the normal active-account preference.
-        if let Some((prefix, _)) = requested_model.split_once(':')
-            && let Some(route) =
-                jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix)
-        {
-            let runtime = match route.provider {
-                jcode_provider_core::DualAuthProvider::Anthropic => self.anthropic_provider(),
-                jcode_provider_core::DualAuthProvider::OpenAI => self.openai_provider(),
-            };
-            if let Some(runtime) = runtime {
-                runtime.set_oauth_account(None)?;
-            }
-        }
-
-        if let Some(target_model) = requested_model.strip_prefix("grok-build:") {
-            let target_model = target_model.trim();
-            if target_model.is_empty() {
-                anyhow::bail!("Grok Build model cannot be empty");
-            }
-            let registry = ProviderRegistry::new(self);
-            let provider = registry
-                .compatible_profile(GROK_BUILD_PROFILE_ID)
-                .or_else(|| {
-                    external::instantiate_expected_external_provider(external::GROK_BUILD_RUNTIME)
-                })
-                .ok_or_else(|| anyhow!("Grok Build is not authenticated"))?;
-            provider.set_model(target_model)?;
-            registry.install_compatible_profile(GROK_BUILD_PROFILE_ID, provider);
-            registry.set_active_compatible_profile(GROK_BUILD_PROFILE_ID);
-            self.set_active_provider(ActiveProvider::OpenRouter);
-            return Ok(());
-        }
-
-        // `jcode:<model>` is the explicit spec for the Jcode subscription
-        // runtime. Without this it fell through to the active provider and
-        // `--model jcode:gpt-5.5` silently stayed on the previous model.
-        if let Some(target_model) = jcode_subscription_model_prefix(requested_model) {
-            return self.set_model_on_jcode_subscription(target_model);
-        }
-
-        if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)
-        {
-            return self.set_model_on_openai_compatible_profile(profile, target_model);
-        }
-
-        // User-defined named provider profiles from config (`[providers.<name>]`).
-        // The model picker emits `<name>:<model>` specs for their routes
-        // (issue #444), so the switch must bind that profile's runtime instead
-        // of falling through to global model-name heuristics.
-        if let Some((profile_name, target_model)) =
-            Self::named_provider_profile_model_prefix(requested_model)
-        {
-            return self.set_model_on_named_provider_profile(&profile_name, &target_model);
-        }
-
-        // Provider-prefixed model names are explicit routing directives. They
-        // must never silently fall through to another provider when the target
-        // is unavailable.
-        if let Some((target, prefix, target_model)) =
-            explicit_model_provider_prefix(requested_model)
-        {
-            // The single canonical parser decides whether this prefix pins a
-            // dual-auth credential (and which provider/mode). Bare `claude:` /
-            // `openai:` prefixes route without pinning a credential.
-            let pinned = jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix);
-            let openai_credential_mode = pinned.and_then(|route| {
-                matches!(
-                    route.provider,
-                    jcode_provider_core::DualAuthProvider::OpenAI
-                )
-                .then(|| match route.mode {
-                    jcode_provider_core::AuthMode::ApiKey => openai::OpenAICredentialMode::ApiKey,
-                    jcode_provider_core::AuthMode::Oauth => openai::OpenAICredentialMode::OAuth,
-                })
-            });
-            let anthropic_credential_mode = pinned.and_then(|route| {
-                matches!(
-                    route.provider,
-                    jcode_provider_core::DualAuthProvider::Anthropic
-                )
-                .then(|| match route.mode {
-                    jcode_provider_core::AuthMode::ApiKey => {
-                        anthropic::AnthropicCredentialMode::ApiKey
-                    }
-                    jcode_provider_core::AuthMode::Oauth => {
-                        anthropic::AnthropicCredentialMode::OAuth
-                    }
-                })
-            });
-            if openai_credential_mode.is_some() || anthropic_credential_mode.is_some() {
-                return self.set_model_on_provider_with_credential_modes(
-                    target,
-                    target_model,
-                    openai_credential_mode,
-                    anthropic_credential_mode,
-                );
-            }
-            return self.set_model_on_provider(target, target_model);
-        }
-
-        // A custom OpenAI-compatible endpoint owns opaque, provider-local model
-        // IDs. Keep unprefixed names on that active endpoint, even when they
-        // resemble a globally known model family. Picker and slash-command
-        // route specs carry explicit prefixes, so the branch above can switch
-        // to any configured provider at any time.
-        if self.active_provider() == ActiveProvider::OpenRouter
-            && self
-                .active_openrouter_execution_provider()
-                .is_some_and(|provider| !provider.supports_provider_routing_features())
-        {
-            return self.set_model_on_provider(ActiveProvider::OpenRouter, requested_model);
-        }
-
-        // Normalize Copilot-style model names (dots -> hyphens) to canonical form.
-        // e.g. "claude-opus-4.6" -> "claude-opus-4-6" so Anthropic accepts it.
-        let model = if let Some(canonical) = normalize_copilot_model_name(requested_model) {
-            canonical
-        } else {
-            requested_model
-        };
-
-        if let Some((base_model, provider_pin)) = model.rsplit_once('@')
-            && !provider_pin.trim().is_empty()
-            && let Some(openrouter_model) = openrouter_catalog_model_id(base_model)
-        {
-            return self.set_model_on_provider(
-                ActiveProvider::OpenRouter,
-                &format!("{}@{}", openrouter_model, provider_pin),
-            );
-        }
-
-        // Detect which provider an unprefixed model belongs to.
-        let target_provider = provider_for_model(model);
-        if let Some(target_provider) = target_provider
-            && let Some(target) = provider_from_model_key(target_provider)
-        {
-            self.set_model_on_provider(target, model)
-        } else if let Some(profile) = self.openai_compatible_profile_owning_model(model) {
-            // Bare ids from an OpenAI-compatible catalog (`celeris-1`,
-            // `mimo-v2.5`, ...) match none of the built-in model-name
-            // heuristics. Without this, `/model <bare-id>` fell through to
-            // whichever provider happened to be active and failed with a
-            // misleading "not supported by <active provider>" error.
-            self.set_model_on_openai_compatible_profile(profile, model)
-        } else {
-            // Unknown model - try current provider.
-            self.set_model_on_provider(self.active_provider(), model)
-        }
+        result
     }
 
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
@@ -2987,7 +3155,14 @@ impl Provider for MultiProvider {
         let catalog_ms = catalog_start.elapsed().as_millis();
         let set_model_start = std::time::Instant::now();
         let switch_request = self.fork_model_switch_request(active, &current_model);
-        let _ = provider.set_model(&switch_request);
+        // A fork carries the same active model to a helper (memory sidecar,
+        // subagent); no user model change happened, so the recorded
+        // image-input rejections must survive. `set_model` would clear the
+        // previous model's restriction on success and the next image-bearing
+        // turn would re-ship pixels to the endpoint that already rejected
+        // them. `set_model_route` applies the route without that capability
+        // bookkeeping.
+        let _ = provider.set_model_route(&switch_request);
         crate::logging::info(&format!(
             "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
             runtimes_ms,

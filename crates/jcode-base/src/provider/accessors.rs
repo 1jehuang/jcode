@@ -58,6 +58,29 @@ impl MultiProvider {
         ProviderRegistry::new(self).active_openrouter_execution()
     }
 
+    /// The key runtime image-input capability records (rejections *and*
+    /// lookups) use for `provider`'s active runtime.
+    ///
+    /// Providers other than OpenRouter have one runtime per slot, so the
+    /// stable slot key identifies them. The OpenRouter slot multiplexes
+    /// several distinct endpoints (real OpenRouter, named OpenAI-compatible
+    /// profiles, direct endpoints) behind one `name()`, and two of those
+    /// endpoints can serve the same model name with *different* image
+    /// capabilities, so the record/lookup key must be the concrete runtime's
+    /// [`Provider::capability_scope`] (profile id or endpoint base) instead
+    /// of the bare slot key. Falls back to the slot key when no runtime is
+    /// installed or the runtime offers no scope.
+    pub(super) fn capability_key_for(&self, provider: ActiveProvider) -> String {
+        if provider == ActiveProvider::OpenRouter
+            && let Some(scope) = self
+                .active_openrouter_execution_provider()
+                .and_then(|runtime| runtime.capability_scope())
+        {
+            return scope;
+        }
+        Self::provider_key(provider).to_string()
+    }
+
     pub(super) fn clear_active_openai_compatible_profile(&self) {
         ProviderRegistry::new(self).clear_active_compatible_profile();
     }
