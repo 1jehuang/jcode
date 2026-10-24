@@ -1043,6 +1043,10 @@ fn openai_compatible_profiles_with_unverified_live_catalogs_have_static_fallback
             jcode_provider_metadata::STACKIT_PROFILE,
             "openai/gpt-oss-120b",
         ),
+        (
+            jcode_provider_metadata::RUNCRATE_PROFILE,
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+        ),
         (jcode_provider_metadata::PERPLEXITY_PROFILE, "sonar"),
         (
             jcode_provider_metadata::DEEPINFRA_PROFILE,

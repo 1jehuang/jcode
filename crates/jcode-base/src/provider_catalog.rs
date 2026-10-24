@@ -654,6 +654,14 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8");
             push("google/gemma-3-27b-it");
         }
+        "runcrate" => {
+            push("deepseek-ai/DeepSeek-V4.1-Flash");
+            push("deepseek-ai/DeepSeek-V4.1-Flash-1017");
+            push("zai-org/GLM-5.3");
+            push("zai-org/GLM-5.3-Flash");
+            push("Qwen/Qwen3.8-Flash");
+            push("openai/gpt-oss-120b");
+        }
         "perplexity" => {
             push("sonar");
             push("sonar-pro");

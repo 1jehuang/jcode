@@ -628,6 +628,7 @@ fn provider_keys_for_env(env_key: &str) -> &'static [&'static str] {
         "NEBIUS_API_KEY" => &["nebius"],
         "SCALEWAY_API_KEY" => &["scaleway"],
         "STACKIT_API_KEY" => &["stackit"],
+        "RUNCRATE_API_KEY" => &["runcrate"],
         "TOGETHER_API_KEY" => &["togetherai", "together-ai", "together"],
         "DEEPINFRA_API_KEY" => &["deepinfra"],
         "FIREWORKS_API_KEY" => &["fireworks"],
