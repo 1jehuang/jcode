@@ -727,8 +727,10 @@ mod tests {
 
     #[test]
     fn worker_item_status_changes_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent::default();
-        agent.todo_statuses = vec!["pending".into(), "in_progress".into()];
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            todo_statuses: vec!["pending".into(), "in_progress".into()],
+            ..Default::default()
+        };
         let before = hash_todo_card_agents(&[agent.clone()]);
         agent.todo_statuses.swap(0, 1);
         assert_ne!(before, hash_todo_card_agents(&[agent]));
