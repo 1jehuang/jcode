@@ -172,6 +172,7 @@ fn is_gemini_long_context_model(model: &str) -> bool {
     if model.starts_with("gemini-2.0-flash")
         || model.starts_with("gemini-2.5")
         || model == "gemini-pro-agent"
+        || matches!(model, "argon" | "argon-low" | "argon-medium" | "argon-high")
     {
         return true;
     }
@@ -225,6 +226,8 @@ pub fn provider_for_model_with_hint(
         Some("claude")
     } else if model.starts_with("gpt-") {
         Some("openai")
+    } else if matches!(model, "argon" | "argon-low" | "argon-medium" | "argon-high") {
+        Some("antigravity")
     } else if model.starts_with("gemini-") {
         Some("gemini")
     } else {
@@ -939,6 +942,10 @@ mod tests {
     #[test]
     fn context_limit_handles_gemini_4_argon_and_future_gemini_generations() {
         for model in [
+            "argon",
+            "argon-low",
+            "argon-medium",
+            "argon-high",
             "gemini-4-argon",
             "gemini-4-argon-low",
             "gemini-4-argon-medium",
