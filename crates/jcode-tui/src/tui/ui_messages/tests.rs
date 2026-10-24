@@ -918,7 +918,7 @@ fn render_background_task_failure_is_compact() {
     assert!(!plain.contains("remote build"));
     assert_eq!(
         extract_line_text(&lines[1]).find('╰').unwrap(),
-        extract_line_text(&lines[0]).find('✗').unwrap() + 2
+        extract_line_text(&lines[0]).find('✗').unwrap()
     );
     assert!(
         lines[0]
@@ -3091,7 +3091,7 @@ fn background_errors_share_cause_selection_and_deduplicate_exit_codes() {
 #[test]
 fn background_explicit_failure_reason_survives_without_prefix_or_preview() {
     let msg = DisplayMessage::background_task(
-        "**Background task** `reason-only` · `bash` · ✗ failed · 1.0s · exit 1\n\n_Failure:_ permission denied\n\n_No output captured._\n\n_Full output:_ `bg action=\"output\" task_id=\"reason-only\"`"
+        "**Background task** `reason-only` · `bash` · ✗ failed · 1.0s · exit 1\n\n_Failure:_ permission denied\n\n_No output captured._\n\n_Full output:_ `bg action=\"output\" task_id=\"reason-only\"`",
     );
     let lines = render_background_task_message(&msg, 100, crate::config::DiffDisplayMode::Off);
     assert!(extract_line_text(&lines[1]).ends_with("exit 1 · permission denied"));

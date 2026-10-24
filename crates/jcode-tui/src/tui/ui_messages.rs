@@ -2952,7 +2952,11 @@ pub(crate) fn render_background_task_message(
         let clean = strip_ansi_escape_sequences(&output);
         let detail = tools_ui::parse_tool_failure(&clean)
             .map(|failure| {
-                let reason = failure.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+                let reason = failure
+                    .reason
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 if reason == parsed.exit_label {
                     reason
                 } else {
@@ -4991,6 +4995,9 @@ mod kv_cache_footer_tests {
         let s = super::kv_cache_footer_summary(
             "KV cache miss [provider switch] turn 3 call 2: 28.6K cached / 47.6K expected tokens: ~19.0K tokens resent (x). See KV_CACHE_USAGE in logs.",
         );
-        assert_eq!(s.as_deref(), Some("19.0K KV cache miss · provider switch · 60% hit"));
+        assert_eq!(
+            s.as_deref(),
+            Some("19.0K KV cache miss · provider switch · 60% hit")
+        );
     }
 }
