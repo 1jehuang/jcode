@@ -3,6 +3,92 @@ use super::*;
 
 use super::streaming::{StreamUsageRecorder, find_wrap_marker_incremental};
 
+const TOOL_FOREGROUND_BUDGET: Duration = Duration::from_secs(3);
+
+/// SDK callbacks and nonstreaming turns use the same policy as TUI turns.
+pub(super) async fn execute_with_background(
+    registry: Registry,
+    name: String,
+    input: serde_json::Value,
+    ctx: ToolContext,
+) -> Result<crate::tool::ToolOutput> {
+    let session_id = ctx.session_id.clone();
+    let tool_name = name.clone();
+    let mut work = tokio::spawn(async move { registry.execute(&tool_name, input, ctx).await });
+    tokio::select! {
+        biased;
+        result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
+        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET) => {
+            let info = crate::background::global().adopt(&name, &session_id, work).await;
+            Ok(crate::tool::ToolOutput::new(format!(
+                "Tool '{}' was moved to background automatically after 3 seconds (task_id: {}). Use the `bg` tool with action 'wait' to wait for completion/checkpoints, or action 'status'/'output' to inspect it.",
+                name, info.task_id
+            )))
+        }
+    }
+}
+
+/// Returns true for an automatic handoff, false for a user/reload signal.
+async fn wait_for_tool_handoff(bg: &InterruptSignal, shutdown: &InterruptSignal) -> bool {
+    tokio::select! {
+        biased;
+        _ = shutdown.notified() => false,
+        _ = bg.notified() => false,
+        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET) => true,
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_tool_handoff_occurs_after_three_seconds_without_cancelling_work() {
+        let bg = InterruptSignal::new();
+        let shutdown = InterruptSignal::new();
+        let mut work = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            42
+        });
+        let start = tokio::time::Instant::now();
+        tokio::select! {
+            biased;
+            _ = &mut work => panic!("slow work completed before handoff"),
+            automatic = wait_for_tool_handoff(&bg, &shutdown) => assert!(automatic),
+        }
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+        assert!(!work.is_finished());
+        assert_eq!(work.await.unwrap(), 42);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fast_tool_finishes_in_foreground() {
+        let bg = InterruptSignal::new();
+        let shutdown = InterruptSignal::new();
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+            _ = wait_for_tool_handoff(&bg, &shutdown) => panic!("fast tool backgrounded"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_background_and_shutdown_do_not_wait_for_budget() {
+        for shutdown_requested in [false, true] {
+            let bg = InterruptSignal::new();
+            let shutdown = InterruptSignal::new();
+            if shutdown_requested {
+                shutdown.fire();
+            } else {
+                bg.fire();
+            }
+            let start = tokio::time::Instant::now();
+            assert!(!wait_for_tool_handoff(&bg, &shutdown).await);
+            assert_eq!(start.elapsed(), Duration::ZERO);
+        }
+    }
+}
+
 fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
     if tc.name == "selfdev" {
         return ("Reload initiated. Process restarting...".to_string(), false);
@@ -1023,10 +1109,13 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = self
-                            .registry
-                            .execute(&tool_name, ToolCall::normalize_input_to_object(input), ctx)
-                            .await;
+                        let tool_result = super::turn_streaming_mpsc::execute_with_background(
+                            self.registry.clone(),
+                            tool_name.clone(),
+                            ToolCall::normalize_input_to_object(input),
+                            ctx,
+                        )
+                        .await;
                         if tool_result.is_err() {
                             crate::telemetry::record_tool_failure();
                         }
@@ -1649,7 +1738,7 @@ impl Agent {
                 }
                 let tool_start = Instant::now();
 
-                // Spawn tool in its own task so we can detach it to background on Alt+B
+                // Spawn independently so automatic and Alt+B handoffs keep it running.
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
@@ -1662,12 +1751,13 @@ impl Agent {
                 // Reset background signal before waiting
                 self.background_tool_signal.reset();
 
-                // Wait for tool completion OR background signal from user (Alt+B)
-                // OR graceful shutdown signal from server reload
+                // All tools share the same default foreground budget, including
+                // tools without their own background execution support.
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
+                let mut automatic_background = false;
                 let mut tool_handle = tool_handle;
                 let running_tool_guard =
                     crate::running_tool_registry::register(self.session_id(), &tc.id, &tc.name);
@@ -1679,12 +1769,8 @@ impl Agent {
                             Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                         });
                     }
-                    _ = async {
-                        tokio::select! {
-                            _ = bg_signal.notified() => {}
-                            _ = shutdown_signal.notified() => {}
-                        }
-                    } => {
+                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal) => {
+                        automatic_background = automatic;
                         if self.is_graceful_shutdown() && allow_reload_handoff {
                             tool_result = match tokio::time::timeout(
                                 Duration::from_millis(750),
@@ -1828,7 +1914,7 @@ impl Agent {
                     self.session.save()?;
                     return Ok(());
                 } else {
-                    // User pressed Alt+B — move tool to background
+                    // Foreground budget expired or user pressed Alt+B.
                     logging::info(&format!(
                         "Tool '{}' moved to background after {:.1}s",
                         tc.name,
@@ -1839,11 +1925,16 @@ impl Agent {
                         .adopt(&tc.name, &self.session.id, tool_handle)
                         .await;
 
+                    let reason = if automatic_background {
+                        "automatically after 3 seconds"
+                    } else {
+                        "by the user"
+                    };
                     let bg_msg = format!(
-                        "Tool '{}' was moved to background by the user (task_id: {}). \
+                        "Tool '{}' was moved to background {} (task_id: {}). \
                          Use the `bg` tool with action 'wait' to wait for completion/checkpoints, \
                          or action 'status'/'output' to inspect it.",
-                        tc.name, bg_info.task_id
+                        tc.name, reason, bg_info.task_id
                     );
 
                     let _ = event_tx.send(ServerEvent::ToolDone {
