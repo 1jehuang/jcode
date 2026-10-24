@@ -676,7 +676,8 @@ pub fn build_actionable_poke_message(actionable: &[TodoItem]) -> String {
     message
 }
 
-const ACTIONABLE_POKE_WAIT_GUIDANCE: &str = "Leave todos waiting on still-running background tasks alone until their dependencies finish.";
+const ACTIONABLE_POKE_WAIT_GUIDANCE: &str =
+    "Leave todos waiting on still-running background tasks alone until their dependencies finish.";
 
 /// Longest list of named todos a gate continuation will spell out, so a big
 /// plan cannot turn one nudge into a wall of text.

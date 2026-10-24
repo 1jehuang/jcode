@@ -123,20 +123,28 @@ fn running_dependencies(
             && status["session_id"].as_str() == Some(session_id)
             && status["status"].as_str() == Some("running")
         {
-            // On Linux a dead owner is observable without coupling this small
-            // policy crate to the application runtime. Legacy records without
-            // ownership metadata retain the daemon's existing semantics.
+            // Without an identifiable owner a historical running record is
+            // not proof that work still exists. Fail open like the CLI.
+            let owner = if status["detached"].as_bool() == Some(true) {
+                status["pid"].as_u64()
+            } else {
+                status["owner_pid"]
+                    .as_u64()
+                    .or_else(|| status["pid"].as_u64())
+            };
+            let Some(owner) = owner.filter(|pid| *pid > 0 && *pid <= i32::MAX as u64) else {
+                continue;
+            };
+            // Linux exposes dead owners without coupling this small policy
+            // crate to the application runtime.
             #[cfg(target_os = "linux")]
             {
-                let owner = if status["detached"].as_bool() == Some(true) {
-                    status["pid"].as_u64()
-                } else {
-                    status["owner_pid"].as_u64()
-                };
-                if owner.is_some_and(|pid| !Path::new("/proc").join(pid.to_string()).exists()) {
+                if !Path::new("/proc").join(owner.to_string()).exists() {
                     continue;
                 }
             }
+            #[cfg(not(target_os = "linux"))]
+            let _ = owner;
             running.insert(id.clone());
         }
     }
@@ -170,6 +178,7 @@ pub fn apply_effects(home: &Path, session_id: &str, effects: TodoEffects) -> std
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{GateObservation, GateObservationKind, TodoItem};
 
     #[test]
     fn snapshots_include_only_referenced_running_tasks_in_the_same_session() {
@@ -189,6 +198,7 @@ mod tests {
                 "foreign".into(),
                 "missing".into(),
                 "broken".into(),
+                "unowned".into(),
                 "../escape".into(),
                 "running".into(),
             ],
@@ -217,6 +227,14 @@ mod tests {
             .unwrap();
         }
         std::fs::write(tasks.join("broken.status.json"), "not json").unwrap();
+        std::fs::write(
+            tasks.join("unowned.status.json"),
+            serde_json::json!({
+                "task_id": "unowned", "session_id": "s", "status": "running"
+            })
+            .to_string(),
+        )
+        .unwrap();
         let state = load_snapshot_with_background_dir(&dir, "s", &tasks);
         assert_eq!(state.running_background_tasks, ["running"]);
         std::fs::remove_file(tasks.join("running.status.json")).unwrap();
@@ -227,7 +245,6 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-    use crate::{GateObservation, GateObservationKind, TodoItem};
 
     #[test]
     fn layout_matches_runtime_file_names() {
