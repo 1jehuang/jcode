@@ -491,9 +491,11 @@ impl CompactionManager {
             return true;
         }
 
-        // 2. Context below the proactive floor — too early regardless of trend.
+        // 2. Either the percentage or absolute token floor permits prediction.
         let usage = self.context_usage_with(all_messages);
-        if usage < cfg.proactive_floor {
+        let token_floor_reached = cfg.proactive_floor_tokens > 0
+            && self.effective_token_count_with(all_messages) >= cfg.proactive_floor_tokens;
+        if usage < cfg.proactive_floor && !token_floor_reached {
             return true;
         }
 

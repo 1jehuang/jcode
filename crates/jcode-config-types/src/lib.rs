@@ -370,8 +370,13 @@ pub struct CompactionConfig {
     /// [proactive] EWMA alpha for token growth smoothing (0.0-1.0, higher = more recency bias)
     pub ewma_alpha: f32,
 
-    /// [proactive/semantic] Minimum context fill level before any proactive check fires (0.0-1.0)
+    /// [proactive/semantic] Minimum context fill level (0.0-1.0), alternatively
+    /// satisfied by proactive_floor_tokens when that alternative is enabled.
     pub proactive_floor: f32,
+
+    /// [proactive/semantic] Alternative minimum token count. Either this count
+    /// or proactive_floor must be reached. Zero disables the token alternative.
+    pub proactive_floor_tokens: usize,
 
     /// [proactive/semantic] Minimum number of token snapshots needed before proactive check
     pub min_samples: usize,
@@ -409,6 +414,7 @@ impl Default for CompactionConfig {
             lookahead_turns: 15,
             ewma_alpha: 0.3,
             proactive_floor: 0.40,
+            proactive_floor_tokens: 150_000,
             min_samples: 3,
             stall_window: 5,
             min_turns_between_compactions: 10,
@@ -1319,7 +1325,7 @@ impl Default for ProviderConfig {
             default_model: None,
             default_provider: None,
             openai_reasoning_effort: Some("low".to_string()),
-            anthropic_reasoning_effort: None,
+            anthropic_reasoning_effort: Some("low".to_string()),
             anthropic_cache_ttl_1h: true,
             openai_transport: None,
             openai_service_tier: Some("priority".to_string()),
@@ -1599,6 +1605,25 @@ pub struct LaunchHotkeysConfig {
 #[cfg(test)]
 mod reasoning_display_defaults_tests {
     use super::*;
+
+    #[test]
+    fn anthropic_effort_defaults_to_low() {
+        let config = ProviderConfig::default();
+        assert_eq!(config.anthropic_reasoning_effort.as_deref(), Some("low"));
+        let parsed: ProviderConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.anthropic_reasoning_effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn proactive_floor_defaults_and_legacy_config() {
+        let config = CompactionConfig::default();
+        assert_eq!(config.proactive_floor, 0.40);
+        assert_eq!(config.proactive_floor_tokens, 150_000);
+        let parsed: CompactionConfig =
+            serde_json::from_str(r#"{"proactive_floor":0.15}"#).unwrap();
+        assert_eq!(parsed.proactive_floor, 0.15);
+        assert_eq!(parsed.proactive_floor_tokens, 150_000);
+    }
 
     #[test]
     fn explicit_reasoning_display_is_distinguishable_from_the_legacy_fallback() {

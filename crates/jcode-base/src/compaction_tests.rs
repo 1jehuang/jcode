@@ -1230,6 +1230,30 @@ fn max_context_tokens_zero_means_no_cap() {
 }
 
 #[test]
+fn proactive_floor_accepts_tokens_or_percentage() {
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.compaction_config = crate::config::CompactionConfig::default();
+    manager.turns_since_last_compact = 10;
+    manager.token_history = [100_000, 120_000, 149_999].into_iter().collect();
+    manager.update_observed_input_tokens(149_999);
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(150_000);
+    assert!(!manager.anti_signals_block(&[]));
+
+    manager.compaction_config.proactive_floor_tokens = 0;
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(400_000);
+    assert!(!manager.anti_signals_block(&[]));
+
+    manager.compaction_config.proactive_floor_tokens = 150_000;
+    manager.set_budget(200_000);
+    manager.update_observed_input_tokens(79_999);
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(80_000);
+    assert!(!manager.anti_signals_block(&[]));
+}
+
+#[test]
 fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     let _lock = crate::storage::lock_test_env();
     struct RestoreHome(Option<std::ffi::OsString>);
