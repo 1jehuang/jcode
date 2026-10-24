@@ -1,3 +1,5 @@
+pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to make progress on other useful work that does not depend on its result. If nothing independent remains, wait for completion rather than repeatedly polling. Do not duplicate the running task or change inputs it is still using.";
+
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;

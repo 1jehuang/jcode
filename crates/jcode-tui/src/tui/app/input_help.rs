@@ -136,6 +136,7 @@ impl App {
                 /poke or /poke on arms auto-poke and immediately pokes if work remains.\n\
                 /poke off disarms auto-poke and clears any queued poke follow-ups.\n\
                 /poke status shows whether auto-poke is currently armed.\n\
+                Explicit todo waiting_on pauses only those todos while their background tasks run, uses no retry budget, and wakes on completion.\n\
                 If a turn is currently running, the poke is queued and sent right after that turn finishes.\n\
                 Injects a reminder with the number of incomplete todos and prompts the model to either\n\
                 finish the work, update the todo list to reflect what is done, or ask for user input if genuinely blocked."

@@ -225,7 +225,13 @@ impl SshOptions {
 
     fn command(&self) -> Command {
         let mut command = Command::new("ssh");
-        if super::cloud_managed::is_managed(&self.host)
+        if let Some(id) = super::cloud_ephemeral::host_id(&self.host) {
+            // The caller validates/prepares this private config before connecting.
+            // Never fall through to the persistent host's SSH identity.
+            if let Ok(path) = super::cloud_ephemeral::ssh_config_path(id) {
+                command.arg("-F").arg(path);
+            }
+        } else if super::cloud_managed::is_managed(&self.host)
             && let Ok(args) = super::cloud_managed::ssh_args()
         {
             command.args(args);
@@ -683,6 +689,25 @@ mod tests {
         for binary in ["", "--help", "jcode\nfalse"] {
             assert!(SshOptions::new("host", binary).is_err());
         }
+    }
+
+    #[test]
+    fn ephemeral_command_uses_its_own_config_and_pinned_binary() {
+        let host = "jcode-ephemeral-cm_0123456789abcdef0123456789abcdef";
+        let options = SshOptions::new(host, "/home/ec2-user/bench/jcode").unwrap();
+        let command = options.command();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let config = args.windows(2).find(|pair| pair[0] == "-F").unwrap();
+        assert!(
+            config[1].ends_with("cloud/ephemeral/cm_0123456789abcdef0123456789abcdef/ssh_config")
+        );
+        assert_eq!(args[args.len() - 2], host);
+        assert!(args.last().unwrap().contains("/home/ec2-user/bench/jcode"));
+        assert!(!args.iter().any(|arg| arg == "jcode-cloud"));
     }
 
     #[test]

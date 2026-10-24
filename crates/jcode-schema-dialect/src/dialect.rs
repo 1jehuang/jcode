@@ -269,10 +269,11 @@ fn is_object_typed(map: &Map<String, Value>) -> bool {
 
 /// Drop `required` names the same object does not declare (#655).
 fn prune_dangling_required(out: &mut Map<String, Value>) {
-    let Some(Value::Object(properties)) = out.get("properties") else {
-        return;
-    };
-    let defined: Vec<String> = properties.keys().cloned().collect();
+    let defined: Vec<String> = out
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default();
     if let Some(Value::Array(required)) = out.get_mut("required") {
         required.retain(|name| {
             name.as_str()

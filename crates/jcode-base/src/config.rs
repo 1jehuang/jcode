@@ -796,9 +796,9 @@ pub struct ToolConfig {
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
-    /// Opt-in Codemode: expose a `codemode` tool that runs model-written
+    /// Codemode: expose a `codemode` tool that runs model-written
     /// JavaScript in an embedded QuickJS sandbox able to call every other
-    /// tool (including MCP tools). Off by default.
+    /// tool (including MCP tools). Enabled by default.
     pub codemode: bool,
 }
 
@@ -811,7 +811,7 @@ impl Default for ToolConfig {
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
-            codemode: false,
+            codemode: true,
         }
     }
 }

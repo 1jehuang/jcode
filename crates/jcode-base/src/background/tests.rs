@@ -4,6 +4,49 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+struct SignalDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for SignalDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn assert_adopted_owner_cancelled(reload: bool) -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    // Capture the guard before spawn so even an unpolled task owns its work.
+    let owner = SignalDrop(Some(dropped_tx));
+    let handle = tokio::spawn(async move {
+        let _owner = owner;
+        std::future::pending::<()>().await;
+        Ok(jcode_tool_types::ToolOutput::new("unreachable"))
+    });
+    let info = manager.adopt("agentgrep", "cancel-owner", handle).await;
+    if reload {
+        assert_eq!(manager.abort_live_tasks_for_reload().await, 1);
+    } else {
+        assert!(manager.cancel(&info.task_id).await?);
+    }
+    tokio::time::timeout(Duration::from_secs(5), dropped_rx)
+        .await
+        .expect("aborting the background wrapper must drop the adopted owner")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn adopted_task_cancellation_drops_actual_owner() -> Result<()> {
+    assert_adopted_owner_cancelled(false).await
+}
+
+#[tokio::test]
+async fn adopted_task_reload_drops_owner() -> Result<()> {
+    assert_adopted_owner_cancelled(true).await
+}
+
 #[tokio::test]
 async fn adopted_task_output_exists_while_running_and_is_replaced_on_completion() -> Result<()> {
     let tmp = tempdir()?;
@@ -83,6 +126,86 @@ async fn spawn_with_notify_emits_started_ui_activity() -> Result<()> {
         "started UI activity event for task {} not received",
         info.task_id
     ))
+}
+
+#[tokio::test]
+async fn delivery_subscription_serializes_with_spawn_and_adopt_completion() -> Result<()> {
+    for adopted in [false, true] {
+        for _ in 0..8 {
+            let tmp = tempdir()?;
+            let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+            let mut events = Bus::global().subscribe();
+            let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+            let info = if adopted {
+                let handle = tokio::spawn(async move {
+                    finish_rx.await?;
+                    Ok(jcode_tool_types::ToolOutput::new("done"))
+                });
+                manager
+                    .adopt_with_options("bash", None, "delivery-race", false, false, handle)
+                    .await
+            } else {
+                manager
+                    .spawn_with_notify(
+                        "bash",
+                        None,
+                        "delivery-race",
+                        false,
+                        false,
+                        |_| async move {
+                            finish_rx.await?;
+                            Ok(TaskResult::completed(Some(0)))
+                        },
+                    )
+                    .await
+            };
+
+            // Queue the subscription before allowing completion. The shared lock
+            // makes this ordering deterministic, rather than relying on disk timing.
+            let guard = manager.progress_updates.lock().await;
+            let delivery = manager.update_delivery(&info.task_id, true, true);
+            tokio::pin!(delivery);
+            assert!(
+                std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(delivery.as_mut().poll(cx).is_pending())
+                })
+                .await
+            );
+            finish_tx.send(()).unwrap();
+            tokio::task::yield_now().await;
+            drop(guard);
+            let updated = delivery.await?.expect("task exists");
+            assert_eq!(updated.status, BackgroundTaskStatus::Running);
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.recv().await {
+                        if event.task_id == info.task_id {
+                            assert!(
+                                event.notify && event.wake,
+                                "accepted subscription must wake"
+                            );
+                            break;
+                        }
+                    }
+                }
+            })
+            .await?;
+
+            // A late delivery or watchdog update must never resurrect Running.
+            let (delivery, _) = tokio::join!(
+                manager.update_delivery(&info.task_id, true, true),
+                manager.arm_stall_watchdog(&info.task_id, 30),
+            );
+            assert_eq!(delivery?.unwrap().status, BackgroundTaskStatus::Completed);
+            manager.disarm_stall_watchdog(&info.task_id).await;
+            assert_eq!(
+                manager.status(&info.task_id).await.unwrap().status,
+                BackgroundTaskStatus::Completed
+            );
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]

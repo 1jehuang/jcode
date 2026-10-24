@@ -119,6 +119,7 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.auto_poke_attempts = 0;
     app.last_todo_ownership_fingerprint = None;
     app.todo_gate_digest_delivered = false;
     cleared
@@ -252,6 +253,7 @@ pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.auto_poke_attempts = 0;
     app.last_todo_ownership_fingerprint = None;
     // Re-arming starts a fresh review cycle, so the deferred quality digest is
     // eligible to be delivered again for the upcoming work.
@@ -368,7 +370,12 @@ pub(super) fn create_transfer_session_from_parent(
     parent: &crate::session::Session,
     compaction: Option<crate::session::StoredCompactionState>,
 ) -> anyhow::Result<(String, String)> {
-    let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
+    let mut todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
+    // Background task IDs belong to the parent session. Transfer the work,
+    // not foreign dependencies, and leave the parent's durable todos intact.
+    for todo in &mut todos {
+        todo.waiting_on.clear();
+    }
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
     child.compaction = compaction;
@@ -2762,7 +2769,7 @@ pub(super) fn incomplete_poke_todos(app: &App) -> Vec<crate::todo::TodoItem> {
 }
 
 pub(super) fn build_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
-    crate::todo::build_auto_poke_message(incomplete.len())
+    crate::todo::build_actionable_poke_message(incomplete)
 }
 
 fn todo_confidence_weight(priority: &str) -> u32 {

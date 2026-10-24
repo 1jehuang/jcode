@@ -156,6 +156,36 @@ fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolC
     }
 }
 
+#[tokio::test]
+async fn background_handoff_names_reason_task_and_productive_wait_without_bg_tutorial() {
+    let result = BashTool::new()
+        .execute(
+            json!({"command": "printf done", "run_in_background": true, "wake": true}),
+            make_ctx(None),
+        )
+        .await
+        .expect("background command should start");
+    assert!(
+        result
+            .output
+            .contains("Command started in background as requested.")
+    );
+    assert!(result.output.contains(BACKGROUND_WAIT_GUIDANCE));
+    assert!(
+        result
+            .output
+            .contains("The agent will be woken when the task completes.")
+    );
+    assert!(!result.output.contains("action=\"wait\""));
+    assert!(!result.output.contains("To check progress"));
+    let metadata = result.metadata.expect("background metadata");
+    let id = metadata["task_id"].as_str().expect("task id");
+    assert!(result.output.contains(&format!("Task ID: {id}")));
+    crate::background::global()
+        .wait(id, Duration::from_secs(5), false)
+        .await;
+}
+
 fn make_agent_ctx(signal: jcode_agent_runtime::InterruptSignal) -> ToolContext {
     ToolContext {
         session_id: "test-session".to_string(),
@@ -318,6 +348,8 @@ async fn test_command_timeout_with_stdin_channel() {
         result.output
     );
     let metadata = result.metadata.expect("expected background metadata");
+    assert!(result.output.contains(BACKGROUND_WAIT_GUIDANCE));
+    assert!(!result.output.contains("Use `bg`"));
     assert_eq!(metadata["background"], true);
     assert_eq!(metadata["timeout_promoted"], true);
     assert_eq!(metadata["foreground_timeout_ms"], 1000);

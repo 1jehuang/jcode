@@ -39,8 +39,8 @@ use queue_recovery::{
 #[allow(unused_imports)]
 pub(super) use reconnect::{
     ConnectOutcome, PostConnectOutcome, ReloadReconnectHints, RemoteRunState, connect_with_retry,
-    finalize_reload_reconnect, handle_post_connect, reload_handoff_active,
-    should_allow_reconnect_takeover, should_use_same_session_fast_path,
+    finalize_reload_reconnect, handle_post_connect, queue_reload_continuation_once,
+    reload_handoff_active, should_allow_reconnect_takeover, should_use_same_session_fast_path,
 };
 use reconnect::{format_disconnect_reason, reconnect_status_message};
 use session_persistence::{
@@ -196,6 +196,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_todo_card_if_needed();
+    needs_redraw |= app.refresh_completed_todo_report(false);
     needs_redraw |= app.refresh_pinned_todos_if_needed();
     needs_redraw |= app.prune_irrelevant_background_tasks();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
@@ -1379,56 +1380,10 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
 
-    // A headed fork stages its first prompt before launching the new client. We
-    // can send that prompt immediately after Subscribe, without waiting for the
-    // client to receive and render History: requests and events share one
-    // ordered socket, so the server finishes writing the Subscribe History
-    // response before it reads this Message request. Do not echo the user turn
-    // locally here because the still-in-flight History payload would clear it.
-    // Preserve the echo and apply it immediately after History instead.
-    //
-    // This removes the visible, intermittent pause between the fork window
-    // opening and its prompt starting, which was proportional to history payload
-    // transfer/render time for large parent sessions.
-    if !remote.has_loaded_history()
-        && app.submit_input_on_startup
-        && !app.is_processing
-        && !app.remote_model_switch_in_flight
-        && !app.auth_catalog_refresh_pending
-        && (!app.input.is_empty() || !app.pending_images.is_empty())
-    {
-        app.submit_input_on_startup = false;
-        app.startup_submit_deferred_reason = None;
-        let prepared = input::take_prepared_input(app);
-        app.pending_startup_prompt_echo = Some(prepared.raw_input.clone());
-        app.last_submitted_input = Some(prepared.raw_input);
-        crate::logging::info(&format!(
-            "Startup auto-submit sent behind ordered Subscribe: input_chars={} pending_images={}",
-            prepared.expanded.chars().count(),
-            prepared.images.len(),
-        ));
-        if let Err(error) = begin_remote_send(
-            app,
-            remote,
-            prepared.expanded,
-            prepared.images,
-            false,
-            None,
-            false,
-            0,
-        )
-        .await
-        {
-            crate::logging::warn(&format!("Early startup auto-submit failed: {error}"));
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to submit startup prompt: {}",
-                error
-            )));
-            app.set_status_notice("Startup prompt failed");
-        }
-        return;
-    }
-
+    // Drain Subscribe's History before sending the staged startup prompt.
+    // Both directions can carry large image payloads: awaiting a prompt write
+    // here would prevent this event loop from reading History while the server
+    // is still writing it, deadlocking both peers on socket backpressure.
     if !remote.has_loaded_history() {
         note_startup_submit_deferred(app, "remote history not loaded yet");
         return;

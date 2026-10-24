@@ -370,10 +370,28 @@ fn transfer_preserves_system_prompt_including_empty_override() {
     for prompt in [None, Some(""), Some("custom system prompt")] {
         let mut parent = crate::session::Session::create(None, None);
         parent.system_prompt = prompt.map(str::to_string);
+        crate::todo::save_todos(
+            &parent.id,
+            &[crate::todo::TodoItem {
+                id: "validate".into(),
+                content: "Validate source build".into(),
+                status: "pending".into(),
+                waiting_on: vec!["source-build".into()],
+                ..Default::default()
+            }],
+        )
+        .unwrap();
         let (child_id, _) = create_transfer_child_session(&parent.id, &parent, None)
             .expect("create transfer session");
         let child = crate::session::Session::load(&child_id).expect("load transfer session");
         assert_eq!(child.system_prompt, parent.system_prompt);
+        let child_todos = crate::todo::load_todos(&child_id).unwrap();
+        assert_eq!(child_todos.len(), 1);
+        assert!(child_todos[0].waiting_on.is_empty());
+        assert_eq!(
+            crate::todo::load_todos(&parent.id).unwrap()[0].waiting_on,
+            ["source-build"]
+        );
     }
 }
 

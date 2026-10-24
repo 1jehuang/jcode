@@ -141,7 +141,7 @@ use memory_ui::{group_into_tiles, render_memory_tiles, split_by_display_width};
 use messages::get_cached_message_lines;
 #[cfg_attr(test, allow(unused_imports))]
 pub(crate) use messages::{
-    SWARM_AGENT_SNAPSHOT_TITLE, TodoCardAgent, compact_swarm_await_summary,
+    SWARM_AGENT_SNAPSHOT_TITLE, TodoCardAgent, TodoCardBackgroundTask, compact_swarm_await_summary,
     encode_swarm_agent_snapshot, render_assistant_message, render_background_task_message,
     render_reasoning_message, render_swarm_message, render_system_message, render_tool_message,
     render_usage_message,
@@ -1803,6 +1803,8 @@ mod draw_recovery;
 mod profile;
 #[path = "ui/selection_highlight.rs"]
 pub(crate) mod selection_highlight;
+#[path = "ui/todo_completion_flash.rs"]
+pub(crate) mod todo_completion_flash;
 #[path = "ui/url.rs"]
 mod url_regex_support;
 use self::copy_selection::{copy_point_from_snapshot, link_target_from_snapshot};
@@ -3544,8 +3546,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
         let widget_start = Instant::now();
         info_widget::render_all(frame, &placements, &widget_data);
-        // Keep the chat scrollbar thumb in front of info widget borders that
-        // dock against the right edge of the messages area.
+        // Merge docked widget borders into the shared scrollbar column, then
+        // highlight the thumb without erasing horizontal border connections.
         if let Some(scrollbar) = chat_scrollbar
             && placements
                 .iter()
@@ -3693,8 +3695,8 @@ impl NativeScrollbar {
         );
     }
 
-    /// Draw only the thumb cells, leaving the rest of the track untouched so an
-    /// overlapping widget border stays visible while the thumb sits in front.
+    /// Merge only visible thumb cells with docked widget borders. Leave the
+    /// invisible track and all corners outside the thumb untouched.
     pub(crate) fn render_thumb_overlay(&self, frame: &mut Frame) {
         let Some(thumb) = native_scrollbar_thumb(
             self.area,
@@ -3710,7 +3712,9 @@ impl NativeScrollbar {
         for row in thumb.offset..thumb.offset + thumb.height {
             let y = self.area.y + row as u16;
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(thumb.glyph(row)).set_fg(color);
+                let junction = matches!(cell.symbol(), "╮" | "╯" | "┐" | "┘" | "┤");
+                cell.set_symbol(if junction { "┤" } else { thumb.glyph(row) })
+                    .set_fg(color);
             }
         }
     }

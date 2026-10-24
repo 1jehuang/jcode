@@ -13,7 +13,13 @@ use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
 
 /// Content rows the Runtime widget renders, mirroring [`render_model_widget`].
+#[cfg(test)]
 pub(super) fn runtime_height(data: &InfoWidgetData) -> u16 {
+    runtime_frame_rows(data).0.len() as u16
+}
+
+/// Content rows in the unframed overview, which retains every runtime fact.
+pub(super) fn overview_runtime_height(data: &InfoWidgetData) -> u16 {
     runtime_rows(data).len() as u16
 }
 
@@ -21,27 +27,14 @@ pub(super) fn runtime_has_data(data: &InfoWidgetData) -> bool {
     !runtime_rows(data).is_empty()
 }
 
-/// Border layout: ` Runtime ` top-left, live throughput bottom-right (it is
-/// the one value that changes every turn), the rest as icon rows.
+/// Keep a distinct runtime fact on the border without duplicating body facts.
 pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let max_len = inner.width as usize;
-    let tps = throughput(data);
-    let lines: Vec<Line<'static>> = runtime_rows(data)
-        .into_iter()
-        .filter(|row| tps.is_none() || row.icon != TPS_ICON)
-        .map(|row| row.into_line(max_len))
-        .collect();
-    let mut framed = Framed::body(lines).title(frame::label("Runtime"));
-    if let Some(tps) = tps {
-        framed = framed.footer_right(Line::from(vec![
-            Span::styled(
-                format!("{TPS_ICON} "),
-                Style::default().fg(rgb(140, 180, 255)),
-            ),
-            frame::dim(format!("{tps:.0} tok/s")),
-        ]));
-    }
-    framed
+    let (rows, footer) = runtime_frame_rows(data);
+    let lines = rows.into_iter().map(|row| row.into_line(max_len)).collect();
+    Framed::body(lines)
+        .title(frame::label("Runtime"))
+        .footer_right(footer.into_line(max_len))
 }
 
 /// Overview section: every runtime fact as a row, no border.
@@ -55,13 +48,33 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
 
 const TPS_ICON: &str = "⏱";
 
-/// Throughput worth showing on the border, only when another row keeps the
-/// body non-empty (a lone tok/s row stays in the body).
-fn throughput(data: &InfoWidgetData) -> Option<f32> {
-    let tps = data
-        .tokens_per_second
-        .filter(|t| t.is_finite() && *t > 0.1)?;
-    (runtime_rows(data).len() > 1).then_some(tps)
+/// Only move a fact when another nonempty fact remains, never a startup spacer.
+/// The overview still uses the complete, unchanged runtime row list.
+fn runtime_frame_rows(data: &InfoWidgetData) -> (Vec<RuntimeRow>, RuntimeRow) {
+    let mut rows = runtime_rows(data);
+    if rows.iter().filter(|row| !row.text.is_empty()).count() > 1 {
+        let index = [TPS_ICON, "↔", "⚡", "◆", "☁"]
+            .iter()
+            .find_map(|icon| rows.iter().position(|row| row.icon == *icon));
+        if let Some(index) = index {
+            let footer = rows.remove(index);
+            return (rows, footer);
+        }
+    }
+    let has_tps = rows.iter().any(|row| row.icon == TPS_ICON);
+    let footer = RuntimeRow {
+        icon: if has_tps { "↔" } else { TPS_ICON },
+        icon_color: rgb(140, 180, 255),
+        text: if has_tps {
+            "transport n/a".into()
+        } else if data.startup_runtime_pending {
+            "tok/s pending".into()
+        } else {
+            "tok/s n/a".into()
+        },
+        text_color: rgb(140, 140, 150),
+    };
+    (rows, footer)
 }
 
 struct RuntimeRow {
@@ -261,6 +274,93 @@ mod tests {
         d.service_tier = None;
         assert!(!runtime_has_data(&d));
         assert_eq!(runtime_height(&d), 0);
+    }
+
+    #[test]
+    fn footer_moves_facts_once_and_preserves_overview() {
+        for (connection, tps, session, expected) in [
+            (Some("websocket"), None, None, "websocket"),
+            (None, None, Some("sauropod"), "fast tier"),
+            (Some("websocket"), Some(61.7), Some("sauropod"), "62 tok/s"),
+        ] {
+            let mut d = data();
+            d.connection_type = connection.map(str::to_string);
+            d.tokens_per_second = tps;
+            d.session_name = session.map(str::to_string);
+            let overview = text(render_model_info(&d, Rect::new(0, 0, 80, 8)));
+            let (rows, footer) = runtime_frame_rows(&d);
+            assert_eq!(footer.text, expected);
+            assert!(!rows.is_empty());
+            assert!(rows.iter().all(|row| row.text != expected));
+            let framed = render_model_widget(&d, Rect::new(0, 0, 80, 8));
+            assert_eq!(framed.lines.len() as u16, runtime_height(&d));
+            assert_eq!(text(framed.all_lines()).matches(expected).count(), 1);
+            assert_eq!(overview.matches(expected).count(), 1);
+        }
+    }
+
+    #[test]
+    fn single_facts_keep_body_and_use_distinct_unavailable_metric() {
+        for icon in ["⚡", "↔", "☁", "◆", TPS_ICON] {
+            let mut d = data();
+            d.service_tier = (icon == "⚡").then(|| "priority".into());
+            d.connection_type = (icon == "↔").then(|| "websocket".into());
+            d.upstream_provider = (icon == "☁").then(|| "fireworks".into());
+            d.session_name = (icon == "◆").then(|| "sauropod".into());
+            d.tokens_per_second = (icon == TPS_ICON).then_some(61.7);
+            let (rows, footer) = runtime_frame_rows(&d);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].icon, icon);
+            assert_ne!(footer.icon, icon);
+            assert!(footer.text.ends_with("n/a"));
+            assert_eq!(runtime_height(&d), 1);
+        }
+    }
+
+    #[test]
+    fn startup_slots_keep_height_and_report_pending_throughput() {
+        for tier in [None, Some("priority")] {
+            let mut d = data();
+            d.service_tier = tier.map(str::to_string);
+            d.startup_runtime_pending = true;
+            let (rows, footer) = runtime_frame_rows(&d);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(runtime_height(&d), 2);
+            assert_eq!(footer.text, "tok/s pending");
+            assert!(rows.iter().all(|row| row.text != footer.text));
+        }
+    }
+
+    #[test]
+    fn invalid_throughput_is_unavailable_not_a_live_metric() {
+        for tps in [0.0, 0.1, -1.0, f32::NAN, f32::INFINITY] {
+            let mut d = data();
+            d.tokens_per_second = Some(tps);
+            let (rows, footer) = runtime_frame_rows(&d);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(footer.text, "tok/s n/a");
+        }
+    }
+
+    #[test]
+    fn overview_height_counts_all_facts_including_moved_footer() {
+        let mut d = data();
+        d.connection_type = Some("websocket".into());
+        d.tokens_per_second = Some(61.7);
+        d.session_name = Some("sauropod".into());
+        let overview = render_model_info(&d, Rect::new(0, 0, 80, 8));
+        assert_eq!(overview.len() as u16, overview_runtime_height(&d));
+        assert_eq!(overview_runtime_height(&d), runtime_height(&d) + 1);
+        d.startup_runtime_pending = true;
+        d.service_tier = None;
+        d.connection_type = None;
+        d.tokens_per_second = None;
+        d.session_name = None;
+        assert_eq!(
+            render_model_info(&d, Rect::new(0, 0, 80, 8)).len() as u16,
+            overview_runtime_height(&d)
+        );
+        assert_eq!(overview_runtime_height(&d), 2);
     }
 
     #[test]

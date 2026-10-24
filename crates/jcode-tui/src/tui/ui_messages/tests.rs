@@ -1,6 +1,137 @@
 use super::*;
 
 #[test]
+fn expanded_diff_rows_preserve_source_and_align_continuations() {
+    let source = "    let result = compute(\"界界 e\u{301}\", argument);";
+    let parsed = ParsedDiffLine {
+        kind: DiffLineKind::Add,
+        prefix: "9+ ".into(),
+        content: source.into(),
+        file_path: None,
+    };
+    let rows = expanded_diff_row(&parsed, Some("rs"), 3, 24);
+    assert!(rows.len() > 1);
+    assert!(extract_line_text(&rows[0]).starts_with("│   9 +     let"));
+    let mut reconstructed = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        assert!(row.width() <= 24, "{row:?}");
+        assert_eq!(row.alignment, Some(Alignment::Left));
+        if index > 0 {
+            assert!(extract_line_text(row).starts_with("│     ↪ "));
+        }
+        for span in row.spans.iter().skip(if index == 0 { 2 } else { 1 }) {
+            reconstructed.push_str(&span.content);
+        }
+    }
+    assert_eq!(reconstructed, source);
+    assert_eq!(rows[0].spans[1].style.fg, Some(diff_add_color()));
+}
+
+#[test]
+fn expanded_diff_rows_fit_narrow_widths_and_expand_tabs() {
+    let parsed = ParsedDiffLine {
+        kind: DiffLineKind::Del,
+        prefix: "123- ".into(),
+        content: "\t界\tvalue".into(),
+        file_path: None,
+    };
+    for width in 0..60 {
+        let rows = expanded_diff_row(&parsed, None, 3, width);
+        assert!(
+            rows.iter().all(|row| row.width() <= width),
+            "{width}: {rows:?}"
+        );
+    }
+    let rows = expanded_diff_row(&parsed, None, 3, 60);
+    assert_eq!(extract_line_text(&rows[0]), "│ 123 -     界  value");
+    assert_eq!(rows[0].spans[1].style.fg, Some(diff_del_color()));
+    let blank = ParsedDiffLine {
+        content: String::new(),
+        ..parsed
+    };
+    assert_eq!(expanded_diff_row(&blank, None, 3, 60).len(), 1);
+}
+
+#[test]
+fn inline_diff_header_compacts_directories_before_filename() {
+    let path = "/home/user/project/crates/very_long_directory/src/important_file.rs";
+    let line = inline_diff_header("╭─", Some((23, 4)), Some(path), 48);
+    let text = extract_line_text(&line);
+    assert!(text.starts_with("╭─ diff · +23 -4 · "), "{text}");
+    assert!(text.ends_with("important_file.rs"), "{text}");
+    assert!(text.contains('…'), "{text}");
+    assert!(line.width() <= 48);
+    assert!(
+        line.spans
+            .iter()
+            .any(|span| span.content == "+23" && span.style.fg == Some(diff_add_color()))
+    );
+}
+
+#[test]
+fn inline_diff_headers_fit_all_cell_budgets() {
+    for path in [
+        "/home/user/a/very/long/path/to/source.rs",
+        "C:\\Users\\user\\project\\very_long_directory\\source.rs",
+        "/目录/很长的目录/另一个目录/主文件.rs",
+        "/very/long/path/a_filename_too_long_for_the_remaining_space.rs",
+    ] {
+        for width in 0..100 {
+            for (prefix, counts) in [("╭─", Some((123, 45))), ("├─", None)] {
+                let line = inline_diff_header(prefix, counts, Some(path), width);
+                assert!(line.width() <= width, "width={width}, line={line:?}");
+                if width >= 64 {
+                    assert!(extract_line_text(&line).ends_with(".rs"), "{line:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn render_tool_message_compacts_every_multi_file_diff_header() {
+    let first = "/home/user/project/very_long_directory/nested/first.rs";
+    let second = "/home/user/project/another_very_long_directory/nested/second.rs";
+    let msg = DisplayMessage {
+        role: "tool".into(),
+        content: "Updated 2 files".into(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "compact_multi_file_headers".into(),
+            name: "apply_patch".into(),
+            input: serde_json::json!({"patch_text": format!(
+                "*** Begin Patch\n*** Update File: {first}\n@@\n-old\n+new\n*** Update File: {second}\n@@\n-old\n+new\n*** End Patch\n"
+            )}),
+            intent: None,
+            thought_signature: None,
+        }),
+    };
+    for width in [40, 72, 120] {
+        for mode in [
+            crate::config::DiffDisplayMode::Inline,
+            crate::config::DiffDisplayMode::FullInline,
+        ] {
+            let lines = render_tool_message(&msg, width, mode);
+            let headers: Vec<_> = lines
+                .iter()
+                .filter(|line| {
+                    let text = extract_line_text(line);
+                    text.trim_start().starts_with("╭─ diff")
+                        || text.trim_start().starts_with("├─ diff")
+                })
+                .collect();
+            assert_eq!(headers.len(), 2, "{lines:?}");
+            for (header, filename) in headers.iter().zip(["first.rs", "second.rs"]) {
+                assert!(header.width() <= width as usize, "{header:?}");
+                assert!(extract_line_text(header).ends_with(filename), "{header:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn oauth_login_progress_renderer_keeps_short_link_and_hides_full_details() {
     let url =
         "https://example.invalid/authorize?state=private-state&code_challenge=private-challenge";
@@ -294,6 +425,29 @@ fn system_glyph_env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[test]
+fn successful_reload_notice_hides_internal_directive() {
+    for content in [
+        "[auto] Reload succeeded (old → new-dirty). Continue immediately from where you left off.",
+        "[auto] Reload complete. Resuming your task.\n\nContinue the user's latest request.\nBuild: old → new.",
+        "Reload complete. Resuming your task.\nBuild: old → new.",
+    ] {
+        let msg = DisplayMessage::system(content);
+        for width in [1, 10, 30, 80, 120] {
+            let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].width() <= width as usize);
+            if width >= 80 {
+                assert_eq!(
+                    extract_line_text(&lines[0]).trim(),
+                    "Reload complete. Resuming your task."
+                );
+            }
+        }
+        assert_eq!(msg.content, content);
+    }
 }
 
 #[test]
@@ -741,7 +895,79 @@ fn render_system_message_uses_width_stable_titles_on_kitty() {
 }
 
 #[test]
-fn render_background_task_message_uses_box_and_truncates_preview_lines() {
+fn render_background_task_failure_is_compact() {
+    let called = (chrono::Utc::now() - chrono::Duration::seconds(125)).to_rfc3339();
+    let msg = DisplayMessage::background_task(format!(
+        "**Background task** `bg123` · `Comparison trace` (`bash`) · ✗ failed · 11.0s · exit 101\n\n_Called at:_ `{called}`\n\n```text\n[stderr] justrust: remote build\n[stderr] warning: unused variable\n[stderr] error[E0308]: mismatched types\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`"
+    ));
+    let lines = render_background_task_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 2);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        plain.contains("✗ bash · Comparison trace · 2m ago"),
+        "{plain}"
+    );
+    assert!(
+        plain.contains("╰─exit 101 · [E0308]: mismatched types"),
+        "{plain}"
+    );
+    assert!(!plain.contains("remote build"));
+    assert_eq!(
+        extract_line_text(&lines[1]).find('╰').unwrap(),
+        extract_line_text(&lines[0]).find('✗').unwrap()
+    );
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content == "bash" && span.style.fg == Some(tool_color()))
+    );
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content.contains('✗') && span.style.fg == Some(rgb(220, 100, 100)))
+    );
+    assert!(
+        lines[1]
+            .spans
+            .iter()
+            .all(|span| span.content.trim().is_empty() || span.style.fg == Some(dim_color()))
+    );
+    assert!(
+        msg.content
+            .contains("bg action=\"output\" task_id=\"bg123\"")
+    );
+    for width in [0, 1, 2, 8, 20, 40] {
+        let lines =
+            render_background_task_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            assert!(UnicodeWidthStr::width(extract_line_text(&line).as_str()) <= width as usize);
+        }
+    }
+}
+
+#[test]
+fn render_background_task_failure_without_diagnostic_is_honest() {
+    let msg = DisplayMessage::background_task(
+        "**Background task** `bg123` · `bash` · ✗ failed · 7.1s · exit 1\n\n_No output captured._\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
+    );
+    let plain = render_background_task_message(&msg, 100, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plain.contains("✗ bash · took 7.1s"), "{plain}");
+    assert!(plain.contains("╰─exit 1 · no diagnostic captured"));
+}
+
+#[test]
+fn render_background_task_success_is_compact_and_preserves_raw_output() {
     let msg = DisplayMessage::background_task(
         "**Background task** `bg123` · `bash` · ✓ completed · 7.1s · exit 0\n\n```text\nline 1\nline 2\nline 3\nline 4\nline 5\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
     );
@@ -758,10 +984,28 @@ fn render_background_task_message_uses_box_and_truncates_preview_lines() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("✓ bg bash completed · bg123"));
-    assert!(plain.contains("exit 0 · 7.1s"));
-    assert!(plain.contains("line 1"));
-    assert!(plain.contains("… +1 more line"));
+    assert_eq!(lines.len(), 1);
+    assert!(plain.contains("✓ bash · took 7.1s"), "{plain}");
+    assert!(!plain.contains("exit 0"));
+    assert!(!plain.contains("line 1"));
+    assert!(!plain.contains("more line"));
+    assert!(!plain.contains('╭') && !plain.contains('│') && !plain.contains('╰'));
+    assert!(
+        lines[0].spans.iter().any(|span| {
+            span.content.contains('✓') && span.style.fg == Some(rgb(120, 210, 140))
+        })
+    );
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|span| { span.content == "bash" && span.style.fg == Some(tool_color()) })
+    );
+    assert!(msg.content.contains("line 5"));
+    assert!(
+        msg.content
+            .contains("bg action=\"output\" task_id=\"bg123\"")
+    );
     assert!(!plain.contains("task bg123 · bash"));
     assert!(!plain.contains("Preview"));
     assert!(!plain.contains("Full output"));
@@ -769,24 +1013,51 @@ fn render_background_task_message_uses_box_and_truncates_preview_lines() {
 }
 
 #[test]
-fn render_background_task_message_strips_ansi_from_existing_preview() {
+fn render_background_task_success_hides_ansi_preview_without_changing_raw() {
     let msg = DisplayMessage::background_task(
         "**Background task** `bg123` · `bash` · ✓ completed · 0.1s · exit 0\n\n```text\n\u{1b}[32m✓\u{1b}[39m passes \u{1b}[2m12ms\u{1b}[22m\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
     );
 
+    let raw = msg.content.clone();
     let plain = render_background_task_message(&msg, 80, crate::config::DiffDisplayMode::Off)
         .iter()
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        plain.contains("✓ passes 12ms"),
-        "rendered preview:\n{plain}"
-    );
+    assert!(plain.contains("✓ bash · took 0.1s"), "{plain}");
+    assert!(!plain.contains("passes"));
+    assert_eq!(msg.content, raw);
     assert!(!plain.contains('\u{1b}'));
     assert!(!plain.contains("[32m"));
     assert!(!plain.contains("[2m"));
+}
+
+#[test]
+fn render_background_task_success_fits_unicode_and_narrow_widths() {
+    let raw = "**Background task** `bg-unicode` · `验证界面 e\u{301} 🦀 long background intent` (`bash`) · ✓ completed · 12.3s · exit 0\n\n```text\nlarge output must stay hidden\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg-unicode\"`";
+    let msg = DisplayMessage::background_task(raw);
+    for width in [0, 1, 2, 3, 8, 16, 20, 40, 100] {
+        let lines =
+            render_background_task_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 1);
+        let text = extract_line_text(&lines[0]);
+        assert!(
+            UnicodeWidthStr::width(text.as_str()) <= width as usize,
+            "width={width}: {text}"
+        );
+        assert!(!text.contains("large output"));
+        if width >= 40 {
+            assert!(text.contains("took 12.3s"), "{text}");
+        }
+        if width == 100 {
+            assert!(
+                text.contains("✓ bash · 验证界面 e\u{301} 🦀 long background intent"),
+                "{text}"
+            );
+        }
+    }
+    assert_eq!(msg.content, raw);
 }
 
 #[test]
@@ -940,6 +1211,125 @@ fn render_overnight_message_uses_rounded_progress_card() {
 }
 
 #[test]
+fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
+    use unicode_width::UnicodeWidthStr;
+    let todo = crate::todo::TodoItem {
+        id: "wait".into(),
+        content: "等待 build 🦀 with a long task title".into(),
+        status: "pending".into(),
+        waiting_on: vec!["build-task".into(), "test-task".into()],
+        ..Default::default()
+    };
+    let tasks = vec![
+        TodoCardBackgroundTask {
+            task_id: "build-task".into(),
+            label: "构建 🦀".into(),
+            percent: Some(40.0),
+        },
+        TodoCardBackgroundTask {
+            task_id: "test-task".into(),
+            label: "tests".into(),
+            percent: Some(75.0),
+        },
+    ];
+    let wide = render_todo_item_line_with_background(&todo, &[], &tasks, "", 160);
+    let text = extract_line_text(&wide);
+    assert!(text.contains("🕒"), "{text}");
+    assert!(!text.contains('○'), "{text}");
+    assert!(text.contains("构建 🦀") && text.contains("tests"), "{text}");
+    assert!(text.contains('▰') && text.contains('▱'), "{text}");
+    assert!(text.find("等待").unwrap() < text.find("构建").unwrap());
+    for width in 0..160 {
+        let line = render_todo_item_line_with_background(&todo, &[], &tasks, "", width);
+        assert!(extract_line_text(&line).width() <= width, "width={width}");
+    }
+    // A terminal or unknown reference is absent from the live snapshot.
+    let resolved = extract_line_text(&render_todo_item_line_with_background(
+        &todo,
+        &[],
+        &[],
+        "",
+        80,
+    ));
+    assert!(!resolved.contains("🕒") && !resolved.contains('%'));
+    assert!(resolved.contains('○'));
+    for status in ["completed", "cancelled"] {
+        let mut done = todo.clone();
+        done.status = status.into();
+        let text = extract_line_text(&render_todo_item_line_with_background(
+            &done,
+            &[],
+            &tasks,
+            "",
+            80,
+        ));
+        assert!(!text.contains("🕒") && !text.contains('%'));
+    }
+}
+
+#[test]
+fn background_dependency_indeterminate_progress_is_not_fabricated() {
+    let todo = crate::todo::TodoItem {
+        waiting_on: vec!["task".into()],
+        status: "in_progress".into(),
+        content: "Wait for task".into(),
+        ..Default::default()
+    };
+    let tasks = vec![TodoCardBackgroundTask {
+        task_id: "task".into(),
+        label: "build".into(),
+        percent: None,
+    }];
+    let text = extract_line_text(&render_todo_item_line_with_background(
+        &todo,
+        &[],
+        &tasks,
+        "",
+        80,
+    ));
+    assert!(text.contains("🕒") && text.contains("running"));
+    assert!(!text.contains('%'));
+}
+
+#[test]
+fn background_dependency_clock_and_progress_render_in_flat_and_stage_cards() {
+    use unicode_width::UnicodeWidthStr;
+    for stage in [None, Some(1)] {
+        let todo = crate::todo::TodoItem {
+            id: "wait".into(),
+            content: "Await build".into(),
+            status: "in_progress".into(),
+            stage,
+            group: stage.map(|_| "compile".into()),
+            waiting_on: vec!["task".into()],
+            ..Default::default()
+        };
+        let message = DisplayMessage::todos(serde_json::json!({
+            "todos": [todo], "background_tasks": [{"task_id":"task", "label":"build", "percent":40.0}]
+        }).to_string());
+        let lines = render_todos_message(&message, 100, crate::config::DiffDisplayMode::Off);
+        let text = lines
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("🕒") && text.contains("build") && text.contains('%'),
+            "{text}"
+        );
+        for width in 20..100 {
+            for line in render_todos_message(&message, width, crate::config::DiffDisplayMode::Off) {
+                assert!(
+                    extract_line_text(&line).width() <= width as usize,
+                    "width={width}: {}",
+                    extract_line_text(&line)
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn render_todos_message_shows_grouped_card_with_status_glyphs() {
     fn todo(id: &str, content: &str, status: &str, group: Option<&str>) -> crate::todo::TodoItem {
         crate::todo::TodoItem {
@@ -952,6 +1342,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
             completion_confidence: (status == "completed")
                 .then_some(crate::todo::ConfidenceState::from_legacy_score(95)),
             confidence_history: Vec::new(),
+            waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
             stage: None,
@@ -1006,9 +1397,8 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
     assert!(plain.contains("✓ Wire the hotkey"), "{plain}");
     assert!(plain.contains("● Render the card"), "{plain}");
     assert!(plain.contains("○ Unrelated cleanup"), "{plain}");
-    // Completed items show completion confidence; open ones planning confidence.
-    assert!(plain.contains("plausible"), "{plain}");
-    assert!(plain.contains("plausible"), "{plain}");
+    // Confidence remains metadata rather than a visible item suffix.
+    assert!(!plain.contains("plausible"), "{plain}");
     // Priority remains metadata and is not repeated in the visible item label.
     assert!(!plain.contains("(high)"), "{plain}");
     assert!(
@@ -1033,6 +1423,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
+        waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(80),
             crate::todo::ConfidenceState::from_legacy_score(85),
@@ -1064,9 +1455,8 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    for assessment in ["Closed feedback loop strong", "Delivery workflow_validated"] {
-        assert!(plain.contains(assessment), "{plain}");
-    }
+    assert!(plain.contains("Closed feedback loop strong"), "{plain}");
+    assert!(!plain.contains("Delivery "), "{plain}");
     assert!(!plain.contains("Relevance representative"), "{plain}");
     assert!(!plain.contains("Coverage main_paths"), "{plain}");
     // Only the plan-level assessment renders above the groups.
@@ -1076,7 +1466,8 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
     );
     assert!(!plain.contains("Feedback ·"), "{plain}");
     assert!(!plain.contains("Inspect a debug frame"), "{plain}");
-    assert!(plain.contains("● Render the card · plausible"), "{plain}");
+    assert!(plain.contains("● Render the card"), "{plain}");
+    assert!(!plain.contains(" · plausible"), "{plain}");
     assert!(!plain.contains("(high)"), "{plain}");
 }
 
@@ -1092,6 +1483,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         confidence: None,
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1175,6 +1567,7 @@ fn render_todos_message_uses_readable_semantic_colors() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1208,10 +1601,32 @@ fn render_todos_message_uses_readable_semantic_colors() {
     assert_eq!(color_for("Readable metadata"), Some(todo_meta_color()));
     assert_eq!(color_for("● "), Some(asap_color()));
     assert_eq!(color_for(" (high)"), None);
-    assert_eq!(color_for(" · plausible"), Some(todo_confidence_color()));
+    assert_eq!(color_for(" · plausible"), None);
     assert_eq!(color_for("strong"), Some(todo_warning_color()));
     assert_eq!(color_for("missing"), Some(todo_failure_color()));
     assert_ne!(todo_meta_color(), dim_color());
+}
+
+#[test]
+fn render_todos_message_hides_item_confidence_transitions() {
+    let todo: crate::todo::TodoItem = serde_json::from_value(serde_json::json!({
+        "id": "hidden-confidence", "content": "Completed task", "status": "completed",
+        "priority": "high", "confidence": "validated", "completion_confidence": "verified"
+    }))
+    .unwrap();
+    let msg = DisplayMessage::todos(serde_json::json!({"todos": [todo]}).to_string());
+    for width in [20, 40, 80] {
+        let text = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off)
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("✓ Completed"), "{text}");
+        assert!(
+            !text.contains("validated") && !text.contains("verified") && !text.contains('→'),
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -1271,6 +1686,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         confidence: None,
         completion_confidence: Some(crate::todo::ConfidenceState::Validated),
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1295,7 +1711,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         .join("\n");
 
     assert!(plain.contains("✓ All quality gates passing"), "{plain}");
-    assert!(plain.contains("Delivery outcome_delivered"), "{plain}");
+    assert!(!plain.contains("Delivery "), "{plain}");
     assert!(!plain.contains("Closed feedback loop closed"), "{plain}");
     assert!(!plain.contains("Relevance acceptance_aligned"), "{plain}");
     assert!(
@@ -1321,6 +1737,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1344,7 +1761,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         .join("\n");
 
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
-    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
+    assert!(!plain.contains("Delivery "), "{plain}");
     assert!(
         lines.iter().all(|line| line.width() <= 38),
         "card exceeded its 38-column content budget: {plain}"
@@ -1362,6 +1779,7 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1430,6 +1848,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(92)),
         completion_confidence: None,
+        waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(85),
             crate::todo::ConfidenceState::from_legacy_score(92),
@@ -1477,11 +1896,8 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
     assert!(plain.contains("Relevance missing"), "{plain}");
     assert!(plain.contains("Coverage missing"), "{plain}");
-    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
-    assert!(
-        plain.contains("● Render the todo result · plausible"),
-        "{plain}"
-    );
+    assert!(!plain.contains("Delivery "), "{plain}");
+    assert!(plain.contains("● Render the todo result"), "{plain}");
     assert!(!plain.contains("(high)"), "{plain}");
     assert!(
         !plain.contains('╭'),
@@ -1987,10 +2403,8 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
 
     assert!(plain.contains("ship outcome  ●"), "{plain}");
     assert!(plain.contains("Deliver the complete workflow"), "{plain}");
-    assert!(
-        plain.contains("✓ All quality gates passing · Delivery workflow_validated"),
-        "{plain}"
-    );
+    assert!(plain.contains("✓ All quality gates passing"), "{plain}");
+    assert!(!plain.contains("Delivery "), "{plain}");
     assert!(!plain.contains("todo 1 items"), "{plain}");
 }
 
@@ -2005,7 +2419,7 @@ fn render_background_task_messages_prefer_display_name() {
             .map(extract_line_text)
             .collect::<Vec<_>>()
             .join("\n");
-    assert!(completion_plain.contains("✓ bg Run integration tests completed · bg123"));
+    assert!(completion_plain.contains("✓ bash · Run integration tests · took 7.1s"));
 
     let progress = DisplayMessage::background_task(
         "**Background task progress** `bg123` · `Run integration tests` (`bash`)\n\n[#####-------] 42% · Running tests (reported)",
@@ -2518,8 +2932,7 @@ fn render_tool_message_hides_technical_preview_by_default() {
     assert_eq!(lines.len(), 1, "Bash output is hidden by default");
 }
 
-/// Even with details off, a failed tool row keeps its error summary so
-/// failures stay diagnosable.
+/// Failures retain their normal header, with diagnostics on a muted second row.
 #[test]
 fn render_tool_message_keeps_error_summary_when_details_hidden() {
     let msg = DisplayMessage {
@@ -2546,7 +2959,20 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
 
     assert!(
         rendered.contains("Run the test suite ·"),
-        "error summary should still render after the intent: {rendered}"
+        "normal intent and token suffix should remain: {rendered}"
+    );
+    assert!(!rendered.contains("command not found"));
+    assert_eq!(lines.len(), 2);
+    assert!(
+        extract_line_text(&lines[1])
+            .trim_start()
+            .starts_with("╰─command not found")
+    );
+    assert!(
+        lines[1]
+            .spans
+            .iter()
+            .all(|span| span.content.trim().is_empty() || span.style.fg == Some(dim_color()))
     );
 }
 
@@ -2576,6 +3002,275 @@ fn render_tool_message_shows_token_badge() {
         .expect("missing token badge");
 
     assert_eq!(badge_span.style.fg, Some(rgb(118, 118, 118)));
+}
+
+#[test]
+fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
+    for (name, input, description) in [
+        (
+            "read",
+            serde_json::json!({"file_path": "src/文件.rs"}),
+            "src/文件.rs",
+        ),
+        (
+            "edit",
+            serde_json::json!({"file_path": "src/文件.rs", "old_string": "old", "new_string": "new"}),
+            "src/文件.rs",
+        ),
+        (
+            "bash",
+            serde_json::json!({"command": "cat 文件.rs"}),
+            "cat 文件.rs",
+        ),
+    ] {
+        for intent in [None, Some("Inspect 文件 e\u{301}")] {
+            let msg = DisplayMessage {
+                role: "tool".to_string(),
+                content: "Error: permission denied 文件\nFull diagnostic retained".to_string(),
+                tool_calls: Vec::new(),
+                duration_secs: None,
+                title: None,
+                tool_data: Some(crate::message::ToolCall {
+                    id: "failure_style".to_string(),
+                    name: name.to_string(),
+                    input: input.clone(),
+                    intent: intent.map(str::to_string),
+                    thought_signature: None,
+                }),
+            };
+            let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Inline);
+            assert_eq!(lines.len(), 2, "{name}");
+            let header = extract_line_text(&lines[0]);
+            assert!(
+                header.trim_start().starts_with(&format!("✗ {name}")),
+                "{header}"
+            );
+            assert!(header.contains(intent.unwrap_or(description)), "{header}");
+            assert!(!header.contains("permission denied"));
+            assert!(lines[0].spans.iter().any(
+                |span| span.content.contains("✗") && span.style.fg == Some(rgb(220, 100, 100))
+            ));
+            assert!(
+                lines[0]
+                    .spans
+                    .iter()
+                    .any(|span| span.content == name && span.style.fg == Some(tool_color()))
+            );
+            assert!(
+                extract_line_text(&lines[1])
+                    .trim_start()
+                    .starts_with("╰─permission denied")
+            );
+            assert!(
+                lines[1].spans.iter().all(
+                    |span| span.content.trim().is_empty() || span.style.fg == Some(dim_color())
+                )
+            );
+            assert!(msg.content.contains("Full diagnostic retained"));
+            for width in [0, 1, 2, 5, 8, 16, 32] {
+                for line in render_tool_message(&msg, width, crate::config::DiffDisplayMode::Inline)
+                {
+                    assert!(
+                        UnicodeWidthStr::width(extract_line_text(&line).as_str()) <= width as usize
+                    );
+                }
+            }
+            let mut successful = msg.clone();
+            successful.content = "ok".to_string();
+            let success_lines =
+                render_tool_message(&successful, 140, crate::config::DiffDisplayMode::Off);
+            assert_eq!(
+                header.find('✗'),
+                extract_line_text(&success_lines[0]).find('✓')
+            );
+            assert_eq!(
+                extract_line_text(&lines[1]).find('╰').unwrap(),
+                header.find('✗').unwrap()
+            );
+            assert!(
+                extract_line_text(&success_lines[0])
+                    .trim_start()
+                    .starts_with(&format!("✓ {name}"))
+            );
+            assert!(
+                !success_lines
+                    .iter()
+                    .any(|line| extract_line_text(line).contains("╰"))
+            );
+        }
+    }
+}
+
+#[test]
+fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "--- [1] read ---\nError: permission denied 文件\nFull diagnostic\n\n--- [2] bash ---\nok\n\nCompleted: 1 succeeded, 1 failed".to_string(),
+        tool_calls: Vec::new(), duration_secs: None, title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "mixed".to_string(), name: "batch".to_string(),
+            input: serde_json::json!({"tool_calls": [
+                {"tool": "read", "parameters": {"file_path": "文件.rs"}, "intent": "Read 文件"},
+                {"tool": "bash", "parameters": {"command": "true"}, "intent": "Check success"}
+            ]}), intent: None, thought_signature: None,
+        }),
+    };
+    let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 4);
+    assert_eq!(
+        extract_line_text(&lines[2]).find('╰').unwrap(),
+        extract_line_text(&lines[1]).find('✗').unwrap()
+    );
+    assert!(extract_line_text(&lines[0]).contains("⚠ batch"));
+    assert!(
+        extract_line_text(&lines[1])
+            .trim_start()
+            .starts_with("✗ read · Read 文件")
+    );
+    assert!(!extract_line_text(&lines[1]).contains("permission"));
+    assert!(
+        extract_line_text(&lines[2])
+            .trim_start()
+            .starts_with("╰─permission denied")
+    );
+    assert!(
+        lines[2]
+            .spans
+            .iter()
+            .all(|span| span.content.trim().is_empty() || span.style.fg == Some(dim_color()))
+    );
+    assert!(
+        extract_line_text(&lines[3])
+            .trim_start()
+            .starts_with("✓ bash · Check success")
+    );
+    for width in [0, 1, 2, 8, 16, 32] {
+        for line in render_tool_message(&msg, width, crate::config::DiffDisplayMode::Off) {
+            assert!(UnicodeWidthStr::width(extract_line_text(&line).as_str()) <= width as usize);
+        }
+    }
+}
+
+#[test]
+fn render_tool_message_batch_level_failure_does_not_invent_successful_children() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "Error: invalid tool_calls payload".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "invalid_batch".to_string(),
+            name: "batch".to_string(),
+            input: serde_json::json!({"tool_calls": [{"tool": "read"}]}),
+            intent: Some("Inspect sources".to_string()),
+            thought_signature: None,
+        }),
+    };
+    let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 2);
+    assert!(extract_line_text(&lines[0]).contains("✗ batch · Inspect sources"));
+    assert!(extract_line_text(&lines[1]).contains("╰─invalid tool_calls payload"));
+}
+
+#[test]
+fn compact_error_rows_normalize_logged_wrappers_and_align_under_status() {
+    let raw = "Error: [selfdev] Error: `selfdev build` requires a non-empty `reason` so other queued agents can see why the build is needed.";
+    let mut msg = DisplayMessage::system(raw);
+    msg.role = "tool".to_string();
+    msg.tool_data = Some(crate::message::ToolCall {
+        id: "logged-selfdev".to_string(),
+        name: "selfdev".to_string(),
+        input: serde_json::json!({"action": "build"}),
+        intent: Some("Build UI".to_string()),
+        thought_signature: None,
+    });
+    let lines = render_tool_message(&msg, 180, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 2);
+    let reason = extract_line_text(&lines[1]);
+    assert!(
+        reason.contains("`selfdev build` requires a non-empty `reason`"),
+        "{reason}"
+    );
+    assert!(
+        !reason.contains("Error:") && !reason.contains("error:") && !reason.contains("[selfdev]"),
+        "{reason}"
+    );
+    let wide_reason = extract_line_text(&render_tool_failure_reason(raw, 180, 2));
+    assert!(
+        !wide_reason.contains('…'),
+        "wide reasons must not be pre-truncated: {wide_reason}"
+    );
+    assert_eq!(extract_line_text(&lines[0]).find('✗'), reason.find('╰'));
+    assert_eq!(msg.content, raw, "normalization must not change raw logs");
+}
+
+#[test]
+fn background_errors_share_cause_selection_and_deduplicate_exit_codes() {
+    for (preview, expected) in [
+        (
+            "Error: [bash] Error: Command exited with code 101\n[stderr] error[E0308]: mismatched types",
+            "exit 101 · [E0308]: mismatched types",
+        ),
+        (
+            "Error: [bash] Error: Command exited with code 101",
+            "exit 101",
+        ),
+    ] {
+        let msg = DisplayMessage::background_task(format!(
+            "**Background task** `logged-bg` · `bash` · ✗ failed · 1.0s · exit 101\n\n```text\n{preview}\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"logged-bg\"`"
+        ));
+        let lines = render_background_task_message(&msg, 160, crate::config::DiffDisplayMode::Off);
+        let reason = extract_line_text(&lines[1]);
+        assert!(reason.ends_with(expected), "{reason}");
+        assert_eq!(reason.matches("exit 101").count(), 1, "{reason}");
+        assert_eq!(extract_line_text(&lines[0]).find('✗'), reason.find('╰'));
+    }
+}
+
+#[test]
+fn background_explicit_failure_reason_survives_without_prefix_or_preview() {
+    let msg = DisplayMessage::background_task(
+        "**Background task** `reason-only` · `bash` · ✗ failed · 1.0s · exit 1\n\n_Failure:_ permission denied\n\n_No output captured._\n\n_Full output:_ `bg action=\"output\" task_id=\"reason-only\"`",
+    );
+    let lines = render_background_task_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    assert!(extract_line_text(&lines[1]).ends_with("exit 1 · permission denied"));
+}
+
+#[test]
+fn tool_failure_reason_handles_exit_codes_fallback_and_unicode_widths() {
+    for (content, expected) in [
+        (
+            "details\n--- Command finished with exit code: 17 ---",
+            "exit 17",
+        ),
+        (
+            "[apply_patch] ✗ 文件: Failed to find expected lines\nlarge diff",
+            "Failed to find expected lines",
+        ),
+        (
+            "\u{1b}[31mError: 文件 e\u{301} missing\u{1b}[0m\nmore detail",
+            "文件 e\u{301} missing",
+        ),
+        ("", "Tool call failed"),
+        (
+            "[tool timing: start=2026-10-23T00:00:00Z]\n[stderr] warning: unused variable\n[stderr] error[E0308]: mismatched types\n--- Command finished with exit code: 101 ---",
+            "[E0308]: mismatched types",
+        ),
+        (
+            "[tool timing: start=2026-10-23T00:00:00Z]\n[stderr] Error: permission denied",
+            "permission denied",
+        ),
+    ] {
+        let reason = render_tool_failure_reason(content, 120, 4);
+        let text = extract_line_text(&reason);
+        assert!(text.contains(expected), "{text}");
+        assert!(!text.contains('\u{1b}'));
+        for width in [0, 1, 4, 8, 16, 32] {
+            let line = render_tool_failure_reason(content, width, 4);
+            assert!(UnicodeWidthStr::width(extract_line_text(&line).as_str()) <= width);
+        }
+    }
 }
 
 #[test]
@@ -2964,6 +3659,173 @@ fn discovery_cards_wrap_within_narrow_transcript_width() {
 }
 
 #[test]
+fn render_tool_message_groups_duration_and_tokens() {
+    for name in [
+        "bash",
+        "read",
+        "edit",
+        "webfetch",
+        "debug_socket",
+        "unknown_tool",
+    ] {
+        for content in ["ok", "Error: failed"] {
+            let mut msg = DisplayMessage::tool(
+                content,
+                crate::message::ToolCall {
+                    id: "timed".into(),
+                    name: name.into(),
+                    input: serde_json::json!({}),
+                    intent: Some("A completed tool call".into()),
+                    thought_signature: None,
+                },
+            );
+            msg.duration_secs = Some(2.4);
+            let tokens =
+                crate::util::format_approx_token_count(crate::util::estimate_tokens(content));
+            for width in [32, 60, 120] {
+                let lines = render_tool_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                let row = extract_line_text(&lines[0]);
+                assert!(row.contains(&format!("2.4s, {tokens}")), "{name}: {row}");
+                assert!(!row.contains("2.4s ·"), "{row}");
+                assert!(lines[0].width() < width as usize, "{row}");
+            }
+        }
+    }
+}
+
+#[test]
+fn batch_subcall_groups_duration_and_tokens() {
+    let tool = crate::message::ToolCall {
+        id: "timed-child".into(),
+        name: "read".into(),
+        input: serde_json::json!({}),
+        intent: Some("Read configuration".into()),
+        thought_signature: None,
+    };
+    let line = crate::tui::ui::tools_ui::render_batch_subcall_line(
+        &tool,
+        "✓",
+        rgb(100, 180, 100),
+        50,
+        Some(80),
+        Some("[tool timing: duration=73ms] config content"),
+    );
+    let text = extract_line_text(&line);
+    assert!(text.contains(" · 73ms, "), "{text}");
+    assert!(text.ends_with(" tok"), "{text}");
+    assert!(line.width() <= 80);
+}
+
+#[test]
+fn tool_usage_label_handles_missing_and_legacy_duration() {
+    use crate::tui::ui::tools_ui::tool_usage_label;
+    assert_eq!(tool_usage_label("217 tok", None, "ok"), "217 tok");
+    assert_eq!(tool_usage_label("217 tok", Some(0.0), "ok"), "0ms, 217 tok");
+    assert_eq!(tool_usage_label("217 tok", Some(f32::NAN), "ok"), "217 tok");
+    assert_eq!(
+        tool_usage_label(
+            "217 tok",
+            None,
+            "[tool timing: start=x finish=y duration=2.4s] ok"
+        ),
+        "2.4s, 217 tok"
+    );
+    assert_eq!(
+        tool_usage_label("217 tok", None, "[tool timing: duration=1m 4s] ok"),
+        "1m 4s, 217 tok"
+    );
+    assert_eq!(
+        tool_usage_label("217 tok", None, "[tool timing: duration=73ms] ok"),
+        "73ms, 217 tok"
+    );
+    assert_eq!(
+        tool_usage_label("217 tok", None, "[tool timing: duration=NaNs] ok"),
+        "217 tok"
+    );
+    assert_eq!(
+        tool_usage_label("217 tok", None, "[tool timing: duration=invalid] ok"),
+        "217 tok"
+    );
+}
+
+#[test]
+fn render_tool_message_colors_duration_independently_from_tokens() {
+    for (seconds, duration_color) in [
+        (0.42, rgb(118, 118, 118)),
+        (9.99, rgb(118, 118, 118)),
+        (10.0, rgb(214, 184, 92)),
+        (59.99, rgb(214, 184, 92)),
+        (60.0, rgb(224, 118, 118)),
+    ] {
+        for content in ["ok".to_owned(), "x".repeat(48_000)] {
+            let mut msg = DisplayMessage::tool(
+                content,
+                crate::message::ToolCall {
+                    id: "independent-metrics".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                    intent: None,
+                    thought_signature: None,
+                },
+            );
+            msg.duration_secs = Some(seconds);
+            let badge = tool_output_token_badge(&msg.content);
+            for width in [32, 120] {
+                let lines = render_tool_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                let spans = &lines[0].spans;
+                let token_index = spans
+                    .iter()
+                    .position(|span| span.content == badge.label)
+                    .expect("missing token span");
+                assert_eq!(spans[token_index].style.fg, Some(badge.color));
+                assert_eq!(spans[token_index - 1].content, ", ");
+                assert_eq!(spans[token_index - 2].style.fg, Some(duration_color));
+                assert!(lines[0].width() < width as usize);
+            }
+        }
+    }
+}
+
+#[test]
+fn batch_subcall_colors_duration_independently_from_tokens() {
+    let tool = crate::message::ToolCall {
+        id: "timed-child".into(),
+        name: "read".into(),
+        input: serde_json::json!({}),
+        intent: None,
+        thought_signature: None,
+    };
+    for (timing, color) in [
+        ("420ms", rgb(118, 118, 118)),
+        ("10s", rgb(214, 184, 92)),
+        ("1m", rgb(224, 118, 118)),
+    ] {
+        let content = format!("[tool timing: duration={timing}] {}", "x".repeat(48_000));
+        let line = crate::tui::ui::tools_ui::render_batch_subcall_line(
+            &tool,
+            "✓",
+            rgb(100, 180, 100),
+            50,
+            Some(60),
+            Some(&content),
+        );
+        let duration = line
+            .spans
+            .iter()
+            .find(|span| span.content == timing)
+            .expect("missing duration span");
+        assert_eq!(duration.style.fg, Some(color));
+        let tokens = line
+            .spans
+            .iter()
+            .find(|span| span.content.ends_with(" tok"))
+            .expect("missing token span");
+        assert_eq!(tokens.style.fg, Some(rgb(224, 118, 118)));
+        assert!(line.width() <= 60);
+    }
+}
+
+#[test]
 fn render_tool_message_colors_high_token_badge() {
     let msg = DisplayMessage {
         tool_duration_ms: None,
@@ -3020,7 +3882,7 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("┌─ diff"), "plain={plain}");
+    assert!(plain.contains("╭─ diff"), "plain={plain}");
     assert!(plain.contains("old line"), "plain={plain}");
     assert!(plain.contains("new line"), "plain={plain}");
 }
@@ -3053,7 +3915,10 @@ fn render_tool_message_labels_single_file_apply_patch_diff() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("┌─ diff · src/example.rs"), "plain={plain}");
+    assert!(
+        plain.contains("╭─ diff · +1 -1 · src/example.rs"),
+        "plain={plain}"
+    );
     assert!(plain.contains("old_value"), "plain={plain}");
     assert!(plain.contains("new_value"), "plain={plain}");
 }
@@ -3086,7 +3951,9 @@ fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let a_header = plain.find("┌─ diff · a.txt").expect("missing a.txt header");
+    let a_header = plain
+        .find("╭─ diff · +2 -2 · a.txt")
+        .expect("missing a.txt header");
     let old_a = plain.find("old a").expect("missing a.txt deletion");
     let new_a = plain.find("new a").expect("missing a.txt addition");
     let b_header = plain
@@ -3128,10 +3995,10 @@ fn render_tool_message_shows_numbered_write_result_diff_after_input_compaction()
         .join("\n");
 
     assert!(
-        lines[0].spans.iter().any(|span| span.content == "+2"),
+        lines[1].spans.iter().any(|span| span.content == "+2"),
         "plain={plain}"
     );
-    assert!(plain.contains("┌─ diff"), "plain={plain}");
+    assert!(plain.contains("╭─ diff"), "plain={plain}");
     assert!(plain.contains("<!doctype html>"), "plain={plain}");
     assert!(plain.contains("<html lang=\"en\">"), "plain={plain}");
 }
@@ -3171,7 +4038,7 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(!plain.contains("┌─ diff"), "tool={name}, plain={plain}");
+        assert!(!plain.contains("╭─ diff"), "tool={name}, plain={plain}");
         assert!(!plain.contains("(+0 -0)"), "tool={name}, plain={plain}");
     }
 }
@@ -3207,7 +4074,7 @@ fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
         plain.trim_start().starts_with("✗ apply_patch"),
         "plain={plain}"
     );
-    assert!(!plain.contains("┌─ diff"), "plain={plain}");
+    assert!(!plain.contains("╭─ diff"), "plain={plain}");
     assert!(!plain.contains("(+0 -0)"), "plain={plain}");
 }
 
@@ -3254,6 +4121,26 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
         "plain={plain}"
     );
     assert!(plain.contains("suffix_2_abcdefghijklm…"), "plain={plain}");
+    assert_eq!(plain.matches("+7 -7").count(), 1, "plain={plain}");
+    assert!(!extract_line_text(&lines[0]).contains("+7"));
+    assert!(!plain.contains("total"));
+    let footer = lines.last().unwrap();
+    assert_eq!(extract_line_text(footer), "╰─");
+    assert!(!plain.contains("hidden"), "plain={plain}");
+    let header = &lines[1];
+    assert!(extract_line_text(header).starts_with("╭─ diff · +7 -7 · "));
+    assert!(
+        header
+            .spans
+            .iter()
+            .any(|span| span.content == "+7" && span.style.fg == Some(diff_add_color()))
+    );
+    assert!(
+        header
+            .spans
+            .iter()
+            .any(|span| span.content == "-7" && span.style.fg == Some(diff_del_color()))
+    );
 }
 
 #[test]
@@ -3293,11 +4180,44 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
 
     assert!(!plain.contains("more changes"), "plain={plain}");
     assert!(plain.contains("old line 4"), "plain={plain}");
+    let source_text = lines
+        .iter()
+        .filter(|line| extract_line_text(line).starts_with("│ "))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .skip(if line.spans[0].content.contains('↪') {
+                    1
+                } else {
+                    2
+                })
+        })
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
     assert!(
-        plain.contains("new line 4 suffix_4_abcdefghijklmnopqrstuvwxyz0123456789"),
+        source_text.contains("new line 4 suffix_4_abcdefghijklmnopqrstuvwxyz0123456789"),
         "plain={plain}"
     );
+    assert!(lines.iter().all(|line| line.width() <= 39), "plain={plain}");
     assert!(!plain.contains('…'), "plain={plain}");
+    assert_eq!(plain.matches("+7 -7").count(), 1, "plain={plain}");
+    assert_eq!(extract_line_text(lines.last().unwrap()), "╰─");
+    assert!(!extract_line_text(&lines[0]).contains("+7"));
+
+    let hidden = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let hidden_plain = hidden
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(hidden_plain.matches("(+7 -7)").count(), 1);
+    assert!(!hidden_plain.contains("╭─ diff"));
+    assert!(
+        hidden[0]
+            .spans
+            .iter()
+            .any(|span| span.content == "+7" && span.style.fg == Some(diff_add_color()))
+    );
 }
 
 #[test]
@@ -3670,7 +4590,7 @@ fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
             .count();
         assert_eq!(occurrences, 1, "path should appear once: {text:#?}");
         assert!(
-            text[1].contains("diff · /repo/src/very_specific_name.rs"),
+            text[1].contains("diff · +1 -1 · /repo/src/very_specific_name.rs"),
             "{text:#?}"
         );
         if let Some(intent) = intent {

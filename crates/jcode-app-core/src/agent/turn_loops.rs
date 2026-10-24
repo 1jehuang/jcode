@@ -755,10 +755,13 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = self
-                            .registry
-                            .execute(&tool_name, ToolCall::normalize_input_to_object(input), ctx)
-                            .await;
+                        let tool_result = super::turn_streaming_mpsc::execute_with_background(
+                            self.registry.clone(),
+                            tool_name.clone(),
+                            ToolCall::normalize_input_to_object(input),
+                            ctx,
+                        )
+                        .await;
                         if tool_result.is_err() {
                             crate::telemetry::record_tool_failure();
                         }
@@ -1235,7 +1238,13 @@ impl Agent {
                     model: Some(self.provider.model()),
                 }));
 
-                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                let result = super::turn_streaming_mpsc::execute_with_background(
+                    self.registry.clone(),
+                    tc.name.clone(),
+                    tc.input.clone(),
+                    ctx,
+                )
+                .await;
                 crate::telemetry::record_tool_call();
                 self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();
