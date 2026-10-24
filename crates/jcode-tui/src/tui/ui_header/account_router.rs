@@ -3,7 +3,9 @@ use super::*;
 use crate::auth::account_pool::{AccountPool, OAuthLogin, account_key};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+#[cfg(not(test))]
+use std::time::Duration;
+use std::time::Instant;
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -26,38 +28,68 @@ struct InventoryCache {
     refreshing: bool,
 }
 
+static CACHE: OnceLock<Mutex<InventoryCache>> = OnceLock::new();
+
 fn cached_inventory() -> Inventory {
-    static CACHE: OnceLock<Mutex<InventoryCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    let Ok(mut state) = cache.try_lock() else {
-        return Inventory::default();
-    };
-    let inventory = state.inventory.clone();
-    if !state.refreshing
-        && state
-            .updated
-            .is_none_or(|when| when.elapsed() >= Duration::from_secs(2))
+    #[cfg(test)]
     {
-        state.refreshing = true;
-        // Never read auth files, migrate credentials, or probe on the render thread.
-        let spawned = std::thread::Builder::new()
-            .name("header-account-inventory".into())
-            .spawn(move || {
-                let inventory = load_inventory();
-                if let Ok(mut state) = cache.lock() {
-                    if state.inventory != inventory {
-                        state.inventory = inventory;
-                        GENERATION.fetch_add(1, Ordering::Release);
-                    }
-                    state.updated = Some(Instant::now());
-                    state.refreshing = false;
-                }
-            });
-        if spawned.is_err() {
-            state.refreshing = false;
+        // Tests must not race a background refresh thread: a refresh spawned by
+        // one test can land its result in this process-global cache after another
+        // test has already read a different inventory, flipping the account row
+        // between two builds inside a single test body (the header
+        // combined-vs-individual flake). Loading synchronously under the cache
+        // mutex keeps every test build deterministic while preserving the
+        // production spawn path for real runs. The fresh inventory is returned
+        // so a single build reflects what it just loaded, not a stale clone.
+        // Blocking (not try_lock) matters: when the holder is another test's
+        // build reading saved accounts, the fallback Inventory::default() made
+        // the two builds of combined_header_sections_match_individual_builders
+        // compare a saved-account row against the empty-account fallback.
+        let mut state = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let inventory = load_inventory();
+        if state.inventory != inventory {
+            state.inventory = inventory.clone();
+            GENERATION.fetch_add(1, Ordering::Release);
         }
+        state.updated = Some(Instant::now());
+        state.refreshing = false;
+        inventory
     }
-    inventory
+    #[cfg(not(test))]
+    {
+        let Ok(mut state) = cache.try_lock() else {
+            return Inventory::default();
+        };
+        let inventory = state.inventory.clone();
+        if !state.refreshing
+            && state
+                .updated
+                .is_none_or(|when| when.elapsed() >= Duration::from_secs(2))
+        {
+            state.refreshing = true;
+            // Never read auth files, migrate credentials, or probe on the render thread.
+            let spawned = std::thread::Builder::new()
+                .name("header-account-inventory".into())
+                .spawn(move || {
+                    let inventory = load_inventory();
+                    if let Ok(mut state) = cache.lock() {
+                        if state.inventory != inventory {
+                            state.inventory = inventory;
+                            GENERATION.fetch_add(1, Ordering::Release);
+                        }
+                        state.updated = Some(Instant::now());
+                        state.refreshing = false;
+                    }
+                });
+            if spawned.is_err() {
+                state.refreshing = false;
+            }
+        }
+        inventory
+    }
 }
 
 fn load_inventory() -> Inventory {
@@ -998,5 +1030,70 @@ mod tests {
             oauth_credential_status(false, Some(&usage)),
             CredentialStatus::Unknown
         );
+    }
+
+    #[test]
+    fn cached_inventory_reads_saved_accounts_under_contention() {
+        // try_lock used to hand contending test builds Inventory::default()
+        // while the holder loaded real saved accounts, so the two builds of
+        // combined_header_sections_match_individual_builders could compare a
+        // saved-account row against the empty-account fallback (PR 1955
+        // review: "competing builds see different accounts"). Test mode now
+        // blocks for a consistent inventory. Hold the cache mutex across a
+        // scoped home that carries a saved claude account, then read the
+        // inventory from a second thread: it must wait and observe the saved
+        // login, not the empty default.
+        let _env_lock = crate::storage::lock_test_env();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().expect("create temp dir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        // jcode_dir() is $JCODE_HOME itself, so the auth file lives at its
+        // root: $JCODE_HOME/auth.json. "main" is a legacy primary sentinel
+        // that label migration renames to claude-otter, so use a stable
+        // user-named label instead.
+        std::fs::write(
+            temp.path().join("auth.json"),
+            r#"{"anthropic_accounts":[{"label":"greptile-test","access":"test-access","refresh":"test-refresh","expires":9999999999,"email":"greptile@example.com"}],"active_anthropic_account":"greptile-test"}"#,
+        )
+        .expect("write auth file");
+
+        // The holder locks the cache mutex and signals, so the read below
+        // contends while it is held. It releases after a short hold, so a
+        // blocking reader proceeds and observes the saved account; the old
+        // try_lock returned Inventory::default() the instant contention
+        // appeared, which this test rejects. No side waits on the other while
+        // holding the mutex, so the schedule cannot deadlock.
+        let (inside_tx, inside_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _cache = CACHE
+                .get_or_init(Default::default)
+                .lock()
+                .expect("lock cache mutex");
+            inside_tx.send(()).expect("signal holder inside");
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        inside_rx
+            .recv()
+            .expect("holder must reach the cache mutex first");
+
+        let reader = cached_inventory();
+        assert_eq!(
+            reader
+                .logins
+                .iter()
+                .map(|login| (login.provider, login.label.clone()))
+                .collect::<Vec<_>>(),
+            vec![("claude", "greptile-test".to_string())],
+            "contending reader must wait and see the saved account"
+        );
+
+        holder.join().expect("holder thread");
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 }
