@@ -36,45 +36,18 @@ pub(super) fn render(
     lines.extend(render_pinned_todos_message(msg, width as u16, diff_mode));
     // Preserve the pinned card's spans verbatim. Only pathological terminal
     // widths smaller than its indent need an extra wrapping pass.
-    let lines: Vec<Line<'static>> = lines
-        .into_iter()
-        .flat_map(|line| {
-            if line.width() > width {
-                markdown::wrap_lines(vec![line], width)
-            } else {
-                vec![line]
-            }
-        })
-        .collect();
-    Some(highlight_panel(lines, width))
-}
-
-/// Completion reports are milestones, so lift them off the transcript with a
-/// tinted panel, the same treatment user prompts get from `user_bg()`, nudged
-/// toward the todo accent green. Lines are padded to the full width so the
-/// panel reads as one block.
-fn highlight_panel(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    let bg = jcode_tui_style::theme::blend_color(
-        jcode_tui_style::theme::user_bg(),
-        todo_score_color(),
-        0.12,
-    );
-    lines
-        .into_iter()
-        .map(|mut line| {
-            for span in &mut line.spans {
-                if span.style.bg.is_none() {
-                    span.style = span.style.bg(bg);
+    Some(
+        lines
+            .into_iter()
+            .flat_map(|line| {
+                if line.width() > width {
+                    markdown::wrap_lines(vec![line], width)
+                } else {
+                    vec![line]
                 }
-            }
-            let pad = width.saturating_sub(line.width());
-            if pad > 0 {
-                line.spans
-                    .push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
-            }
-            line
-        })
-        .collect()
+            })
+            .collect(),
+    )
 }
 
 fn render_gate_categories(
@@ -153,12 +126,9 @@ mod tests {
         }).to_string());
         msg.title = Some("Todo completion".into());
         let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
-        let categories = highlight_panel(render_gate_categories(&observations, 80), 80);
+        let categories = render_gate_categories(&observations, 80);
         assert_eq!(&lines[1..7], categories.as_slice());
-        let card = highlight_panel(
-            render_pinned_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off),
-            80,
-        );
+        let card = render_pinned_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
         assert_eq!(&lines[7..], card.as_slice());
         let text = lines
             .iter()
@@ -188,16 +158,9 @@ mod tests {
         msg.title = Some("Todo completion".into());
         for width in [20, 40, 80] {
             let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
-            let card = highlight_panel(
-                render_pinned_todos_message(&msg, width, crate::config::DiffDisplayMode::Off),
-                width as usize,
-            );
+            let card =
+                render_pinned_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
             assert!(!card.is_empty());
-            // The whole report sits on one full-width tinted panel.
-            assert!(lines.iter().all(|line| {
-                line.width() == width as usize
-                    && line.spans.iter().all(|span| span.style.bg.is_some())
-            }));
             // Line equality checks semantic styles as well as actual text.
             assert_eq!(&lines[1..1 + card.len()], card.as_slice());
             assert_eq!(
