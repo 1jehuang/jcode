@@ -108,7 +108,7 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
             if width == 80 {
                 assert_eq!(
                     lines[0].to_string(),
-                    format!("Todo completion  {}", "●".repeat(12))
+                    format!("✓ Todo completion  {}", "●".repeat(12))
                 );
             }
             // Removing wrap whitespace lets us assert every detail even when

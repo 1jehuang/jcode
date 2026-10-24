@@ -1617,33 +1617,47 @@ fn render_finished_todo_summary(
     }
     let has_groups = groups.iter().any(|(key, _)| key.is_some());
     groups.sort_by_key(|(key, _)| key.is_none());
+    let fallback = if has_groups {
+        Some("other")
+    } else {
+        ungrouped_label
+    };
+    // Share a display-cell column, not a character count. Leave room for the
+    // completion mark and visible status dots even on narrow terminals.
+    let label_column = groups
+        .iter()
+        .filter_map(|(group, _)| group.as_deref().or(fallback))
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0)
+        .min(inner_width.saturating_sub(5));
     groups
         .into_iter()
         .map(|(group, items)| {
-            let label = group.as_deref().or(if has_groups {
-                Some("other")
-            } else {
-                ungrouped_label
-            });
+            let label = group.as_deref().or(fallback);
             let mut spans = Vec::new();
             if let Some(label) = label {
-                // Reserve visible dots even when a lane label is very long.
-                let reserved = if !items.is_empty() && inner_width >= 4 {
-                    2 + items.len().min(12).min(inner_width / 2).max(1)
-                } else {
-                    0
-                };
+                let cancelled =
+                    !items.is_empty() && items.iter().all(|item| item.status == "cancelled");
+                spans.push(Span::styled(
+                    if cancelled { "○ " } else { "✓ " },
+                    Style::default().fg(if cancelled {
+                        todo_meta_color()
+                    } else {
+                        todo_score_color()
+                    }),
+                ));
                 let label = super::truncate_line_with_ellipsis_to_width(
-                    &Line::styled(
+                    &Line::from(Span::styled(
                         label.to_string(),
                         Style::default().fg(todo_group_color()).bold(),
-                    ),
-                    inner_width.saturating_sub(reserved),
+                    )),
+                    label_column,
                 );
                 let label_width = label.width();
                 spans.extend(label.spans);
-                if !items.is_empty() && label_width + 2 < inner_width {
-                    spans.push(Span::raw("  "));
+                if !items.is_empty() && inner_width >= 5 {
+                    spans.push(Span::raw(" ".repeat(label_column - label_width + 2)));
                 }
             }
             let used: usize = spans.iter().map(|span| span.content.width()).sum();
@@ -1779,7 +1793,7 @@ fn push_todo_status_pips<'a>(
         return;
     }
 
-    let (done_pips, active_pips, open_pips) = if total <= max_pips.max(12) {
+    let (done_pips, active_pips, open_pips) = if total <= max_pips {
         (
             completed,
             in_progress,

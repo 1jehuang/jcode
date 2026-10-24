@@ -110,7 +110,7 @@ mod tests {
         let categories = render_gate_categories(&observations, 80);
         assert_eq!(&lines[1..7], categories.as_slice());
         assert_eq!(lines.len(), 7);
-        assert_eq!(lines[0].to_string(), "Todo completion  ●");
+        assert_eq!(lines[0].to_string(), "✓ Todo completion  ●");
         let text = lines
             .iter()
             .map(ToString::to_string)
@@ -141,7 +141,7 @@ mod tests {
             let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
             assert_eq!(lines.len(), 1);
             if width >= 20 {
-                assert_eq!(lines[0].to_string(), "Todo completion  ●");
+                assert_eq!(lines[0].to_string(), "✓ Todo completion  ●");
                 assert!(
                     lines[0].spans.iter().any(
                         |span| span.content == "●" && span.style.fg == Some(rgb(100, 180, 100))
@@ -174,7 +174,7 @@ mod tests {
                 assert!(lines.iter().all(|line| line.width() <= width as usize));
                 let header = lines[0].to_string();
                 if width >= 24 {
-                    assert_eq!(header, "Todo completion  ●");
+                    assert_eq!(header, "✓ Todo completion  ●");
                 }
                 let text = lines
                     .iter()
@@ -200,7 +200,7 @@ mod tests {
             }).to_string());
             msg.title = Some("Todo completion".into());
             let lines = render(&msg, 80, crate::config::DiffDisplayMode::Off).unwrap();
-            assert_eq!(lines[0].to_string(), "Todo completion  ●");
+            assert_eq!(lines[0].to_string(), "✓ Todo completion  ●");
             assert_eq!(lines.len(), 1);
         }
     }
@@ -232,7 +232,7 @@ mod tests {
             }
             if count == 2 {
                 let lines = render(&msg, 80, crate::config::DiffDisplayMode::Off).unwrap();
-                assert_eq!(lines[0].to_string(), "Todo completion  ●○");
+                assert_eq!(lines[0].to_string(), "✓ Todo completion  ●○");
             }
         }
     }
@@ -254,8 +254,29 @@ mod tests {
         let lines = render(&msg, 80, crate::config::DiffDisplayMode::Off).unwrap();
         assert_eq!(
             lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ["Rendering 界  ●○", "Tests  ●", "other  ●"]
+            [
+                "✓ Rendering 界  ●○",
+                "✓ Tests         ●",
+                "✓ other         ●"
+            ]
         );
+        let dot_columns: Vec<_> = lines
+            .iter()
+            .map(|line| {
+                let text = line.to_string();
+                text.split('●').next().unwrap().width()
+            })
+            .collect();
+        assert!(dot_columns.iter().all(|column| *column == dot_columns[0]));
+        for line in &lines {
+            assert!(line.spans.iter().any(|span| {
+                span.content == "✓ " && span.style.fg == Some(todo_score_color())
+            }));
+            assert!(line.spans.iter().any(|span| {
+                span.style.fg == Some(todo_group_color())
+                    && span.style.add_modifier.contains(Modifier::BOLD)
+            }));
+        }
         for width in 1..90 {
             let lines = render(&msg, width, crate::config::DiffDisplayMode::Off).unwrap();
             assert_eq!(lines.len(), 3);
