@@ -275,23 +275,41 @@ export function inheritCredentials(fromHome: string, toHome: string): string[] {
     inherited.push(name);
   }
 
-  // jcode's provider env files live in its platform config directory, which
-  // `JCODE_HOME` moves to `$JCODE_HOME/config/jcode`. Link only the env files:
-  // caches and usage data are not credentials and must stay instance-private.
-  // Most importantly, never link the directory itself. A buggy recursive
-  // cleanup can descend through a directory link and delete the user's files;
-  // a file link can only ever be unlinked at the instance-side path.
+  // Share provider env files, but snapshot model catalogs so a private
+  // instance can validate account models before its first live refresh.
+  // Never link the directory itself or inherit usage and auth-failure state.
   const userConfig = userAppConfigDir();
+  let entries: fs.Dirent[] = [];
   try {
-    for (const entry of fs.readdirSync(userConfig, { withFileTypes: true })) {
-      if ((!entry.isFile() && !entry.isSymbolicLink()) || !entry.name.endsWith(".env")) continue;
-      const relative = `config/${APP_CONFIG_DIRNAME}/${entry.name}`;
-      if (linkCredentialFile(path.join(userConfig, entry.name), toHome, relative)) {
-        inherited.push(relative);
-      }
-    }
+    entries = fs.readdirSync(userConfig, { withFileTypes: true });
   } catch {
     // No app config directory is a normal fresh-install state.
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+    const source = path.join(userConfig, entry.name);
+    const relative = `config/${APP_CONFIG_DIRNAME}/${entry.name}`;
+    if (entry.name.endsWith(".env")) {
+      if (!linkCredentialFile(source, toHome, relative)) continue;
+    } else if (
+      entry.name.endsWith("_model_catalog_cache.json") ||
+      entry.name.endsWith("_models_cache.json")
+    ) {
+      if (!fs.statSync(source, { throwIfNoEntry: false })?.isFile()) continue;
+      const parent = ensureInstanceDirectory(toHome, path.dirname(relative));
+      const destination = path.join(parent, entry.name);
+      const contents = fs.readFileSync(source);
+      try {
+        fs.unlinkSync(destination);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      // Exclusive creation cannot write through an existing file link.
+      fs.writeFileSync(destination, contents, { mode: 0o600, flag: "wx" });
+    } else {
+      continue;
+    }
+    inherited.push(relative);
   }
 
   // Other CLIs' credential stores, which jcode reads directly and which
