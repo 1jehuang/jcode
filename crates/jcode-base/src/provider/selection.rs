@@ -83,7 +83,31 @@ impl MultiProvider {
             .active
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = provider;
+        // Clear any external runtime that was active; the built-in enum
+        // variant now owns completion dispatch.
+        *self
+            .active_external
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.invalidate_routes_memo();
+    }
+
+    /// Mark an external runtime (not in the `ActiveProvider` enum) as the
+    /// active completion target. Currently only `"cursor-acp"` is supported.
+    pub(super) fn set_active_provider_external(&self, key: &str) {
+        *self
+            .active_external
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(key.to_string());
+        self.invalidate_routes_memo();
+    }
+
+    /// Returns the active external runtime key, if any.
+    pub(super) fn active_external_provider(&self) -> Option<String> {
+        self.active_external
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn config_default_provider_for_login_provider(
@@ -253,7 +277,8 @@ impl MultiProvider {
                     return Some(route.session_provider_key().to_string());
                 }
                 match prefix {
-                    "copilot" | "antigravity" | "gemini" | "cursor" | "bedrock" | "openrouter" => {
+                    "copilot" | "antigravity" | "gemini" | "cursor" | "cursor-acp" | "bedrock"
+                    | "openrouter" => {
                         return Some(prefix.to_string());
                     }
                     _ => {
@@ -326,6 +351,7 @@ impl MultiProvider {
             "github copilot" | "copilot" => "copilot",
             "openrouter" => "openrouter",
             "cursor" => "cursor",
+            "cursor acp" | "cursor-acp" => "cursor-acp",
             "gemini" | "google" => "gemini",
             "antigravity" => "antigravity",
             "bedrock" | "aws bedrock" => "bedrock",
@@ -451,7 +477,8 @@ impl MultiProvider {
         let provider_key = Self::canonical_session_provider_key(provider_key);
 
         match provider_key {
-            "copilot" | "antigravity" | "gemini" | "cursor" | "bedrock" | "openrouter" => {
+            "copilot" | "antigravity" | "gemini" | "cursor" | "cursor-acp" | "bedrock"
+            | "openrouter" => {
                 format!("{provider_key}:{model}")
             }
             _ => {
@@ -521,6 +548,7 @@ impl MultiProvider {
                 } => return format!("{profile_id}:{model}"),
                 ModelRouteApiMethod::Copilot => return format!("copilot:{model}"),
                 ModelRouteApiMethod::Cursor => return format!("cursor:{model}"),
+                ModelRouteApiMethod::CursorAcp => return model.to_string(),
                 ModelRouteApiMethod::Bedrock => return format!("bedrock:{model}"),
                 ModelRouteApiMethod::AntigravityHttps => return format!("antigravity:{model}"),
                 ModelRouteApiMethod::OpenAiCompatible { profile_id: None }
@@ -977,5 +1005,47 @@ mod tests {
             Some(ActiveProvider::OpenRouter)
         );
         assert!(MultiProvider::resolve_config_provider_selection("unknown", &cfg).is_none());
+    }
+
+    #[test]
+    fn session_provider_key_maps_cursor_acp_name() {
+        assert_eq!(
+            MultiProvider::session_provider_key_from_provider_name("Cursor ACP"),
+            Some("cursor-acp".to_string())
+        );
+        assert_eq!(
+            MultiProvider::session_provider_key_from_provider_name("cursor-acp"),
+            Some("cursor-acp".to_string())
+        );
+        assert_eq!(
+            MultiProvider::session_provider_key_from_provider_name("cursor"),
+            Some("cursor".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_session_provider_key_recognizes_cursor_acp_prefix() {
+        assert_eq!(
+            MultiProvider::explicit_session_provider_key_for_model_request("cursor-acp:luna"),
+            Some("cursor-acp".to_string())
+        );
+        // Ensure cursor: still maps to cursor, not cursor-acp
+        assert_eq!(
+            MultiProvider::explicit_session_provider_key_for_model_request("cursor:composer-2.5"),
+            Some("cursor".to_string())
+        );
+    }
+
+    #[test]
+    fn model_switch_request_for_session_model_emits_cursor_acp_prefix() {
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_model("luna", Some("cursor-acp")),
+            "cursor-acp:luna"
+        );
+        // Bare cursor-acp model without provider_key still works (returns just model)
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_model("gpt-5.6-luna", None),
+            "gpt-5.6-luna"
+        );
     }
 }

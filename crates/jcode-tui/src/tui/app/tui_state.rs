@@ -2006,20 +2006,31 @@ impl crate::tui::TuiState for App {
     }
 
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        let mut members = self.inline_swarm_members_unticked();
-        // Server snapshots only arrive on state changes, so advance active
-        // workers' stopwatches locally to make them tick every second.
-        if let Some(received_at) = self.remote_swarm_members_received_at {
-            let since = received_at.elapsed().as_secs();
-            for member in &mut members {
-                if jcode_tui_render::swarm_gallery::is_active_status(&member.status)
-                    && let Some(elapsed) = member.runtime.elapsed_secs.as_mut()
-                {
-                    *elapsed = elapsed.saturating_add(since);
-                }
-            }
+        if self.debug_force_inline_gallery {
+            return self.remote_swarm_members.clone();
         }
-        members
+        if !self.swarm_enabled {
+            return Vec::new();
+        }
+        // Scope the inline gallery to the subtree this session actually spawned.
+        // Other sessions can share the same swarm (e.g. same repo) without this
+        // session having spawned them; showing those would be noise. The spawn
+        // tree is reconstructed from each member's `report_back_to_session_id`
+        // parent edge.
+        let self_id = if self.is_remote {
+            self.remote_session_id.as_deref()
+        } else {
+            Some(self.session.id.as_str())
+        };
+        match self_id {
+            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
+            // Session identity is not known yet (e.g. right after connect,
+            // before the History event sets `remote_session_id`). Showing all
+            // swarm members here caused the inline strip to flash on startup
+            // and then disappear once the subtree filter kicked in. Hide the
+            // strip until we know who we are.
+            None => Vec::new(),
+        }
     }
 
     fn swarm_members_for_transcript(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
@@ -2875,35 +2886,5 @@ mod inline_swarm_subtree_tests {
             ids(filter_inline_swarm_subtree(&members, "me")),
             vec!["child"]
         );
-    }
-}
-
-impl App {
-    fn inline_swarm_members_unticked(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        if self.debug_force_inline_gallery {
-            return self.remote_swarm_members.clone();
-        }
-        if !self.swarm_enabled {
-            return Vec::new();
-        }
-        // Scope the inline gallery to the subtree this session actually spawned.
-        // Other sessions can share the same swarm (e.g. same repo) without this
-        // session having spawned them; showing those would be noise. The spawn
-        // tree is reconstructed from each member's `report_back_to_session_id`
-        // parent edge.
-        let self_id = if self.is_remote {
-            self.remote_session_id.as_deref()
-        } else {
-            Some(self.session.id.as_str())
-        };
-        match self_id {
-            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
-            // Session identity is not known yet (e.g. right after connect,
-            // before the History event sets `remote_session_id`). Showing all
-            // swarm members here caused the inline strip to flash on startup
-            // and then disappear once the subtree filter kicked in. Hide the
-            // strip until we know who we are.
-            None => Vec::new(),
-        }
     }
 }

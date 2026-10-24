@@ -132,9 +132,7 @@ fn deadline_is_cached_before_the_outer_account_timeout() {
             tokio::time::pause();
             let started = tokio::time::Instant::now();
             let key = "label:flight-timeout";
-            let error = fetch(key.into(), || std::future::pending())
-                .await
-                .unwrap_err();
+            let error = fetch(key.into(), std::future::pending).await.unwrap_err();
             assert!(error.to_string().contains("timed out"));
             let elapsed = tokio::time::Instant::now() - started;
             assert!(elapsed >= Duration::from_secs(15) && elapsed < Duration::from_secs(16));
@@ -187,7 +185,8 @@ fn received_429_is_cached_without_waiting_for_error_body() {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut bytes = [0; 4096];
-            stream.read(&mut bytes).await.unwrap();
+            let n = stream.read(&mut bytes).await.unwrap();
+            assert!(n > 0);
             stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 62\r\nContent-Length: 10000\r\nConnection: close\r\n\r\n").await.unwrap();
             std::future::pending::<()>().await;
         });
@@ -213,7 +212,8 @@ fn aborted_http_body_read_persists_backoff() {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut bytes = [0; 4096];
-            stream.read(&mut bytes).await.unwrap();
+            let n = stream.read(&mut bytes).await.unwrap();
+            assert!(n > 0);
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 10000\r\n\r\n").await.unwrap();
             let _ = sent.send(());
             std::future::pending::<()>().await;

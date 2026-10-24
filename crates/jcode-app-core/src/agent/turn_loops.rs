@@ -878,15 +878,6 @@ impl Agent {
                     usage_cache_read,
                     usage_cache_creation,
                 );
-                let output = usage_output.unwrap_or(0);
-                let total = self
-                    .effective_context_tokens_from_usage(
-                        usage_input.unwrap_or(0),
-                        usage_cache_read,
-                        usage_cache_creation,
-                    )
-                    .saturating_add(output);
-                crate::session_metrics::record_token_usage(&self.session.id, total, output);
             }
 
             if print_output
@@ -1069,6 +1060,30 @@ impl Agent {
 
             // If provider handles tools internally (like Claude Code CLI), only run native tools locally
             if self.provider.handles_tools_internally() {
+                // Persist tool results that the provider already executed. The
+                // retain below filters tool_calls to native-only, but the
+                // provider's results (from StreamEvent::ToolResult) must still
+                // be saved so the conversation has matching tool_use ->
+                // tool_result pairs. Without this, the session stores
+                // ContentBlock::ToolUse with no corresponding
+                // ContentBlock::ToolResult, leaving an invalid history that
+                // breaks provider replays.
+                if !sdk_tool_results.is_empty() {
+                    for tc in &tool_calls {
+                        if let Some((content, is_error)) = sdk_tool_results.remove(&tc.id) {
+                            let content = cap_sdk_tool_content_for_history(&tc.name, content);
+                            self.add_message(
+                                Role::User,
+                                vec![ContentBlock::ToolResult {
+                                    tool_use_id: tc.id.clone(),
+                                    content,
+                                    is_error: if is_error { Some(true) } else { None },
+                                }],
+                            );
+                        }
+                    }
+                    self.session.save()?;
+                }
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
                 if tool_calls.is_empty() {
                     if !generated_image_contexts.is_empty() {

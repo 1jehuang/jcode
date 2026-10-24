@@ -2602,6 +2602,70 @@ Re-run with `--force` if you really want to stop the server.";
     Ok(())
 }
 
+/// Stop the running server so it can be respawned with a different provider.
+///
+/// This is the internal counterpart of `run_server_stop_command(true, false)`:
+/// it signals the daemon's process group, waits for the listener to disappear
+/// (escalating to SIGKILL after a grace window), and reaps any stale socket.
+/// Unlike the CLI command, it does not require `--force` and emits no user
+/// output (the caller prints its own messages).
+pub async fn stop_running_server() -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let socket = crate::server::socket_path();
+    let had_listener = crate::server::has_live_listener(&socket).await;
+    let server_info = crate::registry::find_server_by_socket_sync(&socket);
+
+    let mut signaled_pid: Option<u32> = None;
+
+    if let Some(info) = server_info.as_ref() {
+        let pid = info.pid;
+        if crate::platform::is_process_running(pid) {
+            #[cfg(unix)]
+            {
+                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
+                signaled_pid = Some(pid);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = crate::platform::signal_detached_process_group(pid, 0);
+                signaled_pid = Some(pid);
+            }
+        }
+    }
+
+    if signaled_pid.is_some() || had_listener {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        #[cfg(unix)]
+        let mut escalated = false;
+        loop {
+            let listener_gone = !crate::server::has_live_listener(&socket).await;
+            let process_gone = signaled_pid
+                .map(|pid| !crate::platform::is_process_running(pid))
+                .unwrap_or(true);
+            if listener_gone && process_gone {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            #[cfg(unix)]
+            if !escalated
+                && Instant::now() + Duration::from_secs(2) >= deadline
+                && let Some(pid) = signaled_pid
+                && crate::platform::is_process_running(pid)
+            {
+                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+                escalated = true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    let _ = crate::server::reap_stale_socket_if_dead(&socket).await;
+    Ok(())
+}
+
 pub async fn run_single_message_command(
     choice: &super::provider_init::ProviderChoice,
     model: Option<&str>,

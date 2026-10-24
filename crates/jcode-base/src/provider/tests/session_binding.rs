@@ -1,9 +1,11 @@
 use super::*;
 
+type ObservedCalls = Arc<Mutex<Vec<(&'static str, Option<String>)>>>;
+
 #[derive(Default)]
 struct SessionRecordingProvider {
     session: RwLock<Option<String>>,
-    observed: Arc<Mutex<Vec<(&'static str, Option<String>)>>>,
+    observed: ObservedCalls,
 }
 
 impl SessionRecordingProvider {
@@ -119,7 +121,7 @@ fn session_binding_fork_retains_identity_and_rebinding_is_local_to_router() {
 
 #[test]
 fn session_binding_new_session_fork_starts_unbound() {
-    static OBSERVED: std::sync::LazyLock<Arc<Mutex<Vec<(&'static str, Option<String>)>>>> =
+    static OBSERVED: std::sync::LazyLock<ObservedCalls> =
         std::sync::LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
     with_clean_provider_test_env(|| {
         let runtime = enter_test_runtime();

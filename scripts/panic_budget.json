@@ -1,5 +1,5 @@
 {
-  "total": 174,
+  "total": 175,
   "tracked_files": {
     "crates/jcode-app-core/build.rs": 4,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
@@ -28,6 +28,7 @@
     "crates/jcode-harness-api/examples/harness_repl.rs": 15,
     "crates/jcode-provider-anthropic/src/wedge_fixture_check.rs": 3,
     "crates/jcode-provider-core/src/model_names.rs": 1,
+    "crates/jcode-provider-cursor-acp-runtime/src/lib.rs": 1,
     "crates/jcode-provider-cursor-runtime/src/wire.rs": 1,
     "crates/jcode-provider-doctor/src/lifecycle_driver.rs": 2,
     "crates/jcode-provider-openai/src/stream.rs": 3,
