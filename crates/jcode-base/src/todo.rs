@@ -304,6 +304,7 @@ mod tests {
             completion_confidence: None,
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
+            waiting_on: Vec::new(),
             assigned_to: None,
             stage: None,
             details: None,

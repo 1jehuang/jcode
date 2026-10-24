@@ -15,6 +15,7 @@ fn uncapped_and_preserves_every_todo_field() {
             confidence_history: vec![ConfidenceState::Speculative, ConfidenceState::Verified],
             assigned_to: Some("worker".into()),
             blocked_by: vec!["dependency".into()],
+            waiting_on: vec!["background-task".into()],
             stage: Some(2),
         })
         .collect();
