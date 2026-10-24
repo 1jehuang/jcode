@@ -695,7 +695,6 @@ fn legacy_model_route_is_unavailable_with_reason() {
 #[tokio::test]
 #[ignore = "requires AWS credentials and enabled Bedrock model access"]
 async fn bedrock_live_smoke_test() {
-    let _guard = lock_test_env();
     if std::env::var("JCODE_BEDROCK_LIVE_TEST").ok().as_deref() != Some("1") {
         return;
     }
