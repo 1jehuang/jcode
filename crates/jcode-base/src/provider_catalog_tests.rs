@@ -385,7 +385,16 @@ fn auth_issue_runtime_display_name_tracks_direct_compatible_profiles() {
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
     ]);
+
+    // The user env can carry an active named provider profile (e.g. a
+    // corporate OpenAI-compatible gateway). `apply_openai_compatible_profile_env`
+    // no-ops while the profile lock is set, so clear it before asserting the
+    // display name tracks each profile passed directly.
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
 
     crate::env::set_var("JCODE_RUNTIME_PROVIDER", "azure-openai");
     assert_eq!(runtime_provider_display_name("openrouter"), "Azure OpenAI");
@@ -1026,6 +1035,14 @@ fn matrix_openai_compatible_localhost_override_allows_no_auth() {
     crate::env::remove_var("JCODE_OPENAI_COMPAT_API_KEY_NAME");
     crate::env::remove_var("JCODE_OPENAI_COMPAT_ENV_FILE");
     crate::env::remove_var("JCODE_OPENAI_COMPAT_LOCAL_ENABLED");
+    // An ambient named provider profile (e.g. a corporate gateway selected for
+    // this session) would route `openai_compatible_profile_is_configured`
+    // through the named-profile credential branch instead of the localhost
+    // path under test. Clear the profile lock so the localhost override is what
+    // gets asserted.
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
 
     let resolved = resolve_openai_compatible_profile(OPENAI_COMPAT_PROFILE);
     assert_eq!(resolved.api_base, "http://localhost:11434/v1");
