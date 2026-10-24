@@ -56,23 +56,13 @@ fn create_test_app() -> crate::tui::app::App {
 /// Point JCODE_HOME at a per-process temp dir when the environment does not
 /// already pin one, so tests never read the developer's real `~/.jcode`
 /// state (e.g. a populated ambient queue turns `has_notification()` on and
-/// breaks the unfocused-redraw assertions). Mirrors the helper of the same
-/// name used by the main app test suite.
+/// breaks the unfocused-redraw assertions). Shared canonical impl in
+/// `jcode-base` storage: it takes the shared env lock across the
+/// check-and-set (blocking briefly when another test owns it, setting
+/// directly when the current thread already holds the lock), so it cannot
+/// flip that test's JCODE_HOME-scoped fingerprint mid-body (#1784).
 fn ensure_test_jcode_home_if_unset() {
-    use std::sync::OnceLock;
-
-    static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
-
-    if std::env::var_os("JCODE_HOME").is_some() {
-        return;
-    }
-
-    let path = TEST_HOME.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&path);
-        path
-    });
-    crate::env::set_var("JCODE_HOME", path);
+    crate::storage::ensure_shared_test_jcode_home_if_unset();
 }
 
 #[test]

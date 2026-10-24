@@ -32,32 +32,54 @@ fn cached_inventory() -> Inventory {
     let Ok(mut state) = cache.try_lock() else {
         return Inventory::default();
     };
-    let inventory = state.inventory.clone();
-    if !state.refreshing
-        && state
-            .updated
-            .is_none_or(|when| when.elapsed() >= Duration::from_secs(2))
+    #[cfg(test)]
     {
-        state.refreshing = true;
-        // Never read auth files, migrate credentials, or probe on the render thread.
-        let spawned = std::thread::Builder::new()
-            .name("header-account-inventory".into())
-            .spawn(move || {
-                let inventory = load_inventory();
-                if let Ok(mut state) = cache.lock() {
-                    if state.inventory != inventory {
-                        state.inventory = inventory;
-                        GENERATION.fetch_add(1, Ordering::Release);
-                    }
-                    state.updated = Some(Instant::now());
-                    state.refreshing = false;
-                }
-            });
-        if spawned.is_err() {
-            state.refreshing = false;
+        // Tests must not race a background refresh thread: a refresh spawned by
+        // one test can land its result in this process-global cache after another
+        // test has already read a different inventory, flipping the account row
+        // between two builds inside a single test body (the header
+        // combined-vs-individual flake). Loading synchronously under the cache
+        // mutex keeps every test build deterministic while preserving the
+        // production spawn path for real runs. The fresh inventory is returned
+        // so a single build reflects what it just loaded, not a stale clone.
+        let inventory = load_inventory();
+        if state.inventory != inventory {
+            state.inventory = inventory.clone();
+            GENERATION.fetch_add(1, Ordering::Release);
         }
+        state.updated = Some(Instant::now());
+        state.refreshing = false;
+        return inventory;
     }
-    inventory
+    #[cfg(not(test))]
+    {
+        let inventory = state.inventory.clone();
+        if !state.refreshing
+            && state
+                .updated
+                .is_none_or(|when| when.elapsed() >= Duration::from_secs(2))
+        {
+            state.refreshing = true;
+            // Never read auth files, migrate credentials, or probe on the render thread.
+            let spawned = std::thread::Builder::new()
+                .name("header-account-inventory".into())
+                .spawn(move || {
+                    let inventory = load_inventory();
+                    if let Ok(mut state) = cache.lock() {
+                        if state.inventory != inventory {
+                            state.inventory = inventory;
+                            GENERATION.fetch_add(1, Ordering::Release);
+                        }
+                        state.updated = Some(Instant::now());
+                        state.refreshing = false;
+                    }
+                });
+            if spawned.is_err() {
+                state.refreshing = false;
+            }
+        }
+        inventory
+    }
 }
 
 fn load_inventory() -> Inventory {

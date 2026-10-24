@@ -281,7 +281,7 @@ mod tests {
     struct Home {
         _dir: tempfile::TempDir,
         prev: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: crate::storage::TestEnvGuard,
     }
 
     impl Home {

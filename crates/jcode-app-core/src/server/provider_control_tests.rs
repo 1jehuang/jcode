@@ -381,14 +381,14 @@ impl Provider for AuthChangeMockProvider {
 
 /// Shared process-wide lock: env vars are global, so a private mutex here would
 /// race every other env-mutating test (issue #593).
-fn lock_env() -> StdMutexGuard<'static, ()> {
+fn lock_env() -> crate::storage::TestEnvGuard {
     crate::storage::lock_test_env()
 }
 
 struct EnvGuard {
     saved: Vec<(&'static str, Option<String>)>,
     _temp_home: tempfile::TempDir,
-    _lock: StdMutexGuard<'static, ()>,
+    _lock: crate::storage::TestEnvGuard,
 }
 
 impl EnvGuard {
