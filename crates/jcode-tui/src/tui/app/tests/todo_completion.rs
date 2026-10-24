@@ -107,7 +107,10 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
             assert_eq!(lines.len(), 2, "{plain}");
             assert_eq!(lines[1].to_string().trim(), "●".repeat(12), "{plain}");
             if width == 80 {
-                assert_eq!(lines[0].to_string(), "Todo completion  Intent clear");
+                assert_eq!(
+                    lines[0].to_string(),
+                    "Todo completion  Show all evidence without another agent turn"
+                );
             }
             // Removing wrap whitespace lets us assert every detail even when
             // an individual word has to be split at a narrow terminal width.
@@ -115,7 +118,7 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
             for unexpected in [
                 "Report task",
                 "Evidence for task",
-                "Show all evidence without another agent turn",
+                "Intent clear",
                 "FINAL_EVIDENCE_MARKER",
                 "Earlier weak states",
                 "feedback_loop_relevance was indirect",

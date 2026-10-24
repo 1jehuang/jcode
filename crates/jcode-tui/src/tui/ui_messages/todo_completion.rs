@@ -29,17 +29,17 @@ pub(super) fn render(
         "Todo completion",
         Style::default().fg(todo_score_color()).bold(),
     )];
-    if let Some(state) = snapshot.plan.understands_user_intent {
-        let color = match state {
-            crate::todo::IntentUnderstanding::Uncertain => todo_failure_color(),
-            crate::todo::IntentUnderstanding::Partial => todo_warning_color(),
-            crate::todo::IntentUnderstanding::Clear
-            | crate::todo::IntentUnderstanding::Complete => todo_score_color(),
-        };
-        header.extend([
-            Span::styled("  Intent ", Style::default().fg(todo_label_color())),
-            Span::styled(state.as_str().to_owned(), Style::default().fg(color)),
-        ]);
+    if let Some(intention) = snapshot.plan.user_intention.as_deref() {
+        // A compact header describes the finished work, not the model's
+        // confidence in its understanding. Normalize multiline saved intent
+        // into a single width-fitted chrome row.
+        let intention = intention.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !intention.is_empty() {
+            header.push(Span::styled(
+                format!("  {intention}"),
+                Style::default().fg(todo_meta_color()),
+            ));
+        }
     }
     let mut lines = vec![super::super::truncate_line_with_ellipsis_to_width(
         &Line::from(header),
@@ -170,25 +170,22 @@ mod tests {
                 "legacy snapshots have no appendix"
             );
             assert_eq!(card.len(), 1);
-            assert!(!lines
-                .iter()
-                .any(|line| line.to_string().contains("Completed work")));
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line.to_string().contains("Completed work"))
+            );
             assert!(lines.iter().all(|line| line.width() <= width as usize));
         }
     }
 
     #[test]
-    fn todo_completion_intent_is_inline_state_derived_and_fitted() {
-        for (state, color) in [
-            ("uncertain", todo_failure_color()),
-            ("partial", todo_warning_color()),
-            ("clear", todo_score_color()),
-            ("complete", todo_score_color()),
-        ] {
+    fn todo_completion_actual_intent_is_inline_and_fitted() {
+        for state in ["uncertain", "partial", "clear", "complete"] {
             let mut msg = DisplayMessage::system(serde_json::json!({
                 "todo_completion_version": 1,
                 "todos": [{"id":"done", "content":"Finished 界 work", "status":"completed", "priority":"high", "details":"Hidden description"}],
-                "plan": {"understands_user_intent":state, "user_intention":"Hidden intention 界"},
+                "plan": {"understands_user_intent":state, "user_intention":"  Ship\n the fix 界  "},
                 "goals": []
             }).to_string());
             msg.title = Some("Todo completion".into());
@@ -199,11 +196,14 @@ mod tests {
                 assert!(lines.iter().all(|line| line.width() <= width as usize));
                 let header = lines[0].to_string();
                 if width >= 40 {
-                    assert_eq!(header, format!("Todo completion  Intent {state}"));
-                    assert!(lines[0]
-                        .spans
-                        .iter()
-                        .any(|span| span.content == state && span.style.fg == Some(color)));
+                    assert_eq!(header, "Todo completion  Ship the fix 界");
+                    assert!(
+                        lines[0]
+                            .spans
+                            .iter()
+                            .any(|span| span.content == "  Ship the fix 界"
+                                && span.style.fg == Some(todo_meta_color()))
+                    );
                 } else {
                     assert!(header.ends_with('…'));
                 }
@@ -214,9 +214,25 @@ mod tests {
                     .join("\n");
                 assert!(!text.contains("Finished"));
                 assert!(!text.contains("Hidden"));
+                assert!(!text.contains(&format!("Intent {state}")));
                 assert!(!lines[1].to_string().contains("Intent"));
                 assert_eq!(msg.content, recorded);
             }
+        }
+    }
+
+    #[test]
+    fn todo_completion_missing_intent_never_substitutes_understanding_state() {
+        for intention in [None, Some(" \n\t ")] {
+            let mut msg = DisplayMessage::system(serde_json::json!({
+                "todo_completion_version":1,
+                "todos":[{"id":"done","content":"Finished","status":"completed","priority":"high"}],
+                "plan":{"understands_user_intent":"complete","user_intention":intention}
+            }).to_string());
+            msg.title = Some("Todo completion".into());
+            let lines = render(&msg, 80, crate::config::DiffDisplayMode::Off).unwrap();
+            assert_eq!(lines[0].to_string(), "Todo completion");
+            assert_eq!(lines.len(), 2);
         }
     }
 
