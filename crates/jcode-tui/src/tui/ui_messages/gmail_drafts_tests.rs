@@ -151,6 +151,7 @@ fn render_gmail_draft_card_preserves_html_like_body_text() {
 #[test]
 fn render_batch_tool_message_shows_nested_gmail_draft_card() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] gmail ---\nDraft created successfully.\nDraft ID: nested_123\nTo: nested@example.com\nSubject: Nested\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
