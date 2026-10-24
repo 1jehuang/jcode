@@ -1166,22 +1166,24 @@ pub trait TuiState {
     fn onboarding_preview_mode(&self) -> bool {
         false
     }
-    /// Whether to render the dedicated first-run onboarding welcome screen
-    /// (gray telemetry header, prominent donut, welcome text, and the login
-    /// prompt). True for brand-new installs / unauthenticated users, or when
-    /// previewing onboarding.
+    /// Whether to render the dedicated first-run onboarding welcome screen.
     fn onboarding_welcome_active(&self) -> bool {
         self.onboarding_preview_mode()
     }
-    /// What the onboarding welcome screen should render in its body. Returns
-    /// `Suggestions` by default (the starter cards); the guided flow overrides
-    /// this to drive the model-select and continue-prompt phases.
+    /// What the onboarding welcome screen should render in its body.
     fn onboarding_welcome_kind(&self) -> OnboardingWelcomeKind {
         OnboardingWelcomeKind::Suggestions
     }
     /// Suggestion prompts for new users (shown in initial empty state).
-    /// Returns (label, prompt_text) pairs. Empty if user is experienced or not authenticated.
     fn suggestion_prompts(&self) -> Vec<(String, String)>;
+    fn suggested_replies_view(
+        &self,
+    ) -> Option<crate::tui::app::suggested_replies::SuggestedRepliesView> {
+        None
+    }
+    fn explorer_countdown_active(&self) -> bool {
+        false
+    }
     /// Cache TTL status - shows whether the prompt cache is warm/cold based on idle time
     fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
     /// Keep a reset offer visible briefly without rearming on usage refresh.
@@ -1190,8 +1192,6 @@ pub trait TuiState {
     }
     /// Read-only reset guidance for the active OpenAI OAuth account.
     fn openai_reset_hint(&self) -> Option<String> {
-        // SSH sessions may use a different login on the remote host. Local
-        // cached credits cannot establish reset availability for that account.
         if self.is_processing() || is_ssh_remote() {
             return None;
         }
@@ -1207,23 +1207,16 @@ pub trait TuiState {
             account_label.as_deref(),
         )?;
         let credits = usage.openai_reset_credits.as_ref()?;
-        // Stable across polling and countdown changes. A different account or
-        // number of credits is a new offer worth showing again.
         let key = format!("{:?}:{}", account_label, credits.available_count);
         self.reset_hint_visible(&key).then_some(hint)
     }
     /// Whether the notification line has content to show
     fn has_notification(&self) -> bool {
-        if self.voice_input_status().is_some() {
-            return true;
-        }
-        if self.openai_reset_hint().is_some() {
-            return true;
-        }
-        if self.copy_selection_status().is_some() {
-            return true;
-        }
-        if crate::tui::ui::recent_flicker_ui_notice().is_some() {
+        if self.voice_input_status().is_some()
+            || self.openai_reset_hint().is_some()
+            || self.copy_selection_status().is_some()
+            || crate::tui::ui::recent_flicker_ui_notice().is_some()
+        {
             return true;
         }
         if self.status_notice().is_some() {

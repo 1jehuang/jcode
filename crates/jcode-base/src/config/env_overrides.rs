@@ -670,6 +670,81 @@ impl Config {
             };
         }
 
+        // Suggested Replies with Default Action Focus
+        if let Ok(v) = std::env::var("JCODE_SUGGESTED_REPLIES_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.enabled = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SUGGESTIONS_JEV_PROVIDER") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.suggested_replies.jev_provider = trimmed.to_ascii_lowercase();
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_USE_OPEN_GF") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.use_open_gf = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SUGGESTED_REPLIES_MAX_SECONDARY")
+            .or_else(|_| std::env::var("JCODE_MAX_SECONDARY_SUGGESTIONS"))
+        {
+            if let Ok(parsed) = v.trim().parse::<i64>() {
+                self.suggested_replies.max_secondary_suggestions = parsed.clamp(1, 20) as usize;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_CONFIDENCE_THRESHOLD") {
+            if let Ok(parsed) = v.trim().parse::<f32>()
+                && parsed.is_finite()
+            {
+                self.suggested_replies.confidence_threshold = parsed.clamp(0.0, 1.0);
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SUGGESTED_REPLIES_SHOW_CONFIDENCE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.show_confidence = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SUGGESTED_REPLIES_CUSTOM_PROMPTS") {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                self.suggested_replies.custom_prompts.clear();
+            } else if trimmed.starts_with('[')
+                && let Ok(parsed) = serde_json::from_str::<Vec<String>>(trimmed)
+            {
+                self.suggested_replies.custom_prompts = parsed
+                    .into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            } else {
+                self.suggested_replies.custom_prompts = trimmed
+                    .split(['|', ';', '\n'])
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_ENABLE_FULL_AUTO_EXPLORER") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.enable_full_auto_explorer = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SIX_LENS_AUTO_REVIEW") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.six_lens_auto_review = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SUGGESTED_REPLIES_ENABLE_FINISH_CATEGORY")
+            .or_else(|_| std::env::var("JCODE_ENABLE_FINISH_CATEGORY"))
+        {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.enable_finish_category = parsed;
+            }
+        }
+
         // Ambient
         if let Ok(v) = std::env::var("JCODE_AMBIENT_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {

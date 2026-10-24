@@ -2286,26 +2286,18 @@ impl crate::tui::TuiState for App {
         App::suggestion_prompts(self)
     }
 
+    fn suggested_replies_view(
+        &self,
+    ) -> Option<crate::tui::app::suggested_replies::SuggestedRepliesView> {
+        self.build_suggested_replies_view()
+    }
+
+    fn explorer_countdown_active(&self) -> bool {
+        self.suggested_replies.explorer_deadline.is_some()
+    }
+
     fn cache_ttl_status(&self) -> Option<crate::tui::CacheTtlInfo> {
-        let baseline = self.kv_cache.kv_cache_baseline.as_ref()?;
-        if baseline.session_id != self.kv_cache_session_id()
-            || baseline.cache_generation != self.kv_cache.cache_generation
-            || baseline.provider != self.kv_cache_provider_name()
-            || baseline.model != self.kv_cache_provider_model()
-        {
-            return None;
-        }
-        let ttl_secs = baseline.cache_ttl_secs?;
-        let elapsed = baseline.completed_at.elapsed().as_secs();
-        let remaining = ttl_secs.saturating_sub(elapsed);
-        Some(crate::tui::CacheTtlInfo {
-            remaining_secs: remaining,
-            ttl_secs,
-            is_cold: remaining == 0,
-            cold_for_secs: elapsed.saturating_sub(ttl_secs),
-            cached_tokens: Some(baseline.input_tokens),
-            is_estimate: crate::provider::cache_ttl_is_estimate(&baseline.provider),
-        })
+        self.compute_cache_ttl_status()
     }
 }
 

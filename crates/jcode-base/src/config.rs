@@ -11,8 +11,9 @@ pub use jcode_config_types::{
     LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
     NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig,
-    SessionConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
-    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    SessionConfig, SessionPickerResumeAction, SponsorsConfig, SuggestedRepliesConfig,
+    SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel, WebSearchConfig,
+    WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -192,6 +193,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_GATEWAY_BIND_ADDR",
     "JCODE_GATEWAY_ENABLED",
     "JCODE_GATEWAY_PORT",
+    "JCODE_HIBERNATION_IDLE_SECS",
+    "JCODE_HIBERNATION_MODE",
     "JCODE_HOME",
     "JCODE_HOOK_PRE_TOOL",
     "JCODE_HOOK_PRE_TOOL_TRANSFORM",
@@ -262,6 +265,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_QUEUE_MODE",
     "JCODE_REASONING_DISPLAY",
     "JCODE_REDRAW_FPS",
+    "JCODE_REQUEST_COMPRESSION",
     "JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
     "JCODE_SCROLL_BOOKMARK_KEY",
     "JCODE_SCROLL_DOWN_FALLBACK_KEY",
@@ -282,6 +286,24 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SMTP_PASSWORD",
     "JCODE_SPAWN_HOOK",
     "JCODE_STREAM_IDLE_TIMEOUT_SECS",
+    "JCODE_SUGGESTED_REPLIES_ENABLED",
+    "JCODE_SUGGESTIONS_JEV_PROVIDER",
+    "JCODE_BROWSER_JEV_PROVIDER",
+    "JCODE_VOICE_JEV_PROVIDER",
+    "JCODE_LAYA_BASE_URL",
+    "LAYA_BASE_URL",
+    "LAYA_API_KEY",
+    "JCODE_USE_OPEN_GF",
+    "JCODE_MAX_SECONDARY_SUGGESTIONS",
+    "JCODE_SUGGESTED_REPLIES_MAX_SECONDARY",
+    "JCODE_CONFIDENCE_THRESHOLD",
+    "JCODE_SUGGESTED_REPLIES_SHOW_CONFIDENCE",
+    "JCODE_SUGGESTED_REPLIES_CUSTOM_PROMPTS",
+    "JCODE_ENABLE_FULL_AUTO_EXPLORER",
+    "JCODE_SIX_LENS_AUTO_REVIEW",
+    "JCODE_SUGGESTED_REPLIES_ENABLE_FINISH_CATEGORY",
+    "JCODE_ENABLE_FINISH_CATEGORY",
+    "OPENJEV_API_KEY",
     "JCODE_MAX_RETRIES",
     "JCODE_MCP_TOOLS",
     "JCODE_MCP_TOOLS_TOKEN_THRESHOLD",
@@ -672,6 +694,9 @@ pub struct Config {
 
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
+
+    /// Two-stage cascading Suggested Replies with Default Action Focus configuration
+    pub suggested_replies: SuggestedRepliesConfig,
 
     /// Partner discovery configuration. Skipped when it matches the shipped
     /// default so saving config never bakes today's default into the file (see
