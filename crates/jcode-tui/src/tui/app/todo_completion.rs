@@ -13,10 +13,11 @@ pub(super) struct TodoCompletionReportState {
     session_id: Option<String>,
     fingerprint: Option<u64>,
     checked_at: Option<Instant>,
+    observations: Vec<crate::todo::GateObservation>,
 }
 
 impl App {
-    /// Render every finished item and its assessments without entering the
+    /// Render every finished item and recorded gate finding without entering the
     /// provider conversation or depending on auto-poke being enabled.
     pub(super) fn refresh_completed_todo_report(&mut self, force: bool) -> bool {
         if crate::tui::is_ssh_remote() {
@@ -50,11 +51,34 @@ impl App {
         {
             // Reopening work starts a new cycle; preserve its earlier report.
             self.todo_completion_report.fingerprint = None;
+            self.todo_completion_report.observations.clear();
             return false;
         }
         let plan = crate::todo::load_plan(&session_id).unwrap_or_default();
         let goals = crate::todo::load_goals(&session_id).unwrap_or_default();
-        let Ok(serialized) = serde_json::to_vec(&(&todos, &plan, &goals)) else {
+        let recorded = crate::todo::load_gate_observations(&session_id).unwrap_or_default();
+        // Turn-end processing clears the live log. Retain this completion
+        // cycle's findings, including repeat counts, across that clearing and
+        // late assessment writes. A reopened cycle starts a fresh collection.
+        for (index, observation) in recorded.iter().enumerate() {
+            let count = recorded[..=index]
+                .iter()
+                .filter(|entry| *entry == observation)
+                .count();
+            let captured_count = self
+                .todo_completion_report
+                .observations
+                .iter()
+                .filter(|entry| *entry == observation)
+                .count();
+            if count > captured_count {
+                self.todo_completion_report
+                    .observations
+                    .push(observation.clone());
+            }
+        }
+        let observations = &self.todo_completion_report.observations;
+        let Ok(serialized) = serde_json::to_vec(&(&todos, &plan, &goals, &observations)) else {
             return false;
         };
         let mut hasher = DefaultHasher::new();
@@ -71,6 +95,7 @@ impl App {
             "todos": todos,
             "plan": plan,
             "goals": goals,
+            "observations": observations,
         })
         .to_string();
         let updating = self.todo_completion_report.fingerprint.is_some();

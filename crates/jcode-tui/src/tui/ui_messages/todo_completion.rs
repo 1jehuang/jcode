@@ -4,7 +4,8 @@ use super::*;
 #[derive(serde::Deserialize)]
 struct Snapshot {
     todo_completion_version: u32,
-    todos: Vec<crate::todo::TodoItem>,
+    #[serde(default)]
+    observations: Vec<crate::todo::GateObservation>,
     plan: crate::todo::TodoPlan,
     goals: Vec<crate::todo::TodoGoal>,
 }
@@ -34,16 +35,12 @@ pub(super) fn render(
     // The snapshot is also a valid current card payload. Reuse the actual
     // pinned renderer, including its grouping, stages, pips and assessments.
     lines.extend(render_pinned_todos_message(msg, width as u16, diff_mode));
-    lines.push(Line::default());
-
-    // Cards intentionally abbreviate prose. Keep the full evidence underneath
-    // in compact semantic rows rather than a second, large Markdown document.
-    let details = crate::todo::completion_report::render_completion_report(
-        &snapshot.todos,
-        &snapshot.plan,
-        &snapshot.goals,
-    );
-    lines.extend(render_detail_rows(&details, width));
+    if let Some(digest) =
+        crate::todo::build_gate_digest(&snapshot.observations, &snapshot.plan, &snapshot.goals)
+    {
+        lines.push(Line::default());
+        lines.extend(render_detail_rows(&digest, width));
+    }
     // Preserve the pinned card's spans verbatim. Only pathological terminal
     // widths smaller than its indent need an extra wrapping pass.
     Some(
@@ -61,42 +58,22 @@ pub(super) fn render(
 }
 
 fn render_detail_rows(details: &str, width: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let mut weaknesses = false;
-    for raw in details.lines().filter(|line| !line.is_empty()) {
-        if raw.starts_with("# ") {
-            continue;
-        }
-        let (text, color, bold) = if let Some(heading) = raw.strip_prefix("## ") {
-            weaknesses = heading.starts_with("Current weaknesses")
-                || heading.starts_with("Earlier weak states");
-            lines.push(Line::default());
-            (heading, todo_group_color(), true)
-        } else if let Some(heading) = raw.strip_prefix("### ") {
-            (heading, todo_group_color(), true)
-        } else if let Some(item) = raw.strip_prefix("- ") {
-            (
-                item,
-                if weaknesses {
-                    todo_warning_color()
-                } else {
-                    todo_meta_color()
-                },
-                false,
-            )
-        } else {
-            (raw, todo_meta_color(), false)
-        };
-        // Decode the formatter's escaped data through the existing Markdown
-        // parser. It cannot become active markup because punctuation is escaped.
-        let rendered = markdown::render_markdown_with_width(text, Some(width));
+    let mut lines = markdown::wrap_lines(
+        vec![Line::from(Span::styled(
+            "  Disabled turn-end gate findings",
+            Style::default().fg(todo_group_color()).bold(),
+        ))],
+        width,
+    );
+    // Only digest bullets are display data. Its automatic continuation header
+    // must never appear here or be dispatched as a model instruction.
+    for item in details.lines().filter_map(|line| line.strip_prefix("- ")) {
+        let text = format!("• {item}");
+        let rendered = markdown::wrap_lines(vec![Line::raw(text)], width.saturating_sub(2).max(1));
         for mut line in rendered {
             line.spans.insert(0, Span::raw("  "));
             for span in &mut line.spans {
-                span.style.fg = Some(color);
-                if bold {
-                    span.style = span.style.bold();
-                }
+                span.style.fg = Some(todo_warning_color());
             }
             lines.extend(markdown::wrap_lines(vec![line], width));
         }
@@ -111,10 +88,10 @@ mod tests {
     #[test]
     fn todo_completion_details_use_compact_warning_rows() {
         let lines = render_detail_rows(
-            "# Todo completion report\n\n## Current weaknesses\n\n- acceptance path blocked\n\n## Plan\n\n- **User intention:** Preserve all evidence\n- **Intent:** clear\n",
+            "[auto] Do not reply or wait for the user.\n- acceptance path blocked",
             80,
         );
-        assert_eq!(lines.len(), 7);
+        assert_eq!(lines.len(), 2);
         let warning = lines
             .iter()
             .find(|line| line.to_string().contains("acceptance path blocked"))
@@ -125,10 +102,12 @@ mod tests {
                 .iter()
                 .all(|span| span.style.fg == Some(todo_warning_color()))
         );
-        assert!(lines.iter().any(|line| {
-            line.to_string()
-                .contains("User intention: Preserve all evidence")
-        }));
+        assert!(
+            lines[0]
+                .to_string()
+                .contains("Disabled turn-end gate findings")
+        );
+        assert!(!lines.iter().any(|line| line.to_string().contains("[auto]")));
     }
 
     #[test]
@@ -151,6 +130,11 @@ mod tests {
             assert!(!card.is_empty());
             // Line equality checks semantic styles as well as actual text.
             assert_eq!(&lines[1..1 + card.len()], card.as_slice());
+            assert_eq!(
+                lines.len(),
+                1 + card.len(),
+                "legacy snapshots have no appendix"
+            );
             assert!(lines.iter().all(|line| line.width() <= width as usize));
         }
     }

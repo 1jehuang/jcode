@@ -89,7 +89,9 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
         assert!(!app.refresh_completed_todo_report(true));
         assert_eq!(completion_report_messages(&app).len(), 1);
 
-        // The actual renderer keeps the entire report at narrow terminal widths.
+        // Descriptive assessments alone never fabricate gate findings.
+        assert_eq!(snapshot["observations"], serde_json::json!([]));
+        // The actual renderer retains the full pinned card at narrow widths.
         for width in [20, 40, 80] {
             let lines = crate::tui::ui::render_system_message(
                 &report,
@@ -102,23 +104,28 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
                 .collect::<Vec<_>>()
                 .join("\n");
             let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
-            assert!(normalized.contains("Report task 11"), "{plain}");
+            if width == 80 {
+                assert!(normalized.contains("Report task 11"), "{plain}");
+            }
             // Removing wrap whitespace lets us assert every detail even when
             // an individual word has to be split at a narrow terminal width.
             let unwrapped: String = plain.chars().filter(|ch| !ch.is_whitespace()).collect();
-            for expected in [
-                "Evidence for task 11",
+            for unexpected in [
                 "FINAL_EVIDENCE_MARKER",
-                "acceptance_blocked",
-                "acceptance path blocked",
                 "Earlier weak states",
                 "feedback_loop_relevance was indirect",
                 "intent understanding was uncertain",
-                "External service unavailable",
                 "Current weaknesses, limitations, or missing assessments",
+                "Disabled turn-end gate findings",
             ] {
-                let expected: String = expected.chars().filter(|ch| !ch.is_whitespace()).collect();
-                assert!(unwrapped.contains(&expected), "missing {expected}: {plain}");
+                let unexpected: String = unexpected
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect();
+                assert!(
+                    !unwrapped.contains(&unexpected),
+                    "unexpected {unexpected}: {plain}"
+                );
             }
             for line in &lines {
                 assert!(line.width() <= width as usize, "width {width}: {line}");
@@ -144,9 +151,83 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
                 .content
                 .contains("Additional acceptance evidence")
         );
+        let observations = vec![crate::todo::GateObservation {
+            kind: crate::todo::GateObservationKind::IntentUnderstanding,
+            group: None,
+            state: Some("uncertain".into()),
+        }];
+        crate::todo::save_gate_observations(&session_id, &observations).unwrap();
+        crate::todo::save_plan(
+            &session_id,
+            &crate::todo::TodoPlan {
+                understands_user_intent: Some(crate::todo::IntentUnderstanding::Clear),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(app.refresh_completed_todo_report(true));
+        assert_eq!(completion_report_messages(&app).len(), 1);
+        assert!(!app.refresh_completed_todo_report(true));
+        // Observation-only late writes must invalidate the fingerprint, and
+        // repeated observations must retain the digest's count and wording.
+        crate::todo::save_gate_observations(
+            &session_id,
+            &[observations[0].clone(), observations[0].clone()],
+        )
+        .unwrap();
+        assert!(app.refresh_completed_todo_report(true));
+        assert_eq!(completion_report_messages(&app).len(), 1);
         let first_report = completion_report_messages(&app)[0].clone();
         let first_render = crate::tui::ui::render_system_message(
             &first_report,
+            40,
+            crate::config::DiffDisplayMode::Off,
+        );
+
+        let plain = first_render
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains("Disabled turn-end gate findings"));
+        assert!(normalized.contains("started this work without understanding"));
+        assert!(normalized.contains("flagged 2 times this turn"));
+        assert!(!plain.contains("[auto]"));
+        assert!(!normalized.contains("Do not reply or wait for the user"));
+        let snapshot: serde_json::Value = serde_json::from_str(&first_report.content).unwrap();
+        assert_eq!(snapshot["observations"].as_array().unwrap().len(), 2);
+        crate::todo::clear_gate_observations(&session_id).unwrap();
+        assert!(!app.refresh_completed_todo_report(true));
+        assert_eq!(
+            completion_report_messages(&app)[0].content,
+            first_report.content
+        );
+        crate::todo::save_plan(
+            &session_id,
+            &crate::todo::TodoPlan {
+                understands_user_intent: Some(crate::todo::IntentUnderstanding::Uncertain),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(app.refresh_completed_todo_report(true));
+        let updated = completion_report_messages(&app)[0].clone();
+        let text = crate::tui::ui::render_system_message(
+            &updated,
+            200,
+            crate::config::DiffDisplayMode::Off,
+        )
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.contains("never became solid"));
+        assert!(text.contains("flagged 2 times this turn"));
+        // This updated snapshot is the immutable record for the earlier cycle.
+        let first_render = crate::tui::ui::render_system_message(
+            &updated,
             40,
             crate::config::DiffDisplayMode::Off,
         );
@@ -162,6 +243,7 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
         assert_eq!(reports.len(), 2);
         assert!(!reports[0].content.contains("Second cycle task"));
         assert!(reports[1].content.contains("Second cycle task"));
+        assert!(reports[1].content.contains("\"observations\":[]"));
         assert_eq!(
             crate::tui::ui::render_system_message(
                 reports[0],
