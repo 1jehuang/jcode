@@ -99,6 +99,12 @@ static ACTIVE_PROVIDER: RwLock<Option<Arc<dyn Provider>>> = RwLock::new(None);
 
 /// Pick the newest usable Bedrock flagship from `routes`, if it should replace
 /// the placeholder default. Pure so it can be tested without AWS.
+///
+/// The placeholder is the shipped flagship default (Opus 5.5), not a stopgap
+/// id, so a catalog only replaces it with a strictly newer frontier release;
+/// an older-but-available model never displaces the default. When the current
+/// id carries no parseable frontier version (custom or legacy ids), the usual
+/// curated ranking still applies.
 fn bedrock_promoted_default(current: &str, routes: &[ModelRoute]) -> Option<String> {
     if current != bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL {
         return None;
@@ -108,8 +114,12 @@ fn bedrock_promoted_default(current: &str, routes: &[ModelRoute]) -> Option<Stri
         .filter(|route| route.available)
         .map(|route| route.model.as_str())
         .collect();
-    crate::auth::lifecycle::preferred_model_for_provider("bedrock", &usable)
-        .filter(|best| best != current)
+    let best = crate::auth::lifecycle::preferred_model_for_provider("bedrock", &usable)
+        .filter(|best| best != current)?;
+    if crate::auth::lifecycle::frontier_version_le(current, &best) {
+        return None;
+    }
+    Some(best)
 }
 
 fn promote_bedrock_placeholder_default(bedrock: &bedrock::BedrockProvider) {
@@ -2446,8 +2456,9 @@ impl Provider for MultiProvider {
             ));
         }
 
-        // Bedrock's built-in default is a 2024 model; once its catalog (live
-        // or cached) is known, land on the newest usable Claude flagship.
+        // Bedrock's built-in default is the shipped Claude flagship; once its
+        // catalog (live or cached) is known, land on a strictly newer usable
+        // release and never demote to an older one.
         if let Some(bedrock) = self.bedrock_provider() {
             promote_bedrock_placeholder_default(&bedrock);
         }
@@ -3140,14 +3151,30 @@ mod bedrock_placeholder_default_tests {
     fn bedrock_placeholder_promotes_to_newest_usable_claude() {
         let routes = vec![
             route(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, true),
+            route("anthropic.claude-opus-6-20270101-v1:0", true),
             route("anthropic.claude-sonnet-4-20250514-v1:0", true),
-            route("us.anthropic.claude-opus-4-6-v1", true),
             route("amazon.nova-pro-v1:0", true),
         ];
         assert_eq!(
             bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes)
                 .as_deref(),
-            Some("us.anthropic.claude-opus-4-6-v1")
+            Some("anthropic.claude-opus-6-20270101-v1:0")
+        );
+    }
+
+    /// The placeholder is the shipped flagship (Opus 5.5). A catalog that only
+    /// carries older releases must not demote the default to them.
+    #[test]
+    fn bedrock_placeholder_never_demotes_to_older_catalog_release() {
+        let routes = vec![
+            route(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, true),
+            route("anthropic.claude-sonnet-4-20250514-v1:0", true),
+            route("us.anthropic.claude-opus-4-6-v1", true),
+            route("amazon.nova-pro-v1:0", true),
+        ];
+        assert_eq!(
+            bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes),
+            None
         );
     }
 
@@ -3156,19 +3183,20 @@ mod bedrock_placeholder_default_tests {
         // A newer Opus that needs a missing inference profile is unavailable
         // and must not become the default.
         let routes = vec![
-            route("anthropic.claude-opus-5-20260101-v1:0", false),
-            route("anthropic.claude-sonnet-4-20250514-v1:0", true),
+            route("anthropic.claude-opus-6-20270101-v1:0", false),
+            route("anthropic.claude-opus-5-6-20260101-v1:0", true),
         ];
         assert_eq!(
             bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes)
                 .as_deref(),
-            Some("anthropic.claude-sonnet-4-20250514-v1:0")
+            Some("anthropic.claude-opus-5-6-20260101-v1:0")
         );
     }
 
-    /// End to end through the real construction path: a cached Bedrock catalog
-    /// on disk must make a freshly built provider start on the newest Claude
-    /// flagship instead of the 2024 placeholder; with no catalog it stays put.
+    /// End to end through the real construction path: with a cached Bedrock
+    /// catalog the freshly built provider starts on a strictly newer Claude
+    /// release, never an older one; with no catalog it stays on the shipped
+    /// flagship default.
     #[test]
     fn new_bedrock_provider_starts_on_newest_cached_flagship() {
         let _guard = crate::storage::lock_test_env();
@@ -3190,7 +3218,7 @@ mod bedrock_placeholder_default_tests {
         assert_eq!(
             fresh.model(),
             bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL,
-            "no catalog: keep placeholder rather than guess from the known list"
+            "no catalog: keep the shipped flagship rather than guess from the known list"
         );
 
         let cache = crate::storage::app_config_dir()
@@ -3204,6 +3232,23 @@ mod bedrock_placeholder_default_tests {
                     "anthropic.claude-3-5-sonnet-20241022-v2:0",
                     "anthropic.claude-sonnet-4-20250514-v1:0",
                     "anthropic.claude-opus-4-20250514-v1:0",
+                ],
+                "inference_profiles": [],
+                "region": null,
+                "fetched_at_rfc3339": "2026-10-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // A catalog of older releases must not demote the shipped flagship.
+        let older_only = new_bedrock_provider().model();
+
+        std::fs::write(
+            &cache,
+            serde_json::json!({
+                "models": [
+                    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                    "anthropic.claude-opus-6-20270101-v1:0",
                 ],
                 "inference_profiles": [],
                 "region": null,
@@ -3226,7 +3271,11 @@ mod bedrock_placeholder_default_tests {
                 None => crate::env::remove_var(key),
             }
         }
-        assert_eq!(promoted, "anthropic.claude-opus-4-20250514-v1:0");
+        assert_eq!(
+            older_only,
+            bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL
+        );
+        assert_eq!(promoted, "anthropic.claude-opus-6-20270101-v1:0");
         assert_eq!(pinned, "anthropic.claude-3-5-haiku-20241022-v1:0");
     }
 

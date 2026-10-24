@@ -104,15 +104,18 @@ pub struct BedrockProvider {
 }
 
 impl BedrockProvider {
-    /// The built-in placeholder model used when nothing was configured. Callers
-    /// that know the live catalog replace it via
-    /// [`Self::replace_placeholder_default_model`].
+    /// The built-in default model used when nothing was configured: the shipped
+    /// Claude flagship. Callers that find a strictly newer usable release in a
+    /// live or cached catalog replace it via
+    /// [`Self::replace_placeholder_default_model`]; it is never demoted to an
+    /// older model.
     pub const PLACEHOLDER_DEFAULT_MODEL: &'static str = DEFAULT_MODEL;
 
-    /// Swap the stale placeholder default for `model` (chosen by the caller from
-    /// this provider's usable routes). No-op when `JCODE_BEDROCK_MODEL` is set or
-    /// the current model is anything other than the placeholder, so explicit
-    /// user, env and session choices always win. Returns whether it switched.
+    /// Swap the built-in flagship default for `model` (chosen by the caller from
+    /// this provider's usable routes, strictly newer than the shipped default).
+    /// No-op when `JCODE_BEDROCK_MODEL` is set or the current model is anything
+    /// other than the built-in default, so explicit user, env and session
+    /// choices always win. Returns whether it switched.
     pub fn replace_placeholder_default_model(&self, model: &str) -> bool {
         if std::env::var_os("JCODE_BEDROCK_MODEL").is_some()
             || model.trim().is_empty()

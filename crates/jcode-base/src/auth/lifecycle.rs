@@ -802,6 +802,37 @@ fn version_cmp(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
+/// Whether `current` already matches or outranks `candidate` as a frontier
+/// release. Both ids are normalized, then parsed as flagship versions within
+/// the Claude family (the only family Bedrock hosts). Ids without a parseable
+/// frontier version compare as "not better", so callers keep the current
+/// default instead of swapping in an unknown id.
+///
+/// Used by the Bedrock placeholder promotion: the shipped default is a real
+/// flagship (Opus 5.5), so a cached catalog must never demote it to an older
+/// available model.
+pub(crate) fn frontier_version_le(current: &str, candidate: &str) -> bool {
+    let current_version = frontier_version_for_bedrock(current);
+    let candidate_version = frontier_version_for_bedrock(candidate);
+    match (current_version, candidate_version) {
+        (Some(current), Some(candidate)) => {
+            version_cmp(&current, &candidate) != std::cmp::Ordering::Less
+        }
+        // No comparable frontier versions: treat the candidate as not an
+        // upgrade so the default stays put.
+        _ => true,
+    }
+}
+
+fn frontier_version_for_bedrock(model: &str) -> Option<Vec<u64>> {
+    const CLAUDE: FrontierFamily = FrontierFamily {
+        prefix: "claude-opus",
+        flagship_token: None,
+    };
+    let normalized = normalize_model_for_preference(model);
+    parse_frontier_version_for_family(&normalized, CLAUDE, false)
+}
+
 /// Auto-detect a brand-new frontier flagship release among `routes` that is
 /// strictly newer than the curated baseline flagship for the same family, and is
 /// not already the curated #1. Returns the chosen model id, or `None` when the
