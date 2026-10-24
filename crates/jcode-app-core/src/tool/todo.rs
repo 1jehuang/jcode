@@ -21,27 +21,46 @@ pub struct TodoTool;
 async fn prepare_background_dependencies(
     manager: &crate::background::BackgroundTaskManager,
     session_id: &str,
+    previous: &[TodoItem],
     todos: &[TodoItem],
 ) -> Result<()> {
-    let ids: std::collections::HashSet<_> = todos
-        .iter()
-        .flat_map(|todo| todo.waiting_on.iter())
-        .collect();
-    let mut running = Vec::new();
-    for id in ids {
-        if id.trim().is_empty() {
-            bail!("waiting_on background task IDs must not be empty");
+    let mut ids: HashMap<&str, (bool, bool)> = HashMap::new();
+    for todo in todos {
+        let prior = previous.iter().find(|old| old.id == todo.id);
+        let active = !crate::todo::todo_status_is_completed(&todo.status)
+            && !crate::todo::todo_status_is_cancelled(&todo.status);
+        for id in &todo.waiting_on {
+            // Check before the manager constructs any filesystem path.
+            if id.is_empty()
+                || !id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+            {
+                bail!("Invalid waiting_on background task ID: {id}");
+            }
+            let is_new = !prior.is_some_and(|old| old.waiting_on.contains(id));
+            let entry = ids.entry(id).or_default();
+            entry.0 |= is_new;
+            entry.1 |= active;
         }
+    }
+    let mut running = Vec::new();
+    for (id, (is_new, active)) in ids {
         let Some(task) = manager.status(id).await else {
-            bail!("Unknown waiting_on background task: {id}");
+            if is_new {
+                bail!("Unknown waiting_on background task: {id}");
+            }
+            // Cleanup can remove historical task files. Retaining that same
+            // todo's reference must not prevent unrelated or assessment writes.
+            continue;
         };
-        if task.task_id != *id {
+        if task.task_id != id {
             bail!("Unknown waiting_on background task: {id}");
         }
         if task.session_id != session_id {
             bail!("waiting_on background task does not belong to this session: {id}");
         }
-        if task.status == crate::bus::BackgroundTaskStatus::Running {
+        if active && task.status == crate::bus::BackgroundTaskStatus::Running {
             running.push(id);
         }
     }
@@ -1112,8 +1131,13 @@ impl Tool for TodoTool {
             // Goals/plan-only writes keep the stored todo list.
             let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
-            prepare_background_dependencies(crate::background::global(), &ctx.session_id, &todos)
-                .await?;
+            prepare_background_dependencies(
+                crate::background::global(),
+                &ctx.session_id,
+                &previous,
+                &todos,
+            )
+            .await?;
             record_todo_write_mode(&write_mode_input);
             merge_confidence_history(&previous, &mut todos);
             (|| {
@@ -1986,16 +2010,21 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            prepare_background_dependencies(&manager, "other-session", std::slice::from_ref(&item))
-                .await
-                .is_err()
+            prepare_background_dependencies(
+                &manager,
+                "other-session",
+                &[],
+                std::slice::from_ref(&item)
+            )
+            .await
+            .is_err()
         );
         let unknown = TodoItem {
             waiting_on: vec!["missing-task".into()],
             ..Default::default()
         };
         assert!(
-            prepare_background_dependencies(&manager, &session, &[item.clone(), unknown])
+            prepare_background_dependencies(&manager, &session, &[], &[item.clone(), unknown])
                 .await
                 .is_err()
         );
@@ -2004,7 +2033,19 @@ mod tests {
             !status.notify && !status.wake,
             "invalid writes must not change delivery"
         );
-        prepare_background_dependencies(&manager, &session, std::slice::from_ref(&item))
+        for status in ["completed", "cancelled"] {
+            let mut closed = item.clone();
+            closed.status = status.into();
+            prepare_background_dependencies(&manager, &session, &[], &[closed])
+                .await
+                .unwrap();
+            let delivery = manager.status(&task.task_id).await.unwrap();
+            assert!(
+                !delivery.notify && !delivery.wake,
+                "closed todos must not arm wakes"
+            );
+        }
+        prepare_background_dependencies(&manager, &session, &[], std::slice::from_ref(&item))
             .await
             .unwrap();
         let status = manager.status(&task.task_id).await.unwrap();
@@ -2027,7 +2068,7 @@ mod tests {
             manager.status(&task.task_id).await.unwrap().status,
             crate::bus::BackgroundTaskStatus::Completed
         );
-        prepare_background_dependencies(&manager, &session, &[item])
+        prepare_background_dependencies(&manager, &session, &[], &[item])
             .await
             .unwrap();
     }
@@ -2044,13 +2085,30 @@ mod tests {
                 Ok(crate::background::TaskResult::completed(Some(0)))
             })
             .await;
-        for id in ["missing-task", "", task.task_id.as_str()] {
+        for id in [
+            "missing-task",
+            "",
+            "../escape",
+            "/absolute",
+            "a/b",
+            "a\\b",
+            "a.b",
+            task.task_id.as_str(),
+        ] {
             let result = TodoTool::new().execute(json!({
                 "todos":[{"id":"a", "content":"A", "status":"pending", "priority":"high", "waiting_on":[id]}],
                 "plan":{"user_intention":"must not be saved"},
                 "goals":[{"feedback_loop":"must not be saved"}]
             }), test_ctx(&session)).await;
             assert!(result.is_err());
+            if id.contains(['/', '\\', '.']) {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Invalid waiting_on")
+                );
+            }
             assert_eq!(
                 std::fs::read_dir(dir.path()).unwrap().count(),
                 0,
@@ -2061,6 +2119,61 @@ mod tests {
             crate::env::set_var("JCODE_HOME", home);
         } else {
             crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_historical_dependencies_allow_unrelated_writes_but_not_new_refs() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "todo-retained-missing-background";
+        let stored = vec![
+            TodoItem {
+                id: "old".into(),
+                content: "old".into(),
+                status: "completed".into(),
+                priority: "high".into(),
+                waiting_on: vec!["removed-bg-task".into()],
+                ..Default::default()
+            },
+            TodoItem {
+                id: "other".into(),
+                content: "other".into(),
+                status: "pending".into(),
+                priority: "high".into(),
+                ..Default::default()
+            },
+        ];
+        save_todos(session, &stored).unwrap();
+        let tool = TodoTool::new();
+        tool.execute(
+            json!({"plan":{"user_intention":"assessment update"}}),
+            test_ctx(session),
+        )
+        .await
+        .unwrap();
+        tool.execute(
+            json!({"update":[{"id":"other", "status":"in_progress"}]}),
+            test_ctx(session),
+        )
+        .await
+        .unwrap();
+        let before = load_todos(session).unwrap();
+        assert_eq!(before[0].waiting_on, vec!["removed-bg-task"]);
+        assert!(
+            tool.execute(
+                json!({"update":[{"id":"other", "waiting_on":["removed-bg-task"]}]}),
+                test_ctx(session)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(load_todos(session).unwrap(), before);
+        match previous_home {
+            Some(home) => crate::env::set_var("JCODE_HOME", home),
+            None => crate::env::remove_var("JCODE_HOME"),
         }
     }
 
