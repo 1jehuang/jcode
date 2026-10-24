@@ -24,6 +24,9 @@ impl JevTransport {
     }
 }
 
+/// Builds the browser-decision request body with the default browser model.
+/// Only in-crate tests call this directly; production paths pass their own
+/// model label through [`request_body_for_model`].
 #[cfg(test)]
 fn request_body(request: &DecisionRequest) -> Result<Value> {
     request_body_for_model(request, &crate::jev::browser_jev_model_label())

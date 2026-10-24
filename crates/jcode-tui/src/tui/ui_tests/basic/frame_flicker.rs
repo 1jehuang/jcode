@@ -831,7 +831,7 @@ fn notification_spans_include_recent_flicker_warning_and_log_hint() {
         "expected log hint in notification line, got: {rendered}"
     );
     assert!(
-        rendered.contains("[Z]"),
+        rendered.contains(&format!("[{}⇧Z]", viewport::copy_badge_alt_label())),
         "expected copy badge in notification line, got: {rendered}"
     );
 

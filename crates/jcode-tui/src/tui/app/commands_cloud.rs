@@ -543,7 +543,7 @@ fn show_cloud_failure(
     app.push_display_message(DisplayMessage::error(format_cloud_failure(
         command, details,
     )));
-    app.set_status_notice(&format!(
+    app.set_status_notice(format!(
         "Cloud failed: {}",
         cloud_failure_reason(&cloud_failure_details(details))
     ));
@@ -943,36 +943,58 @@ mod tests {
         )
     }
 
-    fn unsent_cases() -> Vec<(&'static str, fn(&mut App))> {
+    type UnsentCase = (&'static str, Box<dyn Fn(&mut App)>);
+
+    fn unsent_cases() -> Vec<UnsentCase> {
         vec![
-            ("draft", |app| app.input = "save this draft".into()),
-            ("message", |app| {
-                app.queued_messages.push("queued prompt".into())
-            }),
-            ("command", |app| app.queued_commands.push("/compact".into())),
-            ("hidden", |app| {
-                app.hidden_queued_system_messages.push("reminder".into())
-            }),
-            ("attachment", |app| {
-                app.pending_images.push(("image/png".into(), "data".into()))
-            }),
-            ("paste", |app| {
-                app.pasted_contents.push("pasted draft".into())
-            }),
-            ("interleave", |app| {
-                app.interleave_message = Some("interleave".into())
-            }),
-            ("interleave image", |app| {
-                app.interleave_images
-                    .push(("image/png".into(), "data".into()))
-            }),
-            ("soft interrupt", |app| {
-                app.pending_soft_interrupts.push("interrupt".into())
-            }),
-            ("unacknowledged interrupt", |app| {
-                app.pending_soft_interrupt_requests
-                    .push((1, "interrupt".into()))
-            }),
+            (
+                "draft",
+                Box::new(|app: &mut App| app.input = "save this draft".into()),
+            ),
+            (
+                "message",
+                Box::new(|app: &mut App| app.queued_messages.push("queued prompt".into())),
+            ),
+            (
+                "command",
+                Box::new(|app: &mut App| app.queued_commands.push("/compact".into())),
+            ),
+            (
+                "hidden",
+                Box::new(|app: &mut App| app.hidden_queued_system_messages.push("reminder".into())),
+            ),
+            (
+                "attachment",
+                Box::new(|app: &mut App| {
+                    app.pending_images.push(("image/png".into(), "data".into()))
+                }),
+            ),
+            (
+                "paste",
+                Box::new(|app: &mut App| app.pasted_contents.push("pasted draft".into())),
+            ),
+            (
+                "interleave",
+                Box::new(|app: &mut App| app.interleave_message = Some("interleave".into())),
+            ),
+            (
+                "interleave image",
+                Box::new(|app: &mut App| {
+                    app.interleave_images
+                        .push(("image/png".into(), "data".into()))
+                }),
+            ),
+            (
+                "soft interrupt",
+                Box::new(|app: &mut App| app.pending_soft_interrupts.push("interrupt".into())),
+            ),
+            (
+                "unacknowledged interrupt",
+                Box::new(|app: &mut App| {
+                    app.pending_soft_interrupt_requests
+                        .push((1, "interrupt".into()))
+                }),
+            ),
         ]
     }
 

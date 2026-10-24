@@ -180,7 +180,7 @@ fn background_dependency_card_refresh_tracks_only_live_task_progress() {
         let task = format!("tui-card-{}", app.session.id);
         let _fixture = live_dependency_fixture(&app, &task);
         let todo = dependency_todo("waiting", &task);
-        crate::todo::save_todos(&app.session.id, &[todo.clone()]).unwrap();
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&todo)).unwrap();
         app.upsert_running_background_task(task.clone(), "Build 🦀".into(), Some(25.0));
         app.show_todo_card();
         let payload: serde_json::Value =
@@ -218,7 +218,7 @@ fn background_dependency_reload_reads_session_scoped_task_state() {
         });
         std::fs::write(&path, serde_json::to_vec(&status).unwrap()).unwrap();
         let todo = dependency_todo("reload-id", &task);
-        crate::todo::save_todos(&app.session.id, &[todo.clone()]).unwrap();
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&todo)).unwrap();
         assert!(app.background_task_rows.is_empty());
         assert!(!app.schedule_auto_poke_followup_if_needed());
         app.finish_background_task(
