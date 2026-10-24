@@ -82,7 +82,11 @@ fn exit_code(line: &str) -> Option<i32> {
         .trim_start()
         .split(|c: char| !c.is_ascii_digit() && c != '-')
         .next()?;
-    number.parse().ok()
+    // Ordinary tool output can mention an exit code without a numeric value.
+    let Ok(code) = number.parse() else {
+        return None;
+    };
+    Some(code)
 }
 
 fn strip_wrappers(mut line: &str) -> (&str, u8) {
@@ -332,6 +336,21 @@ pub fn tool_output_looks_failed(content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_code_requires_a_representable_integer() {
+        for line in [
+            "exit code: unknown",
+            "exit code:",
+            "exit code: -",
+            "exit code: 2147483648",
+            "exit code: -2147483649",
+        ] {
+            assert_eq!(exit_code(line), None, "{line}");
+        }
+        assert_eq!(exit_code("exit code: -1"), Some(-1));
+        assert_eq!(exit_code("exit code: 0"), Some(0));
+    }
 
     #[test]
     fn canonicalizes_edit_tool_names() {

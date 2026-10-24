@@ -520,34 +520,35 @@ fn test_build_tools_rewrites_oneof_to_anyof_for_openai() {
 
 #[test]
 fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
+    // Root combinators are flattened; nested object unions remain supported.
     let defs = vec![ToolDefinition {
         name: "schedule".to_string(),
         description: "schedule work".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
-            "required": ["task"],
-            "anyOf": [
-                {
-                    "type": "object",
-                    "required": ["wake_in_minutes"],
-                    "properties": {
-                        "wake_in_minutes": { "type": "integer" }
-                    },
-                    "additionalProperties": false
-                },
-                {
-                    "type": "object",
-                    "required": ["wake_at"],
-                    "properties": {
-                        "wake_at": { "type": "string" }
-                    },
-                    "additionalProperties": false
-                }
-            ],
+            "required": ["task", "when"],
             "properties": {
                 "task": { "type": "string" },
-                "wake_in_minutes": { "type": "integer" },
-                "wake_at": { "type": "string" }
+                "when": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "required": ["wake_in_minutes"],
+                            "properties": {
+                                "wake_in_minutes": { "type": "integer" }
+                            },
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "required": ["wake_at"],
+                            "properties": {
+                                "wake_at": { "type": "string" }
+                            },
+                            "additionalProperties": false
+                        }
+                    ]
+                }
             }
         }),
         defer_loading: false,
@@ -555,11 +556,11 @@ fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools[0]["strict"], serde_json::json!(true));
     assert_eq!(
-        api_tools[0]["parameters"]["anyOf"][0]["additionalProperties"],
+        api_tools[0]["parameters"]["properties"]["when"]["anyOf"][0]["additionalProperties"],
         serde_json::json!(false)
     );
     assert_eq!(
-        api_tools[0]["parameters"]["anyOf"][1]["additionalProperties"],
+        api_tools[0]["parameters"]["properties"]["when"]["anyOf"][1]["additionalProperties"],
         serde_json::json!(false)
     );
 }
