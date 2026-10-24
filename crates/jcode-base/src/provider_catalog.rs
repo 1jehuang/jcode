@@ -908,6 +908,90 @@ fn inline_key_env_name(profile_name: &str) -> String {
     format!("JCODE_PROVIDER_{}_API_KEY", suffix)
 }
 
+/// Resolve the HTTP header overrides for provider requests from config.
+///
+/// Global `[provider].headers` / `[provider].user_agent` form the base; a named
+/// profile's own `headers` / `user_agent` win per header name. Precedence,
+/// lowest to highest:
+///
+/// 1. global `[provider].headers`
+/// 2. global `[provider].user_agent` (folded in as `User-Agent`)
+/// 3. profile `headers` (per header name)
+/// 4. profile `user_agent` (folded in as `User-Agent`)
+///
+/// Header names are matched case-insensitively (HTTP semantics), so a
+/// later level always replaces an earlier one regardless of the case the
+/// user wrote the key with (e.g. `user-agent` vs `User-Agent`).
+///
+/// Some gateways filter or authenticate by `User-Agent` and custom headers
+/// (e.g. corporate LLM proxies), so the result must be applied to every
+/// provider HTTP request last, overriding jcode's own defaults.
+pub fn merged_provider_header_overrides(
+    global: &crate::config::ProviderConfig,
+    profile: Option<&crate::config::NamedProviderConfig>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut merged = global.headers.clone();
+    if let Some(user_agent) = non_empty(global.user_agent.as_deref()) {
+        insert_header_case_insensitive(&mut merged, "User-Agent", user_agent);
+    }
+    if let Some(profile) = profile {
+        for (name, value) in &profile.headers {
+            insert_header_case_insensitive(&mut merged, name, value);
+        }
+        if let Some(user_agent) = non_empty(profile.user_agent.as_deref()) {
+            insert_header_case_insensitive(&mut merged, "User-Agent", user_agent);
+        }
+    }
+    merged
+}
+
+/// Upsert `name`/`value` replacing any existing entry whose name matches
+/// case-insensitively, keeping level precedence deterministic no matter what
+/// case the config key used.
+fn insert_header_case_insensitive(
+    merged: &mut std::collections::BTreeMap<String, String>,
+    name: &str,
+    value: &str,
+) {
+    merged.retain(|existing, _| !existing.eq_ignore_ascii_case(name));
+    merged.insert(name.to_string(), value.to_string());
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Parse merged provider header overrides into a `reqwest::header::HeaderMap`.
+///
+/// Later entries with the same header name replace earlier ones (upsert), so
+/// the result can be applied with `RequestBuilder::headers` to override any
+/// same-named header jcode set earlier on the request.
+pub fn parse_provider_header_overrides(
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<reqwest::header::HeaderMap> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in overrides {
+        let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|err| anyhow::anyhow!("invalid provider header name '{name}': {err}"))?;
+        let header_value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|err| anyhow::anyhow!("invalid value for provider header '{name}': {err}"))?;
+        headers.insert(header_name, header_value);
+    }
+    Ok(headers)
+}
+
+/// Resolve and parse provider header overrides, attributing parse errors to
+/// the given config source label ("[provider]" or a profile name).
+pub fn resolved_provider_http_header_overrides(
+    global: &crate::config::ProviderConfig,
+    profile: Option<&crate::config::NamedProviderConfig>,
+    source_label: &str,
+) -> anyhow::Result<reqwest::header::HeaderMap> {
+    let merged = merged_provider_header_overrides(global, profile);
+    parse_provider_header_overrides(&merged)
+        .map_err(|err| anyhow::anyhow!("{source_label} has invalid header overrides: {err}"))
+}
+
 pub fn clear_anthropic_profile_env() {
     for key in [
         "JCODE_ANTHROPIC_API_BASE",
@@ -1032,12 +1116,17 @@ pub fn apply_named_provider_profile_env_from_config(
                 crate::env::remove_var("JCODE_ANTHROPIC_AUTH_HEADER");
             }
         }
-        if profile.headers.is_empty() {
+        // Serialize the merged override map (global [provider] headers and
+        // user_agent as base, this profile's own values winning per header
+        // name) so the anthropic runtime's JCODE_ANTHROPIC_HEADERS parsing
+        // applies the same precedence as the OpenAI-compatible runtime.
+        let merged_headers = merged_provider_header_overrides(&config.provider, Some(profile));
+        if merged_headers.is_empty() {
             crate::env::remove_var("JCODE_ANTHROPIC_HEADERS");
         } else {
             crate::env::set_var(
                 "JCODE_ANTHROPIC_HEADERS",
-                serde_json::to_string(&profile.headers).map_err(|err| {
+                serde_json::to_string(&merged_headers).map_err(|err| {
                     anyhow::anyhow!("failed to serialize Anthropic-compatible headers: {err}")
                 })?,
             );

@@ -1,8 +1,8 @@
 {
-  "total": 3961,
+  "total": 3964,
   "totals_by_pattern": {
-    "dot_ok": 1553,
-    "let_underscore": 1428,
+    "dot_ok": 1555,
+    "let_underscore": 1429,
     "unwrap_or_default": 980
   },
   "tracked_files": {
@@ -1502,7 +1502,7 @@
       "unwrap_or_default": 2
     },
     "crates/jcode-provider-anthropic-runtime/src/lib.rs": {
-      "dot_ok": 9,
+      "dot_ok": 11,
       "let_underscore": 15,
       "unwrap_or_default": 1
     },
@@ -1699,6 +1699,11 @@
     "crates/jcode-provider-openrouter-runtime/src/models_catalog_parse.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-provider-openrouter-runtime/src/ollama_context.rs": {
+      "dot_ok": 0,
+      "let_underscore": 1,
       "unwrap_or_default": 0
     },
     "crates/jcode-provider-openrouter-runtime/src/opencode_go_responses.rs": {
