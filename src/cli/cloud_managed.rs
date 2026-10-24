@@ -12,7 +12,7 @@
 //! relays the TCP stream. Nothing touches the user's own `~/.ssh`.
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -50,7 +50,7 @@ pub(crate) fn account_available() -> bool {
     crate::subscription_catalog::configured_api_key().is_some_and(|k| !k.trim().is_empty())
 }
 
-fn dir() -> Result<PathBuf> {
+pub(super) fn dir() -> Result<PathBuf> {
     Ok(crate::storage::jcode_dir()?.join("cloud"))
 }
 
@@ -111,7 +111,7 @@ pub(crate) fn ssh_args() -> Result<Vec<String>> {
 /// binary was replaced by an update reports `/path/jcode (deleted)` (or a path
 /// that no longer exists). Writing that into the config would break every
 /// later cloud connection, so fall back to the stable launcher.
-fn proxy_executable(exe: PathBuf) -> PathBuf {
+pub(super) fn proxy_executable(exe: PathBuf) -> PathBuf {
     let text = exe.to_string_lossy();
     let stale = text.ends_with(" (deleted)") || !exe.is_file();
     if !stale {
@@ -187,7 +187,7 @@ fn managed_ssh_config(
     )
 }
 
-fn ssh_quote(value: &str) -> String {
+pub(super) fn ssh_quote(value: &str) -> String {
     if value
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b"/._-+@:".contains(&b))
@@ -202,7 +202,7 @@ fn ssh_quote(value: &str) -> String {
 // Control-plane API
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub(crate) struct Reply {
     #[serde(default)]
     pub state: String,
@@ -220,7 +220,7 @@ pub(crate) struct Reply {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub(crate) struct Usage {
     #[serde(default)]
     pub used_seconds: u64,
@@ -263,6 +263,14 @@ fn off_runtime<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 }
 
 fn request(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<Reply> {
+    request_json(method, path, body)
+}
+
+pub(super) fn request_json<T: serde::de::DeserializeOwned + Send>(
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<T> {
     let account = account()?;
     let url = format!("{}/{}", account.base, path);
     off_runtime(move || {
@@ -272,7 +280,9 @@ fn request(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<
             .build()?;
         let mut req = match method {
             "POST" => client.post(&url),
-            _ => client.get(&url),
+            "GET" => client.get(&url),
+            "DELETE" => client.delete(&url),
+            _ => bail!("unsupported cloud request method"),
         }
         .bearer_auth(&account.key);
         if let Some(body) = body {
@@ -378,14 +388,18 @@ fn validated_host_keys(reply: &Reply) -> Result<Vec<String>> {
 /// go to stderr only, since stdout is the SSH wire.
 pub(crate) fn run_proxy() -> Result<()> {
     let reply = connect(&mut |message| eprintln!("[jcode cloud] {message}"))?;
+    relay_proxy(&reply, HOST, &known_hosts_path()?)
+}
+
+pub(super) fn relay_proxy(reply: &Reply, host: &str, known_hosts: &std::path::Path) -> Result<()> {
     let address: std::net::IpAddr = reply
         .address
         .as_deref()
         .and_then(|a| a.parse().ok())
         .context("Jcode Cloud returned an invalid host address")?;
     let keys = validated_host_keys(&reply)?;
-    let known: String = keys.iter().map(|k| format!("{HOST} {k}\n")).collect();
-    write_private(&known_hosts_path()?, &known)?;
+    let known: String = keys.iter().map(|k| format!("{host} {k}\n")).collect();
+    write_private(known_hosts, &known)?;
     let addr = std::net::SocketAddr::new(address, reply.port.unwrap_or(22));
     let stream =
         off_runtime(|| std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(20)))
@@ -691,7 +705,7 @@ pub(crate) fn describe(reply: &Reply) -> String {
     text
 }
 
-fn create_private_dir(path: &std::path::Path) -> Result<()> {
+pub(super) fn create_private_dir(path: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     #[cfg(unix)]
     {
@@ -701,7 +715,7 @@ fn create_private_dir(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
+pub(super) fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     {
         let mut options = std::fs::OpenOptions::new();
