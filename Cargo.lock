@@ -31,14 +31,16 @@ dependencies = [
 [[package]]
 name = "agentgrep"
 version = "0.1.7"
-source = "git+https://github.com/1jehuang/agentgrep.git?tag=v0.1.7#525fc54117962f5f75f93cbffb53b8becf7b3add"
+source = "git+https://github.com/1jehuang/agentgrep.git?rev=712874f2ca3475ec2cc673983eeed65c8c671694#712874f2ca3475ec2cc673983eeed65c8c671694"
 dependencies = [
  "clap",
  "globset",
  "ignore",
+ "libc",
  "regex",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
