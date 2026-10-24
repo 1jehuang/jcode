@@ -156,6 +156,12 @@ pub enum Request {
         /// pool-approved account and retries the turn itself.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_server_failover: bool,
+        /// Opt in to blocking decision requests (`ask_user` chooser).
+        /// Clients without a chooser never receive `decision_request`
+        /// events, so `ask_user` degrades to asking in plain text instead
+        /// of blocking the turn on a client that can never answer.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_decisions: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -520,6 +526,16 @@ pub enum Request {
         input: String,
     },
 
+    /// Answer a decision request the agent raised via `ask_user`
+    #[serde(rename = "decision_response")]
+    DecisionResponse {
+        id: u64,
+        /// Matches the request_id from DecisionRequest
+        request_id: String,
+        /// Either a 1-based index into the offered options, or free-form text
+        choice: DecisionChoice,
+    },
+
     // === Agent-to-agent communication ===
     /// Register as an external agent
     #[serde(rename = "agent_register")]
@@ -866,3 +882,4 @@ pub enum Request {
 
 mod events;
 pub use events::{AccountUsageSnapshot, ServerEvent};
+pub use events::{DecisionChoice, DecisionOption};

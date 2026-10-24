@@ -1,5 +1,5 @@
-use super::*;
-
+// `use super::*` is inherited from the including module (basic.rs), which
+// already brings the shared test helpers and UI symbols into scope.
 #[test]
 fn reload_overflow_preflight_is_conservative() {
     let empty = DisplayMessage::assistant("");

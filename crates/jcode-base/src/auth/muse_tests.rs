@@ -346,6 +346,7 @@ async fn poll_approval_mints_without_persisting() {
     assert!(!credentials_path().unwrap().exists());
     match poll_login(&client, &challenge).await.expect("poll") {
         PollOutcome::Approved(credentials) => {
+            let credentials = *credentials;
             assert_eq!(credentials.api_key, "LLM_TEST_KEY_1");
             assert_eq!(credentials.base_url, EXPECTED_API_BASE_URL);
             save_credentials(&credentials).expect("explicit save");

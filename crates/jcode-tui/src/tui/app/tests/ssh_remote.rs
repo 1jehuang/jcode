@@ -149,13 +149,16 @@ fn ssh_remote_subscribe_keeps_remote_only_id_and_filters_control_done() {
             let id = match request {
                 crate::protocol::Request::Subscribe {
                     id, target_session_id, client_has_local_history, continue_on_disconnect,
-                    working_dir, terminal_env, ..
+                    working_dir, terminal_env, supports_decisions, ..
                 } => {
                     assert_eq!(target_session_id.as_deref(), Some("remote-only-session"));
                     assert!(!client_has_local_history);
                     assert!(continue_on_disconnect);
                     assert!(terminal_env.is_empty());
                     assert_eq!(working_dir.as_deref(), Some("/remote/project"));
+                    // The TUI renders the ask_user chooser: it must always
+                    // opt in so the daemon wires the decision channel.
+                    assert!(supports_decisions);
                     assert!(id >= 1_u64 << 62);
                     id
                 }

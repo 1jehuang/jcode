@@ -1,8 +1,8 @@
 use super::client_actions::{
-    AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
-    handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
-    handle_set_session_saved, handle_set_subagent_model, handle_split, handle_stdin_response,
-    handle_transfer, handle_trigger_memory_extraction,
+    AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact,
+    handle_decision_response, handle_input_shell, handle_notify_session, handle_rename_session,
+    handle_run_subagent, handle_set_feature, handle_set_session_saved, handle_set_subagent_model,
+    handle_split, handle_stdin_response, handle_transfer, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -55,7 +55,7 @@ use super::{
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
 use crate::id;
-use crate::protocol::{Request, ServerEvent, decode_request, encode_event};
+use crate::protocol::{DecisionOption, Request, ServerEvent, decode_request, encode_event};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::Stream;
@@ -501,6 +501,9 @@ pub(super) async fn handle_client(
     let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
+    // Whether this client can render the ask_user decision chooser. Only set
+    // after a Subscribe opts in; before that no decision channel exists.
+    let mut supports_decisions = false;
 
     let client_start = std::time::Instant::now();
 
@@ -705,6 +708,9 @@ pub(super) async fn handle_client(
 
     let stdin_responses: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let decision_responses: Arc<
+        Mutex<HashMap<String, tokio::sync::oneshot::Sender<crate::tool::DecisionInputResponse>>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
 
     // Subscribe to bus events so we can forward ModelsUpdated to this client
     // (e.g. when Copilot finishes async init after the initial History was sent)
@@ -717,6 +723,13 @@ pub(super) async fn handle_client(
         let mut agent_guard = agent.lock().await;
         agent_guard.set_stdin_request_tx(stdin_req_tx.clone());
     }
+    // Set up decision request forwarding: ask_user sends DecisionInputRequest,
+    // we forward it as a DecisionRequest event to the client. The agent only
+    // gets this channel after a Subscribe opts in via `supports_decisions`;
+    // without it, ask_user degrades to asking in plain text instead of
+    // blocking the turn on a client that can never answer (desktop/SDK/ACP).
+    let (decision_req_tx, mut decision_req_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::tool::DecisionInputRequest>();
     let stdin_forwarder = {
         let client_event_tx = client_event_tx.clone();
         let stdin_responses = stdin_responses.clone();
@@ -733,6 +746,38 @@ pub(super) async fn handle_client(
                     prompt: req.prompt,
                     is_password: req.is_password,
                     tool_call_id: tool_call_id.clone(),
+                });
+            }
+        })
+    };
+
+    // Forward decision requests (ask_user) to the client as DecisionRequest events
+    let decision_forwarder = {
+        let client_event_tx = client_event_tx.clone();
+        let decision_responses = decision_responses.clone();
+        tokio::spawn(async move {
+            while let Some(req) = decision_req_rx.recv().await {
+                let request_id = req.request_id.clone();
+                {
+                    let mut responses = decision_responses.lock().await;
+                    // Prune entries whose ask_user wait already ended (timeout
+                    // auto-pick or cancelled turn dropped the receiver) so the
+                    // map cannot accumulate dead senders across turns.
+                    responses.retain(|_, tx| !tx.is_closed());
+                    responses.insert(request_id.clone(), req.response_tx);
+                }
+                let _ = client_event_tx.send(ServerEvent::DecisionRequest {
+                    request_id,
+                    question: req.question,
+                    options: req
+                        .options
+                        .into_iter()
+                        .map(|opt| DecisionOption {
+                            label: opt.label,
+                            detail: opt.detail,
+                        })
+                        .collect(),
+                    tool_call_id: req.tool_call_id,
                 });
             }
         })
@@ -790,6 +835,14 @@ pub(super) async fn handle_client(
                             event_tx: &swarm_event_tx,
                         },
                     ).await;
+                    // The turn ended: any ask_user still holding a map entry
+                    // resolved on its own (timeout auto-pick) or was dropped
+                    // mid-cancel. Drop dead senders now instead of waiting for
+                    // the next ask_user to prune them.
+                    decision_responses
+                        .lock()
+                        .await
+                        .retain(|_, tx| !tx.is_closed());
                 } else {
                     break;
                 }
@@ -1204,6 +1257,12 @@ pub(super) async fn handle_client(
                     if continue_on_disconnect && let Ok(mut agent) = agent.try_lock() {
                         agent.set_stdin_request_tx(stdin_req_tx.clone());
                     }
+                    configure_decision_request_channel(
+                        &agent,
+                        supports_decisions,
+                        &decision_req_tx,
+                    )
+                    .await;
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
                         info.is_processing = true;
@@ -1606,6 +1665,7 @@ pub(super) async fn handle_client(
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
                 supports_server_failover: requested_server_failover,
+                supports_decisions: requested_decisions,
                 working_dir: subscribe_working_dir,
                 selfdev,
                 target_session_id,
@@ -1645,6 +1705,10 @@ pub(super) async fn handle_client(
                 supports_pdf_panels = requested_pdf_panels;
                 supports_user_response = requested_user_response;
                 supports_server_failover = requested_server_failover;
+                // Wire or unwire the ask_user decision channel to match this
+                // client's declared capability, so a client that cannot answer
+                // decision requests never blocks a turn on them.
+                supports_decisions = requested_decisions;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
@@ -1821,6 +1885,16 @@ pub(super) async fn handle_client(
                     supports_user_response,
                 )
                 .await;
+                // Target-aware Subscribe may replace the provisional agent
+                // with the resumed session's agent. Register only after that
+                // reassignment, otherwise a resumed TUI advertises the
+                // chooser but leaves its real agent without the channel.
+                configure_decision_request_channel(
+                    &agent,
+                    supports_decisions,
+                    &decision_req_tx,
+                )
+                .await;
                 client_subscribed = true;
                 provisional_session = false;
             }
@@ -1991,6 +2065,12 @@ pub(super) async fn handle_client(
                 if let Some(snapshot) = try_available_models_snapshot(&agent) {
                     last_available_models_snapshot = Some(snapshot);
                 }
+                configure_decision_request_channel(
+                    &agent,
+                    supports_decisions,
+                    &decision_req_tx,
+                )
+                .await;
             }
 
             Request::ResumeAllSessions { id } => {
@@ -2292,6 +2372,21 @@ pub(super) async fn handle_client(
             } => {
                 handle_stdin_response(id, request_id, input, &stdin_responses, &client_event_tx)
                     .await;
+            }
+
+            Request::DecisionResponse {
+                id,
+                request_id,
+                choice,
+            } => {
+                handle_decision_response(
+                    id,
+                    request_id,
+                    choice,
+                    &decision_responses,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::AgentTask { id, task, .. } => {
@@ -3213,7 +3308,18 @@ pub(super) async fn handle_client(
         .await?;
         match retained {
             Some(handle) => handle,
-            None => return connection_result,
+            None => {
+                // This early return skips the shutdown block below. An
+                // ask_user still waiting on a reply in `decision_responses`
+                // would hang forever: the forwarder keeps the request channel
+                // open, and with decision_timeout_secs 0 neither side gives
+                // up. The disconnected client can never answer, so close the
+                // channels here.
+                decision_forwarder.abort();
+                let _ = decision_forwarder.await;
+                decision_responses.lock().await.clear();
+                return connection_result;
+            }
         }
     } else {
         event_handle
@@ -3241,6 +3347,9 @@ pub(super) async fn handle_client(
         stdin_forwarder.abort();
         let _ = stdin_forwarder.await;
         stdin_responses.lock().await.clear();
+        decision_forwarder.abort();
+        let _ = decision_forwarder.await;
+        decision_responses.lock().await.clear();
         if let Some(handle) = processing_task.take() {
             crate::logging::info(&format!(
                 "Retaining disconnected turn for session {}",
@@ -3448,6 +3557,30 @@ async fn append_context_message(
         },
     };
     let _ = client_event_tx.send(event);
+}
+
+async fn configure_decision_request_channel(
+    agent: &Arc<Mutex<Agent>>,
+    supports_decisions: bool,
+    decision_req_tx: &mpsc::UnboundedSender<crate::tool::DecisionInputRequest>,
+) {
+    // Never block the reader loop on the agent lock: an active turn holds
+    // the lock for its whole duration, so a blocking lock() here parks the
+    // reader during a reattach/resume while processing, and a Cancel sent by
+    // the reattached client can then never be dispatched -> the turn can
+    // never be cancelled (deadlock, e2e disconnect cancel test). Skip when
+    // the turn owns the agent, mirroring the stdin-restore try_lock pattern:
+    // the previous subscriber's wiring stays until a later free-window
+    // subscribe/message refreshes it, and ask_user degrades to plain text
+    // meanwhile instead of blocking on a client that cannot answer.
+    let Ok(mut agent_guard) = agent.try_lock() else {
+        return;
+    };
+    if supports_decisions {
+        agent_guard.set_decision_request_tx(decision_req_tx.clone());
+    } else {
+        agent_guard.clear_decision_request_tx();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
