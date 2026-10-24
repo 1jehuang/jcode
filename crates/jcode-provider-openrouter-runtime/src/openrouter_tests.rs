@@ -1831,6 +1831,57 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
 }
 
 #[test]
+fn sol_compatible_request_sends_low_reasoning_effort() {
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        model: Arc::new(RwLock::new("gpt-6.1-sol".to_string())),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+    provider
+        .set_reasoning_effort("low")
+        .expect("Sol supports low effort");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut stream = provider.complete(&messages, &[], "", None).await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    });
+    let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(request.contains(r#""model":"gpt-6.1-sol""#), "{request}");
+    assert!(request.contains(r#""reasoning_effort":"low""#), "{request}");
+
+    let disabled = OpenRouterProvider {
+        reasoning_effort_support: Some(false),
+        ..make_custom_compatible_provider()
+    };
+    disabled.set_model("gpt-6.1-sol").unwrap();
+    assert!(disabled.set_reasoning_effort("low").is_err());
+    for unknown in ["gpt-6", "gpt-6.1-sol-pro", "gpt-7"] {
+        assert!(!OpenRouterProvider::model_is_openai_reasoning_family(
+            unknown
+        ));
+    }
+}
+
+#[test]
 fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
     let (api_base, request_rx) = spawn_single_response_chat_server();
     let provider = OpenRouterProvider {
@@ -3249,6 +3300,7 @@ fn compat_profile_serving_gpt_family_model_supports_reasoning_effort() {
 
     for model in [
         "gpt-5.3-codex-spark",
+        "gpt-6.1-sol",
         "gpt-5.5",
         "gpt-5.1-codex-mini",
         "o1",

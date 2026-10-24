@@ -953,6 +953,7 @@ impl OpenRouterProvider {
     fn model_is_openai_reasoning_family(model: &str) -> bool {
         let model = model.trim().to_ascii_lowercase();
         model.starts_with("gpt-5")
+            || model == "gpt-6.1-sol"
             || model.contains("codex")
             || model.starts_with("o1")
             || model.starts_with("o3")
