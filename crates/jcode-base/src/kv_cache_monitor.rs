@@ -661,7 +661,11 @@ mod tests {
         );
         assert!(miss.detail.contains("TTL 5m"), "{}", miss.detail);
         assert!(miss.detail.contains("cause unconfirmed"), "{}", miss.detail);
-        assert!(miss.detail.contains("no detected change"), "{}", miss.detail);
+        assert!(
+            miss.detail.contains("no detected change"),
+            "{}",
+            miss.detail
+        );
         assert!(!miss.detail.contains("so the provider"), "{}", miss.detail);
     }
 
@@ -694,6 +698,32 @@ mod tests {
             account: None,
             cache_ttl_secs: Some(1800),
             ttl_is_estimate: true,
+        }
+    }
+
+    #[test]
+    fn observed_openai_partial_reads_do_not_prove_eviction_and_recover() {
+        for (baseline, input, read, next_input, next_read) in [
+            (19_970, 20_372, 4_352, 27_278, 20_352),
+            (30_379, 30_743, 20_096, 32_143, 30_336),
+        ] {
+            let mut monitor = KvCacheMonitor::new();
+            monitor.begin_request(openai_route(), sig(&[10]));
+            assert!(monitor.finish_request(baseline, Some(0)).is_none());
+            monitor.begin_request(openai_route(), sig(&[10, 11]));
+            let miss = monitor
+                .finish_request(input, Some(read))
+                .expect("partial read");
+            assert_eq!(miss.reason, MissReason::LowRead);
+            assert_eq!(miss.missed_tokens, baseline - read);
+            assert!(miss.detail.contains("cause unconfirmed"), "{}", miss.detail);
+            assert!(!miss.detail.contains("so the provider"), "{}", miss.detail);
+            monitor.begin_request(openai_route(), sig(&[10, 11, 12]));
+            assert!(
+                monitor
+                    .finish_request(next_input, Some(next_read))
+                    .is_none()
+            );
         }
     }
 
