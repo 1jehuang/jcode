@@ -433,8 +433,12 @@ mcp_tools_token_threshold = 8000
 codemode = true
 
 [compaction]
-# Reactive waits for 80% context usage. Proactive predicts future growth.
+# Reactive uses fixed thresholds. Proactive predicts future growth.
 mode = "reactive"
+# Reactive starts at either threshold, whichever is reached first.
+# Zero disables the absolute token threshold.
+reactive_threshold = 0.80
+reactive_threshold_tokens = 400000
 # Proactive/semantic checks become eligible at either floor, whichever is
 # reached first. This permits prediction, not unconditional compaction.
 proactive_floor = 0.40
@@ -892,6 +896,8 @@ mod tests {
         let config =
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
         assert!(config.tools.codemode);
+        assert_eq!(config.compaction.reactive_threshold, 0.80);
+        assert_eq!(config.compaction.reactive_threshold_tokens, 400_000);
         assert_eq!(config.compaction.proactive_floor, 0.40);
         assert_eq!(config.compaction.proactive_floor_tokens, 150_000);
         assert_eq!(

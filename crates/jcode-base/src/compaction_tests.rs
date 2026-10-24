@@ -235,6 +235,40 @@ fn test_context_usage_prefers_observed_tokens() {
 }
 
 #[test]
+fn reactive_threshold_accepts_tokens_or_percentage() {
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.set_mode(crate::config::CompactionMode::Reactive);
+    manager.compaction_config.reactive_threshold = 0.80;
+    manager.compaction_config.reactive_threshold_tokens = 200_000;
+    let messages: Vec<_> = (0..20)
+        .map(|_| make_text_message(Role::User, "x"))
+        .collect();
+    for _ in &messages {
+        manager.notify_message_added();
+    }
+    manager.update_observed_input_tokens(199_999);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(200_000);
+    assert!(manager.should_compact_with(&messages));
+    assert!(!manager.should_compact_with(&messages[..1]));
+
+    manager.compaction_config.reactive_threshold_tokens = 0;
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(800_000);
+    assert!(manager.should_compact_with(&messages));
+
+    manager.compaction_config.reactive_threshold_tokens = 200_000;
+    manager.compaction_config.reactive_threshold = 0.60;
+    manager.set_budget(100_000);
+    manager.update_observed_input_tokens(59_999);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(60_000);
+    assert!(manager.should_compact_with(&messages));
+    manager.suppress_compaction_until_new_message = true;
+    assert!(!manager.should_compact_with(&messages));
+}
+
+#[test]
 fn test_should_compact_uses_observed_tokens() {
     let mut manager = CompactionManager::new().with_budget(1_000);
 

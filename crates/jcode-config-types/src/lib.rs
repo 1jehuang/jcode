@@ -364,6 +364,13 @@ pub struct CompactionConfig {
     /// Compaction mode: reactive (default), proactive, or semantic
     pub mode: CompactionMode,
 
+    /// [reactive] Context fraction that starts background compaction.
+    pub reactive_threshold: f32,
+
+    /// [reactive] Alternative token threshold, whichever is reached first.
+    /// Zero disables the token alternative.
+    pub reactive_threshold_tokens: usize,
+
     /// [proactive] Number of turns to look ahead when projecting token growth
     pub lookahead_turns: usize,
 
@@ -411,6 +418,8 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             mode: CompactionMode::Reactive,
+            reactive_threshold: 0.80,
+            reactive_threshold_tokens: 400_000,
             lookahead_turns: 15,
             ewma_alpha: 0.3,
             proactive_floor: 0.40,
@@ -1617,12 +1626,16 @@ mod reasoning_display_defaults_tests {
     #[test]
     fn proactive_floor_defaults_and_legacy_config() {
         let config = CompactionConfig::default();
+        assert_eq!(config.reactive_threshold, 0.80);
+        assert_eq!(config.reactive_threshold_tokens, 400_000);
         assert_eq!(config.proactive_floor, 0.40);
         assert_eq!(config.proactive_floor_tokens, 150_000);
         let parsed: CompactionConfig =
             serde_json::from_str(r#"{"proactive_floor":0.15}"#).unwrap();
         assert_eq!(parsed.proactive_floor, 0.15);
         assert_eq!(parsed.proactive_floor_tokens, 150_000);
+        assert_eq!(parsed.reactive_threshold, 0.80);
+        assert_eq!(parsed.reactive_threshold_tokens, 400_000);
     }
 
     #[test]
