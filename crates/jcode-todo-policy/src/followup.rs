@@ -209,6 +209,17 @@ impl FollowUpPolicy {
     /// Decide the next follow-up after a turn ended. The caller must already
     /// have checked that no user prompt or other follow-up is pending.
     pub fn decide(&mut self, snapshot: &TodoSnapshot) -> Decision {
+        self.decide_after_turn(snapshot, false)
+    }
+
+    /// Decide after a turn, suppressing only the final-response handoff when
+    /// that turn already delivered a final response. All work and quality
+    /// gates still run, and clean completion is latched for this todo state.
+    pub fn decide_after_turn(
+        &mut self,
+        snapshot: &TodoSnapshot,
+        final_response_delivered: bool,
+    ) -> Decision {
         let todos = &snapshot.todos;
         let goals = &snapshot.goals;
         // A circuit breaker clears `armed` while every todo is complete. Re-arm
@@ -347,13 +358,21 @@ impl FollowUpPolicy {
         if !self.final_response_requested {
             self.final_response_requested = true;
             self.final_response_fingerprint = fingerprint;
+            let notice = format!(
+                "✅ All todos done. Completion confidence: {}.",
+                summary.label()
+            );
+            if final_response_delivered {
+                return Decision {
+                    notice: Some(notice),
+                    effects,
+                    ..Decision::default()
+                };
+            }
             return Decision::send(
                 FollowUpKind::FinalResponse,
                 TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string(),
-                format!(
-                    "✅ All todos done. Completion confidence: {}.",
-                    summary.label()
-                ),
+                notice,
             )
             .with_effects(effects);
         }

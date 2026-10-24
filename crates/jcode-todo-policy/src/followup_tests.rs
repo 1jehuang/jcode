@@ -379,3 +379,114 @@ fn snapshot_round_trips_through_json() {
         TodoSnapshot::default()
     );
 }
+
+#[test]
+fn delivered_final_latches_completion_without_requesting_another_response() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![done("ship", ConfidenceState::Verified)]);
+    state.gate_observations.push(GateObservation {
+        kind: GateObservationKind::IntentUnderstanding,
+        group: None,
+        state: Some("partial".into()),
+    });
+    let decision = policy.decide_after_turn(&state, true);
+    assert_eq!(decision.follow_up, None);
+    assert!(decision.notice.unwrap().contains("verified"));
+    assert!(decision.effects.clear_gate_observations);
+    assert!(policy.final_response_requested);
+    assert_eq!(
+        policy.final_response_fingerprint,
+        serde_json::to_string(&(&state.todos, &state.plan, &state.goals)).ok()
+    );
+    // A later turn without a response or with stale observations stays quiet.
+    assert_eq!(policy.decide_after_turn(&state, false), Decision::default());
+    assert_eq!(policy.decide_after_turn(&state, true), Decision::default());
+    assert_eq!(policy.decide(&state), Decision::default());
+
+    // Changed completed todos start a fresh cycle and can request a response.
+    state
+        .todos
+        .push(done("follow-up", ConfidenceState::Verified));
+    assert_eq!(
+        kind(&policy.decide_after_turn(&state, false)),
+        Some(FollowUpKind::FinalResponse)
+    );
+    state.todos.push(todo("new work", "pending"));
+    assert_eq!(
+        kind(&policy.decide_after_turn(&state, true)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+}
+
+#[test]
+fn absent_final_response_preserves_legacy_decision() {
+    let state = snapshot(vec![done("ship", ConfidenceState::Verified)]);
+    let mut legacy = FollowUpPolicy::new(true);
+    let mut explicit = FollowUpPolicy::new(true);
+    let decision = explicit.decide_after_turn(&state, false);
+    assert_eq!(kind(&decision), Some(FollowUpKind::FinalResponse));
+    assert_eq!(decision, legacy.decide(&state));
+    assert_eq!(explicit, legacy);
+}
+
+#[test]
+fn delivered_final_does_not_bypass_work_or_quality_gates() {
+    let mut review = snapshot(vec![todo("work", "pending")]);
+    review.long_session_review_due = true;
+    let mut ownership = snapshot(vec![done("ship", ConfidenceState::Verified)]);
+    ownership.goals.push(TodoGoal {
+        delivery_state: Some(DeliveryState::ChangeMade),
+        ..Default::default()
+    });
+    let mut spike = done("ship", ConfidenceState::Verified);
+    spike.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
+    let mut digest = snapshot(vec![done("ship", ConfidenceState::Verified)]);
+    digest.gate_observations.push(GateObservation {
+        kind: GateObservationKind::IntentUnderstanding,
+        group: None,
+        state: Some("partial".into()),
+    });
+    for (state, expected) in [
+        (review, FollowUpKind::LongSessionReview),
+        (
+            snapshot(vec![todo("work", "pending")]),
+            FollowUpKind::IncompleteTodos,
+        ),
+        (ownership, FollowUpKind::Ownership),
+        (
+            snapshot(vec![done("ship", ConfidenceState::Plausible)]),
+            FollowUpKind::CompletionValidation,
+        ),
+        (snapshot(vec![spike]), FollowUpKind::ConfidenceSpike),
+        (digest, FollowUpKind::GateDigest),
+    ] {
+        let mut legacy = FollowUpPolicy::new(true);
+        legacy.set_gate_digest_enabled(true);
+        let mut delivered = legacy.clone();
+        let decision = delivered.decide_after_turn(&state, true);
+        assert_eq!(kind(&decision), Some(expected));
+        assert_eq!(decision, legacy.decide(&state));
+        assert_eq!(delivered, legacy);
+        assert!(!delivered.final_response_requested);
+        assert!(delivered.final_response_fingerprint.is_none());
+    }
+}
+
+#[test]
+fn delivered_final_preserves_gate_breaker_and_disabled_policy() {
+    let state = snapshot(vec![done("ship", ConfidenceState::Speculative)]);
+    let mut policy = FollowUpPolicy::new(true);
+    for _ in 0..MAX_GATE_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide_after_turn(&state, true)),
+            Some(FollowUpKind::CompletionValidation)
+        );
+    }
+    let stopped = policy.decide_after_turn(&state, true);
+    assert!(stopped.notice.is_some());
+    assert!(stopped.follow_up.is_none());
+    assert!(!policy.final_response_requested);
+    assert!(policy.final_response_fingerprint.is_none());
+    policy.disable();
+    assert_eq!(policy.decide_after_turn(&state, true), Decision::default());
+}
