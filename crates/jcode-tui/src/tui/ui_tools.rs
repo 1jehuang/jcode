@@ -2,7 +2,7 @@ use crate::message::ToolCall;
 
 use super::{dim_color, rgb, tool_color, truncate_line_preserving_suffix_to_width};
 use ratatui::prelude::*;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 pub(super) use jcode_tui_tool_display::parse_tool_failure;
 pub(crate) use jcode_tui_tool_display::{
@@ -272,76 +272,11 @@ pub(crate) fn extract_unified_patch_primary_file(patch_text: &str) -> Option<Str
     None
 }
 
-fn display_prefix_by_width(s: &str, max_width: usize) -> &str {
-    if max_width == 0 {
-        return "";
-    }
-    let mut used = 0usize;
-    let mut end = 0usize;
-    for (idx, ch) in s.char_indices() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + cw > max_width {
-            break;
-        }
-        used += cw;
-        end = idx + ch.len_utf8();
-    }
-    &s[..end]
-}
-
-fn display_suffix_by_width(s: &str, max_width: usize) -> &str {
-    if max_width == 0 {
-        return "";
-    }
-    let mut used = 0usize;
-    let mut start = s.len();
-    for (idx, ch) in s.char_indices().rev() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + cw > max_width {
-            break;
-        }
-        used += cw;
-        start = idx;
-    }
-    &s[start..]
-}
-
-fn truncate_end_display(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    format!(
-        "{}…",
-        display_prefix_by_width(s, max_width.saturating_sub(1))
-    )
-}
-
-fn truncate_middle_display(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let remaining = max_width.saturating_sub(1);
-    let head = remaining / 2 + remaining % 2;
-    let tail = remaining / 2;
-    format!(
-        "{}…{}",
-        display_prefix_by_width(s, head),
-        display_suffix_by_width(s, tail)
-    )
-}
-
+#[path = "ui_tools/display_width.rs"]
+mod display_width;
+use display_width::{
+    display_prefix_by_width, display_suffix_by_width, truncate_end_display, truncate_middle_display,
+};
 fn truncate_swarm_text(value: &str, max_width: usize) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -831,11 +766,16 @@ fn truncate_identifier_display(value: &str, max_width: usize) -> String {
 }
 
 pub(super) fn batch_subcall_index(id: &str) -> Option<usize> {
-    id.strip_prefix("batch-")?
+    let Ok(index) = id
+        .strip_prefix("batch-")?
         .split('-')
         .next()?
         .parse::<usize>()
-        .ok()
+    else {
+        // Incomplete or non-batch IDs have no displayable subcall index.
+        return None;
+    };
+    Some(index)
 }
 
 pub(super) fn is_memory_store_tool(tc: &ToolCall) -> bool {
