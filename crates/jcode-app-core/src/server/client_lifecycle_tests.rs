@@ -1476,7 +1476,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             provider, registry, session, None,
         )));
 
-        let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
         let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
         let mut client_is_processing = false;
         let mut processing_message_id = None;
@@ -1536,6 +1536,121 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         result?;
         if let Some(handle) = processing_task.take() {
             handle.await.expect("processing task join");
+        }
+        client_is_processing = false;
+        processing_message_id = None;
+        processing_session_id = None;
+        while client_event_rx.try_recv().is_ok() {}
+        let message_count = agent.lock().await.message_count();
+        let event_count = event_counter.load(std::sync::atomic::Ordering::Relaxed);
+
+        // A stale History continuation arriving after the final answer is a
+        // no-op even if it carries an invalid skill. No turn/skill/status edits.
+        start_processing_message(
+            ProcessingMessage {
+                id: 78,
+                content: "continue after reload".to_string(),
+                images: Vec::new(),
+                system_reminder: Some(continuation.to_string()),
+                active_skill: Some("nonexistent-replay-skill".to_string()),
+                server_failover: false,
+            },
+            session_id,
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut processing_message_id,
+                session_id: &mut processing_session_id,
+                task: &mut processing_task,
+            },
+            &agent,
+            &client_event_tx,
+            &processing_done_tx,
+            Vec::new(),
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+        )
+        .await;
+        assert!(!client_is_processing);
+        assert!(processing_message_id.is_none());
+        assert!(processing_session_id.is_none());
+        assert!(processing_task.is_none());
+        assert_eq!(agent.lock().await.message_count(), message_count);
+        assert_eq!(
+            event_counter.load(std::sync::atomic::Ordering::Relaxed),
+            event_count
+        );
+        assert!(processing_done_rx.try_recv().is_err());
+        assert!(matches!(
+            client_event_rx.try_recv(),
+            Ok(ServerEvent::Done { id: 78 })
+        ));
+        assert!(client_event_rx.try_recv().is_err());
+
+        // Unrelated reminders and ordinary prompts (even the exact body) are
+        // not replays. A fresh intent in this session is accepted as well.
+        for (id, reminder) in [
+            (79, Some("ordinary reminder")),
+            (80, None),
+            (81, Some(continuation)),
+        ] {
+            if id == 81 {
+                super::super::reload_recovery::persist_intent(
+                    "reload-next",
+                    session_id,
+                    super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+                    crate::tool::selfdev::ReloadRecoveryDirective {
+                        reconnect_notice: None,
+                        continuation_message: continuation.to_string(),
+                    },
+                    "next reload",
+                )?;
+            }
+            start_processing_message(
+                ProcessingMessage {
+                    id,
+                    content: continuation.to_string(),
+                    images: Vec::new(),
+                    system_reminder: reminder.map(str::to_string),
+                    active_skill: None,
+                    server_failover: false,
+                },
+                session_id,
+                &mut ProcessingState {
+                    client_is_processing: &mut client_is_processing,
+                    message_id: &mut processing_message_id,
+                    session_id: &mut processing_session_id,
+                    task: &mut processing_task,
+                },
+                &agent,
+                &client_event_tx,
+                &processing_done_tx,
+                Vec::new(),
+                &SwarmStatusRefs {
+                    members: &swarm_members,
+                    swarms_by_id: &swarms_by_id,
+                    event_history: &event_history,
+                    event_counter: &event_counter,
+                    event_tx: &swarm_event_tx,
+                },
+            )
+            .await;
+            assert!(client_is_processing);
+            assert_eq!(processing_message_id, Some(id));
+            let (done_id, result, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
+                    .await?
+                    .expect("accepted turn completion");
+            assert_eq!(done_id, id);
+            result?;
+            processing_task.take().unwrap().await?;
+            client_is_processing = false;
+            processing_message_id = None;
+            processing_session_id = None;
         }
         Ok::<(), anyhow::Error>(())
     })?;

@@ -151,6 +151,7 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 
 # CLI

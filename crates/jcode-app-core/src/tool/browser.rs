@@ -25,7 +25,7 @@ fn browser_tool_description_text() -> &'static str {
     if browser_handoff_disabled() {
         return "Control the browser using direct actions. Check action='status' first; run setup only if not ready. Browser handoff is disabled for this process. Complete browser tasks with direct actions in the requested tab.";
     }
-    "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks with goal, tab_id, and optional trusted context. Jev handles the entire task until complete or genuinely blocked; navigation alone is not completion. Direct actions are for setup, tab discovery/creation, or blocked handoffs. list_tabs includes signed-in tabs across windows. On requested_help=script/text, supply exact executable script candidates or exact text_values and resume. On requested_help=user_login, ask the user to sign in/finish 2FA in that tab, wait, then resume the handoff."
+    "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks with goal, tab_id, and optional trusted context. Jev handles the entire task until complete or genuinely blocked; navigation alone is not completion. Direct actions are for setup, tab discovery/creation, or blocked handoffs. list_tabs includes signed-in tabs across windows. On requested_help=script/text, supply exact executable script candidates or exact text_values and resume. On requested_help=user_login, ask the user to complete the CAPTCHA in that tab, wait, then resume the handoff."
 }
 
 /// Opt-in process-local control for direct-only benchmark arms. Normal sessions
@@ -268,7 +268,7 @@ impl Tool for BrowserTool {
             ),
             (
                 "text_values",
-                json!({"type":"array", "maxItems":16, "items":{"type":"string", "maxLength":2000}, "description":"Exact non-sensitive text to type. Never passwords, OTPs, or payment credentials."}),
+                json!({"type":"array", "maxItems":16, "items":{"type":"string", "maxLength":2000}, "description":"Exact text to type. Never payment credentials."}),
             ),
             (
                 "candidates",

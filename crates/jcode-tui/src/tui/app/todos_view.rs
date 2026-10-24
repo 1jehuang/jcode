@@ -50,9 +50,11 @@ impl App {
         let todos = load_current_session_todos(session_id.as_deref());
         let goals = load_current_session_goals(session_id.as_deref());
         let plan = load_current_session_plan(session_id.as_deref());
-        let content = todo_card_payload_json(&todos, &plan, &goals);
+        let tasks = self.todo_card_background_tasks(&todos);
+        let content = with_background_tasks(todo_card_payload_json(&todos, &plan, &goals), &tasks);
         self.todo_card_rendered_hash =
-            hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals);
+            hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
+                ^ hash_background_tasks(&tasks);
 
         if let Some(idx) = self.latest_todo_card_index() {
             if idx + 1 == self.display_messages.len() {
@@ -78,12 +80,14 @@ impl App {
         let todos = load_current_session_todos(session_id.as_deref());
         let goals = load_current_session_goals(session_id.as_deref());
         let plan = load_current_session_plan(session_id.as_deref());
-        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals);
+        let tasks = self.todo_card_background_tasks(&todos);
+        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
+            ^ hash_background_tasks(&tasks);
         if next_hash == self.todo_card_rendered_hash {
             return false;
         }
         self.todo_card_rendered_hash = next_hash;
-        let content = todo_card_payload_json(&todos, &plan, &goals);
+        let content = with_background_tasks(todo_card_payload_json(&todos, &plan, &goals), &tasks);
         self.replace_display_message_content(idx, content)
     }
 
@@ -122,16 +126,57 @@ impl App {
         let goals = load_current_session_goals(session_id.as_deref());
         let plan = load_current_session_plan(session_id.as_deref());
         let agents = self.todo_card_agents(&todos);
+        let tasks = self.todo_card_background_tasks(&todos);
         let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
-            ^ hash_todo_card_agents(&agents);
+            ^ hash_todo_card_agents(&agents)
+            ^ hash_background_tasks(&tasks);
         if next_hash == self.pinned_todos_rendered_hash && self.pinned_todos_payload.is_some() {
             return false;
         }
         self.pinned_todos_rendered_hash = next_hash;
-        self.pinned_todos_payload = Some(todo_card_payload_json_with_agents(
-            &todos, &plan, &goals, &agents,
+        self.pinned_todos_payload = Some(with_background_tasks(
+            todo_card_payload_json_with_agents(&todos, &plan, &goals, &agents),
+            &tasks,
         ));
         true
+    }
+
+    pub(super) fn todo_card_background_tasks(
+        &self,
+        todos: &[TodoItem],
+    ) -> Vec<crate::tui::ui::TodoCardBackgroundTask> {
+        let mut tasks = Vec::new();
+        for todo in todos {
+            if !crate::todo::is_incomplete_todo(todo) {
+                continue;
+            }
+            for id in &todo.waiting_on {
+                if tasks
+                    .iter()
+                    .any(|task: &crate::tui::ui::TodoCardBackgroundTask| &task.task_id == id)
+                {
+                    continue;
+                }
+                let Some(status) = self.running_todo_background_dependency(id) else {
+                    continue;
+                };
+                let row = self
+                    .background_task_rows_ref()
+                    .iter()
+                    .find(|row| &row.task_id == id);
+                tasks.push(crate::tui::ui::TodoCardBackgroundTask {
+                    task_id: id.clone(),
+                    label: row
+                        .map(|row| row.label.clone())
+                        .or(status.display_name)
+                        .unwrap_or(status.tool_name),
+                    percent: row
+                        .and_then(|row| row.percent)
+                        .or_else(|| status.progress.and_then(|progress| progress.percent)),
+                });
+            }
+        }
+        tasks
     }
 
     /// Swarm workers referenced by `assigned_to` on any todo, snapshotted from
@@ -447,6 +492,28 @@ fn todo_card_payload_json(
     todo_card_payload_json_with_agents(todos, plan, goals, &[])
 }
 
+fn with_background_tasks(
+    content: String,
+    tasks: &[crate::tui::ui::TodoCardBackgroundTask],
+) -> String {
+    let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return content;
+    };
+    payload["background_tasks"] = serde_json::to_value(tasks).unwrap_or_default();
+    payload.to_string()
+}
+
+fn hash_background_tasks(tasks: &[crate::tui::ui::TodoCardBackgroundTask]) -> u64 {
+    if tasks.is_empty() {
+        return 0;
+    }
+    let mut hasher = DefaultHasher::new();
+    serde_json::to_string(tasks)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 fn todo_card_payload_json_with_agents(
     todos: &[TodoItem],
     plan: &crate::todo::TodoPlan,
@@ -694,6 +761,7 @@ mod tests {
             completion_confidence: completion_confidence
                 .map(crate::todo::ConfidenceState::from_legacy_score),
             confidence_history: Vec::new(),
+            waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
             stage: None,

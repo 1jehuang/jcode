@@ -608,6 +608,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 | ServerEvent::StatusDetail { .. }
         );
     if externally_started_turn_event {
+        app.streaming.response_output.reset();
         crate::logging::info(
             "Adopting externally started turn: stream event received while idle with no current_message_id",
         );
@@ -660,6 +661,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.insert_thought_line(thought_line);
                 return eager_stream_redraw;
             }
+            app.streaming.response_output.text(&text);
             let mut needs_redraw = false;
             if matches!(
                 app.status,
@@ -680,6 +682,7 @@ pub(in crate::tui::app) fn handle_server_event(
             eager_stream_redraw && needs_redraw
         }
         ServerEvent::TextReplace { text } => {
+            app.streaming.response_output.replace_text(&text);
             let ops = app.stream_buffer.flush();
             app.apply_stream_ops(ops);
             app.replace_streaming_text(text);
@@ -734,6 +737,7 @@ pub(in crate::tui::app) fn handle_server_event(
             eager_stream_redraw
         }
         ServerEvent::ToolStart { id, name } => {
+            app.streaming.response_output.tool();
             app.usage_reset.openai_quota_rejected = false;
             // Tool-call JSON is provider-generated output and is included in output-token
             // usage. Keep the TPS timer running until the server reports ToolExec; actual
@@ -760,6 +764,9 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::ToolExec { id, name } => {
+            // A reconnect can resume during execution, without replaying the
+            // ToolStart event that normally marks this response as tool work.
+            app.streaming.response_output.tool();
             // Provider output generation for this tool call is complete, but final usage
             // snapshots often arrive later. Keep collecting deltas while excluding tool
             // runtime from the elapsed TPS denominator.
@@ -1110,7 +1117,8 @@ pub(in crate::tui::app) fn handle_server_event(
             true
         }
         ServerEvent::TextDone => false,
-        ServerEvent::MessageEnd { .. } => {
+        ServerEvent::MessageEnd { stop_reason } => {
+            app.streaming.response_output.finish(stop_reason.as_deref());
             app.pause_streaming_tps(true);
             app.stream_message_ended = true;
             true
@@ -1357,7 +1365,9 @@ pub(in crate::tui::app) fn handle_server_event(
                     "client_turn_completed",
                     std::time::Duration::from_secs(30),
                 );
-                auto_poked = app.schedule_turn_end_followups();
+                auto_poked = app.schedule_turn_end_followups_after_response(
+                    app.streaming.response_output.has_final_response(),
+                );
                 if !auto_poked {
                     app.clear_visible_turn_started();
                     if app.queued_messages.is_empty() {
@@ -1735,6 +1745,7 @@ pub(in crate::tui::app) fn handle_server_event(
             }
         }
         ServerEvent::Reloading { .. } => {
+            app.scheduled_reload_recoveries.clear();
             app.append_reload_message("🔄 Server reload initiated...");
             // In-process server reloads (self-dev build-reload) keep the same
             // server PID and never disconnect this client, so the reconnect-time
@@ -2440,36 +2451,25 @@ pub(in crate::tui::app) fn handle_server_event(
             if let Some(reload_recovery) = reload_recovery
                 && !app.display_messages.is_empty()
             {
-                let continuation_message = reload_recovery.continuation_message;
                 crate::logging::info(&format!(
                     "History payload requested reload recovery continuation: session={} was_interrupted={:?}",
                     session_id, was_interrupted
                 ));
-                if let Some(notice) = reload_recovery.reconnect_notice
-                    && !app.reload_info.iter().any(|existing| existing == &notice)
+                if let Some(notice) = reload_recovery.reconnect_notice.as_ref()
+                    && !app.reload_info.iter().any(|existing| existing == notice)
                 {
-                    app.reload_info.push(notice);
+                    app.reload_info.push(notice.clone());
                 }
-                let already_queued = app
-                    .hidden_queued_system_messages
-                    .iter()
-                    .any(|queued| queued == &continuation_message)
-                    || app
-                        .rate_limit_pending_message
-                        .as_ref()
-                        .and_then(|pending| pending.system_reminder.as_ref())
-                        .is_some_and(|queued| queued == &continuation_message);
-                if already_queued {
+                if !queue_reload_continuation_once(
+                    app,
+                    &session_id,
+                    reload_recovery,
+                    "Reload complete - continuing because a recovery directive was pending.",
+                ) {
                     crate::logging::info(&format!(
-                        "History payload reload recovery continuation already queued/in-flight: session={}",
+                        "History payload reload recovery continuation already scheduled: session={}",
                         session_id
                     ));
-                } else {
-                    app.push_display_message(DisplayMessage::system(
-                        "Reload complete - continuing because a recovery directive was pending."
-                            .to_string(),
-                    ));
-                    app.hidden_queued_system_messages.push(continuation_message);
                 }
             } else if pending_reload_reconnect_status.is_some() {
                 let message = match was_interrupted {

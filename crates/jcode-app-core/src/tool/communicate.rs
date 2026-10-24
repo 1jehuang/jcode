@@ -3126,8 +3126,10 @@ impl Tool for CommunicateTool {
                                 "\n\n(You can keep working; this wait runs in the background.)"
                             };
                             return Ok(ToolOutput::new(format!(
-                                "{}{}",
-                                summary, compatibility_note
+                                "{}{}\n\n{}",
+                                summary,
+                                compatibility_note,
+                                super::BACKGROUND_WAIT_GUIDANCE
                             )));
                         }
                         let reports = fetch_awaited_member_reports(&ctx, &members).await;

@@ -328,7 +328,26 @@ fn test_recovery_directive_prefers_reload_context_when_present() {
         directive.reconnect_notice.as_deref(),
         Some("Reloaded with build new-build")
     );
-    assert!(directive.continuation_message.contains("Reload succeeded"));
+    assert!(
+        directive
+            .continuation_message
+            .starts_with("Reload complete. Resuming your task.\n\n")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("Build: old-build → new-build.")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("check whether it already completed or is still running")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("unless genuinely blocked")
+    );
     assert!(
         directive
             .continuation_message
@@ -816,6 +835,10 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
         .await
         .expect("second build should queue");
 
+    for output in [&first.output, &second.output] {
+        assert!(output.contains(crate::tool::BACKGROUND_WAIT_GUIDANCE));
+        assert!(!output.contains("Use `bg"));
+    }
     let first_meta = first.metadata.expect("first metadata");
     let second_meta = second.metadata.expect("second metadata");
     let first_task_id = first_meta["task_id"].as_str().expect("first task id");

@@ -18,13 +18,26 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
             frame::label(format!("{} limits", label))
         };
         return with_account_hint(
-            Framed::body(vec![usage_limit_reached_line()]).title(title),
+            Framed::body(vec![usage_limit_reached_line()])
+                .title(title)
+                .footer(frame::dim(
+                    info.five_hour_resets_at
+                        .as_deref()
+                        .or(info.seven_day_resets_at.as_deref())
+                        .map(|reset| format!("Reset {}", crate::usage::format_reset_time(reset)))
+                        .unwrap_or_else(|| "reset unknown".into()),
+                )),
             info,
         );
     }
     if !info.available {
         return if matches!(info.provider, UsageProvider::Anthropic) {
-            Framed::body(vec![usage_unavailable_line()]).title(frame::label("Anthropic limits"))
+            with_account_hint(
+                Framed::body(vec![Line::from("Usage unavailable")])
+                    .title(frame::label("Anthropic limits"))
+                    .footer(frame::dim("refresh pending/failed")),
+                info,
+            )
         } else {
             Framed::default()
         };
@@ -39,7 +52,8 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
             ),
             Style::default().fg(rgb(140, 140, 150)),
         )])])
-        .title(frame::label("Copilot tokens")),
+        .title(frame::label("Copilot tokens"))
+        .footer(frame::dim(token_output_share(info))),
         UsageProvider::CostBased => Framed::body(vec![Line::from(vec![Span::styled(
             format!(
                 "{} in + {} out",
@@ -54,7 +68,8 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
                 format!("${:.4}", info.total_cost),
                 Style::default().fg(rgb(180, 180, 190)).bold(),
             ),
-        ])),
+        ]))
+        .footer(frame::dim(cost_rate(info))),
         _ => {
             let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
             let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
@@ -113,7 +128,12 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
                     data.usage_display_used,
                 ));
             }
-            with_account_hint(Framed::body(lines).title(title), info)
+            with_account_hint(
+                Framed::body(lines)
+                    .title(title)
+                    .footer(frame::dim("▰ used")),
+                info,
+            )
         }
     }
 }
@@ -121,10 +141,31 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
 /// Masked account email on the bottom-right border. The top border already
 /// holds the provider title, and the usual ~29-column widget cannot fit both;
 /// the lone footer slot truncates with an ellipsis instead of wrapping.
-fn with_account_hint(framed: Framed, info: &UsageInfo) -> Framed {
+fn with_account_hint(mut framed: Framed, info: &UsageInfo) -> Framed {
     match info.account_hint.as_deref().filter(|hint| !hint.is_empty()) {
-        Some(hint) => framed.footer_right(frame::dim(hint.to_string())),
+        Some(hint) => {
+            framed.footer = None;
+            framed.footer_right(frame::dim(hint.to_string()))
+        }
         None => framed,
+    }
+}
+
+fn token_output_share(info: &UsageInfo) -> String {
+    let total = info.input_tokens as f64 + info.output_tokens as f64;
+    if total == 0.0 {
+        "no tokens yet".into()
+    } else {
+        format!("{:.0}% output", info.output_tokens as f64 / total * 100.0)
+    }
+}
+
+fn cost_rate(info: &UsageInfo) -> String {
+    let total = info.input_tokens as f64 + info.output_tokens as f64;
+    if total > 0.0 && info.total_cost.is_finite() {
+        format!("${:.4}/1K avg", f64::from(info.total_cost) / total * 1000.0)
+    } else {
+        "avg n/a".into()
     }
 }
 
@@ -309,6 +350,55 @@ pub(crate) fn render_labeled_bar(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_footer_metadata_covers_provider_paths() {
+        for provider in [
+            UsageProvider::Anthropic,
+            UsageProvider::Copilot,
+            UsageProvider::CostBased,
+        ] {
+            let data = InfoWidgetData {
+                usage_info: Some(UsageInfo {
+                    provider,
+                    available: true,
+                    primary_limit_label: Some("5-hour".into()),
+                    input_tokens: 3000,
+                    output_tokens: 1000,
+                    total_cost: 0.04,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let card = render_usage_widget(&data, Rect::new(0, 0, 40, 3));
+            assert!(card.footer.is_some());
+        }
+        let info = UsageInfo {
+            input_tokens: 3000,
+            output_tokens: 1000,
+            total_cost: 0.04,
+            ..Default::default()
+        };
+        assert_eq!(cost_rate(&info), "$0.0100/1K avg");
+        assert_eq!(token_output_share(&info), "25% output");
+        assert_eq!(cost_rate(&UsageInfo::default()), "avg n/a");
+        for (available, limit_reached) in [(false, false), (true, true)] {
+            let data = InfoWidgetData {
+                usage_info: Some(UsageInfo {
+                    provider: UsageProvider::Anthropic,
+                    available,
+                    limit_reached,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(
+                render_usage_widget(&data, Rect::new(0, 0, 40, 3))
+                    .footer
+                    .is_some()
+            );
+        }
+    }
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans

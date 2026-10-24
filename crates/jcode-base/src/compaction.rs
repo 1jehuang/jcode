@@ -491,9 +491,11 @@ impl CompactionManager {
             return true;
         }
 
-        // 2. Context below the proactive floor — too early regardless of trend.
+        // 2. Either the percentage or absolute token floor permits prediction.
         let usage = self.context_usage_with(all_messages);
-        if usage < cfg.proactive_floor {
+        let token_floor_reached = cfg.proactive_floor_tokens > 0
+            && self.effective_token_count_with(all_messages) >= cfg.proactive_floor_tokens;
+        if usage < cfg.proactive_floor && !token_floor_reached {
             return true;
         }
 
@@ -863,7 +865,11 @@ impl CompactionManager {
         match self.mode {
             CompactionMode::Reactive => {
                 self.pending_task.is_none()
-                    && self.context_usage_with(all_messages) >= COMPACTION_THRESHOLD
+                    && (self.context_usage_with(all_messages)
+                        >= self.compaction_config.reactive_threshold
+                        || (self.compaction_config.reactive_threshold_tokens > 0
+                            && self.effective_token_count_with(all_messages)
+                                >= self.compaction_config.reactive_threshold_tokens))
                     && active.len() > RECENT_TURNS_TO_KEEP
             }
             CompactionMode::Proactive => {
@@ -945,7 +951,9 @@ impl CompactionManager {
 
     /// Ensure context fits before an API call.
     ///
-    /// Starts background compaction if above 80%. If context is critically full
+    /// Starts background compaction when the configured strategy triggers.
+    /// Reactive defaults to 80% or 400K tokens, whichever comes first.
+    /// If context is critically full
     /// (>=95%), also performs an immediate hard-compact (drops old messages) so
     /// the next API call doesn't fail with "prompt too long".
     pub fn ensure_context_fits(

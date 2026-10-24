@@ -283,6 +283,14 @@ pub(super) fn pending_directive_for_session(
     Ok(Some(directive))
 }
 
+/// Compare only hidden reminders, never ordinary prompt content.
+pub(super) fn is_delivered_continuation(session_id: &str, reminder: &str) -> Result<bool> {
+    Ok(peek_for_session(session_id)?.is_some_and(|record| {
+        record.status == ReloadRecoveryStatus::Delivered
+            && record.directive.continuation_message == reminder
+    }))
+}
+
 pub(super) fn mark_delivered_if_matching_continuation(
     session_id: &str,
     continuation_message: &str,
@@ -332,6 +340,9 @@ pub(super) fn mark_delivered_if_matching_continuation(
     record.status = ReloadRecoveryStatus::Delivered;
     record.delivered_at = Some(chrono::Utc::now().to_rfc3339());
     crate::storage::write_json(&path, &record)?;
+    // Startup GC removes delivered records, so leftover selfdev context must
+    // not outlive delivery or History could rebuild this continuation later.
+    let _ = crate::tool::selfdev::ReloadContext::load_for_session(session_id);
     super::reload_trace::record_value(
         &record.reload_id,
         "intent_delivered",
@@ -349,17 +360,8 @@ pub(super) fn mark_delivered_if_matching_continuation(
         record.role.as_str(),
         accepted_by
     ));
-    if let Err(error) = remove_record_files(&path) {
-        // Delivery is already durable. Leave the consumed record for the next
-        // startup sweep rather than reporting the accepted continuation as a
-        // failure and risking duplicate recovery work.
-        crate::logging::warn(&format!(
-            "reload recovery store: could not remove delivered intent session={} path={}: {}",
-            session_id,
-            path.display(),
-            error
-        ));
-    }
+    // Retain a replay tombstone for stale History frames. Startup GC removes
+    // it, and persist_intent replaces it when this session has a new reload.
     Ok(true)
 }
 
@@ -535,10 +537,13 @@ mod tests {
             "server-b",
         )?);
 
-        // Consumed intents are removed immediately; startup GC covers a crash
-        // between the delivered write and this deletion.
-        assert!(peek_for_session(session_id)?.is_none());
-        assert!(!path_for_session(session_id)?.with_extension("bak").exists());
+        // Keep a tombstone so stale History continuations can be rejected.
+        assert_eq!(
+            peek_for_session(session_id)?.unwrap().status,
+            ReloadRecoveryStatus::Delivered
+        );
+        assert!(is_delivered_continuation(session_id, continuation)?);
+        assert!(!is_delivered_continuation(session_id, "ordinary reminder")?);
         Ok(())
     }
 

@@ -76,17 +76,79 @@ fn read_or_default<T: DeserializeOwned + Default>(path: &Path) -> T {
 /// Read everything the follow-up policy needs. Never fails: absent state is
 /// an empty snapshot.
 pub fn load_snapshot(home: &Path, session_id: &str) -> TodoSnapshot {
+    load_snapshot_with_background_dir(
+        home,
+        session_id,
+        &std::env::temp_dir().join("jcode-bg-tasks"),
+    )
+}
+
+fn load_snapshot_with_background_dir(
+    home: &Path,
+    session_id: &str,
+    background_dir: &Path,
+) -> TodoSnapshot {
     let path = |file| todo_file_path(home, session_id, file);
     let review: Option<TodoReviewState> = std::fs::read_to_string(path(TodoFile::ReviewState))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok());
+    let todos: Vec<crate::TodoItem> = read_or_default(&path(TodoFile::Todos));
+    let running_background_tasks = running_dependencies(&todos, session_id, background_dir);
     TodoSnapshot {
-        todos: read_or_default(&path(TodoFile::Todos)),
+        todos,
         plan: read_or_default(&path(TodoFile::Plan)),
         goals: read_or_default(&path(TodoFile::Goals)),
         gate_observations: read_or_default(&path(TodoFile::GateObservations)),
         long_session_review_due: review.is_some_and(|state| state.is_due(chrono::Utc::now())),
+        running_background_tasks,
     }
+}
+
+/// Read only referenced tasks, never unrelated sessions' background state.
+/// The daemon owns status reconciliation. Missing/malformed/terminal records
+/// are deliberately actionable rather than an excuse to wait forever.
+fn running_dependencies(
+    todos: &[crate::TodoItem],
+    session_id: &str,
+    directory: &Path,
+) -> Vec<String> {
+    let mut running = std::collections::BTreeSet::new();
+    for id in todos.iter().flat_map(|todo| &todo.waiting_on) {
+        if !is_safe_session_id(id) {
+            continue;
+        }
+        let status: serde_json::Value =
+            read_or_default(&directory.join(format!("{id}.status.json")));
+        if status["task_id"].as_str() == Some(id)
+            && status["session_id"].as_str() == Some(session_id)
+            && status["status"].as_str() == Some("running")
+        {
+            // Without an identifiable owner a historical running record is
+            // not proof that work still exists. Fail open like the CLI.
+            let owner = if status["detached"].as_bool() == Some(true) {
+                status["pid"].as_u64()
+            } else {
+                status["owner_pid"]
+                    .as_u64()
+                    .or_else(|| status["pid"].as_u64())
+            };
+            let Some(owner) = owner.filter(|pid| *pid > 0 && *pid <= i32::MAX as u64) else {
+                continue;
+            };
+            // Linux exposes dead owners without coupling this small policy
+            // crate to the application runtime.
+            #[cfg(target_os = "linux")]
+            {
+                if !Path::new("/proc").join(owner.to_string()).exists() {
+                    continue;
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = owner;
+            running.insert(id.clone());
+        }
+    }
+    running.into_iter().collect()
 }
 
 /// Apply the persistent side effects of a follow-up decision.
@@ -117,6 +179,72 @@ pub fn apply_effects(home: &Path, session_id: &str, effects: TodoEffects) -> std
 mod tests {
     use super::*;
     use crate::{GateObservation, GateObservationKind, TodoItem};
+
+    #[test]
+    fn snapshots_include_only_referenced_running_tasks_in_the_same_session() {
+        let dir =
+            std::env::temp_dir().join(format!("todo-background-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("todos")).unwrap();
+        let tasks = dir.join("background");
+        std::fs::create_dir_all(&tasks).unwrap();
+        let todo = crate::TodoItem {
+            id: "validate".into(),
+            status: "pending".into(),
+            waiting_on: vec![
+                "running".into(),
+                "finished".into(),
+                "failed".into(),
+                "foreign".into(),
+                "missing".into(),
+                "broken".into(),
+                "unowned".into(),
+                "../escape".into(),
+                "running".into(),
+            ],
+            ..Default::default()
+        };
+        std::fs::write(
+            todo_file_path(&dir, "s", TodoFile::Todos),
+            serde_json::to_string(&[todo]).unwrap(),
+        )
+        .unwrap();
+        for (id, session, status) in [
+            ("running", "s", "running"),
+            ("finished", "s", "completed"),
+            ("failed", "s", "failed"),
+            ("foreign", "other", "running"),
+            ("unreferenced", "s", "running"),
+        ] {
+            std::fs::write(
+                tasks.join(format!("{id}.status.json")),
+                serde_json::json!({
+                    "task_id": id, "session_id": session, "status": status,
+                    "owner_pid": std::process::id()
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        std::fs::write(tasks.join("broken.status.json"), "not json").unwrap();
+        std::fs::write(
+            tasks.join("unowned.status.json"),
+            serde_json::json!({
+                "task_id": "unowned", "session_id": "s", "status": "running"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let state = load_snapshot_with_background_dir(&dir, "s", &tasks);
+        assert_eq!(state.running_background_tasks, ["running"]);
+        std::fs::remove_file(tasks.join("running.status.json")).unwrap();
+        assert!(
+            load_snapshot_with_background_dir(&dir, "s", &tasks)
+                .running_background_tasks
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn layout_matches_runtime_file_names() {

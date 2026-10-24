@@ -304,6 +304,7 @@ mod tests {
             completion_confidence: None,
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
+            waiting_on: Vec::new(),
             assigned_to: None,
             stage: None,
             details: None,
@@ -445,8 +446,15 @@ fn sync_lanes_after_save(session_id: &str, todos: &[TodoItem]) {
                 }
             })
         } else if link.coordinator == session_id {
-            let lane = stages::lane_todos_for_worker(todos, &link.lane);
+            let mut lane = stages::lane_todos_for_worker(todos, &link.lane);
             load_todos(&link.worker).and_then(|current| {
+                for todo in &mut lane {
+                    todo.waiting_on = current
+                        .iter()
+                        .find(|old| old.id == todo.id)
+                        .map(|old| old.waiting_on.clone())
+                        .unwrap_or_default();
+                }
                 if lane.is_empty() || current == lane {
                     return Ok(());
                 }
@@ -559,30 +567,32 @@ mod lane_sync_tests {
 
         let boss = "session_boss_1";
         let fox = "session_fox_2";
-        save_todos(
-            boss,
-            &[
-                laned("p1", 1, "parser"),
-                laned("u1", 1, "ui"),
-                laned("p2", 1, "parser"),
-            ],
-        )
-        .unwrap();
+        let mut initial = vec![
+            laned("p1", 1, "parser"),
+            laned("u1", 1, "ui"),
+            laned("p2", 1, "parser"),
+        ];
+        initial[0].waiting_on = vec!["boss-task".into()];
+        save_todos(boss, &initial).unwrap();
 
         // Seeding: the worker's todo list becomes exactly its lane.
         let seeded = link_worker_lane(boss, fox, "lane:1:parser").unwrap();
         assert_eq!(seeded.len(), 2);
         assert_eq!(load_todos(fox).unwrap(), seeded);
+        assert!(seeded.iter().all(|todo| todo.waiting_on.is_empty()));
 
         // Worker edits flow back to the coordinator, in place, tagged.
         let mut mine = load_todos(fox).unwrap();
         mine[0].status = "completed".into();
         mine[1].status = "in_progress".into();
+        mine[0].waiting_on = vec!["fox-task-1".into()];
+        mine[1].waiting_on = vec!["fox-task-2".into()];
         mine.push(TodoItem {
             id: "p3".into(),
             content: "add lexer tests".into(),
             status: "pending".into(),
             priority: "high".into(),
+            waiting_on: vec!["fox-new-task".into()],
             ..Default::default()
         });
         save_todos(fox, &mine).unwrap();
@@ -590,6 +600,12 @@ mod lane_sync_tests {
         let ids: Vec<&str> = boss_view.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["p1", "p2", "p3", "u1"]);
         assert_eq!(boss_view[0].status, "completed");
+        assert_eq!(boss_view[0].waiting_on, vec!["boss-task"]);
+        assert!(
+            boss_view[1..3]
+                .iter()
+                .all(|todo| todo.waiting_on.is_empty())
+        );
         assert_eq!(boss_view[2].group.as_deref(), Some("parser"));
         assert!(
             boss_view[..3]
@@ -601,11 +617,26 @@ mod lane_sync_tests {
         let mut edited = load_todos(boss).unwrap();
         edited[2].content = "add lexer + parser tests".into();
         edited[3].status = "completed".into(); // other lane: worker unaffected
+        edited.swap(0, 1); // references must follow IDs, not list positions
         save_todos(boss, &edited).unwrap();
         let worker_view = load_todos(fox).unwrap();
         assert_eq!(worker_view.len(), 3);
         assert_eq!(worker_view[2].content, "add lexer + parser tests");
         assert!(worker_view.iter().all(|t| t.id != "u1"));
+        for (id, dependency) in [
+            ("p1", "fox-task-1"),
+            ("p2", "fox-task-2"),
+            ("p3", "fox-new-task"),
+        ] {
+            assert_eq!(
+                worker_view
+                    .iter()
+                    .find(|todo| todo.id == id)
+                    .unwrap()
+                    .waiting_on,
+                vec![dependency]
+            );
+        }
         // No echo: the coordinator list is exactly what it saved.
         assert_eq!(load_todos(boss).unwrap(), edited);
         assert_eq!(

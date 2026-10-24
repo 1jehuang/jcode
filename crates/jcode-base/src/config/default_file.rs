@@ -286,13 +286,32 @@ prompt_entry_animation = true
 # exactly what to fix. `/colors` lists every role, and `/colors export` prints
 # this section for you.
 #
+# The values below are the complete built-in default palette. Uncomment the
+# section and edit any line to change that role.
+#
 # [display.colors]
 # user = "#8ab4f8"
 # ai = "#81c784"
+# tool = "#787878"
+# file_link = "#b4c8ff"
+# dim = "#505050"
 # accent = "#ba8bff"
+# system = "#ffaadc"
+# queued = "#ffc107"
+# asap = "#6ed2ff"
+# pending = "#8c8c8c"
+# user_text = "#f5f5ff"
+# user_bg = "#232832"
+# ai_text = "#dcdcd7"
+# header_icon = "#78d2e6"
+# header_name = "#bed2eb"
+# header_session = "#ffffff"
 # success = "#64c864"
 # warning = "#ffc864"
 # error = "#ff6464"
+# info = "#8cb4ff"
+# border = "#64646e"
+# selection_bg = "#3c3c50"
 
 [features]
 # Check for and install updates during startup. Set to false for the persistent
@@ -307,6 +326,9 @@ mermaid = true
 # Auto-poke: automatically nudge the model to continue when it stops with
 # incomplete todos. /poke on and /poke off still override this per session.
 auto_poke = true
+# Optional aggregate weak-point follow-up, once per completed todo cycle.
+# Requires auto-poke. Does not control the display-only completion report.
+todo_gate_digest = false
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
 # Persist memory injections into session history instead of sending them as request-only ephemeral context
@@ -403,12 +425,25 @@ disable_base_tools = false
 # kept only so existing configs still parse.
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
-# Experimental, opt-in Codemode. Adds a `codemode` tool that runs
+# Codemode is enabled by default. Adds a `codemode` tool that runs
 # model-written JavaScript in an embedded QuickJS sandbox. Scripts call any
 # other tool (including MCP tools) via `await tools.<name>(args)`, chain and
 # parallelize calls, and keep intermediate results out of the conversation.
-# Env override: JCODE_CODEMODE=1.
-codemode = false
+# Env override: JCODE_CODEMODE=0 to disable.
+codemode = true
+
+[compaction]
+# Reactive uses fixed thresholds. Proactive predicts future growth.
+mode = "reactive"
+# Reactive starts at either threshold, whichever is reached first.
+# Zero disables the absolute token threshold.
+reactive_threshold = 0.80
+reactive_threshold_tokens = 400000
+# Proactive/semantic checks become eligible at either floor, whichever is
+# reached first. This permits prediction, not unconditional compaction.
+proactive_floor = 0.40
+proactive_floor_tokens = 150000
+# Set proactive_floor_tokens = 0 to use only the percentage floor.
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.
@@ -436,8 +471,8 @@ tool_profile = "acp"
 openai_reasoning_effort = "low"
 # Anthropic reasoning effort for Claude reasoning models (none|low|medium|high|xhigh|max)
 # xhigh needs Opus 4.7/4.8 or Fable 5; max needs an output_config effort model (Opus/Sonnet 4.6+).
-# Defaults to xhigh for Claude Opus 4.7/4.8 (high on older Opus) when unset; other models keep their own default.
-# anthropic_reasoning_effort = "medium"
+# Defaults to low when unset.
+anthropic_reasoning_effort = "low"
 # OpenAI transport mode (auto|websocket|https)
 # openai_transport = "auto"
 # OpenAI service tier override (priority|ultrafast|flex|off)
@@ -860,6 +895,15 @@ mod tests {
         let template = Config::default_config_file_contents();
         let config =
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+        assert!(config.tools.codemode);
+        assert_eq!(config.compaction.reactive_threshold, 0.80);
+        assert_eq!(config.compaction.reactive_threshold_tokens, 400_000);
+        assert_eq!(config.compaction.proactive_floor, 0.40);
+        assert_eq!(config.compaction.proactive_floor_tokens, 150_000);
+        assert_eq!(
+            config.provider.anthropic_reasoning_effort.as_deref(),
+            Some("low")
+        );
         assert_eq!(config.tools.mcp_tools, McpToolsMode::Auto);
         assert_eq!(config.tools.mcp_tools_token_threshold, 8_000);
         assert_eq!(config.session.hibernation_idle_secs, 1800);
@@ -872,6 +916,20 @@ mod tests {
             ReasoningDisplayMode::Full,
             "the shipped user config must keep the full reasoning trace visible"
         );
+    }
+
+    #[test]
+    fn codemode_defaults_on_and_can_be_disabled() {
+        assert!(ToolConfig::default().codemode);
+        for contents in ["", "[tools]\n", "[tools]\ncodemode = true\n"] {
+            let config: Config = toml::from_str(contents).unwrap();
+            assert!(config.tools.codemode);
+        }
+        let disabled: Config = toml::from_str("[tools]\ncodemode = false\n").unwrap();
+        assert!(!disabled.tools.codemode);
+        let encoded = toml::to_string(&disabled).unwrap();
+        let restored: Config = toml::from_str(&encoded).unwrap();
+        assert!(!restored.tools.codemode);
     }
 
     #[test]

@@ -1559,6 +1559,13 @@ impl App {
     /// guardrail circuit breaker first, then tries auto-poke and overnight
     /// poke scheduling. Returns true when a follow-up was queued.
     pub(super) fn schedule_turn_end_followups(&mut self) -> bool {
+        self.schedule_turn_end_followups_after_response(false)
+    }
+
+    pub(super) fn schedule_turn_end_followups_after_response(
+        &mut self,
+        final_response_delivered: bool,
+    ) -> bool {
         if self.guardrail_stops_exhausted_at_turn_end() {
             self.stop_auto_continuation_after_guardrail();
             return false;
@@ -1574,57 +1581,36 @@ impl App {
         if self.has_pending_user_followup() {
             return false;
         }
-        self.schedule_auto_poke_followup_if_needed()
+        if self.all_open_todos_wait_on_background_tasks() {
+            self.last_auto_poke_fingerprint = None;
+            self.auto_poke_attempts = 0;
+            return false;
+        }
+        self.schedule_auto_poke_followup_after_response(final_response_delivered)
             || self.schedule_overnight_poke_followup_if_needed()
     }
 
-    /// Deliver this turn's deferred quality-check reminder, if anything is
-    /// still unresolved. Returns true when a continuation was queued.
-    ///
-    /// Delivered at most once per turn: the reminder asks the model to verify
-    /// weak points, and re-asking after it has done so would loop. The
-    /// observation log is cleared either way, so the next turn starts clean.
-    fn deliver_deferred_gate_digest_if_needed(&mut self) -> bool {
-        if self.todo_gate_digest_delivered {
-            return false;
-        }
-        // In a remote client `self.session` is the local wrapper session, while
-        // todo tools execute against the remote session. Reading the wrapper's
-        // files makes every persisted remote assessment appear to be missing.
-        let session_id = self
-            .remote_session_id
-            .as_deref()
-            .unwrap_or_else(|| self.session_id())
-            .to_string();
-        let observations = crate::todo::load_gate_observations(&session_id).unwrap_or_default();
-        if observations.is_empty() {
-            return false;
-        }
-        let plan = crate::todo::load_plan(&session_id).unwrap_or_default();
-        let goals = crate::todo::load_goals(&session_id).unwrap_or_default();
-        let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
-        let _ = crate::todo::clear_gate_observations(&session_id);
-        let Some(digest) = digest else {
-            crate::logging::info(&format!(
-                "TODO_GATE_DIGEST action=skip reason=nothing_to_report observations={}",
-                observations.len()
-            ));
-            return false;
-        };
-        self.todo_gate_digest_delivered = true;
-        crate::logging::info(&format!(
-            "TODO_GATE_DIGEST action=queue observations={}",
-            observations.len()
-        ));
-        self.push_display_message(DisplayMessage::system(
-            "🔎 We asked the agent to double-check this turn's weak points.",
-        ));
-        self.queued_messages.push(digest);
-        self.pending_queued_dispatch = true;
-        true
+    #[cfg(test)]
+    pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+        self.schedule_auto_poke_followup_after_response(false)
     }
 
-    pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+    fn schedule_auto_poke_followup_after_response(
+        &mut self,
+        final_response_delivered: bool,
+    ) -> bool {
+        // Completion is visible even with /poke off, and never needs another
+        // model turn merely to show the plan's remaining weaknesses.
+        self.refresh_completed_todo_report(true);
+        // Report display remains independent of the optional model follow-up.
+        let observation_session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or_else(|| self.session_id());
+        if !crate::config::config().features.todo_gate_digest {
+            let _ = crate::todo::clear_gate_observations(observation_session_id);
+        }
+
         // The completion-gate circuit breaker clears auto_poke_incomplete_todos,
         // and it can only trip while every todo is complete, so the restore in
         // the all-complete branch never runs for an agent that adds open work
@@ -1647,6 +1633,19 @@ impl App {
         }
 
         let todos = super::commands::poke_todos(self);
+        let incomplete: Vec<_> = todos
+            .iter()
+            .filter(|todo| super::commands::is_incomplete_poke_todo(todo))
+            .filter(|todo| !self.todo_waits_on_background_task(todo))
+            .cloned()
+            .collect();
+        if incomplete.is_empty() && todos.iter().any(super::commands::is_incomplete_poke_todo) {
+            // Completion delivery owns the next wake. Waiting is not resistance
+            // and must not spend either the work or assessment review budget.
+            self.last_auto_poke_fingerprint = None;
+            self.auto_poke_attempts = 0;
+            return false;
+        }
         let todo_session_id = self
             .remote_session_id
             .as_deref()
@@ -1658,8 +1657,8 @@ impl App {
             serde_json::to_string(&(&todo_session_id, &todos, &plan, &goals)).ok();
         if self.final_response_todo_fingerprint.is_some() {
             if self.final_response_todo_fingerprint == todo_fingerprint {
-                // Check before timed reviews and deferred digests too: neither
-                // elapsed time nor a stale observation starts a new todo cycle.
+                // Check before timed reviews too: elapsed time alone does not
+                // start a new todo cycle.
                 return false;
             }
             self.final_response_todo_fingerprint = None;
@@ -1680,16 +1679,12 @@ impl App {
             self.pending_queued_dispatch = true;
             return true;
         }
-        let incomplete: Vec<_> = todos
-            .iter()
-            .filter(|todo| super::commands::is_incomplete_poke_todo(todo))
-            .cloned()
-            .collect();
         if incomplete.is_empty() {
             // Completing or removing a todo list ends the prior poke cycle. If
             // equivalent work appears later, it is a new cycle and deserves
             // one fresh nudge rather than being mistaken for the old stall.
             self.last_auto_poke_fingerprint = None;
+            self.auto_poke_attempts = 0;
             if todos.is_empty() {
                 // No todo list exists yet for this session. Auto-poke is armed
                 // by default (`features.auto_poke`), so disarming here would
@@ -1700,15 +1695,25 @@ impl App {
                 crate::logging::info("AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0");
                 self.todo_final_response_requested = false;
                 self.last_todo_ownership_fingerprint = None;
+                self.todo_gate_digest_delivered = false;
                 return false;
             }
-            // Deferred quality checks land here, once, instead of interrupting
-            // every todo write during the turn. Every point recorded during the
-            // turn is raised, including ones whose score later climbed: work
-            // done while the score was low never benefited from the assessment
-            // that arrived after it.
-            if self.deliver_deferred_gate_digest_if_needed() {
-                return true;
+            if crate::config::config().features.todo_gate_digest {
+                let observations =
+                    crate::todo::load_gate_observations(&todo_session_id).unwrap_or_default();
+                let _ = crate::todo::clear_gate_observations(&todo_session_id);
+                if !self.todo_gate_digest_delivered
+                    && let Some(message) =
+                        crate::todo::build_gate_digest(&observations, &plan, &goals)
+                {
+                    self.todo_gate_digest_delivered = true;
+                    self.push_display_message(DisplayMessage::system(
+                        "🔍 Double-checking this turn's weak points...",
+                    ));
+                    self.queued_messages.push(message);
+                    self.pending_queued_dispatch = true;
+                    return true;
+                }
             }
             let ownership_needs_followup =
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
@@ -1747,8 +1752,6 @@ impl App {
                 return true;
             }
             let confidence_summary = super::commands::todo_confidence_summary(&todos);
-            let confidence_label =
-                super::commands::format_todo_completion_confidence(confidence_summary);
             let needs_spike_challenge = confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
             if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
@@ -1809,10 +1812,15 @@ impl App {
             if !self.todo_final_response_requested {
                 self.todo_final_response_requested = true;
                 self.final_response_todo_fingerprint = todo_fingerprint;
-                self.push_display_message(DisplayMessage::system(format!(
-                    "✅ All todos done. Completion confidence: {}.",
-                    confidence_label
-                )));
+                // The ordinary answer already wrapped up this work. Keep the
+                // completed fingerprint latched, but do not buy another turn
+                // merely to repeat it. Quality gates above still run normally.
+                if final_response_delivered {
+                    crate::logging::info(
+                        "AUTO_POKE_DECISION action=idle reason=final_response_already_delivered",
+                    );
+                    return false;
+                }
                 self.queued_messages
                     .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
                 self.pending_queued_dispatch = true;
@@ -1827,11 +1835,15 @@ impl App {
         // Open work begins a new completion cycle. Keep the prior spike check
         // latched until this point so the synthetic final-response turn cannot
         // retrigger the same evidence gate against unchanged completed todos.
+        self.todo_gate_digest_delivered = false;
         self.todo_confidence_spike_challenged = false;
         self.last_todo_ownership_fingerprint = None;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
-        if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
+        if self.last_auto_poke_fingerprint.as_ref() != Some(&fingerprint) {
+            self.auto_poke_attempts = 0;
+        }
+        if self.auto_poke_attempts >= crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS {
             crate::logging::info(&format!(
                 "AUTO_POKE_DECISION action=idle reason=unchanged_todos incomplete={}",
                 incomplete.len()
@@ -1859,6 +1871,7 @@ impl App {
         // exhaustion should only trip when the gate itself stops moving.
         self.todo_completion_gate_attempts = 0;
         self.last_auto_poke_fingerprint = Some(fingerprint);
+        self.auto_poke_attempts += 1;
         self.queued_messages.push(poke_message);
         self.pending_queued_dispatch = true;
         true
@@ -1870,6 +1883,7 @@ impl App {
         let incomplete: Vec<_> = super::commands::poke_todos(self)
             .into_iter()
             .filter(super::commands::is_incomplete_poke_todo)
+            .filter(|todo| !self.todo_waits_on_background_task(todo))
             .collect();
         if incomplete.is_empty() {
             return None;
@@ -1919,11 +1933,15 @@ impl App {
         if let Some(fingerprint) = self.current_incomplete_poke_fingerprint()
             && text.starts_with("You have ")
         {
+            // A peer owns continuation for this unchanged state. Do not send
+            // competing retries from every attached window.
             self.last_auto_poke_fingerprint = Some(fingerprint);
+            self.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
         }
     }
 
     pub(super) fn schedule_queued_dispatch_after_interrupt(&mut self) {
+        self.streaming.response_output.reset();
         if self.has_queued_followups() {
             self.pending_queued_dispatch = true;
         }
@@ -3797,6 +3815,7 @@ impl App {
     /// replayed from the top, so everything from the aborted attempt must
     /// disappear or the replay would render duplicated output.
     pub(super) fn rollback_streaming_attempt(&mut self) {
+        self.streaming.response_output.reset();
         self.stream_buffer.clear();
         self.clear_streaming_render_state();
         self.streaming_tool_calls.clear();

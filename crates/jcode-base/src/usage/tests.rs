@@ -930,6 +930,44 @@ fn attach_activity_refreshes_openai_oauth_totals_even_on_error() {
     );
 }
 
+#[test]
+fn attach_activity_refreshes_anthropic_oauth_totals_even_on_error() {
+    let label = "test-anthropic-summary-no-account";
+    let expected = crate::provider_activity::anthropic_oauth_usage_summary(label);
+    let mut report = ProviderUsage {
+        error: Some("quota unavailable".into()),
+        extra_info: vec![
+            ("Plan".into(), "Max".into()),
+            ("Today".into(), "stale".into()),
+        ],
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        attach_activity(&mut report, &format!("claude:oauth:{label}"));
+        for row in &expected {
+            assert!(report.extra_info.contains(row));
+            assert_eq!(
+                report
+                    .extra_info
+                    .iter()
+                    .filter(|(key, _)| key == &row.0)
+                    .count(),
+                1
+            );
+        }
+        assert!(
+            report
+                .extra_info
+                .contains(&("Account label".into(), label.into()))
+        );
+        assert!(report.error.is_some());
+        assert!(report.extra_info.contains(&("Plan".into(), "Max".into())));
+    }
+    let mut api = ProviderUsage::default();
+    attach_activity(&mut api, "claude:api-key");
+    assert!(!api.extra_info.iter().any(|(key, _)| key == "Today"));
+}
+
 fn jcode_me(memory_used: u64, upgrade: bool) -> crate::subscription_api::SubscriptionMe {
     serde_json::from_value(serde_json::json!({
         "account_id": "a", "email": "e@example.com", "tier": "plus", "status": "active",
@@ -1009,9 +1047,28 @@ fn jcode_usage_unknown_monthly_budget_is_not_exhausted() {
 }
 
 #[test]
+fn jcode_usage_replaces_subscription_placeholder() {
+    let mut reports = vec![ProviderUsage {
+        provider_name: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+        ..Default::default()
+    }];
+    let report = jcode_usage_report(&jcode_me(100, true));
+    let expected_limits = report.limits.len();
+
+    upsert_provider_usage(&mut reports, report);
+
+    assert_eq!(reports.len(), 1, "subscription must render only one card");
+    assert_eq!(reports[0].limits.len(), expected_limits);
+    assert!(reports[0].extra_info.iter().any(|(key, _)| key == "Plan"));
+}
+
+#[test]
 fn jcode_usage_shows_daily_allowances_without_upsell_when_low() {
     let report = jcode_usage_report(&jcode_me(100, true));
-    assert_eq!(report.provider_name, "Jcode subscription");
+    assert_eq!(
+        report.provider_name,
+        crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+    );
     assert_eq!(report.limits.len(), 2);
     assert_eq!(report.limits[0].name, "Memory recall (daily)");
     assert!((report.limits[0].usage_percent - 10.0).abs() < 0.01);

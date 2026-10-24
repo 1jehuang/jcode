@@ -102,6 +102,7 @@ mod remote;
 mod remote_header_hint;
 mod remote_notifications;
 mod replay;
+mod response_output;
 pub(crate) mod run_shell;
 mod runtime_memory;
 mod shortcut_hints;
@@ -124,6 +125,7 @@ mod swarm_hint;
 mod terminal_liveness;
 mod terminal_setup_command;
 mod terminal_title;
+mod todo_completion;
 mod todos_view;
 pub(crate) use todos_view::pinned_todos_payload_for_session;
 mod tui_lifecycle;
@@ -884,6 +886,7 @@ enum ColdCacheWarningTrigger {
 #[derive(Clone, Debug, Default)]
 struct StreamingProgress {
     streaming_text: String,
+    response_output: response_output::ResponseOutput,
     // Live token usage (per turn)
     streaming_input_tokens: u64,
     streaming_output_tokens: u64,
@@ -1057,6 +1060,9 @@ pub struct App {
     remote_interrupt_ack_deadline: Option<Instant>,
     // Reload reconnect is waiting for server history before deciding whether to continue.
     pending_reload_reconnect_status: Option<PendingReloadReconnectStatus>,
+    // Keep recovery identities after dispatch so delayed History cannot requeue
+    // the same continuation. Reset only when a new server reload begins.
+    scheduled_reload_recoveries: HashSet<(String, String)>,
     // Current status
     status: ProcessingStatus,
     // Subagent status (shown during Task tool execution)
@@ -1106,10 +1112,9 @@ pub struct App {
     /// Todo state at the final-response handoff. Unchanged finished work must
     /// not re-enter quality gates on later turn-end or timer callbacks.
     final_response_todo_fingerprint: Option<String>,
-    /// Exact continuation sent for the last incomplete todo state. An unchanged
-    /// list must not trigger another automatic turn: the agent may be parked on
-    /// a worker, wake, or human decision, and repeated pokes cannot help.
+    /// Last incomplete state and its bounded automatic continuation budget.
     last_auto_poke_fingerprint: Option<String>,
+    auto_poke_attempts: u8,
     /// Set when the current turn ended with a provider guardrail/refusal stop
     /// (ServerEvent::ProviderGuardrail). Consumed by the Done handler to
     /// update `consecutive_guardrail_stops`.
@@ -1530,6 +1535,8 @@ pub struct App {
     /// Hash of the todo payload rendered into the inline chat todo card, used
     /// to keep the card live-updating while it stays in the transcript.
     todo_card_rendered_hash: u64,
+    /// Tracks the display-only full report for the current completed todo cycle.
+    todo_completion_report: todo_completion::TodoCompletionReportState,
     /// JSON payload for the pinned todo band (display.pin_todos). `None` when
     /// the feature is off or the session has no todos. Refreshed on tick.
     /// The renderer wiring for these three fields is landing separately, so
@@ -2004,6 +2011,7 @@ impl App {
         &mut self,
         signature: KvCacheRequestSignature,
     ) {
+        self.streaming.response_output.reset();
         let turn_number = self
             .display_messages
             .iter()

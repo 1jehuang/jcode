@@ -1,6 +1,6 @@
 //! Native SSH attach: the TUI is local; its daemon and workspace are remote.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use super::args::{Args, Command};
 use super::provider_init::ProviderChoice;
@@ -62,6 +62,12 @@ pub(crate) async fn run(args: Args) -> Result<()> {
 async fn run_unix(args: Args) -> Result<()> {
     let host = args.ssh.as_deref().expect("SSH dispatch requires a host");
     let binary = args.ssh_binary.as_deref().unwrap_or("jcode");
+    if let Some(id) = super::cloud_ephemeral::host_id(host) {
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || super::cloud_ephemeral::wait_ready(&id))
+            .await
+            .context("wait for ephemeral cloud machine")??;
+    }
     super::output::stderr_info(format!("Connecting local Jcode UI to {host} over SSH..."));
     let mut connection = super::ssh_transport::NativeSsh::connect_with_workspace(
         host,
@@ -84,7 +90,12 @@ async fn run_unix(args: Args) -> Result<()> {
     {
         crate::env::set_var("JCODE_SSH_LOCAL_WORKING_DIR", local_dir);
     }
-    if super::cloud_managed::is_managed(host) {
+    if let Some(id) = super::cloud_ephemeral::host_id(host) {
+        crate::env::set_var(
+            "JCODE_SSH_CONFIG",
+            super::cloud_ephemeral::ssh_config_path(id)?,
+        );
+    } else if super::cloud_managed::is_managed(host) {
         let _ = super::cloud_managed::ssh_args()?;
         crate::env::set_var("JCODE_SSH_CONFIG", super::cloud_managed::ssh_config_path()?);
     } else {

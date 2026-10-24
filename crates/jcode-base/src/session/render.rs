@@ -398,6 +398,7 @@ pub fn render_messages_and_images_with_compacted_history(
         };
         rendered.push(RenderedMessage {
             response_stats: None,
+            tool_duration_ms: None,
             role: "system".to_string(),
             content,
             tool_calls: Vec::new(),
@@ -429,6 +430,7 @@ pub fn render_messages_and_images_with_compacted_history(
         if let Some(summary) = auto_poke_user_message_display_summary(msg) {
             rendered.push(RenderedMessage {
                 response_stats: None,
+                tool_duration_ms: None,
                 role: "system".to_string(),
                 content: summary.to_string(),
                 tool_calls: Vec::new(),
@@ -506,6 +508,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         reasoning.clear();
                         rendered.push(RenderedMessage {
                             response_stats: None,
+                            tool_duration_ms: None,
                             role: role.to_string(),
                             content: combined,
                             tool_calls: tool_calls.clone(),
@@ -529,6 +532,7 @@ pub fn render_messages_and_images_with_compacted_history(
 
                     rendered.push(RenderedMessage {
                         response_stats: None,
+                        tool_duration_ms: msg.tool_duration_ms,
                         role: "tool".to_string(),
                         content: content.clone(),
                         tool_calls: Vec::new(),
@@ -591,6 +595,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         reasoning.clear();
                         rendered.push(RenderedMessage {
                             response_stats: None,
+                            tool_duration_ms: None,
                             role: role.to_string(),
                             content: combined,
                             tool_calls: std::mem::take(&mut tool_calls),
@@ -612,6 +617,7 @@ pub fn render_messages_and_images_with_compacted_history(
                     });
                     rendered.push(RenderedMessage {
                         response_stats: None,
+                        tool_duration_ms: None,
                         role: "tool".to_string(),
                         content: output,
                         tool_calls: Vec::new(),
@@ -632,6 +638,7 @@ pub fn render_messages_and_images_with_compacted_history(
             }
             rendered.push(RenderedMessage {
                 response_stats: None,
+                tool_duration_ms: None,
                 role: role.to_string(),
                 content: combined,
                 tool_calls,

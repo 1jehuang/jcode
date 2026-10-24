@@ -2,8 +2,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use super::provider_init::ProviderChoice;
 
+mod cloud_ephemeral;
 mod google;
 mod mcp;
+pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
@@ -719,6 +721,11 @@ pub(crate) enum ServerCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CloudCommand {
+    /// Manage disposable remote machines with mandatory automatic expiry.
+    Ephemeral {
+        #[command(subcommand)]
+        action: CloudEphemeralCommand,
+    },
     /// Upload, list, verify, and view cloud-synced sessions
     Sessions {
         #[command(subcommand)]
