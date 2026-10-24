@@ -28,7 +28,6 @@ enum Disposition {
     ClientInternal,
     /// A real gap. Worth exposing, not yet done. Every entry needs a reason
     /// that says what a client cannot build without it.
-    #[allow(dead_code)] // Empty today; the ledger keeps the slot for future gaps.
     Gap(&'static str),
 }
 
@@ -38,6 +37,14 @@ use Disposition::{ClientInternal, Covered, Gap};
 ///
 /// Sorted by name so additions produce clean diffs.
 const LEDGER: &[(&str, Disposition)] = &[
+    (
+        "AccountUsage",
+        Gap(
+            "clients cannot read daemon-owned subscription quota ratios, reset times, \
+             or exhaustion status to warn before a turn is refused, even though \
+             InvalidateUsage already lets them invalidate that quota cache",
+        ),
+    ),
     ("BackgroundTool", Covered),
     ("Cancel", Covered),
     ("CancelSoftInterrupts", Covered),
@@ -52,8 +59,10 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetState", Covered),
     ("InputShell", ClientInternal),
     ("InvalidateAnthropicUsage", Covered),
+    ("InvalidateOpenAiUsage", Covered),
     ("Message", Covered),
     ("NotifyAuthChanged", Covered),
+    ("PersistSession", ClientInternal),
     ("RefreshModels", ClientInternal),
     ("Reload", ClientInternal),
     ("RenameSession", Covered),
@@ -62,8 +71,8 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("Rewind", Covered),
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
-    ("SetCompactionMode", ClientInternal),
     ("SetAgentModel", Covered),
+    ("SetCompactionMode", ClientInternal),
     ("SetFeature", ClientInternal),
     ("SetModel", Covered),
     ("SetPremiumMode", ClientInternal),
@@ -71,7 +80,6 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),
     ("SetSessionSaved", Covered),
-    ("PersistSession", ClientInternal),
     ("SetSubagentModel", ClientInternal),
     ("SetTransport", ClientInternal),
     ("SoftInterrupt", Covered),
@@ -80,21 +88,34 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("Subscribe", Covered),
     ("SwitchAnthropicAccount", ClientInternal),
     ("SwitchOpenAiAccount", ClientInternal),
-    ("InvalidateOpenAiUsage", Covered),
-    ("InvalidateAnthropicUsage", Covered),
     ("Transcript", ClientInternal),
     ("Transfer", ClientInternal),
     ("TriggerMemoryExtraction", ClientInternal),
 ];
 
 /// Requests the reference clients (TUI) send to the daemon.
-fn reference_client_requests() -> BTreeSet<String> {
-    let mut found = BTreeSet::new();
-    {
-        let dir = "../jcode-tui/src";
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
-        collect_requests(&root, &mut found);
+fn reference_client_requests() -> Option<BTreeSet<String>> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Standalone vendored/packaged copies may omit the reference client. In
+    // the repository, the workspace manifest marks that omission as an error.
+    let in_workspace = manifest.join("../../Cargo.toml").is_file();
+    reference_client_requests_at(&manifest.join("../jcode-tui/src"), in_workspace)
+        .expect("failed to scrape reference client requests")
+}
+
+fn reference_client_requests_at(
+    root: &std::path::Path,
+    in_workspace: bool,
+) -> std::io::Result<Option<BTreeSet<String>>> {
+    match std::fs::metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !in_workspace => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+        Ok(_) => {}
     }
+    let mut found = BTreeSet::new();
+    collect_requests(root, &mut found)?;
     // covered by construction and would otherwise pollute the diff.
     for api_only in [
         "CreateSession",
@@ -105,21 +126,22 @@ fn reference_client_requests() -> BTreeSet<String> {
     ] {
         found.remove(api_only);
     }
-    found
+    if found.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("no daemon requests scraped from {}", root.display()),
+        ));
+    }
+    Ok(Some(found))
 }
 
-fn collect_requests(dir: &std::path::Path, found: &mut BTreeSet<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
+fn collect_requests(dir: &std::path::Path, found: &mut BTreeSet<String>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
         if path.is_dir() {
-            collect_requests(&path, found);
+            collect_requests(&path, found)?;
         } else if path.extension().is_some_and(|ext| ext == "rs") {
-            let Ok(source) = std::fs::read_to_string(&path) else {
-                continue;
-            };
+            let source = std::fs::read_to_string(&path)?;
             for (index, _) in source.match_indices("Request::") {
                 // `Request::` also matches unrelated local enums whose names
                 // merely end in "Request" (the TUI's own
@@ -146,6 +168,60 @@ fn collect_requests(dir: &std::path::Path, found: &mut BTreeSet<String>) {
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn the_ledger_is_sorted_unique_and_gaps_have_reasons() {
+    for pair in LEDGER.windows(2) {
+        assert!(
+            pair[0].0 < pair[1].0,
+            "ledger must be strictly sorted with no duplicates: {pair:?}"
+        );
+    }
+    for (name, disposition) in LEDGER {
+        if let Gap(reason) = disposition {
+            assert!(!reason.trim().is_empty(), "{name} needs a gap reason");
+        }
+    }
+}
+
+#[test]
+fn reference_scrape_fails_closed_except_for_absent_vendored_sources() {
+    let root = std::env::temp_dir().join(format!(
+        "jcode-capability-coverage-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    // Ensure fixtures are removed even when an assertion fails.
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _fixture = Fixture(root.clone());
+    let source = root.join("src");
+    assert!(reference_client_requests_at(&source, true).is_err());
+    assert_eq!(reference_client_requests_at(&source, false).unwrap(), None);
+    std::fs::create_dir(&source).unwrap();
+    for in_workspace in [false, true] {
+        assert!(reference_client_requests_at(&source, in_workspace).is_err());
+    }
+    let file = source.join("client.rs");
+    std::fs::write(&file, "Request::CreateSession").unwrap();
+    assert!(reference_client_requests_at(&source, true).is_err());
+    std::fs::write(&file, "Request::AccountUsage").unwrap();
+    assert_eq!(
+        reference_client_requests_at(&source, true).unwrap(),
+        Some(BTreeSet::from(["AccountUsage".to_owned()]))
+    );
+    std::fs::write(&file, [0xff]).unwrap();
+    assert!(reference_client_requests_at(&source, true).is_err());
 }
 
 /// Every capability the reference clients use must have a reviewed entry.
@@ -154,11 +230,10 @@ fn collect_requests(dir: &std::path::Path, found: &mut BTreeSet<String>) {
 /// that nothing is missing *by accident*.
 #[test]
 fn every_reference_client_capability_is_triaged() {
-    let used = reference_client_requests();
-    if used.is_empty() {
-        // Vendored/packaged builds without the sibling crates: nothing to do.
+    let Some(used) = reference_client_requests() else {
+        // Only standalone vendored/packaged builds may omit sibling sources.
         return;
-    }
+    };
     let ledger: BTreeSet<&str> = LEDGER.iter().map(|(name, _)| *name).collect();
 
     let untriaged: Vec<&String> = used
