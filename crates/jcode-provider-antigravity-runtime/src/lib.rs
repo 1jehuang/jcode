@@ -913,6 +913,12 @@ impl Provider for AntigravityProvider {
         }
     }
 
+    fn model_capabilities_need_refresh(&self) -> bool {
+        self.fetched_catalog().is_empty()
+            || Self::load_persisted_catalog()
+                .is_none_or(|catalog| catalog_is_stale(&catalog.fetched_at_rfc3339))
+    }
+
     async fn prefetch_models(&self) -> Result<()> {
         match self.fetch_available_models().await {
             Ok(snapshot) => {

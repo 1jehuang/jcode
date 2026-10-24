@@ -184,6 +184,8 @@ fn active_antigravity_keeps_precedence_for_unprefixed_known_models_and_explicit_
         // When Antigravity is active, unprefixed Antigravity-known models stay
         // on Antigravity even if Gemini and Claude are also configured.
         for model in [
+            "argon",
+            "argon-high",
             "gemini-4-argon",
             "gemini-4-argon-low",
             "gemini-3-flash",
@@ -193,6 +195,26 @@ fn active_antigravity_keeps_precedence_for_unprefixed_known_models_and_explicit_
             provider
                 .set_model(model)
                 .unwrap_or_else(|err| panic!("active Antigravity should accept {model}: {err}"));
+            assert_eq!(provider.active_provider(), ActiveProvider::Antigravity);
+            assert_eq!(provider.model(), model);
+        }
+
+        // Antigravity-exclusive models (Argon tiers, Gemini 3.8 Flash tiers,
+        // GPT-OSS 120B) must select Antigravity even when OpenAI is active and
+        // Gemini/Claude runtimes are also configured.
+        for model in [
+            "argon",
+            "argon-high",
+            "gemini-4-argon",
+            "gemini-4-argon-medium",
+            "gemini-4-argon-high",
+            "gemini-3.8-flash-high",
+            "gpt-oss-120b-medium",
+        ] {
+            provider.set_active_provider(ActiveProvider::OpenAI);
+            provider
+                .set_model(model)
+                .unwrap_or_else(|err| panic!("Antigravity-exclusive {model} should route to Antigravity: {err}"));
             assert_eq!(provider.active_provider(), ActiveProvider::Antigravity);
             assert_eq!(provider.model(), model);
         }

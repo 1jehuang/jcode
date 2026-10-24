@@ -2310,21 +2310,20 @@ impl Provider for MultiProvider {
     }
 
     fn model_capabilities_need_refresh(&self) -> bool {
-        matches!(self.active_provider(), ActiveProvider::OpenAI)
+        (matches!(self.active_provider(), ActiveProvider::OpenAI)
             && self
                 .openai_provider()
-                .is_some_and(|provider| provider.model_capabilities_need_refresh())
+                .is_some_and(|p| p.model_capabilities_need_refresh()))
+            || self
+                .antigravity_provider()
+                .is_some_and(|p| p.model_capabilities_need_refresh())
     }
 
     async fn prefetch_models(&self) -> Result<()> {
         let anthropic = self.anthropic_provider();
         let openai = self.openai_provider();
         let openrouter = self.openrouter_provider();
-        let copilot = self
-            .copilot_api
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+        let copilot = self.copilot_provider();
         let antigravity = self.antigravity_provider();
         let gemini = self.gemini_provider();
         let cursor = self.cursor_provider();

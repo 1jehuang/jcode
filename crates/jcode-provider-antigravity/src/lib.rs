@@ -121,6 +121,22 @@ pub fn catalog_matches_current_endpoint(catalog: &PersistedCatalog) -> bool {
     }
 }
 
+/// Whether a persisted catalog includes the CLI-gated model set when it carries
+/// the full backend catalog. Legacy non-`cli/` User-Agent fetches return
+/// `gemini-3.8-flash-tiered` while omitting all `gemini-4-argon-*` tiers; such
+/// caches must be discarded so they do not mask Argon availability.
+pub fn catalog_has_cli_models(catalog: &PersistedCatalog) -> bool {
+    let has_legacy_non_cli_marker = catalog
+        .models
+        .iter()
+        .any(|model| model.id == "gemini-3.8-flash-tiered");
+    let has_argon = catalog
+        .models
+        .iter()
+        .any(|model| model.id.starts_with("gemini-4-argon"));
+    !has_legacy_non_cli_marker || has_argon
+}
+
 /// Result of parsing the backend `fetchAvailableModels` response: the ordered
 /// catalog plus the backend-advertised default agent model id. The alias
 /// `"default"` is not a real model id, so the resolved backend default is what
@@ -274,6 +290,17 @@ pub fn is_known_model(model: &str) -> bool {
     !normalized.is_empty()
         && (AVAILABLE_MODELS.contains(&normalized)
             || AVAILABLE_MODELS.contains(&remap_unsupported_model(normalized)))
+}
+
+/// Whether `model` is an Antigravity-only model id (or alias) that is not
+/// served by the standalone Gemini or Anthropic providers.
+pub fn is_antigravity_exclusive_model(model: &str) -> bool {
+    let normalized = model.trim();
+    is_known_model(normalized)
+        && !matches!(
+            remap_unsupported_model(normalized),
+            "claude-sonnet-4-6" | "gemini-3-flash"
+        )
 }
 
 pub fn parse_fetch_available_models_response(
@@ -559,7 +586,9 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
 pub fn remap_unsupported_model(model: &str) -> &str {
     match model {
         "gemini-3.1-pro-high" => "gemini-pro-agent",
-        "gemini-4-argon" => "gemini-4-argon-medium",
+        "gemini-4-argon" | "argon" | "argon-medium" => "gemini-4-argon-medium",
+        "argon-high" => "gemini-4-argon-high",
+        "argon-low" => "gemini-4-argon-low",
         "gemini-3.8-flash" => "gemini-3.8-flash-medium",
         other => other,
     }
@@ -567,7 +596,9 @@ pub fn remap_unsupported_model(model: &str) -> &str {
 
 /// Whether a resolved Antigravity model id targets a Gemini model.
 pub fn model_is_gemini(model: &str) -> bool {
-    model.trim().to_ascii_lowercase().starts_with("gemini")
+    remap_unsupported_model(model.trim())
+        .to_ascii_lowercase()
+        .starts_with("gemini")
 }
 
 /// The schema dialect the Antigravity backend will validate a request against,

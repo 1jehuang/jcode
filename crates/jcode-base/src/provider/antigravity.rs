@@ -16,14 +16,15 @@ use crate::auth::antigravity as antigravity_auth;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-pub use jcode_provider_antigravity::is_known_model;
 pub use jcode_provider_antigravity::{
     AVAILABLE_MODELS, CatalogModel, CatalogSnapshot, DEFAULT_FALLBACK_MODEL,
     FetchAvailableModelsResponse, PersistedCatalog, X_GOOG_API_CLIENT,
-    antigravity_compatible_schema, antigravity_user_agent, catalog_is_stale, catalog_model_detail,
-    client_metadata_header, fetch_models_api_url, is_retryable_empty_turn,
-    merge_antigravity_model_ids, parse_fetch_available_models_response, remap_unsupported_model,
+    antigravity_compatible_schema, antigravity_user_agent, catalog_has_cli_models,
+    catalog_is_stale, catalog_model_detail, client_metadata_header, fetch_models_api_url,
+    is_retryable_empty_turn, merge_antigravity_model_ids, parse_fetch_available_models_response,
+    remap_unsupported_model,
 };
+pub use jcode_provider_antigravity::{is_antigravity_exclusive_model, is_known_model};
 
 /// Path of the persisted warm-catalog cache shared by the runtime crate and
 /// base's `/usage` report.
@@ -44,6 +45,7 @@ pub fn load_persisted_catalog() -> Option<PersistedCatalog> {
         .filter(|catalog: &PersistedCatalog| {
             !catalog.models.is_empty()
                 && jcode_provider_antigravity::catalog_matches_current_endpoint(catalog)
+                && jcode_provider_antigravity::catalog_has_cli_models(catalog)
         })
 }
 

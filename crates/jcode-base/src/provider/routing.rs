@@ -43,6 +43,11 @@ impl super::MultiProvider {
         {
             return self.set_model_on_provider(super::ActiveProvider::Antigravity, model);
         }
+        if crate::provider::antigravity::is_antigravity_exclusive_model(model)
+            && self.reconcile_auth_if_provider_missing(super::ActiveProvider::Antigravity)
+        {
+            return self.set_model_on_provider(super::ActiveProvider::Antigravity, model);
+        }
 
         // Detect which provider an unprefixed model belongs to.
         let target_provider = super::provider_for_model(model);
