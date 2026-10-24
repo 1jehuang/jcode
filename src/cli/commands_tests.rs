@@ -843,7 +843,7 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
         build_run_auto_poke_follow_up_from_todos(
             &open,
             false,
-            take_run_gate_digest_if_turn_ended(session, false, &open),
+            take_run_gate_digest_if_turn_ended(session, false, &open, true),
         ),
         Some(RunAutoPokeFollowUp::Incomplete { .. })
     ));
@@ -865,7 +865,7 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
     match build_run_auto_poke_follow_up_from_todos(
         &done,
         false,
-        take_run_gate_digest_if_turn_ended(session, false, &done),
+        take_run_gate_digest_if_turn_ended(session, false, &done, true),
     ) {
         Some(RunAutoPokeFollowUp::GateDigest { message }) => {
             assert!(message.starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
@@ -918,6 +918,22 @@ fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
             .is_empty()
     );
     assert!(take_run_gate_digest(session, false).is_none());
+
+    crate::todo::append_gate_observations(
+        session,
+        &[crate::todo::GateObservation {
+            kind: crate::todo::GateObservationKind::IntentUnderstanding,
+            group: None,
+            state: Some("partial".into()),
+        }],
+    )
+    .unwrap();
+    assert!(take_run_gate_digest_if_turn_ended(session, false, &[], false).is_none());
+    assert!(
+        crate::todo::load_gate_observations(session)
+            .unwrap()
+            .is_empty()
+    );
 
     match previous_home {
         Some(value) => crate::env::set_var("JCODE_HOME", value),

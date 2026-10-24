@@ -159,6 +159,55 @@ fn empty_digest_still_consumes_the_log() {
 }
 
 #[test]
+fn opted_in_digest_runs_once_and_preserves_validation() {
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    let state = TodoSnapshot {
+        todos: vec![done("ship", ConfidenceState::Plausible)],
+        gate_observations: vec![GateObservation {
+            kind: GateObservationKind::IntentUnderstanding,
+            group: None,
+            state: Some("partial".into()),
+        }],
+        ..Default::default()
+    };
+    let digest = policy.decide(&state);
+    assert_eq!(kind(&digest), Some(FollowUpKind::GateDigest));
+    assert!(digest.effects.clear_gate_observations);
+    assert!(
+        digest
+            .follow_up
+            .unwrap()
+            .message
+            .starts_with(crate::TODO_GATE_DIGEST_PREFIX)
+    );
+    // Even an unacknowledged/repeated log must not cause another digest.
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::CompletionValidation)
+    );
+    assert_eq!(
+        kind(&policy.decide(&snapshot(vec![todo("new", "pending")]))),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+    assert_eq!(kind(&policy.decide(&state)), Some(FollowUpKind::GateDigest));
+    assert_eq!(policy.decide(&TodoSnapshot::default()), Decision::default());
+    assert_eq!(kind(&policy.decide(&state)), Some(FollowUpKind::GateDigest));
+    policy.reset_cycle();
+    assert_eq!(kind(&policy.decide(&state)), Some(FollowUpKind::GateDigest));
+    policy.disable();
+    assert_eq!(policy.decide(&state), Decision::default());
+    policy.enable();
+    assert_eq!(kind(&policy.decide(&state)), Some(FollowUpKind::GateDigest));
+    policy.set_gate_digest_enabled(false);
+    policy.reset_cycle();
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::CompletionValidation)
+    );
+}
+
+#[test]
 fn ownership_gate_asks_once_per_distinct_gap() {
     let mut policy = FollowUpPolicy::new(true);
     let state = TodoSnapshot {

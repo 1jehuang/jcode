@@ -2882,7 +2882,12 @@ fn take_run_gate_digest_if_turn_ended(
     session_id: &str,
     already_delivered: bool,
     todos: &[crate::todo::TodoItem],
+    enabled: bool,
 ) -> Option<String> {
+    if !enabled {
+        let _ = crate::todo::clear_gate_observations(session_id);
+        return None;
+    }
     let work_remains = todos.iter().any(|todo| {
         !crate::todo::todo_status_is_completed(&todo.status)
             && !crate::todo::todo_status_is_cancelled(&todo.status)
@@ -2989,8 +2994,12 @@ async fn run_single_message_command_plain_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        let gate_digest =
-            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
+        let gate_digest = take_run_gate_digest_if_turn_ended(
+            agent.session_id(),
+            gate_digest_delivered,
+            &todos,
+            crate::config::config().features.todo_gate_digest,
+        );
         match build_run_auto_poke_follow_up_from_todos(
             &todos,
             confidence_spike_challenged,
@@ -3033,6 +3042,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 continue;
             }
             Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                gate_digest_delivered = false;
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         eprintln!(
@@ -3071,8 +3081,12 @@ async fn run_single_message_command_capture_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        let gate_digest =
-            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
+        let gate_digest = take_run_gate_digest_if_turn_ended(
+            agent.session_id(),
+            gate_digest_delivered,
+            &todos,
+            crate::config::config().features.todo_gate_digest,
+        );
         match build_run_auto_poke_follow_up_from_todos(
             &todos,
             confidence_spike_challenged,
@@ -3112,6 +3126,7 @@ async fn run_single_message_command_capture_with_auto_poke(
                 continue;
             }
             Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                gate_digest_delivered = false;
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         outputs.push(format!(
@@ -3209,8 +3224,12 @@ async fn run_single_message_command_ndjson(
             break;
         }
         let todos = run_todos(&session_id);
-        let gate_digest =
-            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
+        let gate_digest = take_run_gate_digest_if_turn_ended(
+            agent.session_id(),
+            gate_digest_delivered,
+            &todos,
+            crate::config::config().features.todo_gate_digest,
+        );
         match build_run_auto_poke_follow_up_from_todos(
             &todos,
             confidence_spike_challenged,
@@ -3266,6 +3285,7 @@ async fn run_single_message_command_ndjson(
                 continue;
             }
             Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                gate_digest_delivered = false;
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         write_json_line(

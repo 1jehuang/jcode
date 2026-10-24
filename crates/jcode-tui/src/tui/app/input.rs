@@ -1582,13 +1582,14 @@ impl App {
         // Completion is visible even with /poke off, and never needs another
         // model turn merely to show the plan's remaining weaknesses.
         self.refresh_completed_todo_report(true);
-        // Aggregated weak-point digests are disabled. Discard legacy observations
-        // without queuing a continuation or notice, including for remote sessions.
+        // Report display remains independent of the optional model follow-up.
         let observation_session_id = self
             .remote_session_id
             .as_deref()
             .unwrap_or_else(|| self.session_id());
-        let _ = crate::todo::clear_gate_observations(observation_session_id);
+        if !crate::config::config().features.todo_gate_digest {
+            let _ = crate::todo::clear_gate_observations(observation_session_id);
+        }
 
         // The completion-gate circuit breaker clears auto_poke_incomplete_todos,
         // and it can only trip while every todo is complete, so the restore in
@@ -1665,7 +1666,25 @@ impl App {
                 crate::logging::info("AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0");
                 self.todo_final_response_requested = false;
                 self.last_todo_ownership_fingerprint = None;
+                self.todo_gate_digest_delivered = false;
                 return false;
+            }
+            if crate::config::config().features.todo_gate_digest {
+                let observations =
+                    crate::todo::load_gate_observations(&todo_session_id).unwrap_or_default();
+                let _ = crate::todo::clear_gate_observations(&todo_session_id);
+                if !self.todo_gate_digest_delivered
+                    && let Some(message) =
+                        crate::todo::build_gate_digest(&observations, &plan, &goals)
+                {
+                    self.todo_gate_digest_delivered = true;
+                    self.push_display_message(DisplayMessage::system(
+                        "🔍 Double-checking this turn's weak points...",
+                    ));
+                    self.queued_messages.push(message);
+                    self.pending_queued_dispatch = true;
+                    return true;
+                }
             }
             let ownership_needs_followup =
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
@@ -1784,6 +1803,7 @@ impl App {
         // Open work begins a new completion cycle. Keep the prior spike check
         // latched until this point so the synthetic final-response turn cannot
         // retrigger the same evidence gate against unchanged completed todos.
+        self.todo_gate_digest_delivered = false;
         self.todo_confidence_spike_challenged = false;
         self.last_todo_ownership_fingerprint = None;
         let fingerprint =

@@ -948,6 +948,64 @@ fn test_gate_digest_is_disabled_at_turn_end() {
     });
 }
 
+#[test]
+fn test_gate_digest_explicit_opt_in_runs_once_before_completion() {
+    with_temp_jcode_home(|| {
+        write_test_config("[features]\ntodo_gate_digest = true\n");
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "digest-opt-in".into(),
+                content: "Ship the fix".into(),
+                status: "completed".into(),
+                priority: "high".into(),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let observations = [crate::todo::GateObservation {
+            kind: crate::todo::GateObservationKind::IntentUnderstanding,
+            group: None,
+            state: Some("partial".into()),
+        }];
+        crate::todo::append_gate_observations(&app.session.id, &observations).unwrap();
+        // /poke off still displays the completion report, but never sends a digest.
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = false;
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|message| message.title.as_deref() == Some("Todo completion"))
+        );
+        app.auto_poke_incomplete_todos = true;
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.todo_gate_digest_delivered);
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(app.queued_messages[0].starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
+        assert!(
+            crate::todo::load_gate_observations(&app.session.id)
+                .unwrap()
+                .is_empty()
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        // Repeated observations cannot buy another aggregate turn this cycle.
+        crate::todo::append_gate_observations(&app.session.id, &observations).unwrap();
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+    });
+}
+
 // Regression: auto-poke is on by default (`features.auto_poke`), but the
 // scheduler used to disarm it permanently the first time a turn ended with no
 // todo list at all, and again whenever a cycle completed. In practice that

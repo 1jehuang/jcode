@@ -1208,6 +1208,10 @@ pub struct FeatureConfig {
     /// incomplete todos). `/poke on` / `/poke off` still override this per session
     /// (default: true)
     pub auto_poke: bool,
+    /// Opt in to one aggregate todo weak-point follow-up per completion cycle.
+    /// Requires auto-poke; independent of the display-only completion report.
+    /// Disabled by default for every user.
+    pub todo_gate_digest: bool,
     /// Inject timestamps into user messages and tool results sent to the model (default: true)
     pub message_timestamps: bool,
     /// Persist auto-recalled memory injections into normal session history instead of sending
@@ -1231,6 +1235,7 @@ impl Default for FeatureConfig {
             swarm: true,
             mermaid: true,
             auto_poke: true,
+            todo_gate_digest: false,
             message_timestamps: true,
             persist_memory_injections: false,
             kv_cache_miss_notices: true,

@@ -307,6 +307,9 @@ mermaid = true
 # Auto-poke: automatically nudge the model to continue when it stops with
 # incomplete todos. /poke on and /poke off still override this per session.
 auto_poke = true
+# Optional aggregate weak-point follow-up, once per completed todo cycle.
+# Requires auto-poke. Does not control the display-only completion report.
+todo_gate_digest = false
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
 # Persist memory injections into session history instead of sending them as request-only ephemeral context

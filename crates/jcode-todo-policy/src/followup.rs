@@ -117,6 +117,8 @@ pub struct FollowUpPolicy {
     spike_challenged: bool,
     last_ownership_fingerprint: Option<String>,
     last_poke_fingerprint: Option<String>,
+    gate_digest_enabled: bool,
+    gate_digest_delivered: bool,
 }
 
 pub fn is_incomplete_todo(todo: &TodoItem) -> bool {
@@ -137,14 +139,24 @@ impl FollowUpPolicy {
         self.armed || self.default_on
     }
 
+    /// Configure `features.todo_gate_digest` (default false), independently of
+    /// report display. Changing this does not reset the current cycle.
+    pub fn set_gate_digest_enabled(&mut self, enabled: bool) {
+        self.gate_digest_enabled = enabled;
+    }
+
     /// `/poke on`: arm, restore default-on re-arming, and start a fresh cycle.
     pub fn enable(&mut self) {
-        *self = Self::new(true);
+        self.default_on = true;
+        self.armed = true;
+        self.reset_cycle();
     }
 
     /// `/poke off` or a circuit breaker that must stick for the session.
     pub fn disable(&mut self) {
-        *self = Self::new(false);
+        self.default_on = false;
+        self.armed = false;
+        self.reset_cycle();
     }
 
     /// Forget per-cycle progress without changing whether poking is enabled.
@@ -152,8 +164,10 @@ impl FollowUpPolicy {
     pub fn reset_cycle(&mut self) {
         let enabled = self.default_on;
         let armed = self.armed;
+        let gate_digest_enabled = self.gate_digest_enabled;
         *self = Self::new(enabled);
         self.armed = armed;
+        self.gate_digest_enabled = gate_digest_enabled;
     }
 
     /// Decide the next follow-up after a turn ended. The caller must already
@@ -181,6 +195,7 @@ impl FollowUpPolicy {
             self.final_response_requested = false;
             self.gate_attempts = 0;
             self.spike_challenged = false;
+            self.gate_digest_delivered = false;
             self.last_ownership_fingerprint = None;
         }
 
@@ -208,15 +223,29 @@ impl FollowUpPolicy {
             // turns that do leave work open.
             self.final_response_requested = false;
             self.last_ownership_fingerprint = None;
+            self.gate_digest_delivered = false;
             return Decision::default();
         }
 
-        // Weak-point observations remain diagnostic data, not a reason to
-        // inject another conversation turn before the agent can finish.
+        // Observations are diagnostic by default. Explicit opt-in allows one
+        // aggregate reminder before the existing completion gates.
         let effects = TodoEffects {
             clear_gate_observations: !snapshot.gate_observations.is_empty(),
             ..TodoEffects::default()
         };
+        if self.gate_digest_enabled && !self.gate_digest_delivered {
+            if let Some(message) =
+                crate::build_gate_digest(&snapshot.gate_observations, &snapshot.plan, goals)
+            {
+                self.gate_digest_delivered = true;
+                return Decision::send(
+                    FollowUpKind::GateDigest,
+                    message,
+                    "🔍 Double-checking this turn's weak points...",
+                )
+                .with_effects(effects);
+            }
+        }
 
         let ownership_needs_followup = !completed_groups_have_sufficient_delivery(todos, goals);
         let gate_budget_left = self.gate_attempts < MAX_GATE_ATTEMPTS;
@@ -298,6 +327,7 @@ impl FollowUpPolicy {
     fn poke_incomplete(&mut self, incomplete: &[&TodoItem]) -> Decision {
         self.final_response_requested = false;
         // Open work begins a new completion cycle.
+        self.gate_digest_delivered = false;
         self.spike_challenged = false;
         self.last_ownership_fingerprint = None;
         let message = build_auto_poke_message(incomplete.len());
