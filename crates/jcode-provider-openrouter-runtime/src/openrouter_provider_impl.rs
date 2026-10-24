@@ -53,6 +53,7 @@ impl Provider for OpenRouterProvider {
         let model = self.model.read().await.clone();
         let responses_api =
             model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
+        let model_key = self.model_key.read().await.clone();
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
         // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
@@ -78,7 +79,7 @@ impl Provider for OpenRouterProvider {
         // (issue #815). Unlike Kimi, this only unlocks stored reasoning: it does
         // not synthesize the field when the prior turn did not return one.
         let direct_deepseek_model =
-            !self.supports_provider_features && Self::model_is_deepseek_family(&model);
+            !self.supports_provider_features && Self::model_key_is_deepseek_family(&model_key);
         let allow_reasoning =
             (self.supports_provider_features || kimi_coding_endpoint || direct_deepseek_model)
                 && thinking_enabled != Some(false);
@@ -145,14 +146,16 @@ impl Provider for OpenRouterProvider {
             });
         }
 
-        if let Some(max_tokens) = self.max_tokens {
+        // Per-model `max_output_tokens` from named-provider config overrides the
+        // runtime default (opencode `limit.output` parity).
+        let effective_max_tokens = self.max_output_tokens_for_key(&model_key);
+        if let Some(max_tokens) = effective_max_tokens {
             request["max_tokens"] = serde_json::json!(max_tokens);
         }
 
         let sent_reasoning_config = reasoning_effort.as_deref().is_some_and(|effort| {
-            let resolved =
-                jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
-            self.apply_resolved_reasoning_effort(&mut request, resolved, strict_openai_schema)
+            let resolved = self.resolve_swarm_root_effort_for_request(effort);
+            self.apply_resolved_reasoning_effort(&mut request, &resolved, strict_openai_schema)
         });
 
         if !api_tools.is_empty() {
@@ -233,13 +236,23 @@ impl Provider for OpenRouterProvider {
         // provider-only fields cannot leak into `/responses`; configured extra
         // body fields remain an intentional escape hatch and are merged last.
         if responses_api {
+            // Responses requests must carry the same per-model settings the
+            // chat request does: the swarm sentinel resolved through the
+            // configured root effort and the map-aware wire value, plus the
+            // per-model `max_output_tokens` override. Passing the stored rung
+            // and the runtime default here dropped both for Responses models
+            // (per-model reasoning maps and limits silently stopped applying).
+            let resolved_effort = reasoning_effort
+                .as_deref()
+                .and_then(|effort| self.resolve_request_reasoning_effort(effort));
+            let responses_max_tokens = self.max_output_tokens_for_key(&model_key);
             request = super::opencode_go_responses::build_request(
                 &effective_messages,
                 tools,
                 system,
                 &model,
-                reasoning_effort.as_deref(),
-                self.max_tokens,
+                resolved_effort.as_deref(),
+                responses_max_tokens,
                 jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
             );
             if let Some(extra) = self.extra_body.as_ref()
@@ -413,8 +426,13 @@ impl Provider for OpenRouterProvider {
         // untouched so cross-provider switches from a saved session still work.
         let trimmed = self.strip_session_profile_prefix(trimmed);
 
+        // The picker sends the display-name alias (from `models[].display_name`)
+        // back through `set_model`. Resolve it to the raw upstream id so the
+        // API request uses the identifier the endpoint actually expects.
+        let trimmed = self.resolve_display_name_to_id(trimmed);
+
         let (model_id, provider) = if self.supports_provider_features {
-            let (model_id, provider) = parse_model_spec(trimmed);
+            let (model_id, provider) = parse_model_spec(&trimmed);
             let model_id = if provider.is_some() {
                 jcode_base::provider::openrouter_catalog_model_id(&model_id).unwrap_or(model_id)
             } else {
@@ -437,13 +455,18 @@ impl Provider for OpenRouterProvider {
                 model_id
             );
         }
-        if let Ok(mut current) = self.model.try_write() {
-            *current = model_id.clone();
-        } else {
-            return Err(anyhow::anyhow!(
-                "Cannot change model while a request is in progress"
-            ));
-        }
+        let mut current = self
+            .model
+            .try_write()
+            .map_err(|_| anyhow::anyhow!("Cannot change model while a request is in progress"))?;
+        let mut current_key = self
+            .model_key
+            .try_write()
+            .map_err(|_| anyhow::anyhow!("Cannot change model while a request is in progress"))?;
+        *current = model_id.clone();
+        *current_key = Self::normalized_model_key(&model_id);
+        drop(current_key);
+        drop(current);
 
         if self.supports_provider_features {
             if let Some(provider) = provider {
@@ -461,6 +484,7 @@ impl Provider for OpenRouterProvider {
                 .model_reasoning_config()
                 .and_then(|config| config.1.as_ref())
                 .is_some()
+            || self.model_reasoning_map().is_some()
         {
             let configured = self.configured_effort_for_model();
             if let Ok(mut effort) = self.reasoning_effort.try_write() {
@@ -494,6 +518,11 @@ impl Provider for OpenRouterProvider {
             .and_then(|effort| effort.clone())
     }
 
+    fn effective_reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort()
+            .or_else(|| self.extra_body_reasoning_effort())
+    }
+
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         if !self.supports_any_reasoning_effort() {
             anyhow::bail!(
@@ -524,15 +553,33 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
+        // A configured per-model reasoning map defines the ladder exactly:
+        // only enabled rungs are selectable (opencode per-level mapping). The
+        // swarm sentinels stay appended since they are Jcode UI modes resolved
+        // to the root effort before any map lookup.
+        if let Some(map) = self.model_reasoning_map() {
+            let mut efforts: Vec<&'static str> = jcode_base::config::REASONING_EFFORT_MAP_KEYS
+                .iter()
+                .copied()
+                .filter(|rung| map.rung(rung).is_some_and(|config| !config.disabled))
+                .collect();
+            efforts.extend(jcode_provider_core::reasoning::SWARM_EFFORTS);
+            return efforts;
+        }
+        // No-map ladders come from the shared constants, which predate the
+        // `swarm-deep` sentinel. The client ladder (`configured_reasoning_
+        // efforts_in`) appends both sentinels, so the runtime must accept
+        // them too; otherwise selecting the advertised rung bails with
+        // "not supported" (same append pattern as the map branch above).
         if self.supports_deepseek_reasoning_effort() {
-            jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
+            append_swarm_sentinels(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec())
         } else if self.supports_openai_reasoning_effort() {
-            jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
+            append_swarm_sentinels(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec())
         } else if Self::profile_supports_unified_reasoning(
             self.profile_id.as_deref(),
             self.send_openrouter_headers,
         ) {
-            jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec()
+            append_swarm_sentinels(jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec())
         } else {
             vec![]
         }
@@ -546,6 +593,22 @@ impl Provider for OpenRouterProvider {
 
     fn available_models_display(&self) -> Vec<String> {
         let finalize = |models: Vec<String>| self.filter_profile_chat_supported_models(models);
+        // Replace raw model ids with their configured display name aliases so
+        // the picker shows the user-friendly name (opencode `name` parity).
+        let apply_display_names = |mut models: Vec<String>| {
+            if self.static_model_display_names.is_empty() {
+                return models;
+            }
+            for model in &mut models {
+                if let Some(display) = self
+                    .static_model_display_names
+                    .get(&model.to_ascii_lowercase())
+                {
+                    *model = display.clone();
+                }
+            }
+            models
+        };
         let with_current_model = |mut models: Vec<String>| {
             let current = self.model();
             if !current.trim().is_empty() && !models.iter().any(|model| model == &current) {
@@ -569,14 +632,16 @@ impl Provider for OpenRouterProvider {
 
         if !self.supports_model_catalog {
             if !self.static_models.is_empty() {
-                return finalize(with_current_model(self.static_models.clone()));
+                return finalize(apply_display_names(with_current_model(
+                    self.static_models.clone(),
+                )));
             }
             let model = self.model();
-            return finalize(if model.trim().is_empty() {
+            return finalize(apply_display_names(if model.trim().is_empty() {
                 Vec::new()
             } else {
                 vec![model]
-            });
+            }));
         }
 
         if let Ok(cache) = self.models_cache.try_read()
@@ -589,9 +654,9 @@ impl Provider for OpenRouterProvider {
             {
                 self.maybe_schedule_model_catalog_refresh(cache_age, "display memory cache");
             }
-            return finalize(merge_static_models(
+            return finalize(apply_display_names(merge_static_models(
                 cache.models.iter().map(|m| m.id.clone()).collect(),
-            ));
+            )));
         }
 
         if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
@@ -604,9 +669,9 @@ impl Provider for OpenRouterProvider {
                 cache.cached_at = Some(cache_entry.cached_at);
             }
             self.maybe_schedule_model_catalog_refresh(cache_age, "display disk cache");
-            return finalize(merge_static_models(
+            return finalize(apply_display_names(merge_static_models(
                 cache_entry.models.into_iter().map(|m| m.id).collect(),
-            ));
+            )));
         }
 
         // No memory or disk catalog yet. This commonly happens immediately after
@@ -619,15 +684,17 @@ impl Provider for OpenRouterProvider {
         self.maybe_schedule_model_catalog_refresh(u64::MAX, "display cache miss");
 
         if !self.static_models.is_empty() {
-            return finalize(with_current_model(self.static_models.clone()));
+            return finalize(apply_display_names(with_current_model(
+                self.static_models.clone(),
+            )));
         }
 
         let model = self.model();
-        finalize(if model.trim().is_empty() {
+        finalize(apply_display_names(if model.trim().is_empty() {
             Vec::new()
         } else {
             vec![model]
-        })
+        }))
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
@@ -666,6 +733,18 @@ impl Provider for OpenRouterProvider {
                 } else {
                     detail.clone()
                 };
+                let raw_model_id = self.resolve_display_name_to_id(&model);
+                let raw_model_key = Self::normalized_model_key(&raw_model_id);
+                let route_detail =
+                    if let Some(max_tokens) = self.max_output_tokens_for_key(&raw_model_key) {
+                        if route_detail.trim().is_empty() {
+                            format!("max output {}", max_tokens)
+                        } else {
+                            format!("{}; max output {}", route_detail, max_tokens)
+                        }
+                    } else {
+                        route_detail
+                    };
                 jcode_provider_core::ModelRoute {
                     model,
                     provider: provider_label.clone(),
@@ -837,6 +916,12 @@ impl Provider for OpenRouterProvider {
             model: Arc::new(RwLock::new(
                 self.model.try_read().map(|m| m.clone()).unwrap_or_default(),
             )),
+            model_key: Arc::new(RwLock::new(
+                self.model_key
+                    .try_read()
+                    .map(|m| m.clone())
+                    .unwrap_or_default(),
+            )),
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             api_base: self.api_base.clone(),
             auth: self.auth.clone(),
@@ -852,6 +937,12 @@ impl Provider for OpenRouterProvider {
             static_models: self.static_models.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
+            static_model_display_names: self.static_model_display_names.clone(),
+            static_display_name_to_id: self.static_display_name_to_id.clone(),
+            static_model_reasoning: self.static_model_reasoning.clone(),
+            static_model_reasoning_maps: self.static_model_reasoning_maps.clone(),
+            static_model_max_output_tokens: self.static_model_max_output_tokens.clone(),
+            display_name: self.display_name.clone(),
             send_openrouter_headers: self.send_openrouter_headers,
             // A fork is a new conversation (new session or subagent), so it
             // gets its own stable id.
@@ -1087,4 +1178,17 @@ fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
         .input
         .iter()
         .any(|modality| modality.eq_ignore_ascii_case("image"))
+}
+
+/// Append the swarm sentinels a ladder is missing. The shared constants
+/// predate `swarm-deep`, and the client-side ladder advertises both, so the
+/// runtime ladder must match or `set_reasoning_effort` rejects what the UI
+/// offered.
+fn append_swarm_sentinels(mut efforts: Vec<&'static str>) -> Vec<&'static str> {
+    for sentinel in jcode_provider_core::reasoning::SWARM_EFFORTS {
+        if !efforts.contains(sentinel) {
+            efforts.push(sentinel);
+        }
+    }
+    efforts
 }

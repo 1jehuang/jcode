@@ -889,4 +889,68 @@ reasoning_effort = "max"
         assert!(error.to_string().contains("Failed to parse config file"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }
+    #[test]
+    fn provider_extra_body_effort_parses_from_user_toml() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path());
+        let path = home.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[providers.llmg-coding]
+type = "openai-compatible"
+base_url = "https://llmg.example.com/v1"
+auth = "Bearer"
+api_key_env = "LLMG_API_KEY"
+supports_reasoning_effort = false
+
+[providers.llmg-coding.extra_body]
+reasoning_effort = "high"
+
+[[providers.llmg-coding.models]]
+id = "together_ai/revolut-ltd/glm-5-2-nvfp4"
+"#,
+        )
+        .unwrap();
+
+        let parsed = Config::load_strict().unwrap();
+        let profile = &parsed.providers["llmg-coding"];
+        assert_eq!(profile.supports_reasoning_effort, Some(false));
+        let extra = profile.extra_body.as_ref().expect("extra_body parsed");
+        assert_eq!(extra["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn provider_extra_body_nim_style_parses_from_user_toml() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path());
+        let path = home.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[providers.nim-gw]
+type = "openai-compatible"
+base_url = "https://integrate.api.nvidia.com/v1"
+auth = "Bearer"
+api_key_env = "NIM_API_KEY"
+
+[providers.nim-gw.extra_body]
+[providers.nim-gw.extra_body.chat_template_kwargs]
+thinking = true
+reasoning_effort = "high"
+"#,
+        )
+        .unwrap();
+
+        let parsed = Config::load_strict().unwrap();
+        let extra = parsed.providers["nim-gw"]
+            .extra_body
+            .as_ref()
+            .expect("extra_body parsed");
+        let kwargs = &extra["chat_template_kwargs"];
+        assert_eq!(kwargs["thinking"], true);
+        assert_eq!(kwargs["reasoning_effort"], "high");
+    }
 }

@@ -16,6 +16,7 @@ include!("tests/remote_startup_input_01/part_01.rs");
 include!("tests/remote_startup_input_01/part_02.rs");
 include!("tests/remote_startup_input_02/part_01.rs");
 include!("tests/remote_startup_input_02/part_02.rs");
+include!("tests/remote_startup_input_02/part_03.rs");
 include!("tests/remote_startup_input_03/part_01.rs");
 include!("tests/remote_startup_input_03/part_02.rs");
 include!("tests/remote_startup_input_04.rs");
@@ -2033,3 +2034,198 @@ include!("tests/kv_cache_provider_identity.rs");
 include!("tests/cache_retention_routes.rs");
 
 include!("tests/cache_prompt_accounting.rs");
+include!("tests/remote_reasoning_efforts.rs");
+
+// extra_body effort display: a provider whose switchable /effort is off but
+// whose config injects a fixed effort must still show it in the info widget.
+// Mirrors the OpenRouter extra_body fallback via the trait hook.
+#[derive(Clone)]
+struct ExtraBodyEffortWidgetProvider;
+
+#[async_trait::async_trait]
+impl Provider for ExtraBodyEffortWidgetProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("Mock provider")
+    }
+
+    fn name(&self) -> &str {
+        "mock-extra-body"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+
+    fn model(&self) -> String {
+        "glm-5-2-nvfp4".to_string()
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        None
+    }
+
+    fn effective_reasoning_effort(&self) -> Option<String> {
+        Some("high".to_string())
+    }
+}
+
+#[test]
+fn info_widget_surfaces_extra_body_effort_when_switching_off() {
+    with_temp_jcode_home(|| {
+        ensure_test_jcode_home_if_unset();
+        let provider: Arc<dyn Provider> = Arc::new(ExtraBodyEffortWidgetProvider);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+
+        use crate::tui::TuiState;
+        let data = app.info_widget_data();
+        assert_eq!(
+            data.reasoning_effort.as_deref(),
+            Some("high"),
+            "info widget must show the extra_body-injected effort"
+        );
+
+        // /context must report the same value for local sessions.
+        app.input = "/context".to_string();
+        app.submit_input();
+        let context_out = app
+            .display_messages()
+            .last()
+            .expect("/context must produce a report");
+        assert!(
+            context_out.content.contains("- reasoning effort: high"),
+            "/context must surface the extra_body effort, got: {}",
+            context_out.content
+        );
+        assert!(
+            !context_out.content.contains("- reasoning effort: default"),
+            "/context must not fall back to default while a fixed effort exists, got: {}",
+            context_out.content
+        );
+    });
+}
+
+#[test]
+fn effort_command_shows_fixed_effort_when_switching_unavailable() {
+    with_temp_jcode_home(|| {
+        ensure_test_jcode_home_if_unset();
+        let provider: Arc<dyn Provider> = Arc::new(ExtraBodyEffortWidgetProvider);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+
+        app.input = "/effort".to_string();
+        app.submit_input();
+
+        let msg = app.display_messages().last().expect("/effort must respond");
+        assert!(
+            msg.content.contains("not switchable"),
+            "/effort must explain switching is unavailable, got: {}",
+            msg.content
+        );
+        assert!(
+            msg.content.contains("Effort: High"),
+            "/effort must show the fixed extra_body effort, got: {}",
+            msg.content
+        );
+        assert!(
+            !msg.content.contains("not available"),
+            "must not claim effort is unknown when a fixed effort exists, got: {}",
+            msg.content
+        );
+    });
+}
+
+#[derive(Clone)]
+struct NoEffortWidgetProvider;
+
+#[async_trait::async_trait]
+impl Provider for NoEffortWidgetProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("Mock provider")
+    }
+
+    fn name(&self) -> &str {
+        "mock-no-effort"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+
+    fn model(&self) -> String {
+        "plain-model".to_string()
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+}
+
+#[test]
+fn effort_command_keeps_not_available_without_any_effort() {
+    with_temp_jcode_home(|| {
+        ensure_test_jcode_home_if_unset();
+        let provider: Arc<dyn Provider> = Arc::new(NoEffortWidgetProvider);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+
+        app.input = "/effort".to_string();
+        app.submit_input();
+
+        let msg = app.display_messages().last().expect("/effort must respond");
+        assert!(
+            msg.content.contains("Reasoning effort not available"),
+            "without any effort the original message must stay, got: {}",
+            msg.content
+        );
+    });
+}
+
+#[test]
+fn effort_set_command_still_rejects_non_switchable_provider() {
+    with_temp_jcode_home(|| {
+        ensure_test_jcode_home_if_unset();
+        let provider: Arc<dyn Provider> = Arc::new(ExtraBodyEffortWidgetProvider);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+
+        // Attempting to set an effort must keep failing: extra_body display
+        // support must not accidentally enable switching.
+        app.input = "/effort low".to_string();
+        app.submit_input();
+
+        let msg = app
+            .display_messages()
+            .last()
+            .expect("/effort <value> must respond");
+        assert!(
+            msg.content.contains("Failed to set effort"),
+            "switching must stay rejected for extra_body-only providers, got: {}",
+            msg.content
+        );
+    });
+}

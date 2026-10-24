@@ -107,6 +107,11 @@ mod tests {
 
     #[tokio::test]
     async fn user_response_desktop_registration_is_reversible_and_isolated() {
+        // Registry::execute runs post_tool_feedback hooks, which read env-driven
+        // config; the hook tests in tool::tests mutate that env under
+        // lock_test_env, so take the same lock or their hook can append to
+        // this test's tool output.
+        let _env_lock = crate::storage::lock_test_env();
         let desktop = crate::tool::Registry::empty();
         let tui = crate::tool::Registry::empty();
         assert!(!crate::tool::Registry::base_tools(&tui.skills).contains_key("user_response"));

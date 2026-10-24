@@ -90,6 +90,15 @@ pub(super) fn account_router_generation() -> u64 {
     account_router::generation()
 }
 
+/// Pin the header account inventory (background-loaded from the ambient
+/// `JCODE_HOME`) empty for render tests that compare frames against each
+/// other. Callers must hold the shared render-state test lock before creating
+/// the guard.
+#[cfg(test)]
+pub(crate) fn scoped_empty_inventory_for_tests() -> account_router::InventoryOverrideGuard {
+    account_router::scoped_empty_inventory_for_tests()
+}
+
 pub(crate) fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {

@@ -1333,3 +1333,120 @@ fn stale_credential_route_fallback_follows_runtime_pin_or_drops_to_auto() {
         assert!(stale_credential_route_fallback("openrouter:z-ai/glm-5.2@Novita").is_none());
     });
 }
+
+// MultiProvider delegation for the display-only effective effort. The stub
+// mimics an OpenAI-compatible runtime where switching is off but extra_body
+// injects a fixed effort: reasoning_effort() is None, effective is set.
+struct SplitEffortStubProvider {
+    name: &'static str,
+    switchable: Option<&'static str>,
+    effective: Option<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl Provider for SplitEffortStubProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        anyhow::bail!("split effort stub does not stream")
+    }
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn model(&self) -> String {
+        "stub-model".to_string()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(SplitEffortStubProvider {
+            name: self.name,
+            switchable: self.switchable,
+            effective: self.effective,
+        })
+    }
+    fn reasoning_effort(&self) -> Option<String> {
+        self.switchable.map(str::to_string)
+    }
+    fn effective_reasoning_effort(&self) -> Option<String> {
+        self.effective.map(str::to_string)
+    }
+}
+
+fn multi_provider_with_openrouter_stub(stub: Arc<dyn Provider>) -> MultiProvider {
+    MultiProvider {
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(None),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        bedrock: RwLock::new(None),
+        openrouter: RwLock::new(Some(stub)),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
+        session_id: RwLock::new(None),
+        active: RwLock::new(ActiveProvider::OpenRouter),
+        startup_notices: RwLock::new(Vec::new()),
+        initial_provider: None,
+        routes_memo: std::sync::Mutex::new(None),
+        catalog_scope: next_catalog_scope(),
+        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }
+}
+
+#[test]
+fn multi_provider_effective_reasoning_effort_delegates_to_openrouter_slot() {
+    with_clean_provider_test_env(|| {
+        let stub: Arc<dyn Provider> = Arc::new(SplitEffortStubProvider {
+            name: "stub-openrouter",
+            switchable: None,
+            effective: Some("high"),
+        });
+        let provider = multi_provider_with_openrouter_stub(stub);
+
+        assert_eq!(provider.reasoning_effort(), None);
+        assert_eq!(
+            provider.effective_reasoning_effort(),
+            Some("high".to_string()),
+            "MultiProvider must surface the slot's effective (display) effort"
+        );
+    });
+}
+
+#[test]
+fn multi_provider_effective_reasoning_effort_defaults_to_switchable_when_set() {
+    with_clean_provider_test_env(|| {
+        // Live /effort is set: it must win, no extra_body fallback involved.
+        let stub: Arc<dyn Provider> = Arc::new(SplitEffortStubProvider {
+            name: "stub-openrouter",
+            switchable: Some("low"),
+            effective: Some("low"),
+        });
+        let provider = multi_provider_with_openrouter_stub(stub);
+
+        assert_eq!(provider.reasoning_effort(), Some("low".to_string()));
+        assert_eq!(
+            provider.effective_reasoning_effort(),
+            Some("low".to_string())
+        );
+    });
+}
+
+#[test]
+fn multi_provider_effective_reasoning_effort_none_without_slot() {
+    with_clean_provider_test_env(|| {
+        let stub: Arc<dyn Provider> = Arc::new(SplitEffortStubProvider {
+            name: "stub-openrouter",
+            switchable: None,
+            effective: None,
+        });
+        // Active provider has no OpenRouter slot: delegation returns None.
+        let provider = multi_provider_with_openrouter_stub(stub);
+        *provider.active.write().unwrap() = ActiveProvider::OpenAI;
+
+        assert_eq!(provider.effective_reasoning_effort(), None);
+    });
+}

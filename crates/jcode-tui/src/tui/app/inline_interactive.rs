@@ -17,10 +17,10 @@ mod preview;
 #[path = "inline_interactive/preview_request.rs"]
 mod preview_request;
 use helpers::{
-    agent_model_default_summary, agent_model_target_label, agent_model_target_slug,
-    catchup_candidates, catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
-    openrouter_route_model_id, picker_route_model_spec, picker_route_selection,
-    save_agent_model_override,
+    agent_model_chord_target, agent_model_default_summary, agent_model_target_label,
+    agent_model_target_slug, catchup_candidates, catchup_queue_position, model_entry_base_name,
+    model_entry_saved_spec, openrouter_route_model_id, picker_route_model_spec,
+    picker_route_selection, save_agent_model_override,
 };
 
 pub(super) fn subagent_picker_model_spec(entry: &PickerEntry) -> String {
@@ -680,6 +680,18 @@ impl App {
         picker.column = 0;
     }
 
+    /// The identity (entry name + saved spec) of the picker's highlighted
+    /// entry, for restoring the selection across rebuilds.
+    pub(super) fn selected_model_picker_entry_identity(&self) -> Option<(String, String)> {
+        self.inline_interactive_state.as_ref().and_then(|picker| {
+            picker
+                .filtered
+                .get(picker.selected)
+                .and_then(|&idx| picker.entries.get(idx))
+                .map(|entry| (entry.name.clone(), model_entry_saved_spec(entry)))
+        })
+    }
+
     pub(super) fn remote_model_catalog_snapshot(
         &self,
     ) -> jcode_provider_core::ModelCatalogSnapshot {
@@ -1271,11 +1283,16 @@ impl App {
         } else {
             self.provider.reasoning_effort()
         };
-        let available_efforts = if self.is_remote {
-            inferred_reasoning_efforts(
+        let available_efforts_storage;
+        let available_efforts: Vec<&str> = if self.is_remote {
+            available_efforts_storage = remote_reasoning_efforts(
                 self.remote_provider_name.as_deref(),
                 self.remote_provider_model.as_deref(),
-            )
+            );
+            available_efforts_storage
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<&str>>()
         } else {
             self.provider.available_efforts()
         };
@@ -1379,6 +1396,7 @@ impl App {
                         );
                         routes
                     },
+                    None,
                 );
                 return;
             }
@@ -1428,6 +1446,7 @@ impl App {
                         );
                         routes
                     },
+                    None,
                 );
                 return;
             }
@@ -1491,9 +1510,12 @@ impl App {
         picker_started: std::time::Instant,
     ) {
         let provider = self.provider.clone();
-        self.start_model_picker_route_load_with(signature, picker_started, move || {
-            provider.model_routes()
-        });
+        self.start_model_picker_route_load_with(
+            signature,
+            picker_started,
+            move || provider.model_routes(),
+            None,
+        );
     }
 
     /// Run an arbitrary route builder off the UI thread and deliver the result
@@ -1503,8 +1525,15 @@ impl App {
         signature: ModelPickerCacheSignature,
         picker_started: std::time::Instant,
         build_routes: impl FnOnce() -> Vec<crate::provider::ModelRoute> + Send + 'static,
+        agent_target: Option<crate::tui::AgentModelTarget>,
     ) {
-        self.start_model_picker_route_load_inner(signature, picker_started, false, build_routes);
+        self.start_model_picker_route_load_inner(
+            signature,
+            picker_started,
+            false,
+            build_routes,
+            agent_target,
+        );
     }
 
     /// Build routes AND the full picker entry list off the UI thread. Only
@@ -1515,6 +1544,7 @@ impl App {
         picker_started: std::time::Instant,
         store_remote_routes: bool,
         build_routes: impl FnOnce() -> Vec<crate::provider::ModelRoute> + Send + 'static,
+        agent_target: Option<crate::tui::AgentModelTarget>,
     ) {
         self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
         let request_id = self.model_picker_load_request_id;
@@ -1538,6 +1568,7 @@ impl App {
             request_id,
             signature,
             picker_started,
+            agent_target,
             receiver: rx,
             store_remote_routes,
         });
@@ -1586,11 +1617,16 @@ impl App {
         } else {
             self.provider.reasoning_effort()
         };
-        let available_efforts = if self.is_remote {
-            inferred_reasoning_efforts(
+        let available_efforts_storage;
+        let available_efforts: Vec<&str> = if self.is_remote {
+            available_efforts_storage = remote_reasoning_efforts(
                 self.remote_provider_name.as_deref(),
                 self.remote_provider_model.as_deref(),
-            )
+            );
+            available_efforts_storage
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<&str>>()
         } else {
             self.provider.available_efforts()
         };
@@ -1614,6 +1650,14 @@ impl App {
                     .inline_interactive_state
                     .as_ref()
                     .is_some_and(|picker| picker.kind == PickerKind::Model);
+                // Capture the user's selected entry before the rebuild below
+                // resets rows; retag restores by this identity, and reading
+                // the post-rebuild name would retag a row-shifted entry.
+                let agent_selected_identity = if picker_open {
+                    self.selected_model_picker_entry_identity()
+                } else {
+                    None
+                };
                 let routes = if picker_open {
                     self.apply_built_model_picker(pending.signature, result.outcome, true, true)
                 } else {
@@ -1638,6 +1682,17 @@ impl App {
                         ModelPickerBuildOutcome::Empty => Vec::new(),
                     }
                 };
+                if let Some(target) = pending.agent_target
+                    && picker_open
+                    && self.inline_interactive_state.is_some()
+                {
+                    // This load feeds an agent-model sub-picker (Alt+S /
+                    // Alt+M in /model). The rebuild above recreated the
+                    // ordinary model picker; re-tag it so Enter still saves
+                    // the agent override instead of switching the session
+                    // model.
+                    self.retag_picker_for_agent_model_target(target, agent_selected_identity);
+                }
                 if pending.store_remote_routes && !routes.is_empty() {
                     // Keep the normalized routes so the signature (which
                     // samples remote_model_options) stays stable, then
@@ -2212,11 +2267,21 @@ impl App {
 
         let previous_picker = self.inline_interactive_state.as_ref().and_then(|picker| {
             if picker.kind == PickerKind::Model {
+                // Restore the selection by identity, not row number: the
+                // rebuilt entries can shift rows (inserted saved-override /
+                // inherit rows, catalog growth), and a positional clamp
+                // would silently move the user's pick to a different model
+                // (greptile: refresh changed the selected model).
+                let selected_entry = picker
+                    .filtered
+                    .get(picker.selected)
+                    .and_then(|&idx| picker.entries.get(idx));
                 Some((
                     picker.preview,
                     picker.filter.clone(),
                     picker.selected,
                     picker.column,
+                    selected_entry.map(|entry| (entry.name.clone(), model_entry_saved_spec(entry))),
                     picker.entries.iter().any(|entry| {
                         matches!(entry.action, PickerAction::SubagentModelChoice { .. })
                     }),
@@ -2252,7 +2317,8 @@ impl App {
             preview: false,
         });
 
-        if let Some((preview, filter, selected, column, subagent_model)) = previous_picker
+        if let Some((preview, filter, selected, column, selected_identity, subagent_model)) =
+            previous_picker
             && let Some(ref mut picker) = self.inline_interactive_state
         {
             if subagent_model {
@@ -2263,7 +2329,16 @@ impl App {
             }
             picker.preview = preview;
             picker.filter = filter;
-            picker.selected = selected.min(picker.filtered.len().saturating_sub(1));
+            // Identity match first (same entry name and saved spec); fall
+            // back to the row clamp when the entry no longer exists.
+            picker.selected = selected_identity
+                .and_then(|(name, saved_spec)| {
+                    picker.filtered.iter().position(|&idx| {
+                        picker.entries[idx].name == name
+                            && model_entry_saved_spec(&picker.entries[idx]) == saved_spec
+                    })
+                })
+                .unwrap_or_else(|| selected.min(picker.filtered.len().saturating_sub(1)));
             picker.column = column.min(picker.max_navigable_column());
             Self::apply_inline_interactive_filter(picker);
         }
@@ -2317,11 +2392,16 @@ impl App {
         } else {
             self.provider.reasoning_effort()
         };
-        let available_efforts = if self.is_remote {
-            inferred_reasoning_efforts(
+        let available_efforts_storage;
+        let available_efforts: Vec<&str> = if self.is_remote {
+            available_efforts_storage = remote_reasoning_efforts(
                 self.remote_provider_name.as_deref(),
                 self.remote_provider_model.as_deref(),
-            )
+            );
+            available_efforts_storage
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<&str>>()
         } else {
             self.provider.available_efforts()
         };
@@ -2486,6 +2566,10 @@ impl App {
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'n');
         if is_default || is_favorite {
             self.handle_inline_interactive_key(code, modifiers)?;
+            return Ok(true);
+        }
+        if let Some(target) = agent_model_chord_target(code, modifiers) {
+            self.open_agent_model_picker(target);
             return Ok(true);
         }
         Ok(false)
@@ -3534,6 +3618,19 @@ impl App {
             });
             return Ok(());
         }
+        // `/model` picker and its preview: Alt+S / Alt+M open the swarm /
+        // memory model sub-pickers so users can choose which model spawned
+        // swarm agents or memory extraction use, without leaving the /model
+        // flow. Ctrl+S keeps its global input-stash meaning.
+        if let Some(target) = agent_model_chord_target(code, modifiers)
+            && self
+                .inline_interactive_state
+                .as_ref()
+                .is_some_and(picker_is_runtime_model_picker)
+        {
+            self.open_agent_model_picker(target);
+            return Ok(());
+        }
         match code {
             KeyCode::Esc => {
                 if let Some(ref mut picker) = self.inline_interactive_state
@@ -4099,6 +4196,12 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
+                // Ctrl+letter chords never type: Ctrl+S is the global
+                // input-stash chord, and letting unhandled ctrl chords fall
+                // through here leaked their letter into the filter.
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(());
+                }
                 if let Some(ref mut picker) = self.inline_interactive_state
                     // Spaces separate independently matched search terms. The
                     // token matcher already permits those terms to appear in

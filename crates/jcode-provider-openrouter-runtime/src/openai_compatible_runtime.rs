@@ -57,10 +57,13 @@ impl OpenRouterProvider {
 
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
-            model: Arc::new(RwLock::new(model)),
+            model: Arc::new(RwLock::new(model.clone())),
+            model_key: Arc::new(RwLock::new(Self::normalized_model_key(&model))),
             reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
                 None,
                 Some(&resolved.id),
+                &Self::normalized_model_key(&model),
+                None,
             ))),
             api_base,
             auth,
@@ -76,6 +79,12 @@ impl OpenRouterProvider {
             static_models,
             static_context_limits,
             static_image_input_support: HashMap::new(),
+            static_model_display_names: HashMap::new(),
+            static_display_name_to_id: HashMap::new(),
+            static_model_reasoning: HashMap::new(),
+            static_model_reasoning_maps: HashMap::new(),
+            static_model_max_output_tokens: HashMap::new(),
+            display_name: None,
             send_openrouter_headers: false,
             conversation_id: new_conversation_id(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),

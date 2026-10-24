@@ -418,6 +418,8 @@ fn model_picker_keybind_hint_mentions_default_and_favorites() {
 
     assert!(hint.contains("Ctrl+O set default"));
     assert!(hint.contains("Ctrl+N favorite"));
+    assert!(hint.contains("Alt+S swarm model"));
+    assert!(hint.contains("Alt+M memory model"));
 }
 
 #[test]

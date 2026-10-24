@@ -165,8 +165,11 @@ impl Agent {
     }
 
     /// Reasoning effort the active provider is running with, if any.
+    /// Includes display-only fallbacks such as effort injected via
+    /// OpenAI-compatible `extra_body`; `/effort` switching keeps using the
+    /// switchable state on the provider itself.
     pub fn provider_reasoning_effort(&self) -> Option<String> {
-        self.provider.reasoning_effort()
+        self.provider.effective_reasoning_effort()
     }
 
     pub fn provider_model(&self) -> String {
