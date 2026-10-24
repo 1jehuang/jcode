@@ -196,6 +196,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_todo_card_if_needed();
+    needs_redraw |= app.refresh_completed_todo_report(false);
     needs_redraw |= app.refresh_pinned_todos_if_needed();
     needs_redraw |= app.prune_irrelevant_background_tasks();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();

@@ -1579,6 +1579,9 @@ impl App {
     }
 
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+        // Completion is visible even with /poke off, and never needs another
+        // model turn merely to show the plan's remaining weaknesses.
+        self.refresh_completed_todo_report(true);
         // Aggregated weak-point digests are disabled. Discard legacy observations
         // without queuing a continuation or notice, including for remote sessions.
         let observation_session_id = self

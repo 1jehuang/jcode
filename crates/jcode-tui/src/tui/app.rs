@@ -124,6 +124,7 @@ mod swarm_hint;
 mod terminal_liveness;
 mod terminal_setup_command;
 mod terminal_title;
+mod todo_completion;
 mod todos_view;
 pub(crate) use todos_view::pinned_todos_payload_for_session;
 mod tui_lifecycle;
@@ -1530,6 +1531,8 @@ pub struct App {
     /// Hash of the todo payload rendered into the inline chat todo card, used
     /// to keep the card live-updating while it stays in the transcript.
     todo_card_rendered_hash: u64,
+    /// Tracks the display-only full report for the current completed todo cycle.
+    todo_completion_report: todo_completion::TodoCompletionReportState,
     /// JSON payload for the pinned todo band (display.pin_todos). `None` when
     /// the feature is off or the session has no todos. Refreshed on tick.
     /// The renderer wiring for these three fields is landing separately, so
