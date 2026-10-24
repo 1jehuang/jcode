@@ -87,6 +87,10 @@ pub struct DisplayConfig {
     /// always fall back to the technical detail.
     #[serde(default)]
     pub tool_call_details: bool,
+    /// Show a compact duration badge (" · 2m 3s") on completed tool rows,
+    /// colored by severity (issue #1453). Default: false.
+    #[serde(default)]
+    pub show_tool_duration: bool,
     /// Native terminal scrollbar configuration for scrollable panes
     pub native_scrollbars: NativeScrollbarConfig,
     /// Surface occasional "learn this keybinding" nudges when the user keeps
@@ -155,6 +159,7 @@ impl Default for DisplayConfig {
             show_agentgrep_output: false,
             show_bash_output: false,
             tool_call_details: false,
+            show_tool_duration: false,
             native_scrollbars: NativeScrollbarConfig::default(),
             keybinding_hints: true,
             theme: String::new(),
@@ -248,5 +253,19 @@ mod tests {
         let used: DisplayConfig =
             serde_json::from_str(r#"{"usage_display":"used"}"#).expect("display config");
         assert!(used.usage_display_used());
+    }
+
+    /// Issue #1453: the tool duration badge is strictly opt-in. Missing key
+    /// means off; explicit true turns it on.
+    #[test]
+    fn tool_duration_badge_is_opt_in_and_defaults_off() {
+        assert!(!DisplayConfig::default().show_tool_duration);
+
+        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
+        assert!(!missing.show_tool_duration);
+
+        let enabled: DisplayConfig =
+            serde_json::from_str(r#"{"show_tool_duration":true}"#).expect("display config");
+        assert!(enabled.show_tool_duration);
     }
 }
