@@ -4,6 +4,49 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+struct SignalDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for SignalDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn assert_adopted_owner_cancelled(reload: bool) -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    // Capture the guard before spawn so even an unpolled task owns its work.
+    let owner = SignalDrop(Some(dropped_tx));
+    let handle = tokio::spawn(async move {
+        let _owner = owner;
+        std::future::pending::<()>().await;
+        Ok(jcode_tool_types::ToolOutput::new("unreachable"))
+    });
+    let info = manager.adopt("agentgrep", "cancel-owner", handle).await;
+    if reload {
+        assert_eq!(manager.abort_live_tasks_for_reload().await, 1);
+    } else {
+        assert!(manager.cancel(&info.task_id).await?);
+    }
+    tokio::time::timeout(Duration::from_secs(5), dropped_rx)
+        .await
+        .expect("aborting the background wrapper must drop the adopted owner")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn adopted_task_cancellation_drops_actual_owner() -> Result<()> {
+    assert_adopted_owner_cancelled(false).await
+}
+
+#[tokio::test]
+async fn adopted_task_reload_drops_owner() -> Result<()> {
+    assert_adopted_owner_cancelled(true).await
+}
+
 #[tokio::test]
 async fn adopted_task_output_exists_while_running_and_is_replaced_on_completion() -> Result<()> {
     let tmp = tempdir()?;
