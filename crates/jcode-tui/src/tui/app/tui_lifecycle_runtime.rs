@@ -2,6 +2,14 @@ use super::*;
 use crate::tui::connection_type_icon;
 
 impl App {
+    /// Mark that a server was just spawned - run_remote will retry initial connection
+    /// instead of failing fatally, allowing the TUI to show while the server starts.
+    pub fn set_server_spawning(&mut self) {
+        self.server_spawning = true;
+        self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
+        self.remote_startup_phase_started = Some(Instant::now());
+    }
+
     /// Create an App instance for replay mode (playing back a saved session)
     pub fn new_for_replay(session: crate::session::Session) -> Self {
         Self::new_for_replay_with_title(session, true)
@@ -372,9 +380,7 @@ impl App {
             self.update_context_limit_for_model(&active_model, None);
             // Mark session as active now that it's being used again
             self.session.mark_active();
-            self.set_side_panel_snapshot(
-                crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
-            );
+            self.load_session_panels(session_id);
             crate::telemetry::begin_resumed_session(self.provider.name(), &active_model);
             crate::logging::info(&format!("Restored session: {}", session_id));
 

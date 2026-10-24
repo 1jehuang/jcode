@@ -800,9 +800,7 @@ impl App {
         self.active_skill = None;
         self.provider_session_id = None;
         self.session = new_session;
-        self.set_side_panel_snapshot(
-            crate::side_panel::snapshot_for_session(&self.session.id).unwrap_or_default(),
-        );
+        self.inherit_recovered_panels(&old_session.id);
 
         for msg in old_messages {
             let role = msg.role.clone();

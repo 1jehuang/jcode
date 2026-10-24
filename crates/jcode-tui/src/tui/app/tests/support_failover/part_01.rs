@@ -320,18 +320,18 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
 
 fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::SidePanelSnapshot {
     crate::side_panel::SidePanelSnapshot {
-        focus_revision: 0,
         focused_page_id: Some(page_id.to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: page_id.to_string(),
             title: title.to_string(),
             file_path: format!("/tmp/{page_id}.md"),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: format!("# {title}"),
             updated_at_ms: 1,
+            ..Default::default()
         }],
+        ..Default::default()
     }
 }
 

@@ -1673,6 +1673,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         || handle_subagent_command(app, trimmed)
         || handle_observe_command(app, trimmed)
         || handle_todos_view_command(app, trimmed)
+        || super::panel_history::handle_panels_command(app, trimmed)
         || super::commands_overnight::handle_overnight_command(app, trimmed)
         || super::split_view::handle_split_view_command(app, trimmed)
         || handle_btw_command(app, trimmed)
@@ -2733,15 +2734,7 @@ Final proof packet required:\n\
     )
 }
 
-pub(super) fn active_session_id(app: &App) -> String {
-    if app.is_remote {
-        app.remote_session_id
-            .clone()
-            .unwrap_or_else(|| app.session.id.clone())
-    } else {
-        app.session.id.clone()
-    }
-}
+pub(super) use super::panel_history::active_session_id;
 
 pub(super) fn poke_todos(app: &App) -> Vec<crate::todo::TodoItem> {
     crate::todo::load_todos(&active_session_id(app)).unwrap_or_default()

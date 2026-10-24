@@ -2,6 +2,7 @@
 //! internal protocol. Kept side-effect free so it is trivially unit-testable.
 
 mod credentials;
+mod side_panels;
 
 use crate::background_progress::parse_background_notification;
 use jcode_harness_api::{
@@ -1408,23 +1409,6 @@ impl BridgeState {
             serde_json::from_value(snapshot.clone()).ok()?
         };
         Some(ServerFrame::event(ApiEvent::AppletState {
-            session_id: session_id.to_string(),
-            snapshot,
-        }))
-    }
-
-    fn side_panel_frame(session_id: &str, snapshot: &Value) -> Option<ServerFrame> {
-        if session_id.is_empty() {
-            return None;
-        }
-        // Missing history state means empty: native history omits empty panels.
-        // Malformed snapshots must not clear a previously valid document.
-        let snapshot = if snapshot.is_null() {
-            jcode_harness_api::SidePanelSnapshot::default()
-        } else {
-            serde_json::from_value(snapshot.clone()).ok()?
-        };
-        Some(ServerFrame::event(ApiEvent::SidePanelState {
             session_id: session_id.to_string(),
             snapshot,
         }))

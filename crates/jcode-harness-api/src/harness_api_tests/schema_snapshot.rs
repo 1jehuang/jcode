@@ -625,7 +625,6 @@ fn hidden_system_reminder_wire_shape_and_legacy_default() {
 #[test]
 fn side_panel_state_shared_types_roundtrip() {
     let snapshot = SidePanelSnapshot {
-        focus_revision: 0,
         focused_page_id: Some("notes".into()),
         pages: vec![SidePanelPage {
             id: "notes".into(),
@@ -636,6 +635,7 @@ fn side_panel_state_shared_types_roundtrip() {
             updated_at_ms: 42,
             ..Default::default()
         }],
+        ..Default::default()
     };
     let mut pdf_snapshot = snapshot.clone();
     pdf_snapshot.focus_revision = 123;

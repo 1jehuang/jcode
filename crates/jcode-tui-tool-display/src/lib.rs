@@ -82,7 +82,11 @@ fn exit_code(line: &str) -> Option<i32> {
         .trim_start()
         .split(|c: char| !c.is_ascii_digit() && c != '-')
         .next()?;
-    number.parse().ok()
+    // Ordinary tool output can mention an exit code without a numeric value.
+    let Ok(code) = number.parse() else {
+        return None;
+    };
+    Some(code)
 }
 
 fn strip_wrappers(mut line: &str) -> (&str, u8) {
@@ -268,15 +272,14 @@ pub fn parse_tool_failure(content: &str) -> Option<ToolFailureSummary> {
                 .split_once("panicked at ")
                 .and_then(|(_, location)| location.strip_suffix(':').map(str::to_string));
             score = 60;
-        } else if let Some(location) = panic_location.take() {
-            if !lower.starts_with("note:")
-                && !lower.starts_with("stack backtrace:")
-                && !lower.starts_with("backtrace:")
-                && !line.starts_with(|c: char| c.is_ascii_digit())
-            {
-                panic_reason = Some(format!("{location}: {line}"));
-                score = 85;
-            }
+        } else if let Some(location) = panic_location.take()
+            && !lower.starts_with("note:")
+            && !lower.starts_with("stack backtrace:")
+            && !lower.starts_with("backtrace:")
+            && !line.starts_with(|c: char| c.is_ascii_digit())
+        {
+            panic_reason = Some(format!("{location}: {line}"));
+            score = 85;
         }
         if let Some((kind, _)) = line.split_once(':')
             && (kind.ends_with("Error") || kind.ends_with("Exception"))
@@ -333,6 +336,21 @@ pub fn tool_output_looks_failed(content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_code_requires_a_representable_integer() {
+        for line in [
+            "exit code: unknown",
+            "exit code:",
+            "exit code: -",
+            "exit code: 2147483648",
+            "exit code: -2147483649",
+        ] {
+            assert_eq!(exit_code(line), None, "{line}");
+        }
+        assert_eq!(exit_code("exit code: -1"), Some(-1));
+        assert_eq!(exit_code("exit code: 0"), Some(0));
+    }
 
     #[test]
     fn canonicalizes_edit_tool_names() {

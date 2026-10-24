@@ -12,8 +12,61 @@ use std::collections::HashMap;
 use std::io::BufRead as _;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, BufReader};
 use tokio::sync::{Mutex, RwLock, mpsc};
+
+fn read_test_events<T: AsyncRead + Unpin + Send + 'static>(
+    peer: T,
+    count: usize,
+) -> tokio::task::JoinHandle<(Vec<u8>, BufReader<T>)> {
+    // Drain while the request writes, rather than relying on socket capacity.
+    // Read frames, not EOF: Windows split halves share the pipe handle, so a
+    // retained server read half keeps it open after the writer is dropped.
+    tokio::spawn(async move {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+            let mut reader = BufReader::new(peer);
+            let mut bytes = Vec::new();
+            for _ in 0..count {
+                let mut line = Vec::new();
+                assert!(
+                    tokio::io::AsyncBufReadExt::read_until(&mut reader, b'\n', &mut line)
+                        .await
+                        .unwrap()
+                        > 0
+                );
+                assert_eq!(line.last(), Some(&b'\n'), "complete event frame");
+                bytes.extend(line);
+            }
+            // Keep the peer open for later assertions, including requests
+            // that should fail for reasons unrelated to a disconnected client.
+            (bytes, reader)
+        })
+        .await
+        .expect("test peer must receive event frames promptly")
+    })
+}
+
+#[tokio::test]
+async fn panel_history_test_reader_drains_backpressure_without_waiting_for_eof() {
+    use tokio::io::AsyncWriteExt;
+
+    // A tiny portable transport makes write-before-read deadlock regardless
+    // of the host's native socket or named-pipe buffer size.
+    let (mut writer, peer) = tokio::io::duplex(64);
+    let reader = read_test_events(peer, 1);
+    let payload = format!("{}\n", "x".repeat(1024 * 1024));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        writer.write_all(payload.as_bytes()),
+    )
+    .await
+    .expect("concurrent reader must drain a payload larger than the buffer")
+    .unwrap();
+    // Keep the writer alive: receiving a frame must not require EOF.
+    let (bytes, _peer) = reader.await.expect("test peer task");
+    assert_eq!(bytes, payload.as_bytes());
+    drop(writer);
+}
 
 struct MockProvider(Option<&'static str>);
 
@@ -100,15 +153,19 @@ async fn model_prefetch_hydrates_capabilities_with_existing_model_names() {
     assert_eq!(provider.available_models_display(), vec!["known-model"]);
     assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
 
-    let (stream, mut peer) = crate::transport::stream_pair().unwrap();
+    let (stream, peer) = crate::transport::stream_pair().unwrap();
+    let reader = read_test_events(peer, 1);
     let (_, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(writer));
-    handle_get_model_catalog(44, session_id, &agent, &provider, &writer)
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle_get_model_catalog(44, session_id, &agent, &provider, &writer),
+    )
+    .await
+    .expect("model catalog must complete promptly")
+    .unwrap();
     drop(writer);
-    let mut bytes = Vec::new();
-    peer.read_to_end(&mut bytes).await.unwrap();
+    let (bytes, _peer) = reader.await.expect("test peer task");
     let event: crate::protocol::ServerEvent = serde_json::from_slice(&bytes).unwrap();
     let crate::protocol::ServerEvent::History {
         available_service_tiers,
@@ -367,7 +424,8 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
     )])));
     let connections = Arc::new(RwLock::new(HashMap::new()));
     let count = Arc::new(RwLock::new(1));
-    let (stream, mut peer) = crate::transport::stream_pair().unwrap();
+    let (stream, peer) = crate::transport::stream_pair().unwrap();
+    let reader = read_test_events(peer, 6);
     let (_reader, write_half) = stream.into_split();
     let writer = Arc::new(Mutex::new(write_half));
     let busy_guard = agent.lock().await;
@@ -425,8 +483,7 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
 
     drop(busy_guard);
     drop(writer);
-    let mut bytes = Vec::new();
-    peer.read_to_end(&mut bytes).await.unwrap();
+    let (bytes, _peer) = reader.await.expect("test peer task");
     let events: Vec<crate::protocol::ServerEvent> = std::io::Cursor::new(bytes)
         .lines()
         .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
@@ -535,7 +592,11 @@ async fn assert_history_service_tier_and_pdf_capability(
     session.save().expect("save session");
 
     let pdf_path = temp_home.path().join("report.pdf");
-    std::fs::write(&pdf_path, b"%PDF-1.4\n%%EOF").unwrap();
+    std::fs::write(
+        &pdf_path,
+        include_bytes!("../../tests/fixtures/side-panel-one-page.pdf"),
+    )
+    .unwrap();
     let original_panel =
         crate::side_panel::load_file(session_id, "report", Some("Report"), &pdf_path, true)
             .unwrap();
@@ -567,7 +628,8 @@ async fn assert_history_service_tier_and_pdf_capability(
     let client_connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
     let client_count = Arc::new(RwLock::new(1usize));
 
-    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (stream_a, stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let reader = read_test_events(stream_b, 1);
     let (_reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
 
@@ -638,11 +700,7 @@ async fn assert_history_service_tier_and_pdf_capability(
     drop(busy_guard);
     drop(writer);
 
-    let mut bytes = Vec::new();
-    stream_b
-        .read_to_end(&mut bytes)
-        .await
-        .expect("read history event bytes");
+    let (bytes, _peer) = reader.await.expect("test peer task");
     let mut cursor = std::io::Cursor::new(bytes);
     let mut line = String::new();
     cursor.read_line(&mut line).expect("read first line");
@@ -782,7 +840,8 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
     )));
     let busy_guard = if busy { Some(agent.lock().await) } else { None };
 
-    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (stream_a, stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let reader = read_test_events(stream_b, 1);
     let (_reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
 
@@ -797,16 +856,17 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
     drop(busy_guard);
     drop(writer);
 
-    let mut bytes = Vec::new();
-    stream_b
-        .read_to_end(&mut bytes)
-        .await
-        .expect("read model catalog event bytes");
+    let (bytes, _peer) = reader.await.expect("test peer task");
     let mut cursor = std::io::Cursor::new(bytes);
     let mut line = String::new();
     cursor.read_line(&mut line).expect("read first line");
     let event: crate::protocol::ServerEvent =
         serde_json::from_str(line.trim()).expect("decode model catalog event");
+    let wire: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert!(
+        wire.get("side_panel").is_none(),
+        "catalog replies must not claim an empty panel inventory"
+    );
 
     match event {
         crate::protocol::ServerEvent::History {

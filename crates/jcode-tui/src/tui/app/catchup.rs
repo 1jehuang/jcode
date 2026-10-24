@@ -103,7 +103,6 @@ impl App {
             title: CATCHUP_PAGE_TITLE.to_string(),
             file_path: format!("catchup://{}", session_id),
             format: SidePanelPageFormat::Markdown,
-            pdf_data: None,
             source: SidePanelPageSource::Ephemeral,
             content: markdown,
             updated_at_ms: std::time::SystemTime::now()
@@ -111,6 +110,7 @@ impl App {
                 .map(|duration| duration.as_millis() as u64)
                 .unwrap_or(1)
                 .max(1),
+            ..Default::default()
         }
     }
 }

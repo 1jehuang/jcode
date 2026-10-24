@@ -88,6 +88,7 @@ pub(super) fn picker_account_provider_scope(picker: &InlineInteractiveState) -> 
             provider_filter: None,
         })
         | PickerAction::Model
+        | PickerAction::Panel { .. }
         | PickerAction::Login(_)
         | PickerAction::RemoteLogin { .. }
         | PickerAction::RemoteImportDecision { .. }

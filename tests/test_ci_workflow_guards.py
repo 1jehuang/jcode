@@ -60,6 +60,23 @@ class WorkflowGuardTests(unittest.TestCase):
                        'check_panic_budget.py', 'check_swallowed_error_budget.py'):
             self.assertIn(f'run: python3 scripts/{script}\n', quality)
 
+    def test_sidepanel_regressions_execute_on_native_platform_jobs(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        native = workflow.split('      - name: Run sidepanel retention and history regressions\n', 1)[1].split('      - name:', 1)[0]
+        windows = workflow.split('      - name: Run Windows sidepanel retention and history regressions\n', 1)[1].split('      - name:', 1)[0]
+        for package in ('jcode-base', 'jcode-app-core', 'jcode-tui', 'jcode-protocol',
+                        'jcode-harness-api-server', 'jcode-harness-api'):
+            self.assertIn(package, native)
+            self.assertIn(package, windows)
+        self.assertIn('--lib panel -- --test-threads=1', native)
+        self.assertIn("'--lib', 'panel', '--', '--test-threads=1", windows)
+        self.assertIn('--lib model_catalog_', native)
+        self.assertIn('run_with_timeout.py', native)
+        self.assertIn('invoke_cargo_with_timeout.ps1', windows)
+        for step in (native, windows):
+            self.assertNotIn('continue-on-error:', step)
+            self.assertNotIn('if:', step)
+
     def test_compiler_lookup_failure_is_not_masked_by_export(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         match = re.search(r'^          (RUSTC=.*)\n          (export RUSTC)\n'

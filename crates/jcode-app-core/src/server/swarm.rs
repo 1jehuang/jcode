@@ -10,7 +10,6 @@ use futures::future::try_join_all;
 use jcode_swarm_core::{
     completion_notification_message, normalize_completion_report, truncate_detail,
 };
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1950,29 +1949,9 @@ No extra text.\n\nRequest:\n{message}"
     Ok(final_output)
 }
 
-#[derive(Debug, Deserialize)]
-struct SwarmTaskSpec {
-    description: String,
-    prompt: String,
-    #[serde(default)]
-    subagent_type: Option<String>,
-}
-
-fn parse_swarm_tasks(text: &str) -> Vec<SwarmTaskSpec> {
-    if let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(text) {
-        return tasks;
-    }
-
-    if let (Some(start), Some(end)) = (text.find('['), text.rfind(']'))
-        && start < end
-        && let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(&text[start..=end])
-    {
-        return tasks;
-    }
-
-    Vec::new()
-}
-
+#[path = "swarm/task_specs.rs"]
+mod task_specs;
+use task_specs::*;
 #[cfg(test)]
 mod tests {
     use super::{

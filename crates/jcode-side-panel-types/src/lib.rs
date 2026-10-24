@@ -38,6 +38,12 @@ impl SidePanelPageSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistedSidePanelState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived: Vec<SidePanelHistoryEntry>,
     #[serde(default)]
     pub focus_revision: u64,
     #[serde(default)]
@@ -48,6 +54,10 @@ pub struct PersistedSidePanelState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSidePanelPage {
+    #[serde(default, skip_serializing_if = "SidePanelPageStatus::is_default")]
+    pub status: SidePanelPageStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_path: Option<String>,
     pub id: String,
     pub title: String,
     pub file_path: String,
@@ -60,6 +70,8 @@ pub struct PersistedSidePanelPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SidePanelPage {
+    #[serde(default, skip_serializing_if = "SidePanelPageStatus::is_default")]
+    pub status: SidePanelPageStatus,
     pub id: String,
     pub title: String,
     pub file_path: String,
@@ -78,6 +90,14 @@ pub struct SidePanelPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SidePanelSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived: Vec<SidePanelHistoryEntry>,
     #[serde(default)]
     pub focus_revision: u64,
     #[serde(default)]
@@ -98,5 +118,53 @@ impl SidePanelSnapshot {
 }
 
 pub fn snapshot_is_empty(snapshot: &SidePanelSnapshot) -> bool {
-    !snapshot.has_pages()
+    snapshot.session_id.is_none()
+        && snapshot.revision == 0
+        && !snapshot.has_pages()
+        && snapshot.archived.is_empty()
+        && snapshot.unavailable.is_none()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SidePanelPageStatus {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_successful_update_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub source_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_opened_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_from_session: Option<String>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl SidePanelPageStatus {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// Archived metadata only. Bodies are read only when reopening a page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SidePanelHistoryEntry {
+    pub id: String,
+    pub title: String,
+    pub file_path: String,
+    #[serde(default)]
+    pub format: SidePanelPageFormat,
+    #[serde(default)]
+    pub source: SidePanelPageSource,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "SidePanelPageStatus::is_default")]
+    pub status: SidePanelPageStatus,
+    #[serde(default)]
+    pub archived_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_path: Option<String>,
 }

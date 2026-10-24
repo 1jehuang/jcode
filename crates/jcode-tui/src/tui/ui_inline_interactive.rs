@@ -173,31 +173,9 @@ fn route_detail_is_limited(detail: &str) -> bool {
         || lower.contains("provider will initialize")
 }
 
-fn selected_route_notice_text(
-    picker: &crate::tui::InlineInteractiveState,
-    route: Option<&crate::tui::PickerOption>,
-) -> Option<(String, bool)> {
-    if picker.kind != crate::tui::PickerKind::Model {
-        return None;
-    }
-    let route = route?;
-    let unavailable = !route.available;
-    let detail = route_detail_display_text(&route.detail, unavailable)?;
-    if unavailable {
-        return Some((format!("× {}", detail), true));
-    }
-    if route_detail_is_limited(&route.detail) {
-        return Some((format!("⚠ {}", detail), true));
-    }
-    if route
-        .detail
-        .to_ascii_lowercase()
-        .contains("inference profile")
-    {
-        return Some((format!("ⓘ {}", detail), false));
-    }
-    None
-}
+#[path = "ui_inline_interactive/notice.rs"]
+mod notice;
+use notice::selected_route_notice_text;
 
 fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<&'static str> {
     let is_swarm_agent_model_picker = picker.kind == crate::tui::PickerKind::Model
@@ -310,11 +288,20 @@ fn account_picker_entry_title(
     (format!("{}{}", provider_prefix, display_name), prefix_chars)
 }
 
-fn account_inline_interactive_state_label(entry: &crate::tui::PickerEntry) -> &'static str {
+fn account_inline_interactive_state_label(entry: &crate::tui::PickerEntry) -> &str {
+    if matches!(entry.action, crate::tui::PickerAction::Panel { .. }) {
+        return entry
+            .active_option()
+            .map(|route| route.provider.as_str())
+            .unwrap_or("-");
+    }
     entry.account_state_label().unwrap_or("-")
 }
 
 fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: usize) -> usize {
+    if picker.kind == crate::tui::PickerKind::Panels {
+        return max_width;
+    }
     let marker_width = 3usize;
     let is_preview = picker.preview;
     const WIDTH_SCAN_LIMIT: usize = 200;
@@ -686,7 +673,14 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
             via_width = via_width.saturating_sub(via_reduction);
         }
     }
-    let account_state_width = (max_account_state_len + 1).clamp(7, 10);
+    let state_cap = if picker.kind == crate::tui::PickerKind::Panels {
+        24
+    } else {
+        10
+    };
+    let account_state_width = (max_account_state_len + 1)
+        .clamp(7, state_cap)
+        .min(width.saturating_sub(marker_width));
     let account_title_width = width.saturating_sub(marker_width + account_state_width);
     let model_width = width.saturating_sub(marker_width + provider_width + via_width);
 

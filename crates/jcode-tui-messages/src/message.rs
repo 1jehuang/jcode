@@ -279,15 +279,31 @@ impl DisplayMessage {
         }
         let header = prefix.strip_prefix("[tool timing:")?.split_once(']')?.0;
         let value = header.split_once("duration=")?.1.trim();
+        // Output may be truncated or merely resemble a timing header. Invalid
+        // metadata leaves the duration unknown without rejecting tool content.
         let seconds = if let Some(ms) = value.strip_suffix("ms") {
-            ms.parse::<u64>().ok()? as f64 / 1000.0
+            let Ok(ms) = ms.parse::<u64>() else {
+                return None;
+            };
+            ms as f64 / 1000.0
         } else if let Some((minutes, seconds)) = value.split_once("m ") {
-            minutes.parse::<u64>().ok()? as f64 * 60.0
-                + seconds.strip_suffix('s')?.parse::<u64>().ok()? as f64
+            let Ok(minutes) = minutes.parse::<u64>() else {
+                return None;
+            };
+            let Ok(seconds) = seconds.strip_suffix('s')?.parse::<u64>() else {
+                return None;
+            };
+            minutes as f64 * 60.0 + seconds as f64
         } else if let Some(minutes) = value.strip_suffix('m') {
-            minutes.parse::<u64>().ok()? as f64 * 60.0
+            let Ok(minutes) = minutes.parse::<u64>() else {
+                return None;
+            };
+            minutes as f64 * 60.0
         } else {
-            value.strip_suffix('s')?.parse::<f64>().ok()?
+            let Ok(seconds) = value.strip_suffix('s')?.parse::<f64>() else {
+                return None;
+            };
+            seconds
         };
         (seconds.is_finite() && seconds >= 0.0 && seconds <= f32::MAX as f64)
             .then_some(seconds as f32)
@@ -508,6 +524,12 @@ mod tests {
             "[tool timing: duration=-1s]",
             "[tool timing: duration=infs]",
             "[tool timing: duration=oops]",
+            "[tool timing: duration=oopsms]",
+            "[tool timing: duration=oopsm 2s]",
+            "[tool timing: duration=1m oopss]",
+            "[tool timing: duration=oopsm]",
+            "[tool timing: duration=oopss]",
+            "[tool timing: duration=18446744073709551616ms]",
         ] {
             assert_eq!(DisplayMessage::tool_duration_from_output(output), None);
         }

@@ -465,17 +465,16 @@ fn merge_all_of_branches(out: &mut Map<String, Value>) {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let mut required: Vec<String> = out
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|names| {
-            names
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // An absent or non-array required keyword contributes no names. Branch
+    // requirements can still be merged into this schema below.
+    let mut required: Vec<String> = match out.get("required").and_then(Value::as_array) {
+        Some(names) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
 
     for branch in &branches {
         let Some(branch) = branch.as_object() else {

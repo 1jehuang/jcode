@@ -96,6 +96,8 @@ mod onboarding_flow_control;
 pub(crate) mod onboarding_graph;
 mod onboarding_repair;
 mod onboarding_sim;
+mod panel_history;
+mod panel_session;
 mod productivity;
 mod prompt_history;
 mod remote;
@@ -1506,7 +1508,6 @@ pub struct App {
     last_visible_diagram_hash: Option<u64>,
     // Whether the user is dragging the diagram pane border
     diagram_pane_dragging: bool,
-    // Scroll offset for pinned diff pane
     diff_pane_scroll: usize,
     diff_pane_scroll_x: i32,
     side_panel_image_zoom_percent: u8,
@@ -1515,6 +1516,8 @@ pub struct App {
     diff_pane_focus: bool,
     diff_pane_auto_scroll: bool,
     side_panel: crate::side_panel::SidePanelSnapshot,
+    panel_sessions: panel_session::PanelSessions,
+    pending_panel_action: Option<(String, String, String)>,
     observe_mode_enabled: bool,
     observe_page_markdown: String,
     observe_page_updated_at_ms: u64,
@@ -1555,13 +1558,9 @@ pub struct App {
     last_side_panel_focus_id: Option<String>,
     // Side panel takes over the whole transcript column (Alt+M cycle: split -> fullscreen -> hidden).
     side_panel_fullscreen: bool,
-    // User explicitly hid the side panel with the side-panel toggle key. While set, incoming snapshots may update
-    // pages but must not reopen the panel by restoring focused_page_id.
+    // Content updates may replace pages, but cannot undo a user dismissal.
     side_panel_user_hidden: bool,
-    // True when the user explicitly hid the side panel (e.g. Alt+M) rather than
-    // it being auto-hidden. This makes the hide "sticky" so transient image
-    // repopulation (such as after a server reload/reconnect) does not re-reveal
-    // a panel the user deliberately closed.
+    // Explicit dismissal stays sticky across image repopulation and reconnects.
     side_panel_explicit_hidden: bool,
     // Pin read images to side pane
     pin_images: bool,

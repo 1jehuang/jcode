@@ -906,7 +906,15 @@ impl Provider for AntigravityProvider {
                 .iter()
                 .find(|entry| entry.id == id)
                 .and_then(|entry| entry.max_tokens)
-                .and_then(|limit| usize::try_from(limit).ok())
+                .and_then(|limit| match usize::try_from(limit) {
+                    Ok(limit) => Some(limit),
+                    Err(err) => {
+                        jcode_base::logging::warn(&format!(
+                            "Antigravity context limit for {id} is out of range; using fallback: {err}"
+                        ));
+                        None
+                    }
+                })
                 .filter(|limit| *limit > 0)
         };
         limit_for(&resolved)

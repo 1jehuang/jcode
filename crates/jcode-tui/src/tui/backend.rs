@@ -483,6 +483,7 @@ impl RemoteConnection {
             | Request::GetHistory { id }
             | Request::ResumeSession { id, .. }
             | Request::GetModelCatalog { id, .. }
+            | Request::PanelAction { id, .. }
             | Request::AccountUsage { id }
             | Request::GetState { id } => Some(*id),
             _ => None,
@@ -785,25 +786,6 @@ impl RemoteConnection {
         self.has_loaded_history = false;
         self.send_request(Request::RewindUndo { id }).await?;
         Ok(id)
-    }
-
-    /// Cycle the active model on the server
-    pub async fn cycle_model(&mut self, direction: i8) -> Result<()> {
-        let request = Request::CycleModel {
-            id: self.next_request_id,
-            direction,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Trigger a background refresh of available models on the server.
-    pub async fn refresh_models(&mut self) -> Result<()> {
-        let request = Request::RefreshModels {
-            id: self.next_request_id,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
     }
 
     /// Set the active model on the server
@@ -1620,6 +1602,9 @@ impl RemoteEventState for ReplayRemoteState {
 
     fn mark_history_loaded(&mut self) {}
 }
+
+#[path = "backend/session_controls.rs"]
+mod session_controls;
 
 #[cfg(test)]
 #[path = "backend_tests.rs"]

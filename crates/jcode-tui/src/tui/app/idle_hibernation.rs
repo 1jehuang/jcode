@@ -504,7 +504,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("Hibernated"));
-        assert!(screen.contains("private mem"));
+        assert_eq!(
+            screen.contains("private mem"),
+            app.idle_hibernation.rss_before.is_some() && app.idle_hibernation.rss_after.is_some(),
+            "memory details are shown only when both OS samples are available"
+        );
+        assert!(screen.contains("type to resume"));
         let snapshot = app.hibernation_frame().unwrap().clone();
         app.enter_idle_hibernation(Some(&Buffer::empty(Rect::new(0, 0, 5, 5))));
         assert_eq!(app.hibernation_frame().unwrap(), &snapshot);
@@ -559,7 +564,12 @@ mod tests {
         assert!(hibernation_notice(Some(100 * mib), Some(70 * mib)).contains("-30.0 MiB"));
         assert!(hibernation_notice(Some(70 * mib), Some(100 * mib)).contains("+30.0 MiB"));
         assert!(hibernation_notice(Some(70 * mib), Some(70 * mib)).contains("unchanged"));
-        assert!(!hibernation_notice(None, Some(100)).contains('\n'));
+        for (before, after) in [(None, None), (Some(100), None), (None, Some(100))] {
+            let notice = hibernation_notice(before, after);
+            assert!(!notice.contains('\n'));
+            assert!(!notice.contains("private mem"));
+            assert!(notice.contains("type to resume"));
+        }
     }
 
     #[test]

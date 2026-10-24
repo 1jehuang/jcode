@@ -1,22 +1,42 @@
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use std::io::Read as _;
+mod retention;
+pub use retention::{
+    MAX_ARCHIVED_BYTES, MAX_ARCHIVED_PAGES, archive_page, history, inherit_for_recovery,
+    purge_page, reopen_page,
+};
+mod persistence;
+use persistence::{load_state, save_state};
+mod locking;
+use locking::store_lock;
 
 /// Maximum unencoded PDF payload size.
 pub const MAX_PDF_BYTES: u64 = 20 * 1024 * 1024;
 /// Aggregate decoded PDF budget keeps base64 snapshots within the transport cap.
 pub const MAX_SESSION_PDF_BYTES: u64 = 32 * 1024 * 1024;
 pub use jcode_side_panel_types::{
-    PersistedSidePanelPage, PersistedSidePanelState, SidePanelPage, SidePanelPageFormat,
-    SidePanelPageSource, SidePanelSnapshot, snapshot_is_empty,
+    PersistedSidePanelPage, PersistedSidePanelState, SidePanelHistoryEntry, SidePanelPage,
+    SidePanelPageFormat, SidePanelPageSource, SidePanelPageStatus, SidePanelSnapshot,
+    snapshot_is_empty,
 };
 use std::hash::{Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn snapshot_for_session(session_id: &str) -> Result<SidePanelSnapshot> {
+    let _lock = store_lock()?;
     let state = load_state(session_id)?;
     hydrate_snapshot(state)
+}
+
+/// Report an unavailable inventory without representing a failed read as deletion.
+pub fn snapshot_for_session_or_unavailable(session_id: &str) -> SidePanelSnapshot {
+    snapshot_for_session(session_id).unwrap_or_else(|error| SidePanelSnapshot {
+        session_id: Some(session_id.to_string()),
+        unavailable: Some(format!("{error:#}")),
+        ..Default::default()
+    })
 }
 
 pub fn write_markdown_page(
@@ -58,10 +78,11 @@ pub fn load_file(
     source_path: &Path,
     focus: bool,
 ) -> Result<SidePanelSnapshot> {
+    let _lock = store_lock()?;
     validate_page_id(page_id)?;
     let format = source_format(source_path)?;
 
-    let (_, pdf_data) = read_page_content(source_path, format)?;
+    let (content, pdf_data) = read_page_content(source_path, format)?;
     let source_path =
         std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
 
@@ -85,6 +106,13 @@ pub fn load_file(
         now,
         focus,
     );
+    retention::cache_loaded(
+        session_id,
+        &mut state,
+        page_id,
+        &content,
+        pdf_data.as_deref(),
+    )?;
     save_state(session_id, &state)?;
 
     hydrate_snapshot(state)
@@ -94,56 +122,15 @@ pub fn refresh_linked_page_content(
     snapshot: &mut SidePanelSnapshot,
     page_id: Option<&str>,
 ) -> bool {
-    let target_page_id = page_id.or(snapshot.focused_page_id.as_deref());
-    let mut changed = false;
-
-    for page in &mut snapshot.pages {
-        if page.source != SidePanelPageSource::LinkedFile {
-            continue;
-        }
-        if let Some(target_page_id) = target_page_id
-            && page.id != target_page_id
-            // PDF pages share a session-wide budget. A nonfocused PDF growing
-            // or shrinking can change whether the focused page can be loaded.
-            && page.format != SidePanelPageFormat::Pdf
-        {
-            continue;
-        }
-
-        let next_revision = linked_file_revision(Path::new(&page.file_path));
-        if next_revision == page.updated_at_ms {
-            continue;
-        }
-
-        let (content, pdf_data) = hydrated_content(Path::new(&page.file_path), page.format);
-        page.content = content;
-        page.pdf_data = pdf_data;
-        page.updated_at_ms = next_revision;
-        changed = true;
-    }
-
-    if changed {
-        let mut budget = MAX_SESSION_PDF_BYTES;
-        for page in &mut snapshot.pages {
-            // Reconsider all PDFs when budget changes, including a previously
-            // downgraded page whose own file revision has not changed.
-            if page.source == SidePanelPageSource::LinkedFile
-                && page.format == SidePanelPageFormat::Pdf
-            {
-                (page.content, page.pdf_data) =
-                    hydrated_content(Path::new(&page.file_path), page.format);
-                page.updated_at_ms = linked_file_revision(Path::new(&page.file_path));
-            }
-            enforce_pdf_budget(&mut page.content, &mut page.pdf_data, &mut budget);
-        }
-    }
-    changed
+    retention::refresh_snapshot(snapshot, page_id)
 }
 
 pub fn focus_page(session_id: &str, page_id: &str) -> Result<SidePanelSnapshot> {
+    let _lock = store_lock()?;
     validate_page_id(page_id)?;
     let mut state = load_state(session_id)?;
-    if state.pages.iter().any(|page| page.id == page_id) {
+    if let Some(page) = state.pages.iter_mut().find(|page| page.id == page_id) {
+        page.status.last_opened_at_ms = now_ms();
         state.focused_page_id = Some(page_id.to_string());
         state.focus_revision = next_focus_revision(state.focus_revision);
         save_state(session_id, &state)?;
@@ -154,27 +141,7 @@ pub fn focus_page(session_id: &str, page_id: &str) -> Result<SidePanelSnapshot> 
 }
 
 pub fn delete_page(session_id: &str, page_id: &str) -> Result<SidePanelSnapshot> {
-    validate_page_id(page_id)?;
-    let mut state = load_state(session_id)?;
-    let before = state.pages.len();
-    state.pages.retain(|page| page.id != page_id);
-    if state.pages.len() == before {
-        anyhow::bail!("Side panel page not found: {}", page_id);
-    }
-
-    let page_path = session_dir(session_id)?.join(format!("{}.md", page_id));
-    let _ = std::fs::remove_file(page_path);
-
-    if state.focused_page_id.as_deref() == Some(page_id) {
-        state.focused_page_id = state
-            .pages
-            .iter()
-            .max_by_key(|page| page.updated_at_ms)
-            .map(|page| page.id.clone());
-    }
-
-    save_state(session_id, &state)?;
-    hydrate_snapshot(state)
+    purge_page(session_id, page_id)
 }
 
 pub fn status_output(snapshot: &SidePanelSnapshot) -> String {
@@ -221,6 +188,7 @@ fn write_page(
     focus: bool,
     append: bool,
 ) -> Result<SidePanelSnapshot> {
+    let _lock = store_lock()?;
     validate_page_id(page_id)?;
     let dir = session_dir(session_id)?;
     crate::storage::ensure_dir(&dir)?;
@@ -237,9 +205,14 @@ fn write_page(
         anyhow::bail!("cannot append Markdown to a PDF panel; use write to replace it");
     }
 
-    let combined_content = if append && page_path.exists() {
-        let mut existing = std::fs::read_to_string(&page_path)
-            .with_context(|| format!("failed to read {}", page_path.display()))?;
+    let prefix_path = state
+        .pages
+        .iter()
+        .find(|page| page.id == page_id)
+        .map(|page| Path::new(page.cache_path.as_deref().unwrap_or(&page.file_path)));
+    let combined_content = if append && let Some(prefix_path) = prefix_path {
+        let mut existing = std::fs::read_to_string(prefix_path)
+            .with_context(|| format!("failed to read {}", prefix_path.display()))?;
         if !existing.is_empty() && !existing.ends_with('\n') {
             existing.push('\n');
         }
@@ -249,8 +222,7 @@ fn write_page(
         content.to_string()
     };
 
-    std::fs::write(&page_path, &combined_content)
-        .with_context(|| format!("failed to write {}", page_path.display()))?;
+    retention::atomic_content(&page_path, combined_content.as_bytes())?;
 
     upsert_page_record(
         &mut state,
@@ -299,9 +271,20 @@ fn upsert_page_record(
         existing.file_path = file_path;
         existing.format = format;
         existing.source = source;
+        if source == SidePanelPageSource::Managed {
+            existing.cache_path = None;
+        }
         existing.updated_at_ms = updated_at_ms;
+        existing.status.last_successful_update_ms = updated_at_ms;
+        existing.status.stale_reason = None;
     } else {
         state.pages.push(PersistedSidePanelPage {
+            status: SidePanelPageStatus {
+                last_successful_update_ms: updated_at_ms,
+                last_opened_at_ms: updated_at_ms,
+                ..Default::default()
+            },
+            cache_path: None,
             id: page_id.to_string(),
             title: title
                 .map(str::trim)
@@ -315,6 +298,7 @@ fn upsert_page_record(
         });
     }
 
+    state.archived.retain(|page| page.id != page_id);
     state.pages.sort_by(|a, b| {
         b.updated_at_ms
             .cmp(&a.updated_at_ms)
@@ -322,6 +306,9 @@ fn upsert_page_record(
     });
 
     if focus {
+        if let Some(page) = state.pages.iter_mut().find(|p| p.id == page_id) {
+            page.status.last_opened_at_ms = now_ms();
+        }
         state.focus_revision = next_focus_revision(state.focus_revision);
     }
     if focus {
@@ -330,60 +317,11 @@ fn upsert_page_record(
 }
 
 fn hydrate_snapshot(state: PersistedSidePanelState) -> Result<SidePanelSnapshot> {
-    let mut pdf_budget = MAX_SESSION_PDF_BYTES;
-    let pages = state
-        .pages
-        .into_iter()
-        .map(|page| {
-            let (mut content, mut pdf_data) = if page.source == SidePanelPageSource::Ephemeral {
-                (String::new(), None)
-            } else {
-                hydrated_content(Path::new(&page.file_path), page.format)
-            };
-            enforce_pdf_budget(&mut content, &mut pdf_data, &mut pdf_budget);
-            let updated_at_ms = match page.source {
-                SidePanelPageSource::Managed => page.updated_at_ms,
-                SidePanelPageSource::LinkedFile => linked_file_revision(Path::new(&page.file_path)),
-                SidePanelPageSource::Ephemeral => page.updated_at_ms,
-            };
-            SidePanelPage {
-                id: page.id,
-                title: page.title,
-                file_path: page.file_path,
-                format: page.format,
-                source: page.source,
-                content: if page.source == SidePanelPageSource::Ephemeral {
-                    String::new()
-                } else {
-                    content
-                },
-                pdf_data,
-                updated_at_ms,
-            }
-        })
-        .collect();
-
-    Ok(SidePanelSnapshot {
-        focus_revision: state.focus_revision,
-        focused_page_id: state.focused_page_id,
-        pages,
-    })
-}
-
-fn load_state(session_id: &str) -> Result<PersistedSidePanelState> {
-    let path = state_file(session_id)?;
-    if !path.exists() {
-        return Ok(PersistedSidePanelState::default());
-    }
-    crate::storage::read_json(&path)
-}
-
-fn save_state(session_id: &str, state: &PersistedSidePanelState) -> Result<()> {
-    let path = state_file(session_id)?;
-    crate::storage::write_json_fast(&path, state)
+    retention::hydrate(state)
 }
 
 fn session_dir(session_id: &str) -> Result<PathBuf> {
+    validate_page_id(session_id)?;
     let base = crate::storage::jcode_dir()?.join("side_panel");
     Ok(base.join(session_id))
 }
@@ -406,7 +344,7 @@ fn validate_page_id(page_id: &str) -> Result<()> {
     {
         anyhow::bail!("page_id must use only ASCII letters, digits, underscore, dash, or dot");
     }
-    if page_id.contains("..") {
+    if page_id == "." || page_id.contains("..") {
         anyhow::bail!("page_id cannot contain '..'");
     }
     if Path::new(page_id).components().count() != 1 {
@@ -453,7 +391,7 @@ fn validate_pdf_budget(
         .pages
         .iter()
         .filter(|p| p.id != replacing && p.format == SidePanelPageFormat::Pdf)
-        .filter_map(|p| std::fs::metadata(&p.file_path).ok())
+        .filter_map(|p| std::fs::metadata(p.cache_path.as_deref().unwrap_or(&p.file_path)).ok())
         .map(|m| m.len())
         .filter(|len| *len <= MAX_PDF_BYTES)
         .sum();
@@ -520,6 +458,12 @@ fn read_page_content(path: &Path, format: SidePanelPageFormat) -> Result<(String
                 "invalid PDF signature: {}",
                 path.display()
             );
+            anyhow::ensure!(
+                bytes.windows(5).any(|part| part == b"%%EOF")
+                    && bytes.windows(9).any(|part| part == b"startxref"),
+                "truncated or malformed PDF: {}",
+                path.display()
+            );
             Ok((
                 format!(
                     "PDF document: `{}`\n\nOpen this panel in the desktop app to view the PDF.",
@@ -570,6 +514,30 @@ fn linked_file_revision(path: &Path) -> u64 {
 
     hasher.finish()
 }
+
+#[cfg(test)]
+#[path = "side_panel/backup_io_tests.rs"]
+mod backup_io_tests;
+
+#[cfg(test)]
+#[path = "side_panel/backup_repair_tests.rs"]
+mod backup_repair_tests;
+
+#[cfg(test)]
+#[path = "side_panel/review_regression_tests.rs"]
+mod review_regression_tests;
+
+#[cfg(test)]
+#[path = "side_panel/retention_process_tests.rs"]
+mod retention_process_tests;
+
+#[cfg(test)]
+#[path = "side_panel/retention_limits_tests.rs"]
+mod retention_limits_tests;
+
+#[cfg(test)]
+#[path = "side_panel/retention_tests.rs"]
+mod retention_tests;
 
 #[cfg(test)]
 #[path = "side_panel_tests.rs"]

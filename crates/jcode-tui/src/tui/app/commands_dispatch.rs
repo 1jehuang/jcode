@@ -213,6 +213,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         if super::commands::handle_cancel_command(app, trimmed)
             || super::commands::handle_help_command(app, trimmed)
             || super::commands::handle_diff_command(app, trimmed)
+            || super::panel_history::handle_panels_command(app, trimmed)
         {
             return true;
         }

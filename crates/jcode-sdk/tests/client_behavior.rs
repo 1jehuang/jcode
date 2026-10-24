@@ -897,13 +897,13 @@ fn side_panel_events_hydrate_before_attach_and_route_only_to_matching_session() 
                     ApiEvent::SidePanelState {
                         session_id: sid.into(),
                         snapshot: jcode_sdk::SidePanelSnapshot {
-                            focus_revision: 0,
                             focused_page_id: Some("notes".into()),
                             pages: vec![jcode_sdk::SidePanelPage {
                                 id: "notes".into(),
                                 content: "# Notes".into(),
                                 ..Default::default()
                             }],
+                            ..Default::default()
                         },
                     },
                     writer,

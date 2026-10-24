@@ -733,7 +733,7 @@ async fn send_history_from_persisted_session(
         history_base.filter(|_| messages_base_count.is_some()),
     );
     let side_panel = super::client_writer::side_panel_for_client(
-        crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
+        crate::side_panel::snapshot_for_session_or_unavailable(session_id),
         supports_pdf_panels,
     );
 
@@ -977,7 +977,7 @@ async fn send_history_with_guard(
 
     let side_panel_start = Instant::now();
     let side_panel = super::client_writer::side_panel_for_client(
-        crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
+        crate::side_panel::snapshot_for_session_or_unavailable(session_id),
         supports_pdf_panels,
     );
     let side_panel_ms = side_panel_start.elapsed().as_millis();

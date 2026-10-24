@@ -1,4 +1,6 @@
 use super::*;
+#[path = "ui_pinned_header.rs"]
+mod header;
 mod ui_pinned_table;
 use ui_pinned_table::is_rendered_table_line;
 
@@ -567,69 +569,27 @@ pub(super) fn draw_side_panel_markdown(
         image_zoom_percent,
     );
 
-    let mut title_parts = vec![Span::styled(" side ", Style::default().fg(tool_color()))];
-    title_parts.push(Span::styled(
-        page.title.clone(),
-        Style::default()
-            .fg(rgb(180, 200, 255))
-            .add_modifier(ratatui::style::Modifier::BOLD),
-    ));
-    title_parts.push(Span::styled(
-        format!(" {}/{} ", page_index, page_count),
-        Style::default().fg(dim_color()),
-    ));
-    title_parts.push(Span::styled(
-        format!(
-            " {} {} ",
-            crate::tui::keybind::side_panel_toggle_key_label(),
-            if app.side_panel_fullscreen() {
-                "hide"
-            } else {
-                "fullscreen"
-            }
-        ),
-        Style::default().fg(dim_color()),
-    ));
-    if focused {
-        title_parts.push(Span::styled(
-            " j/k scroll ",
-            Style::default().fg(dim_color()),
-        ));
-        if page_count > 1 {
-            title_parts.push(Span::styled(
-                " Tab/Shift-Tab pages ",
-                Style::default().fg(dim_color()),
-            ));
-        }
-        title_parts.push(Span::styled(
-            " Esc focus chat ",
-            Style::default().fg(dim_color()),
-        ));
-    }
-    if rendered_full_width.has_scrollable_images {
-        title_parts.push(Span::styled(
-            " readable ",
-            Style::default()
-                .fg(accent_color())
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ));
-        title_parts.push(Span::styled(" scroll ", Style::default().fg(dim_color())));
-        if focused {
-            title_parts.push(Span::styled(
-                " h/l pan +/- zoom ",
-                Style::default().fg(dim_color()),
-            ));
-        }
-    }
-    if image_zoom_percent != 100 {
-        title_parts.push(Span::styled(
-            format!(" zoom {}% ", image_zoom_percent),
-            Style::default().fg(accent_color()),
-        ));
-    }
+    let badge = header::freshness_label(
+        page,
+        snapshot.unavailable.as_deref(),
+        chrono::Utc::now().timestamp_millis().max(0) as u64,
+    );
+    let title_line = header::panel_header(
+        &page.title,
+        &badge,
+        header::PanelHeaderOptions {
+            page_index,
+            page_count,
+            fullscreen: app.side_panel_fullscreen(),
+            focused,
+            scrollable_images: rendered_full_width.has_scrollable_images,
+            zoom: image_zoom_percent,
+        },
+        area.width.saturating_sub(1) as usize,
+    );
 
     let Some(content_shell_area) =
-        super::draw_right_rail_chrome(frame, area, Line::from(title_parts), border_style)
+        super::draw_right_rail_chrome(frame, area, title_line, border_style)
     else {
         return;
     };
