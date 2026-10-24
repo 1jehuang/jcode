@@ -675,7 +675,8 @@ fn cache_response_evidence(response: &Value) -> Value {
         "model": identifier("model"),
         "service_tier": identifier("service_tier"),
         "input_tokens": usage.and_then(|value| value.get("input_tokens")).and_then(Value::as_u64),
-        "cached_tokens": usage.and_then(|value| value.pointer("/input_tokens_details/cached_tokens")).and_then(Value::as_u64),
+        "cached_tokens": usage.and_then(|value| extract_input_token_detail(value, "cached_tokens")),
+        "cache_write_tokens": usage.and_then(|value| extract_input_token_detail(value, "cache_write_tokens")),
         "diagnostic_type": allowed_diagnostic("type", &["cache_hit", "cache_miss", "comparison_response_not_found", "unavailable"]),
         "diagnostic_reason": allowed_diagnostic("reason", &[
             "model_changed", "prompt_cache_key_changed", "service_tier_changed", "tools_changed",

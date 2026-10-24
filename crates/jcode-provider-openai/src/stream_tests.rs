@@ -48,6 +48,19 @@ fn cache_response_evidence_does_not_invent_missing_or_malformed_metadata() {
 }
 
 #[test]
+fn cache_response_evidence_matches_compatibility_usage_counters() {
+    let evidence = cache_response_evidence(&serde_json::json!({"usage": {
+        "input_tokens_details": {"cached_tokens": null},
+        "prompt_tokens_details": {"cached_tokens": 1024, "cache_write_tokens": 128}
+    }}));
+    assert_eq!(evidence["cached_tokens"], 1024);
+    assert_eq!(evidence["cache_write_tokens"], 128);
+    let absent = cache_response_evidence(&serde_json::json!({"usage": {"input_tokens": 2048}}));
+    assert!(absent["cached_tokens"].is_null());
+    assert!(absent["cache_write_tokens"].is_null());
+}
+
+#[test]
 fn service_tier_metadata_is_provider_reported_and_precedes_completion() {
     for kind in ["response.created", "response.completed"] {
         for tier in ["default", "priority", "ultrafast"] {
