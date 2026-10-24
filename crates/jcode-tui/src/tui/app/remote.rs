@@ -2094,14 +2094,7 @@ fn handle_disconnected_key_internal(
         }
     }
 
-    let macos_option_shortcut =
-        crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
     if modifiers.contains(KeyModifiers::ALT) && input::handle_alt_key(app, code) {
-        return Ok(());
-    }
-    if let Some(shortcut) = macos_option_shortcut
-        && input::handle_alt_key(app, KeyCode::Char(shortcut))
-    {
         return Ok(());
     }
 

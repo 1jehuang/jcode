@@ -2479,8 +2479,6 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
 
-    let macos_option_shortcut =
-        crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
     if app.toggle_keys.auto_poke.matches(code, modifiers) {
         super::commands::toggle_auto_poke_hotkey_local(app);
         return true;
@@ -2608,11 +2606,6 @@ pub(super) fn handle_pre_control_shortcuts(
     if modifiers.contains(KeyModifiers::ALT) && handle_alt_key(app, code) {
         return true;
     }
-    if let Some(shortcut) = macos_option_shortcut
-        && handle_alt_key(app, KeyCode::Char(shortcut))
-    {
-        return true;
-    }
     if modifiers.contains(KeyModifiers::SUPER) && handle_super_key(app, code) {
         return true;
     }
@@ -2634,9 +2627,7 @@ pub(super) fn handle_visible_copy_shortcut(
     // on-screen [Alt] [⇧] copy badges behave consistently.
     let explicit_shift = modifiers.contains(KeyModifiers::SHIFT);
     let implicit_shift = c.is_ascii_uppercase();
-    let macos_option_shift =
-        crate::tui::keybind::shortcut_char_for_macos_option_shift_key(code, modifiers).is_some();
-    if !explicit_shift && !implicit_shift && !macos_option_shift {
+    if !explicit_shift && !implicit_shift {
         // Some terminals report Alt+Shift+E as Alt+lowercase `e` with no
         // explicit SHIFT modifier. Keep the relaxed fallback scoped to the
         // expand badge so plain Alt+letter copy shortcuts do not become active.
@@ -2677,12 +2668,6 @@ pub(super) fn handle_visible_copy_shortcut(
 }
 
 fn visible_copy_shortcut_key(code: KeyCode, modifiers: KeyModifiers) -> Option<char> {
-    if let Some(key) =
-        crate::tui::keybind::shortcut_char_for_macos_option_shift_key(code, modifiers)
-    {
-        return Some(key);
-    }
-
     let KeyCode::Char(c) = code else {
         return None;
     };

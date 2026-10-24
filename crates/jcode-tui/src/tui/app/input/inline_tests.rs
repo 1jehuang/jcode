@@ -1,4 +1,21 @@
 #[test]
+fn native_text_is_not_a_copy_badge_shortcut() {
+    for text in ['Ç', 'ı'] {
+        assert_eq!(
+            super::visible_copy_shortcut_key(KeyCode::Char(text), KeyModifiers::empty()),
+            None,
+        );
+    }
+    assert_eq!(
+        super::visible_copy_shortcut_key(
+            KeyCode::Char('C'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ),
+        Some('C'),
+    );
+}
+
+#[test]
 fn ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch() {
     if crate::tui::app::commands_dispatch::ssh_test_runs_in_child(
         "ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch",
