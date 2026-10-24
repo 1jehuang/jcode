@@ -1337,8 +1337,8 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "image label line must render in the live frame, got:\n{rendered}"
     );
     assert!(
-        rendered.contains("click to show image"),
-        "tool image must start collapsed: {rendered}"
+        !rendered.contains("click to show image"),
+        "tool image must be shown by default: {rendered}"
     );
     assert!(
         !rendered.contains("IIMG:"),
@@ -1357,7 +1357,7 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         }
         // The transcript also shows the tool-call row ("read shot.png"); the
         // image label row is the one that carries the show/hide badge keys.
-        if !line.contains("shot.png") || !line.contains("show image") {
+        if !line.contains("shot.png") || !line.contains("1×1") {
             continue;
         }
         // Click the first cell of the label text (the hit-region is the whole
@@ -1407,7 +1407,7 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
     let expanded = render_and_snap(&app, &mut terminal);
     assert!(
         !expanded.contains("click to show image"),
-        "click should reveal the image: {expanded}"
+        "expanded image must stay visible: {expanded}"
     );
 }
 

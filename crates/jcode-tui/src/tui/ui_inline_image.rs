@@ -695,10 +695,10 @@ fn resolve_item(
         height,
         label,
         uses_text_fallback: mermaid::uses_text_image_fallback(),
-        collapsed_by_default: matches!(
-            image.anchor,
-            Some(crate::session::RenderedImageAnchor::ToolCall { .. })
-        ),
+        // Images render inline by default, including tool-produced ones
+        // (generated images, screenshots). Users can still hide all inline
+        // images with the global toggle.
+        collapsed_by_default: false,
     })
 }
 

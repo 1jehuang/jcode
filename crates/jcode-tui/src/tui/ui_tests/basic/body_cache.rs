@@ -806,8 +806,8 @@ fn test_prepare_body_anchors_tool_image_after_tool_message() {
     );
     let region = &prepared.image_regions[0];
     assert_eq!(region.render, jcode_tui_messages::ImageRegionRender::Fit);
-    assert_eq!(region.width, 0);
-    assert_eq!(region.height, 0, "tool images start collapsed");
+    assert!(region.width > 0);
+    assert!(region.height > 0, "tool images are shown by default");
 
     // The region must sit between the tool message and the assistant reply.
     let plain = &prepared.wrapped_plain_lines;
