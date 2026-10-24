@@ -203,15 +203,14 @@ fn create_body(
             .to_string(),
         None => uuid::Uuid::new_v4().to_string(),
     };
-    if let Some(name) = &name {
-        if name.is_empty()
+    if let Some(name) = &name
+        && (name.is_empty()
             || name.len() > 64
             || !name
                 .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-        {
-            bail!("name must be 1..64 letters, digits, hyphens or underscores");
-        }
+                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)))
+    {
+        bail!("name must be 1..64 letters, digits, hyphens or underscores");
     }
     let mut body = serde_json::json!({"request_id": request_id, "ttl_seconds": ttl_seconds});
     if let Some(name) = name {
