@@ -39,6 +39,7 @@ fn release_policy_is_exact_and_development_has_no_fallback() {
 mod shell {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     struct Fixture {
         dir: tempfile::TempDir,
