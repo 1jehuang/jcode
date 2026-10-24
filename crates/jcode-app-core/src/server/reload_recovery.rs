@@ -340,6 +340,9 @@ pub(super) fn mark_delivered_if_matching_continuation(
     record.status = ReloadRecoveryStatus::Delivered;
     record.delivered_at = Some(chrono::Utc::now().to_rfc3339());
     crate::storage::write_json(&path, &record)?;
+    // Startup GC removes delivered records, so leftover selfdev context must
+    // not outlive delivery or History could rebuild this continuation later.
+    let _ = crate::tool::selfdev::ReloadContext::load_for_session(session_id);
     super::reload_trace::record_value(
         &record.reload_id,
         "intent_delivered",
