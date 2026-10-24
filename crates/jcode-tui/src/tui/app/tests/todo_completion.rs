@@ -68,6 +68,7 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
             "Report task 11",
             "Evidence for task 11",
             "acceptance&#95;blocked",
+            "acceptance path blocked",
             "uncertain",
             "External service unavailable",
             "Show all evidence without another agent turn",

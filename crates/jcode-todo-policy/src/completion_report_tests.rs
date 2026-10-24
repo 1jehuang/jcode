@@ -130,6 +130,24 @@ fn current_weaknesses_use_difficulty_thresholds() {
 }
 
 #[test]
+fn blocked_acceptance_and_exhausted_constraints_stay_prominent() {
+    let report = render_completion_report(
+        &[],
+        &TodoPlan::default(),
+        &[TodoGoal {
+            difficulty: Some(Difficulty::Routine),
+            feedback_loop_relevance: Some(FeedbackLoopRelevance::AcceptanceBlocked),
+            iteration_maturity: Some(IterationMaturity::ConstraintsExhausted),
+            stopping_evidence: Some("Service unavailable".into()),
+            ..Default::default()
+        }],
+    );
+    let current = report.split("## Earlier").next().unwrap();
+    assert!(current.contains("acceptance path blocked"));
+    assert!(current.contains("stopped at constraints&#95;exhausted"));
+}
+
+#[test]
 fn missing_cancelled_unicode_and_hostile_markdown_are_display_only() {
     let todo = TodoItem {
         content: "日本語 🦀\n# fake [link](javascript:bad) <script> *bold*".into(),

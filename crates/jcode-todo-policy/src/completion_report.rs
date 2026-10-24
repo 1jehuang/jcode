@@ -52,6 +52,25 @@ fn issue(out: &mut Vec<String>, label: &str, passes: bool) {
 
 fn goal_issues(goal: &TodoGoal) -> Vec<String> {
     let mut issues = Vec::new();
+    // A permissive policy threshold is not proof of an accepted outcome.
+    // Blockers and non-outcome stopping reasons stay visible in the report
+    // even when they are an honest reason to stop automated follow-ups.
+    if goal.feedback_loop_relevance == Some(FeedbackLoopRelevance::AcceptanceBlocked) {
+        issues.push("acceptance path blocked".into());
+    }
+    if let Some(state) = goal.iteration_maturity
+        && matches!(
+            state,
+            IterationMaturity::ConstraintsExhausted
+                | IterationMaturity::BudgetExhausted
+                | IterationMaturity::PlateauConfirmed
+        )
+    {
+        issues.push(format!(
+            "stopped at {} rather than outcome_reached",
+            state.as_str()
+        ));
+    }
     issue(
         &mut issues,
         "feedback loop description missing",
@@ -219,7 +238,10 @@ pub fn render_completion_report(todos: &[TodoItem], plan: &TodoPlan, goals: &[To
         "# Todo completion report\n\nDisplay only. These are recorded descriptive self-assessments, not independently proven results. Status alone does not establish successful validation. Historical comparisons use current policy thresholds and current recorded difficulty.\n\n",
     );
     for (heading, issues) in [
-        ("Current weak or missing assessments", current),
+        (
+            "Current weaknesses, limitations, or missing assessments",
+            current,
+        ),
         (
             "Earlier weak states (including subsequently improved assessments)",
             earlier,
