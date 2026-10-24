@@ -98,6 +98,8 @@ fn render_tool_message_compacts_every_multi_file_diff_header() {
         tool_calls: Vec::new(),
         duration_secs: None,
         title: None,
+        timestamp: None,
+        tool_duration_ms: None,
         tool_data: Some(crate::message::ToolCall {
             id: "compact_multi_file_headers".into(),
             name: "apply_patch".into(),
@@ -3043,6 +3045,8 @@ fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
                 tool_calls: Vec::new(),
                 duration_secs: None,
                 title: None,
+                timestamp: None,
+                tool_duration_ms: None,
                 tool_data: Some(crate::message::ToolCall {
                     id: "failure_style".to_string(),
                     name: name.to_string(),
@@ -3120,6 +3124,7 @@ fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason()
         role: "tool".to_string(),
         content: "--- [1] read ---\nError: permission denied 文件\nFull diagnostic\n\n--- [2] bash ---\nok\n\nCompleted: 1 succeeded, 1 failed".to_string(),
         tool_calls: Vec::new(), duration_secs: None, title: None,
+        timestamp: None, tool_duration_ms: None,
         tool_data: Some(crate::message::ToolCall {
             id: "mixed".to_string(), name: "batch".to_string(),
             input: serde_json::json!({"tool_calls": [
@@ -3172,6 +3177,8 @@ fn render_tool_message_batch_level_failure_does_not_invent_successful_children()
         tool_calls: Vec::new(),
         duration_secs: None,
         title: None,
+        timestamp: None,
+        tool_duration_ms: None,
         tool_data: Some(crate::message::ToolCall {
             id: "invalid_batch".to_string(),
             name: "batch".to_string(),
