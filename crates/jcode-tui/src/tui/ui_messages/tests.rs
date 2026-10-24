@@ -1312,9 +1312,8 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    for assessment in ["Closed feedback loop strong", "Delivery workflow_validated"] {
-        assert!(plain.contains(assessment), "{plain}");
-    }
+    assert!(plain.contains("Closed feedback loop strong"), "{plain}");
+    assert!(!plain.contains("Delivery "), "{plain}");
     assert!(!plain.contains("Relevance representative"), "{plain}");
     assert!(!plain.contains("Coverage main_paths"), "{plain}");
     // Only the plan-level assessment renders above the groups.
@@ -1543,7 +1542,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         .join("\n");
 
     assert!(plain.contains("✓ All quality gates passing"), "{plain}");
-    assert!(plain.contains("Delivery outcome_delivered"), "{plain}");
+    assert!(!plain.contains("Delivery "), "{plain}");
     assert!(!plain.contains("Closed feedback loop closed"), "{plain}");
     assert!(!plain.contains("Relevance acceptance_aligned"), "{plain}");
     assert!(
@@ -1592,7 +1591,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         .join("\n");
 
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
-    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
+    assert!(!plain.contains("Delivery "), "{plain}");
     assert!(
         lines.iter().all(|line| line.width() <= 38),
         "card exceeded its 38-column content budget: {plain}"
@@ -1724,7 +1723,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
     assert!(plain.contains("Relevance missing"), "{plain}");
     assert!(plain.contains("Coverage missing"), "{plain}");
-    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
+    assert!(!plain.contains("Delivery "), "{plain}");
     assert!(
         plain.contains("● Render the todo result · plausible"),
         "{plain}"
@@ -2229,10 +2228,8 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
 
     assert!(plain.contains("ship outcome  ●"), "{plain}");
     assert!(plain.contains("Deliver the complete workflow"), "{plain}");
-    assert!(
-        plain.contains("✓ All quality gates passing · Delivery workflow_validated"),
-        "{plain}"
-    );
+    assert!(plain.contains("✓ All quality gates passing"), "{plain}");
+    assert!(!plain.contains("Delivery "), "{plain}");
     assert!(!plain.contains("todo 1 items"), "{plain}");
 }
 

@@ -1542,21 +1542,6 @@ fn todo_goal_score_segments(goal: &crate::todo::TodoGoal) -> Vec<Vec<Span<'stati
         ]);
     }
 
-    // Delivery is progress toward the outcome, not a quality gate. Keep it
-    // visible and visually separate from failures so it cannot read as one.
-    if let Some(state) = goal.delivery_state {
-        let color = if state >= crate::todo::DeliveryState::WorkflowValidated {
-            todo_score_color()
-        } else if state == crate::todo::DeliveryState::Integrated {
-            todo_warning_color()
-        } else {
-            todo_failure_color()
-        };
-        segments.push(vec![
-            Span::styled("Delivery ", Style::default().fg(todo_label_color())),
-            Span::styled(state.as_str().to_string(), Style::default().fg(color)),
-        ]);
-    }
     segments
 }
 
