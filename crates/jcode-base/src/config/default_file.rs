@@ -159,6 +159,10 @@ diff_mode = "inline"
 # Center all content by default (default: false)
 centered = false
 
+# TUI color theme: "auto"/"system" (detect terminal background), "light", "dark",
+# or a custom theme file name from ~/.jcode/themes/<name>.toml.
+theme = "auto"
+
 # Pin read images to a side pane (default: true)
 pin_images = true
 
@@ -273,9 +277,6 @@ prompt_entry_animation = true
 # Label shown for the Alt/Option modifier in copy badges.
 # Empty = auto ("⌥" on macOS, "Alt" elsewhere). Examples: "Option", "Alt", "⌥".
 # copy_badge_alt_label = ""
-
-# Color theme: "auto" (query the terminal background), "dark", or "light".
-# theme = "auto"
 
 # Per-role color overrides. Every color the TUI renders is configurable: the
 # named roles below are substituted directly, and the ad hoc shades individual

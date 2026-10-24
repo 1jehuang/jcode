@@ -17,6 +17,7 @@ use crate::tui::detect_kv_cache_problem;
 use crate::tui::info_widget::occasional_status_tip;
 use crate::tui::layout_utils;
 use crate::tui::session_facts;
+use jcode_tui_style::theme::input_text_style;
 use ratatui::{prelude::*, style::Modifier, widgets::Paragraph};
 
 fn shell_mode_color() -> Color {
@@ -2893,12 +2894,12 @@ pub(crate) fn wrap_input_text<'a>(
             lines.push(Line::from(vec![
                 Span::styled(num_str.to_string(), Style::default().fg(num_color)),
                 Span::styled(prompt_char.to_string(), Style::default().fg(caret_color)),
-                Span::raw(segment.text.clone()),
+                Span::styled(segment.text.clone(), input_text_style()),
             ]));
         } else {
             lines.push(Line::from(vec![
                 Span::raw(" ".repeat(prompt_len)),
-                Span::raw(segment.text.clone()),
+                Span::styled(segment.text.clone(), input_text_style()),
             ]));
         }
     }

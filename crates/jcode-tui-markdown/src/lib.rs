@@ -519,7 +519,6 @@ fn rendered_rule_width(max_width: Option<usize>) -> usize {
     }
 }
 
-// Colors matching ui.rs palette
 use jcode_tui_workspace::color_support::rgb;
 const MATH_FOREGROUND: (u8, u8, u8) = (255, 255, 255);
 const MATH_INLINE_FOREGROUND: (u8, u8, u8) = (255, 255, 255);
@@ -547,10 +546,10 @@ fn html_fg() -> Color {
     rgb(140, 140, 150)
 }
 fn text_color() -> Color {
-    rgb(200, 200, 195)
+    jcode_tui_style::theme::markdown_text_color()
 }
 fn bold_color() -> Color {
-    rgb(240, 240, 235)
+    jcode_tui_style::theme::bold_color()
 }
 fn heading_h1_color() -> Color {
     rgb(255, 215, 100)
