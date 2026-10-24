@@ -625,4 +625,33 @@ mod tests {
             assert_eq!(out["properties"]["label"]["type"], "string");
         }
     }
+
+    #[test]
+    fn gemini_and_antigravity_collapse_array_type_to_scalar_nullable() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "waiting_on": {
+                    "type": ["array", "null"],
+                    "items": { "type": "string" },
+                    "description": "background task ids"
+                }
+            }
+        });
+        for spec in [
+            &registry::GEMINI,
+            &registry::ANTIGRAVITY_CLAUDE,
+            &registry::ANTIGRAVITY_BRIDGE,
+        ] {
+            let out = dialect::apply(&schema, spec);
+            assert_eq!(out["properties"]["waiting_on"]["type"], "array");
+            assert_eq!(out["properties"]["waiting_on"]["nullable"], true);
+            assert_eq!(out["properties"]["waiting_on"]["items"]["type"], "string");
+            assert!(
+                must_not_contain_unsupported_constructs(&out, spec).is_empty(),
+                "normalized schema must pass conformance for `{}`: {out}",
+                spec.id
+            );
+        }
+    }
 }
