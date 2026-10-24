@@ -4,6 +4,7 @@ use crate::session::Session;
 use crate::storage;
 use crate::{logging, util};
 use ::agentgrep::cli::{FindArgs, FullRegionMode, GrepArgs, OutlineArgs, SmartArgs};
+use ::agentgrep::control::{SearchControl, SearchLimits, with_search_control};
 use ::agentgrep::find::{FindResult, run_find};
 use ::agentgrep::outline::run_outline;
 use ::agentgrep::search::{GrepResult, run_grep};
@@ -18,9 +19,50 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 const AGENTGREP_FOREGROUND_BUDGET: Duration = Duration::from_secs(5);
+
+struct CancelSearchOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelSearchOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Dropping a JoinHandle detaches it. Foreground ownership must instead abort
+/// the async owner, whose cancellation guard signals the blocking worker.
+struct SearchTaskOwner(Option<tokio::task::JoinHandle<Result<ToolOutput>>>);
+
+impl Drop for SearchTaskOwner {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
+fn spawn_cancellable_search(
+    work: impl FnOnce() -> Result<ToolOutput> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<ToolOutput>> {
+    let token = Arc::new(AtomicBool::new(false));
+    let control = SearchControl::new(token.clone(), SearchLimits::default());
+    // Create outside the future so abort before its first poll also cancels.
+    let guard = CancelSearchOnDrop(token);
+    tokio::spawn(async move {
+        let _guard = guard;
+        tokio::task::spawn_blocking(move || {
+            with_search_control(control, work).map_err(anyhow::Error::msg)?
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("agentgrep blocking task failed to join: {err}"))?
+    })
+}
 
 mod args;
 mod context;
@@ -259,8 +301,7 @@ impl Tool for AgentGrepTool {
         // the first cold-cache search feel like it "takes forever" with no
         // spinner and an unresponsive interrupt. This mirrors how the sibling
         // grep/glob/ls tools offload their work.
-        let work_handle =
-            tokio::task::spawn_blocking(move || run_agentgrep_blocking(&params, &ctx));
+        let work_handle = spawn_cancellable_search(move || run_agentgrep_blocking(&params, &ctx));
         await_or_background_search(
             work_handle,
             AGENTGREP_FOREGROUND_BUDGET,
@@ -272,12 +313,13 @@ impl Tool for AgentGrepTool {
 }
 
 async fn await_or_background_search(
-    mut work_handle: tokio::task::JoinHandle<Result<ToolOutput>>,
+    work_handle: tokio::task::JoinHandle<Result<ToolOutput>>,
     foreground_budget: Duration,
     display_name: String,
     session_id: String,
 ) -> Result<ToolOutput> {
-    match tokio::time::timeout(foreground_budget, &mut work_handle).await {
+    let mut owner = SearchTaskOwner(Some(work_handle));
+    match tokio::time::timeout(foreground_budget, owner.0.as_mut().unwrap()).await {
         Ok(joined) => {
             joined.map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?
         }
@@ -289,7 +331,9 @@ async fn await_or_background_search(
                     &session_id,
                     true,
                     false,
-                    work_handle,
+                    // Transfer, do not cancel: the background manager becomes
+                    // the sole owner, including while adoption is awaiting.
+                    owner.0.take().unwrap(),
                 )
                 .await;
             Ok(ToolOutput::new(format!(
@@ -408,8 +452,10 @@ fn execute_linked_agentgrep(
         "find" => {
             let args = build_find_args(params, ctx)?;
             let root = resolve_search_root(ctx, args.path.as_deref())?;
-            let result =
-                filter_find_result_to_exact_file(run_find(&root, &args), exact_file.as_deref());
+            let result = filter_find_result_to_exact_file(
+                run_find(&root, &args).map_err(anyhow::Error::msg)?,
+                exact_file.as_deref(),
+            );
             Ok(ToolOutput::new(render_find_output(&result, &args)).with_title("agentgrep find"))
         }
         "outline" => {
