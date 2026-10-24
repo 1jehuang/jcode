@@ -1,6 +1,36 @@
 use super::*;
 use crate::tui::{AgentModelTarget, PickerEntry, PickerOption};
 
+/// The agent sub-picker a chord opens: Alt+S -> swarm, Alt+P -> memory.
+///
+/// Ctrl cannot carry these: Ctrl+S is the global input-stash chord and Ctrl+M
+/// arrives as Enter on legacy terminals, so the chords live on Alt. macOS
+/// terminals often insert the Option-key character instead of reporting ALT
+/// (e.g. Option+S -> `ß`), so that character is normalized too. Alt+P keeps
+/// clear of Alt+M, which stays free for features that later branches add to
+/// this same picker, so merged stacks never have to renegotiate the chord.
+pub(super) fn agent_model_chord_target(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<AgentModelTarget> {
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    let letter = if modifiers.contains(KeyModifiers::ALT) {
+        match code {
+            KeyCode::Char(c) => Some(c.to_ascii_lowercase()),
+            _ => None,
+        }
+    } else {
+        crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers)
+    }?;
+    match letter {
+        's' => Some(AgentModelTarget::Swarm),
+        'p' => Some(AgentModelTarget::Memory),
+        _ => None,
+    }
+}
+
 pub(super) fn slash_command_preview_filter(input: &str, commands: &[&str]) -> Option<String> {
     let trimmed = input.trim_start();
     for command in commands {
@@ -256,6 +286,70 @@ pub(super) fn agent_model_default_summary(target: AgentModelTarget, app: &App) -
 mod tests {
     use super::*;
     use crate::tui::{PickerAction, PickerEntry, PickerOption};
+
+    #[test]
+    fn agent_model_chord_targets_alt_s_and_alt_p() {
+        assert_eq!(
+            agent_model_chord_target(KeyCode::Char('s'), KeyModifiers::ALT),
+            Some(AgentModelTarget::Swarm)
+        );
+        assert_eq!(
+            agent_model_chord_target(KeyCode::Char('p'), KeyModifiers::ALT),
+            Some(AgentModelTarget::Memory)
+        );
+        // Uppercase Alt+ chords behave the same as lowercase.
+        assert_eq!(
+            agent_model_chord_target(KeyCode::Char('S'), KeyModifiers::ALT),
+            Some(AgentModelTarget::Swarm)
+        );
+    }
+
+    #[test]
+    fn agent_model_chord_targets_macos_option_chars() {
+        // macOS terminals often deliver Option+S / Option+P as the inserted
+        // character (ß / π) with no ALT modifier; the fallback is
+        // macOS-only (see shortcut_char_for_macos_option_key), so the chord
+        // must only resolve there. Plain German/Greek letters elsewhere must
+        // never open a picker.
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                agent_model_chord_target(KeyCode::Char('ß'), KeyModifiers::empty()),
+                Some(AgentModelTarget::Swarm),
+            );
+            assert_eq!(
+                agent_model_chord_target(KeyCode::Char('π'), KeyModifiers::empty()),
+                Some(AgentModelTarget::Memory),
+            );
+        } else {
+            assert_eq!(
+                agent_model_chord_target(KeyCode::Char('ß'), KeyModifiers::empty()),
+                None,
+            );
+            assert_eq!(
+                agent_model_chord_target(KeyCode::Char('π'), KeyModifiers::empty()),
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn agent_model_chord_ignores_ctrl_and_plain_keys() {
+        // Ctrl+S must stay the input-stash chord, not the swarm picker.
+        assert_eq!(
+            agent_model_chord_target(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            None
+        );
+        // Plain typing must never trigger the picker chords.
+        assert_eq!(
+            agent_model_chord_target(KeyCode::Char('s'), KeyModifiers::empty()),
+            None
+        );
+        // Unrelated Alt chords are not agent chords either.
+        assert_eq!(
+            agent_model_chord_target(KeyCode::Char('x'), KeyModifiers::ALT),
+            None
+        );
+    }
 
     #[test]
     fn memory_model_picker_describes_extraction_not_recall() {

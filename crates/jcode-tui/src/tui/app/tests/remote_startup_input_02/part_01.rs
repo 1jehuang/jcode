@@ -205,11 +205,9 @@ fn test_remote_fallback_bedrock_arn_does_not_create_openrouter_route() {
     assert!(routes.iter().any(|route| {
         route.model == model && route.api_method == "bedrock" && route.provider == "AWS Bedrock"
     }));
-    assert!(
-        !routes
-            .iter()
-            .any(|route| route.model == model && route.api_method == "openrouter")
-    );
+    assert!(!routes
+        .iter()
+        .any(|route| route.model == model && route.api_method == "openrouter"));
 }
 
 #[test]

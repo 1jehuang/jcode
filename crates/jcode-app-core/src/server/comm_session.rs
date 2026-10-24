@@ -272,10 +272,27 @@ async fn resolve_coordinator_spawn_identity(
         }
         Err(error) => {
             crate::logging::warn(&format!(
-                "Swarm spawn: failed to load persisted coordinator session {} for model inheritance: {} (spawned agent will use server defaults)",
+                "Swarm spawn: failed to load persisted coordinator session {} for model inheritance: {} (falling back to config default model)",
                 req_session_id, error
             ));
-            CoordinatorSpawnIdentity::default()
+            // Fall back to the config's default model instead of returning
+            // all-None, which would cause spawned agents to silently use a
+            // hardcoded/random provider default instead of the user's
+            // configured default model (issue #981).
+            let config = crate::config::config();
+            let default_model = config.provider.default_model.clone();
+            let default_provider = config.provider.default_provider.clone();
+            let provider_key = default_provider.as_deref().map(str::to_string).or_else(|| {
+                default_model
+                    .as_deref()
+                    .and_then(|m| provider_key_for_spawn_model(Some(m), None))
+            });
+            CoordinatorSpawnIdentity {
+                model: default_model,
+                provider_key,
+                route_api_method: None,
+                is_canary: false,
+            }
         }
     }
 }
