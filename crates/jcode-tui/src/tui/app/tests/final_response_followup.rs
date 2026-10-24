@@ -46,10 +46,10 @@ fn final_response_followup_does_not_repeat_answer_across_compaction() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
         for compaction in [None, Some(false), Some(true)] {
             let mut app = completed_response_test_app();
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let guard = rt.enter();
             app.handle_server_event(
                 ServerEvent::TextDelta {
                     text: "The review is complete.".into(),
@@ -87,6 +87,7 @@ fn final_response_followup_does_not_repeat_answer_across_compaction() {
             // Reloading must not re-open the completed cycle either.
             app.save_input_for_reload(&app.session.id);
             let restored = App::restore_input_for_reload(&app.session.id).unwrap();
+            drop(guard);
             let mut reloaded = create_test_app();
             reloaded.session.id = app.session.id.clone();
             reloaded.auto_poke_incomplete_todos = true;
@@ -102,7 +103,6 @@ fn final_response_followup_still_requests_missing_or_incomplete_answer() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
         for events in [
             vec![ServerEvent::ReasoningDelta {
                 text: "Need to wrap up".into(),
@@ -151,6 +151,7 @@ fn final_response_followup_still_requests_missing_or_incomplete_answer() {
         ] {
             let mut app = completed_response_test_app();
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let _guard = rt.enter();
             let has_end = events
                 .iter()
                 .any(|event| matches!(event, ServerEvent::MessageEnd { .. }));
@@ -175,10 +176,10 @@ fn final_response_followup_tracks_the_last_request_not_earlier_commentary() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
         for final_answer in [false, true] {
             let mut app = completed_response_test_app();
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let _guard = rt.enter();
             app.handle_server_event(
                 ServerEvent::TextDelta {
                     text: "Checking now.".into(),
@@ -224,7 +225,6 @@ fn final_response_followup_preserves_incomplete_and_validation_gates() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
         for incomplete in [false, true] {
             let mut app = completed_response_test_app();
             let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
@@ -235,6 +235,7 @@ fn final_response_followup_preserves_incomplete_and_validation_gates() {
             }
             crate::todo::save_todos(&app.session.id, &todos).unwrap();
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let _guard = rt.enter();
             app.handle_server_event(
                 ServerEvent::TextDelta {
                     text: "Here is the outcome.".into(),
