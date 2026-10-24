@@ -425,12 +425,12 @@ disable_base_tools = false
 # kept only so existing configs still parse.
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
-# Experimental, opt-in Codemode. Adds a `codemode` tool that runs
+# Codemode is enabled by default. Adds a `codemode` tool that runs
 # model-written JavaScript in an embedded QuickJS sandbox. Scripts call any
 # other tool (including MCP tools) via `await tools.<name>(args)`, chain and
 # parallelize calls, and keep intermediate results out of the conversation.
-# Env override: JCODE_CODEMODE=1.
-codemode = false
+# Env override: JCODE_CODEMODE=0 to disable.
+codemode = true
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.
@@ -458,8 +458,8 @@ tool_profile = "acp"
 openai_reasoning_effort = "low"
 # Anthropic reasoning effort for Claude reasoning models (none|low|medium|high|xhigh|max)
 # xhigh needs Opus 4.7/4.8 or Fable 5; max needs an output_config effort model (Opus/Sonnet 4.6+).
-# Defaults to xhigh for Claude Opus 4.7/4.8 (high on older Opus) when unset; other models keep their own default.
-# anthropic_reasoning_effort = "medium"
+# Defaults to low when unset.
+anthropic_reasoning_effort = "low"
 # OpenAI transport mode (auto|websocket|https)
 # openai_transport = "auto"
 # OpenAI service tier override (priority|ultrafast|flex|off)
@@ -882,6 +882,11 @@ mod tests {
         let template = Config::default_config_file_contents();
         let config =
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+        assert!(config.tools.codemode);
+        assert_eq!(
+            config.provider.anthropic_reasoning_effort.as_deref(),
+            Some("low")
+        );
         assert_eq!(config.tools.mcp_tools, McpToolsMode::Auto);
         assert_eq!(config.tools.mcp_tools_token_threshold, 8_000);
         assert_eq!(config.session.hibernation_idle_secs, 1800);
@@ -894,6 +899,20 @@ mod tests {
             ReasoningDisplayMode::Full,
             "the shipped user config must keep the full reasoning trace visible"
         );
+    }
+
+    #[test]
+    fn codemode_defaults_on_and_can_be_disabled() {
+        assert!(ToolConfig::default().codemode);
+        for contents in ["", "[tools]\n", "[tools]\ncodemode = true\n"] {
+            let config: Config = toml::from_str(contents).unwrap();
+            assert!(config.tools.codemode);
+        }
+        let disabled: Config = toml::from_str("[tools]\ncodemode = false\n").unwrap();
+        assert!(!disabled.tools.codemode);
+        let encoded = toml::to_string(&disabled).unwrap();
+        let restored: Config = toml::from_str(&encoded).unwrap();
+        assert!(!restored.tools.codemode);
     }
 
     #[test]
