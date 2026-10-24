@@ -13,6 +13,11 @@ impl Config {
         {
             self.server.wake_mode = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_TERMINAL_STATUS_OSC9")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.terminal_status_osc9 = parsed;
+        }
 
         // Keybindings
         if let Ok(v) = std::env::var("JCODE_SCROLL_UP_KEY") {

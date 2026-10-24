@@ -297,6 +297,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_TELEGRAM_BOT_TOKEN",
     "JCODE_TELEGRAM_CHAT_ID",
     "JCODE_TELEGRAM_REPLY_ENABLED",
+    "JCODE_TERMINAL_STATUS_OSC9",
     "JCODE_TOOL_CALL_DETAILS",
     "JCODE_TOOL_PROFILE",
     "JCODE_TOOLS",
@@ -591,8 +592,12 @@ pub fn on_config_reloaded(listener: fn()) {
         .push(listener);
 }
 
+fn default_terminal_status_osc9() -> bool {
+    true
+}
+
 /// Main configuration struct
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Idle session memory hibernation policy.
@@ -600,6 +605,10 @@ pub struct Config {
 
     /// Daemon behavior for autonomous wake requests.
     pub server: ServerConfig,
+    /// Emit OSC 9 terminal status side-channel updates (`jcode:working`,
+    /// `jcode:blocked`, `jcode:idle`) for terminal integrations such as herdr.
+    #[serde(default = "default_terminal_status_osc9")]
+    pub terminal_status_osc9: bool,
 
     /// Keybinding configuration
     pub keybindings: KeybindingsConfig,
@@ -715,6 +724,41 @@ impl WakeMode {
 pub struct ServerConfig {
     /// Ownership model for autonomous wake requests.
     pub wake_mode: WakeMode,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            session: SessionConfig::default(),
+            server: ServerConfig::default(),
+            terminal_status_osc9: true,
+            keybindings: KeybindingsConfig::default(),
+            dictation: DictationConfig::default(),
+            display: DisplayConfig::default(),
+            features: FeatureConfig::default(),
+            websearch: WebSearchConfig::default(),
+            tools: ToolConfig::default(),
+            acp: AcpConfig::default(),
+            auth: AuthConfig::default(),
+            provider: ProviderConfig::default(),
+            providers: BTreeMap::default(),
+            agents: AgentsConfig::default(),
+            terminal: TerminalConfig::default(),
+            hooks: HooksConfig::default(),
+            ambient: AmbientConfig::default(),
+            safety: SafetyConfig::default(),
+            notifications: NotificationsConfig::default(),
+            gateway: GatewayConfig::default(),
+            compaction: CompactionConfig::default(),
+            power: PowerConfig::default(),
+            menubar: MenubarConfig::default(),
+            autoreview: AutoReviewConfig::default(),
+            autojudge: AutoJudgeConfig::default(),
+            sponsors: SponsorsConfig::default(),
+            launch_hotkeys: LaunchHotkeysConfig::default(),
+            desktop: None,
+        }
+    }
 }
 
 /// Agent Client Protocol adapter configuration.
