@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 const MAX_PARALLEL: usize = 10;
 
-const BATCH_DESCRIPTION: &str = "Run independent tool calls in parallel (1-10). Each tool_calls entry contains tool, intent, and the tool's normal arguments as sibling fields. Do not batch dependent calls or nest batch.";
+const BATCH_DESCRIPTION: &str = r#"Run independent tool calls in parallel (1-10). Use tool, intent, parameters: {"tool":"mcp_call","parameters":{"tool":"raw","arguments":{}}}. Flat inputs work. No dependent calls or nested batch."#;
 
 pub(crate) fn generic_batch_schema() -> Value {
     json!({
@@ -27,7 +27,12 @@ pub(crate) fn generic_batch_schema() -> Value {
                             "type": "string",
                             "description": "Tool name."
                         },
-                        "intent": super::intent_schema_property()
+                        "intent": super::intent_schema_property(),
+                        "parameters": {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "description": "Complete child input. Nest native tool, name, arguments, args, and input fields here."
+                        }
                     },
                     "additionalProperties": true
                 },
@@ -89,7 +94,6 @@ struct BatchInput {
 
 #[derive(Deserialize, Clone)]
 struct ToolCallInput {
-    #[serde(alias = "name")]
     tool: String,
     #[serde(default)]
     parameters: Option<Value>,
@@ -104,14 +108,183 @@ impl ToolCallInput {
     }
 }
 
-/// Try to fix common LLM mistakes in batch tool_calls:
-/// - Parameters placed at the same level as "tool" instead of nested under "parameters"
-/// - "name" used instead of "tool" for the tool name key
-/// - "arguments", "args", or "input" used instead of "parameters"
-fn normalize_batch_input(mut input: Value) -> Value {
+fn schema_property_declaration(schema: &Value, property: &str) -> Option<bool> {
+    fn declares(
+        schema: &Value,
+        root: &Value,
+        property: &str,
+        depth: usize,
+        budget: &mut usize,
+    ) -> Option<bool> {
+        if depth > 16 || *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        if schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| properties.contains_key(property))
+        {
+            return Some(true);
+        }
+        // Explicitly open schemas may use native fields not listed in properties.
+        // Preserve those fields rather than guessing that they are batch aliases.
+        let mut unknown = matches!(
+            schema.get("additionalProperties"),
+            Some(Value::Bool(true) | Value::Object(_))
+        ) || match schema.get("patternProperties") {
+            Some(Value::Object(patterns)) => !patterns.is_empty(),
+            Some(_) => true,
+            None => false,
+        };
+        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+            match reference
+                .strip_prefix('#')
+                .and_then(|path| root.pointer(path))
+                .and_then(|referenced| declares(referenced, root, property, depth + 1, budget))
+            {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => unknown = true,
+            }
+        }
+        for key in ["allOf", "anyOf", "oneOf", "if", "then", "else"] {
+            if let Some(value) = schema.get(key) {
+                let branches = value
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_else(|| std::slice::from_ref(value));
+                for branch in branches {
+                    match declares(branch, root, property, depth + 1, budget) {
+                        Some(true) => return Some(true),
+                        Some(false) => {}
+                        None => unknown = true,
+                    }
+                }
+            }
+        }
+        // Conditional schemas describe this same input object, not a nested
+        // child. Preserve their native fields even when activation is unknown.
+        if let Some(dependencies) = schema.get("dependentSchemas") {
+            if let Some(dependencies) = dependencies.as_object() {
+                for dependency in dependencies.values() {
+                    match declares(dependency, root, property, depth + 1, budget) {
+                        Some(true) => return Some(true),
+                        Some(false) => {}
+                        None => unknown = true,
+                    }
+                }
+            } else {
+                unknown = true;
+            }
+        }
+        if unknown { None } else { Some(false) }
+    }
+    declares(schema, schema, property, 0, &mut 256)
+}
+
+fn schema_declares_property(schema: Option<&Value>, property: &str) -> bool {
+    schema.is_some_and(|schema| schema_property_declaration(schema, property) == Some(true))
+}
+
+fn schema_may_declare_property(schema: Option<&Value>, property: &str) -> bool {
+    // Unresolved or cyclic schemas justify preserving a child field, not
+    // automatically treating a `name` value as a new routing selector.
+    schema.is_some_and(|schema| schema_property_declaration(schema, property) != Some(false))
+}
+
+fn schema_confidently_lacks_property(schema: Option<&Value>, property: &str) -> bool {
+    !schema_may_declare_property(schema, property)
+}
+
+#[derive(Clone)]
+struct SelectorSchema {
+    schema: Value,
+    resolved_route: Option<String>,
+}
+
+/// Normalize legacy flat calls without consuming a child's native routing or
+/// argument fields. Explicit `parameters` keeps wrapper and child names separate.
+#[cfg(test)]
+fn normalize_batch_input_with_schemas(
+    input: Value,
+    tool_schemas: &HashMap<String, Value>,
+) -> Result<Value> {
+    let selectors = tool_schemas
+        .iter()
+        .map(|(name, schema)| {
+            (
+                name.clone(),
+                SelectorSchema {
+                    schema: schema.clone(),
+                    resolved_route: Some(
+                        Registry::resolve_tool_name(
+                            name.strip_prefix("functions.").unwrap_or(name),
+                        )
+                        .to_string(),
+                    ),
+                },
+            )
+        })
+        .collect();
+    normalize_batch_input_with_selectors(input, &selectors)
+}
+
+fn normalize_batch_input_with_selectors(
+    mut input: Value,
+    tool_schemas: &HashMap<String, SelectorSchema>,
+) -> Result<Value> {
     if let Some(calls) = input.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
         for call in calls.iter_mut() {
             if let Some(obj) = call.as_object_mut() {
+                if obj.get("parameters").is_some_and(Value::is_null) {
+                    obj.remove("parameters");
+                }
+                let tool_name = obj.get("tool").and_then(Value::as_str).map(str::to_owned);
+                let name_alias = obj.get("name").and_then(Value::as_str).map(str::to_owned);
+                if let (Some(tool), Some(name)) = (&tool_name, &name_alias) {
+                    let tool_selector = tool_schemas.get(tool);
+                    let name_selector = tool_schemas.get(name);
+                    let tool_schema = tool_selector.map(|selector| &selector.schema);
+                    let same_route = match (
+                        tool_selector.and_then(|selector| selector.resolved_route.as_deref()),
+                        name_selector.and_then(|selector| selector.resolved_route.as_deref()),
+                    ) {
+                        (Some(tool_route), Some(name_route)) => tool_route == name_route,
+                        _ => tool == name,
+                    };
+
+                    if !obj.contains_key("parameters")
+                        && !same_route
+                        && let (Some(tool_route), Some(name_route)) = (
+                            tool_selector.and_then(|selector| selector.resolved_route.as_deref()),
+                            name_selector.and_then(|selector| selector.resolved_route.as_deref()),
+                        )
+                        && tool_route != name_route
+                        && schema_confidently_lacks_property(tool_schema, "name")
+                    {
+                        anyhow::bail!(
+                            "Ambiguous batch tool/name selectors. Use {{\"tool\":\"<wrapper>\",\"parameters\":{{\"tool\":\"<child>\"}}}}."
+                        );
+                    }
+
+                    if same_route && schema_confidently_lacks_property(tool_schema, "name") {
+                        obj.remove("name");
+                    } else if !obj.contains_key("parameters")
+                        && schema_confidently_lacks_property(tool_schema, "name")
+                        && name_selector.is_some_and(|selector| {
+                            schema_declares_property(Some(&selector.schema), "tool")
+                        })
+                    {
+                        // Recover a name-routed wrapper only when the current
+                        // route is known to omit a native `name` field.
+                        obj.remove("name");
+                        let wrapper = Value::String(name.clone());
+                        let parameters = std::mem::take(obj);
+                        obj.insert("tool".to_string(), wrapper);
+                        obj.insert("parameters".to_string(), Value::Object(parameters));
+                    }
+                }
                 // Normalize "name" -> "tool" if the model used the wrong key
                 if !obj.contains_key("tool")
                     && let Some(name_val) = obj.remove("name")
@@ -120,7 +293,22 @@ fn normalize_batch_input(mut input: Value) -> Value {
                 }
 
                 if !obj.contains_key("parameters") {
+                    let schema = obj
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .and_then(|name| tool_schemas.get(name))
+                        .map(|selector| &selector.schema);
                     for alias in ["arguments", "args", "input"] {
+                        // Do not steal a native child field, or drop its routing
+                        // siblings by mistaking it for the whole input envelope.
+                        if schema_may_declare_property(schema, alias)
+                            || obj.keys().any(|key| {
+                                !matches!(key.as_str(), "tool" | "intent" | "accept_large_output")
+                                    && key != alias
+                            })
+                        {
+                            continue;
+                        }
                         if let Some(alias_val) = obj.remove(alias) {
                             obj.insert("parameters".to_string(), alias_val);
                             break;
@@ -177,7 +365,12 @@ fn normalize_batch_input(mut input: Value) -> Value {
             }
         }
     }
-    input
+    Ok(input)
+}
+
+#[cfg(test)]
+fn normalize_batch_input(input: Value) -> Value {
+    normalize_batch_input_with_schemas(input, &HashMap::new()).unwrap()
 }
 
 #[async_trait]
@@ -199,7 +392,44 @@ impl Tool for BatchTool {
             .registry
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("Batch tool registry is no longer available"))?;
-        let input = normalize_batch_input(input);
+        // Look up only the supplied routing candidates. Match dispatch's
+        // namespace/alias resolution and session-local SDK replacements, and
+        // release the registry lock before executing any child tool.
+        let tool_schemas = {
+            let tools = registry.tools.read().await;
+            let custom = super::sdk::config(&ctx.session_id);
+            let mut schemas = HashMap::new();
+            if let Some(calls) = input.get("tool_calls").and_then(Value::as_array) {
+                for call in calls {
+                    for key in ["tool", "name"] {
+                        if let Some(name) = call.get(key).and_then(Value::as_str) {
+                            let resolved =
+                                Registry::resolve_tool_name_for_session(&ctx.session_id, name);
+                            let schema = custom
+                                .as_ref()
+                                .and_then(|config| {
+                                    config.custom.iter().find(|tool| tool.name == resolved)
+                                })
+                                .map(|tool| tool.parameters.clone())
+                                .or_else(|| {
+                                    tools.get(resolved).map(|tool| tool.parameters_schema())
+                                });
+                            if let Some(schema) = schema {
+                                schemas.insert(
+                                    name.to_string(),
+                                    SelectorSchema {
+                                        schema,
+                                        resolved_route: Some(resolved.to_string()),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            schemas
+        };
+        let input = normalize_batch_input_with_selectors(input, &tool_schemas)?;
         let params: BatchInput = serde_json::from_value(input)?;
 
         if params.tool_calls.is_empty() {
@@ -363,3 +593,11 @@ impl Tool for BatchTool {
 #[cfg(test)]
 #[path = "batch_tests.rs"]
 mod batch_tests;
+
+#[cfg(all(test, unix))]
+#[path = "batch_mcp_tests.rs"]
+mod batch_mcp_tests;
+
+#[cfg(test)]
+#[path = "batch_schema_tests.rs"]
+mod batch_schema_tests;

@@ -672,7 +672,7 @@ async fn test_definitions_keep_batch_schema_generic() {
     );
     assert!(
         batch_def.input_schema["properties"]["tool_calls"]["items"]["properties"]["parameters"]
-            .is_null()
+            .is_object()
     );
 }
 
