@@ -7,13 +7,13 @@ struct Snapshot {
     #[serde(default)]
     observations: Vec<crate::todo::GateObservation>,
     #[serde(default)]
-    plan: crate::todo::TodoPlan,
+    todos: Vec<crate::todo::TodoItem>,
 }
 
 pub(super) fn render(
     msg: &DisplayMessage,
     width: u16,
-    diff_mode: crate::config::DiffDisplayMode,
+    _diff_mode: crate::config::DiffDisplayMode,
 ) -> Option<Vec<Line<'static>>> {
     if msg.title.as_deref() != Some("Todo completion") {
         return None;
@@ -29,26 +29,19 @@ pub(super) fn render(
         "Todo completion",
         Style::default().fg(todo_score_color()).bold(),
     )];
-    if let Some(intention) = snapshot.plan.user_intention.as_deref() {
-        // A compact header describes the finished work, not the model's
-        // confidence in its understanding. Normalize multiline saved intent
-        // into a single width-fitted chrome row.
-        let intention = intention.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !intention.is_empty() {
-            header.push(Span::styled(
-                format!("  {intention}"),
-                Style::default().fg(todo_meta_color()),
-            ));
-        }
+    if !snapshot.todos.is_empty() && width > "Todo completion  ".len() {
+        header.push(Span::raw("  "));
+        push_todo_status_pips(
+            &mut header,
+            &snapshot.todos,
+            width.saturating_sub("Todo completion  ".len()),
+        );
     }
     let mut lines = vec![super::super::truncate_line_with_ellipsis_to_width(
         &Line::from(header),
         width,
     )];
     lines.extend(render_gate_categories(&snapshot.observations, width));
-    // Render the recorded payload through the same compact chat card path.
-    // The pinned band intentionally retains its detailed presentation.
-    lines.extend(render_todos_message(msg, width as u16, diff_mode));
     Some(lines)
 }
 
@@ -130,8 +123,8 @@ mod tests {
         let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
         let categories = render_gate_categories(&observations, 80);
         assert_eq!(&lines[1..7], categories.as_slice());
-        let card = render_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
-        assert_eq!(&lines[7..], card.as_slice());
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[0].to_string(), "Todo completion  ●");
         let text = lines
             .iter()
             .map(ToString::to_string)
@@ -160,16 +153,15 @@ mod tests {
         msg.title = Some("Todo completion".into());
         for width in [1, 2, 10, 20, 40, 80] {
             let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
-            let card = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
-            assert!(!card.is_empty());
-            // Line equality checks semantic styles as well as actual text.
-            assert_eq!(&lines[1..1 + card.len()], card.as_slice());
-            assert_eq!(
-                lines.len(),
-                1 + card.len(),
-                "legacy snapshots have no appendix"
-            );
-            assert_eq!(card.len(), 1);
+            assert_eq!(lines.len(), 1);
+            if width >= 20 {
+                assert_eq!(lines[0].to_string(), "Todo completion  ●");
+                assert!(
+                    lines[0].spans.iter().any(
+                        |span| span.content == "●" && span.style.fg == Some(rgb(100, 180, 100))
+                    )
+                );
+            }
             assert!(
                 !lines
                     .iter()
@@ -180,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn todo_completion_actual_intent_is_inline_and_fitted() {
+    fn todo_completion_hides_intent_and_fits_inline_dots() {
         for state in ["uncertain", "partial", "clear", "complete"] {
             let mut msg = DisplayMessage::system(serde_json::json!({
                 "todo_completion_version": 1,
@@ -192,19 +184,12 @@ mod tests {
             let recorded = msg.content.clone();
             for width in [1, 2, 8, 15, 16, 24, 40, 80] {
                 let lines = render(&msg, width, crate::config::DiffDisplayMode::Off).unwrap();
-                assert_eq!(lines.len(), 2, "header must never wrap");
+                assert_eq!(lines.len(), 1, "header must never wrap");
                 assert!(lines.iter().all(|line| line.width() <= width as usize));
                 let header = lines[0].to_string();
-                if width >= 40 {
-                    assert_eq!(header, "Todo completion  Ship the fix 界");
-                    assert!(
-                        lines[0]
-                            .spans
-                            .iter()
-                            .any(|span| span.content == "  Ship the fix 界"
-                                && span.style.fg == Some(todo_meta_color()))
-                    );
-                } else {
+                if width >= 24 {
+                    assert_eq!(header, "Todo completion  ●");
+                } else if width < 15 {
                     assert!(header.ends_with('…'));
                 }
                 let text = lines
@@ -214,8 +199,8 @@ mod tests {
                     .join("\n");
                 assert!(!text.contains("Finished"));
                 assert!(!text.contains("Hidden"));
+                assert!(!text.contains("Ship"));
                 assert!(!text.contains(&format!("Intent {state}")));
-                assert!(!lines[1].to_string().contains("Intent"));
                 assert_eq!(msg.content, recorded);
             }
         }
@@ -231,8 +216,40 @@ mod tests {
             }).to_string());
             msg.title = Some("Todo completion".into());
             let lines = render(&msg, 80, crate::config::DiffDisplayMode::Off).unwrap();
-            assert_eq!(lines[0].to_string(), "Todo completion");
-            assert_eq!(lines.len(), 2);
+            assert_eq!(lines[0].to_string(), "Todo completion  ●");
+            assert_eq!(lines.len(), 1);
+        }
+    }
+
+    #[test]
+    fn todo_completion_many_dots_stay_on_one_row_and_keep_terminal_statuses() {
+        for count in [0, 2, 12, 100] {
+            let todos: Vec<_> = (0..count)
+                .map(|index| {
+                    serde_json::json!({
+                        "id":index.to_string(), "content":"Hidden task", "priority":"high",
+                        "status":if index == 1 { "cancelled" } else { "completed" }
+                    })
+                })
+                .collect();
+            let mut msg = DisplayMessage::system(
+                serde_json::json!({
+                    "todo_completion_version":1,"todos":todos,
+                    "plan":{"user_intention":"Do not render me"}
+                })
+                .to_string(),
+            );
+            msg.title = Some("Todo completion".into());
+            for width in 1..120 {
+                let lines = render(&msg, width, crate::config::DiffDisplayMode::Off).unwrap();
+                assert_eq!(lines.len(), 1);
+                assert!(lines[0].width() <= width as usize);
+                assert!(!lines[0].to_string().contains("Do not render me"));
+            }
+            if count == 2 {
+                let lines = render(&msg, 80, crate::config::DiffDisplayMode::Off).unwrap();
+                assert_eq!(lines[0].to_string(), "Todo completion  ●○");
+            }
         }
     }
 

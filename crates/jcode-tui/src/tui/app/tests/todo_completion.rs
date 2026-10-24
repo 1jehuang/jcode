@@ -91,8 +91,8 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
 
         // Descriptive assessments alone never fabricate gate findings.
         assert_eq!(snapshot["observations"], serde_json::json!([]));
-        // The snapshot retains all evidence, but the chat view only shows an
-        // inline intent header and the finished task dots at every width.
+        // The snapshot retains all evidence, but the chat view only shows a
+        // completion title with inline finished task dots at every width.
         for width in [20, 40, 80] {
             let lines = crate::tui::ui::render_system_message(
                 &report,
@@ -104,12 +104,11 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
                 .map(|line| line.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert_eq!(lines.len(), 2, "{plain}");
-            assert_eq!(lines[1].to_string().trim(), "●".repeat(12), "{plain}");
+            assert_eq!(lines.len(), 1, "{plain}");
             if width == 80 {
                 assert_eq!(
                     lines[0].to_string(),
-                    "Todo completion  Show all evidence without another agent turn"
+                    format!("Todo completion  {}", "●".repeat(12))
                 );
             }
             // Removing wrap whitespace lets us assert every detail even when
@@ -119,6 +118,7 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
                 "Report task",
                 "Evidence for task",
                 "Intent clear",
+                "Show all evidence without another agent turn",
                 "FINAL_EVIDENCE_MARKER",
                 "Earlier weak states",
                 "feedback_loop_relevance was indirect",
