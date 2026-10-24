@@ -286,13 +286,32 @@ prompt_entry_animation = true
 # exactly what to fix. `/colors` lists every role, and `/colors export` prints
 # this section for you.
 #
+# The values below are the complete built-in default palette. Uncomment the
+# section and edit any line to change that role.
+#
 # [display.colors]
 # user = "#8ab4f8"
 # ai = "#81c784"
+# tool = "#787878"
+# file_link = "#b4c8ff"
+# dim = "#505050"
 # accent = "#ba8bff"
+# system = "#ffaadc"
+# queued = "#ffc107"
+# asap = "#6ed2ff"
+# pending = "#8c8c8c"
+# user_text = "#f5f5ff"
+# user_bg = "#232832"
+# ai_text = "#dcdcd7"
+# header_icon = "#78d2e6"
+# header_name = "#bed2eb"
+# header_session = "#ffffff"
 # success = "#64c864"
 # warning = "#ffc864"
 # error = "#ff6464"
+# info = "#8cb4ff"
+# border = "#64646e"
+# selection_bg = "#3c3c50"
 
 [features]
 # Check for and install updates during startup. Set to false for the persistent
