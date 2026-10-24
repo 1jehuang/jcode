@@ -133,7 +133,10 @@ fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
 /// `~/.jcode/stats/todo-write-modes.json`; nothing leaves the machine.
 fn todo_write_mode(input: &Value) -> &'static str {
     let has = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
-    match (has("todos"), has("update") || has("add") || has("remove")) {
+    match (
+        has("todos") || has("phases"),
+        has("update") || has("add") || has("remove"),
+    ) {
         (true, _) => "full",
         (false, true) => "patch",
         (false, false) if has("goals") || has("plan") => "assessment",
@@ -164,8 +167,9 @@ fn record_todo_write_mode(input: &Value) {
 /// (status validation, confidence history, gates, lane and plan sync) runs on
 /// one path. `update` changes only the given fields of todos matched by `id`;
 /// `add` appends new todos (or inserts each after its `after` id); `remove`
-/// drops ids. Only applies when `todos` is absent: a full list always wins.
+/// drops ids. Full replacements and incremental edits are mutually exclusive.
 fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    flatten_phases(&mut input)?;
     let Some(obj) = input.as_object_mut() else {
         return Ok(input);
     };
@@ -196,12 +200,11 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
     let adds = parse_list(obj.remove("add"))?;
     let removes: Vec<String> = parse_list(obj.remove("remove"))?
         .into_iter()
-        .filter_map(|value| match value {
-            Value::String(id) => Some(id),
-            Value::Object(fields) => fields.get("id").and_then(Value::as_str).map(str::to_string),
-            _ => None,
+        .map(|value| match value {
+            Value::String(id) => Ok(id),
+            _ => bail!("each remove entry must be an id string"),
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
     let Value::Array(mut todos) = stored() else {
         bail!("stored todos are not a list");
@@ -222,6 +225,7 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
             bail!("no todo with id {id:?}; use `add` for new todos");
         };
         let target = todo.as_object_mut().expect("stored todo is an object");
+        validate_membership(fields)?;
         for (key, value) in fields {
             if key != "id" {
                 // `phase`/`lane` are the card's words for `stage`/`group`;
@@ -242,7 +246,42 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         };
         let after = fields
             .remove("after")
-            .and_then(|v| v.as_str().map(str::to_string));
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("after must be a nonempty todo id"))
+            })
+            .transpose()?;
+        validate_membership(fields)?;
+        let anchor = after
+            .as_ref()
+            .map(|id| {
+                todos
+                    .iter()
+                    .find(|todo| id_of(todo).as_ref() == Some(id))
+                    .ok_or_else(|| anyhow::anyhow!("unknown after todo {id:?}"))
+            })
+            .transpose()?;
+        for (public, canonical) in [("phase", "stage"), ("lane", "group")] {
+            if !fields.contains_key(public) && !fields.contains_key(canonical) {
+                let value = anchor
+                    .and_then(|todo| todo.get(canonical).or_else(|| todo.get(public)))
+                    .filter(|value| !value.is_null())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "added todo needs {public}, or an after todo with membership"
+                        )
+                    })?;
+                fields.insert(canonical.to_string(), value.clone());
+            }
+        }
+        for (alias, canonical) in [("phase", "stage"), ("wave", "stage"), ("lane", "group")] {
+            if let Some(value) = fields.remove(alias) {
+                fields.insert(canonical.into(), value);
+            }
+        }
         let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
         if let Some(id) = &id
             && todos.iter().any(|todo| id_of(todo).as_deref() == Some(id))
@@ -275,7 +314,17 @@ struct TodoInput {
 }
 
 fn parse_todo_input(input: Value) -> Result<TodoInput> {
+    let mut input = input;
+    flatten_phases(&mut input)?;
     let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
+    if let Some(todos) = &params.todos {
+        let mut ids = std::collections::HashSet::new();
+        for todo in todos {
+            if !ids.insert(&todo.id) {
+                bail!("duplicate todo id {:?}", todo.id);
+            }
+        }
+    }
     if let Some(todo) = params.todos.as_ref().and_then(|todos| {
         todos
             .iter()
@@ -287,6 +336,138 @@ fn parse_todo_input(input: Value) -> Result<TodoInput> {
         );
     }
     Ok(params)
+}
+
+/// Validate aliases before serde can silently select or duplicate membership.
+fn validate_membership(fields: &serde_json::Map<String, Value>) -> Result<()> {
+    if ["phases", "lanes", "items"]
+        .iter()
+        .any(|key| fields.contains_key(*key))
+    {
+        bail!("incremental items must not contain hierarchy containers");
+    }
+    for keys in [
+        ["phase", "stage", "wave"].as_slice(),
+        ["lane", "group"].as_slice(),
+    ] {
+        let values: Vec<_> = keys.iter().filter_map(|key| fields.get(*key)).collect();
+        if values.windows(2).any(|pair| pair[0] != pair[1]) {
+            bail!("conflicting membership fields: {keys:?}");
+        }
+        for value in values {
+            if keys[0] == "phase" {
+                if !value
+                    .as_u64()
+                    .is_some_and(|phase| phase > 0 && phase <= u32::MAX as u64)
+                {
+                    bail!("phase must be a positive integer");
+                }
+            } else if !value.as_str().is_some_and(|lane| !lane.trim().is_empty()) {
+                bail!("lane must be a nonempty string");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Only the public boundary is hierarchical. Storage and swarm retain stage/group.
+fn flatten_phases(input: &mut Value) -> Result<()> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(phases) = obj.get("phases") else {
+        return Ok(());
+    };
+    if ["todos", "update", "add", "remove"]
+        .iter()
+        .any(|key| obj.get(*key).is_some_and(|v| !v.is_null()))
+    {
+        bail!("send phases or legacy todos or incremental edits, not both");
+    }
+    let phases = phases
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("phases must be an array"))?;
+    let mut phase_ids = std::collections::HashSet::new();
+    let mut item_ids = std::collections::HashSet::new();
+    let mut todos = Vec::new();
+    for phase in phases {
+        let phase = phase
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("phase must be an object"))?;
+        if phase
+            .keys()
+            .any(|key| !["phase", "lanes"].contains(&key.as_str()))
+        {
+            bail!("unexpected phase field");
+        }
+        let number = phase
+            .get("phase")
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+            .ok_or_else(|| anyhow::anyhow!("phase must be a positive integer"))?;
+        if !phase_ids.insert(number) {
+            bail!("duplicate phase {number}");
+        }
+        let lanes = phase
+            .get("lanes")
+            .and_then(Value::as_array)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("phase needs nonempty lanes"))?;
+        let mut lane_ids = std::collections::HashSet::new();
+        for lane in lanes {
+            let lane = lane
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("lane must be an object"))?;
+            if lane
+                .keys()
+                .any(|key| !["lane", "items"].contains(&key.as_str()))
+            {
+                bail!("unexpected lane field");
+            }
+            let name = lane
+                .get("lane")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("lane must be a nonempty string"))?;
+            if !lane_ids.insert(name) {
+                bail!("duplicate lane {name:?}");
+            }
+            let items = lane
+                .get("items")
+                .and_then(Value::as_array)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("lane needs nonempty items"))?;
+            for item in items {
+                let mut item = item
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("item must be an object"))?;
+                if ["phase", "lane", "stage", "group", "wave"]
+                    .iter()
+                    .any(|key| item.contains_key(*key))
+                {
+                    bail!("hierarchical items must not own phase/lane/stage/group membership");
+                }
+                let id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("item needs id"))?;
+                if id.trim().is_empty() {
+                    bail!("item needs a nonempty id");
+                }
+                if !item_ids.insert(id.to_string()) {
+                    bail!("duplicate todo id {id:?}");
+                }
+                item.insert("stage".into(), json!(number));
+                item.insert("group".into(), json!(name));
+                todos.push(Value::Object(item));
+            }
+        }
+    }
+    obj.remove("phases");
+    obj.insert("todos".into(), Value::Array(todos));
+    Ok(())
 }
 
 /// Normalize a goal's group label: trimmed, with empty/whitespace collapsed
@@ -930,7 +1111,7 @@ impl Tool for TodoTool {
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
         "Read or update todos and goal assessments. For multi-step work, write the plan \
-         once with `todos`. Then use `update` by id for status/field changes and `add` \
+         once with `phases` containing lanes containing items. Then use `update` by id for status/field changes and `add` \
          for new work. Reserve full replacement for restructuring; remove rarely. \
          Mark work in_progress before starting and completed as soon as it is done. \
          Keep the live list current after meaningful steps. Use short titles, with \
@@ -1115,6 +1296,28 @@ impl Tool for TodoTool {
         schema["properties"]["add"]["items"]["properties"] = add_properties;
         schema["properties"]["update"]["items"]["properties"]["waiting_on"] =
             schema["properties"]["todos"]["items"]["properties"]["waiting_on"].clone();
+        let mut item = schema["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("todos")
+            .unwrap()["items"]
+            .clone();
+        item["properties"].as_object_mut().unwrap().remove("phase");
+        item["properties"].as_object_mut().unwrap().remove("lane");
+        item["additionalProperties"] = json!(false);
+        schema["properties"]["phases"] = json!({
+            "type": "array",
+            "description": "Full replacement: sequential phases, parallel lanes within each phase, ordered items within each lane. Empty array clears the plan.",
+            "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
+                "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
+                    "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
+                        "properties": {"lane": {"type": "string", "minLength": 1}, "items": {"type": "array", "minItems": 1, "items": item}}
+                    }
+                }}}
+        });
+        schema["properties"]["add"]["description"] = json!(
+            "Add items with explicit phase and lane, or inherit missing membership from an existing after id."
+        );
         schema
     }
 
@@ -1231,6 +1434,176 @@ impl Tool for TodoTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hierarchy_preserves_declared_order_and_rejects_empty_ids() {
+        let item = |id: &str| json!({"id":id,"content":id,"status":"pending","priority":"high"});
+        let input = json!({"phases":[
+            {"phase":2,"lanes":[{"lane":"one","items":[item("a"),item("b")]},{"lane":"two","items":[item("c")]}]},
+            {"phase":1,"lanes":[{"lane":"one","items":[item("d")]}]}
+        ]});
+        let todos = parse_todo_input(input).unwrap().todos.unwrap();
+        assert_eq!(
+            todos.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c", "d"]
+        );
+        assert_eq!(
+            todos.iter().map(|t| t.stage).collect::<Vec<_>>(),
+            [Some(2), Some(2), Some(2), Some(1)]
+        );
+        for id in ["", " "] {
+            assert!(
+                parse_todo_input(
+                    json!({"phases":[{"phase":1,"lanes":[{"lane":"work","items":[item(id)]}]}]})
+                )
+                .is_err()
+            );
+        }
+        let patched = apply_todo_patch(
+            json!({"add":[{
+                "id":"a","content":"A","status":"pending","priority":"high",
+                "phase":1,"stage":1,"lane":"work","group":"work"
+            }]}),
+            || json!([]),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_todo_input(patched).unwrap().todos.unwrap()[0].stage,
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn hierarchy_invalid_writes_are_atomic() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "hierarchy-atomic";
+        let tool = TodoTool::new();
+        let valid = json!({"phases":[{"phase":1,"lanes":[{"lane":"x","items":[
+            {"id":"a","content":"original","status":"pending","priority":"high"}
+        ]}]}]});
+        tool.execute(valid.clone(), test_ctx(session))
+            .await
+            .unwrap();
+        let before = load_todos(session).unwrap();
+        let mut invalid = valid;
+        invalid["phases"][0]["lanes"][0]["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"a"}));
+        for input in [
+            invalid,
+            json!({"update":[{"id":"a","content":"changed"}],"add":[{"id":"b","phase":0,"lane":"x"}]}),
+            json!({"update":[{"id":"a","content":"changed"},{"id":"missing","status":"pending"}]}),
+        ] {
+            assert!(tool.execute(input, test_ctx(session)).await.is_err());
+            assert_eq!(load_todos(session).unwrap(), before);
+        }
+        tool.execute(json!({"phases":[]}), test_ctx(session))
+            .await
+            .unwrap();
+        assert!(load_todos(session).unwrap().is_empty());
+        match previous_home {
+            Some(home) => crate::env::set_var("JCODE_HOME", home),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+    #[test]
+    fn hierarchy_flattens_and_clears() {
+        let input = json!({"phases":[{"phase":2,"lanes":[{"lane":"parser","items":[
+            {"id":"a","content":"A","status":"pending","priority":"high"}
+        ]}]}]});
+        let parsed = parse_todo_input(input.clone()).unwrap().todos.unwrap();
+        assert_eq!(parsed[0].stage, Some(2));
+        assert_eq!(parsed[0].group.as_deref(), Some("parser"));
+        assert_eq!(todo_write_mode(&input), "full");
+        assert!(
+            parse_todo_input(json!({"phases":[]}))
+                .unwrap()
+                .todos
+                .unwrap()
+                .is_empty()
+        );
+        let flattened =
+            apply_todo_patch(input, || panic!("replacement must not load stored list")).unwrap();
+        assert!(flattened.get("phases").is_none());
+        assert_eq!(flattened["todos"][0]["stage"], 2);
+    }
+
+    #[test]
+    fn hierarchy_rejects_malformed_structures() {
+        let item = json!({"id":"a","content":"A","status":"pending","priority":"high"});
+        let lane = json!({"lane":"x","items":[item]});
+        let phase = json!({"phase":1,"lanes":[lane]});
+        for bad in [
+            json!(null),
+            json!({}),
+            json!([null]),
+            json!([{"phase":0,"lanes":[lane]}]),
+            json!([{"phase":1.5,"lanes":[lane]}]),
+            json!([{"phase":1}]),
+            json!([{"phase":1,"lanes":[]}]),
+            json!([{"phase":1,"lanes":{}}]),
+            json!([{"phase":1,"lanes":[{"lane":" ","items":[item]}]}]),
+            json!([{"phase":1,"lanes":[{"lane":"x"}]}]),
+            json!([{"phase":1,"lanes":[{"lane":"x","items":[]}]}]),
+            json!([{"phase":1,"lanes":[{"lane":"x","items":[null]}]}]),
+            json!([phase, phase]),
+            json!([{"phase":1,"lanes":[lane,lane]}]),
+            json!([{"phase":1,"lanes":[lane,{"lane":"y","items":[item]}]}]),
+        ] {
+            assert!(
+                parse_todo_input(json!({"phases":bad})).is_err(),
+                "accepted {bad}"
+            );
+        }
+        for key in ["phase", "stage", "wave", "lane", "group"] {
+            let mut item = item.clone();
+            item[key] = json!(1);
+            assert!(
+                parse_todo_input(
+                    json!({"phases":[{"phase":1,"lanes":[{"lane":"x","items":[item]}]}]})
+                )
+                .is_err()
+            );
+        }
+        for key in ["todos", "update", "add", "remove"] {
+            let mut input = json!({"phases":[]});
+            input[key] = json!([]);
+            assert!(apply_todo_patch(input, || json!([])).is_err());
+        }
+    }
+
+    #[test]
+    fn hierarchy_patch_inherits_and_preserves_membership() {
+        let stored = json!([{"id":"a","content":"A","status":"pending","priority":"high","stage":2,"group":"x"}]);
+        let result = apply_todo_patch(
+            json!({"update":[{"id":"a","content":"changed"}],
+            "add":[{"id":"b","content":"B","status":"pending","priority":"high","after":"a"}]}),
+            || stored.clone(),
+        )
+        .unwrap();
+        let todos = parse_todo_input(result).unwrap().todos.unwrap();
+        assert_eq!(todos.len(), 2);
+        for todo in todos {
+            assert_eq!(todo.stage, Some(2));
+            assert_eq!(todo.group.as_deref(), Some("x"));
+        }
+        for patch in [
+            json!({"add":[{"id":"b"}]}),
+            json!({"add":[{"id":"b","after":"missing"}]}),
+            json!({"update":[{"id":"a","phase":0}]}),
+            json!({"update":[{"id":"a","lane":""}]}),
+            json!({"update":[{"id":"a","phase":1,"stage":2}]}),
+            json!({"update":[{"id":"a","lane":"x","group":"y"}]}),
+            json!({"update":[{"id":"a","items":[]}]}),
+            json!({"remove":[42]}),
+        ] {
+            assert!(apply_todo_patch(patch, || stored.clone()).is_err());
+            assert_eq!(stored[0]["content"], "A");
+        }
+    }
     use super::*;
 
     #[test]
@@ -1242,7 +1615,7 @@ mod tests {
     fn add_schema_declares_all_todo_fields_and_conforms_to_gemini() {
         let schema = TodoTool::new().parameters_schema();
         let add = &schema["properties"]["add"]["items"];
-        for (name, property) in schema["properties"]["todos"]["items"]["properties"]
+        for (name, property) in schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]["properties"]["items"]["items"]["properties"]
             .as_object()
             .unwrap()
         {
@@ -1268,7 +1641,8 @@ mod tests {
             .expect("todo schema should have properties");
         assert_eq!(props.len(), 7);
         assert!(props.contains_key("intent"));
-        assert!(props.contains_key("todos"));
+        assert!(props.contains_key("phases"));
+        assert!(!props.contains_key("todos"));
         assert!(props.contains_key("plan"));
         assert!(props.contains_key("goals"));
         for patch in ["update", "add", "remove"] {
@@ -1278,7 +1652,7 @@ mod tests {
             );
         }
 
-        let item = props["todos"]
+        let item = props["phases"]["items"]["properties"]["lanes"]["items"]["properties"]["items"]
             .get("items")
             .and_then(|v| v.as_object())
             .expect("todos should describe item objects");
@@ -1291,8 +1665,8 @@ mod tests {
             .get("properties")
             .and_then(|v| v.as_object())
             .expect("todo item should advertise properties");
-        assert!(item_props.contains_key("phase"));
-        assert!(item_props.contains_key("lane"));
+        assert!(!item_props.contains_key("phase"));
+        assert!(!item_props.contains_key("lane"));
         assert!(!item_props.contains_key("stage"));
         assert!(!item_props.contains_key("group"));
         assert!(item_props.contains_key("confidence"));
@@ -1987,7 +2361,7 @@ mod tests {
                 }
             );
         }
-        let input = apply_todo_patch(json!({"add":[{"id":"b", "content":"B", "status":"pending", "priority":"high", "waiting_on":["new"]}]}), || initial.clone()).unwrap();
+        let input = apply_todo_patch(json!({"add":[{"id":"b", "content":"B", "status":"pending", "priority":"high", "phase":1, "lane":"test", "waiting_on":["new"]}]}), || initial.clone()).unwrap();
         assert_eq!(
             parse_todo_input(input).unwrap().todos.unwrap()[1].waiting_on,
             vec!["new"]
