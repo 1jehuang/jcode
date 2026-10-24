@@ -1724,8 +1724,6 @@ impl App {
                 return true;
             }
             let confidence_summary = super::commands::todo_confidence_summary(&todos);
-            let confidence_label =
-                super::commands::format_todo_completion_confidence(confidence_summary);
             let needs_spike_challenge = confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
             if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
@@ -1786,10 +1784,6 @@ impl App {
             if !self.todo_final_response_requested {
                 self.todo_final_response_requested = true;
                 self.final_response_todo_fingerprint = todo_fingerprint;
-                self.push_display_message(DisplayMessage::system(format!(
-                    "✅ All todos done. Completion confidence: {}.",
-                    confidence_label
-                )));
                 self.queued_messages
                     .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
                 self.pending_queued_dispatch = true;

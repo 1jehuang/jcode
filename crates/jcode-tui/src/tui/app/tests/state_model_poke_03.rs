@@ -2735,7 +2735,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
         );
         assert!(app.hidden_queued_system_messages.is_empty());
-        assert!(app.display_messages().iter().any(|msg| {
+        assert!(!app.display_messages().iter().any(|msg| {
             msg.content
                 .contains("All todos done. Completion confidence: verified.")
         }));
@@ -2876,7 +2876,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 .iter()
                 .filter(|message| message.content.contains("All todos done"))
                 .count(),
-            1
+            0
         );
     });
 }

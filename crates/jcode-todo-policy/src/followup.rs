@@ -112,7 +112,8 @@ pub struct FollowUp {
     pub kind: FollowUpKind,
     /// Model-facing text. Recognized by `is_auto_poke_message`.
     pub message: String,
-    /// Short user-facing notice describing what happened.
+    /// Short user-facing notice describing what happened. Empty for a silent
+    /// final-response handoff.
     pub notice: String,
 }
 
@@ -358,13 +359,8 @@ impl FollowUpPolicy {
         if !self.final_response_requested {
             self.final_response_requested = true;
             self.final_response_fingerprint = fingerprint;
-            let notice = format!(
-                "✅ All todos done. Completion confidence: {}.",
-                summary.label()
-            );
             if final_response_delivered {
                 return Decision {
-                    notice: Some(notice),
                     effects,
                     ..Decision::default()
                 };
@@ -372,7 +368,7 @@ impl FollowUpPolicy {
             return Decision::send(
                 FollowUpKind::FinalResponse,
                 TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string(),
-                notice,
+                String::new(),
             )
             .with_effects(effects);
         }

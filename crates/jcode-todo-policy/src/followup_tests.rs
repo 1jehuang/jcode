@@ -167,13 +167,7 @@ fn completed_work_skips_digest_and_runs_validation_then_final_response_once() {
     state.todos = vec![done("ship", ConfidenceState::Verified)];
     let final_response = policy.decide(&state);
     assert_eq!(kind(&final_response), Some(FollowUpKind::FinalResponse));
-    assert!(
-        final_response
-            .follow_up
-            .unwrap()
-            .notice
-            .contains("verified")
-    );
+    assert!(final_response.follow_up.unwrap().notice.is_empty());
     // The final-response turn itself must not trigger another cycle.
     assert_eq!(policy.decide(&state), Decision::default());
     // New work starts a fresh cycle.
@@ -391,7 +385,7 @@ fn delivered_final_latches_completion_without_requesting_another_response() {
     });
     let decision = policy.decide_after_turn(&state, true);
     assert_eq!(decision.follow_up, None);
-    assert!(decision.notice.unwrap().contains("verified"));
+    assert!(decision.notice.is_none());
     assert!(decision.effects.clear_gate_observations);
     assert!(policy.final_response_requested);
     assert_eq!(
