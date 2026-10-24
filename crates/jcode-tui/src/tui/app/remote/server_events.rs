@@ -151,6 +151,32 @@ fn handle_kv_cache_miss(
             .iter_mut()
             .find(|sample| sample.turn_number == turn_number && sample.call_index == call_index)
         {
+            // The daemon can have complete request fingerprints after a
+            // reconnect while the client only has provisional usage telemetry.
+            // Upgrade evidence in place without losing local turn/hit counters.
+            if notices_enabled
+                && matches!(reason, "low_read" | "zero_read")
+                && matches!(
+                    sample.reason,
+                    KvCacheMissReason::LowRead | KvCacheMissReason::ZeroRead
+                )
+                && message.contains("] [prefix unchanged]")
+            {
+                let marker = format!("turn {turn_number} call {call_index}:");
+                if let Some(idx) = app.display_messages.iter().rposition(|entry| {
+                    entry.role == "system"
+                        && entry.content.contains("KV cache miss [")
+                        && entry.content.contains(&marker)
+                        && !entry.content.contains("] [prefix unchanged]")
+                }) {
+                    let tagged = app.display_messages[idx].content.replacen(
+                        "] ",
+                        "] [prefix unchanged] ",
+                        1,
+                    );
+                    return app.replace_display_message_content(idx, tagged);
+                }
+            }
             // TokenUsage can arrive before the daemon's native-compaction
             // attribution. Correct that provisional local notice in place,
             // rather than deduplicating away the more authoritative cause.
@@ -161,6 +187,11 @@ fn handle_kv_cache_miss(
                 "daily_rollover" => Some(KvCacheMissReason::DailyRollover),
                 // The daemon knows the account actually used after a failover.
                 "account_switch" => Some(KvCacheMissReason::AccountSwitch),
+                // Never retain a provisional unchanged-prefix tag when the
+                // daemon detected a real change in its request fingerprints.
+                "system_changed" => Some(KvCacheMissReason::HarnessSystemChanged),
+                "tools_changed" => Some(KvCacheMissReason::HarnessToolsChanged),
+                "prefix_changed" => Some(KvCacheMissReason::HarnessPrefixChanged),
                 _ => None,
             };
             if let Some(authoritative) = authoritative

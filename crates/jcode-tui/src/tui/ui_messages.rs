@@ -598,6 +598,12 @@ fn kv_cache_footer_summary(body: &str) -> Option<String> {
         None => kind.to_string(),
     };
     let mut parts = vec![lead, reason];
+    if body
+        .split_once(']')
+        .is_some_and(|(_, tail)| tail.trim_start().starts_with("[prefix unchanged]"))
+    {
+        parts.push("prefix unchanged".to_string());
+    }
     if let Some(hit) = hit {
         parts.push(format!("{hit:.0}% hit"));
     }
@@ -5224,6 +5230,30 @@ mod tests;
 
 #[cfg(test)]
 mod kv_cache_footer_tests {
+    #[test]
+    fn preserves_prefix_evidence_tag_and_keeps_footer_width_bounded() {
+        let body = "KV cache miss [low read] [prefix unchanged] turn 2 call 3: 4.35K cached / 20K expected tokens: ~15.6K tokens resent (cause unconfirmed).";
+        assert_eq!(
+            super::kv_cache_footer_summary(body).as_deref(),
+            Some("15.6K KV cache miss · low read · prefix unchanged · 22% hit")
+        );
+        let message = super::DisplayMessage::system(format!("ℹ️ {body}"));
+        for width in [12_u16, 30, 80, 120] {
+            let lines = super::render_kv_cache_footer(&message, width).unwrap();
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].width() <= usize::from(width));
+            if width >= 80 {
+                assert!(lines[0].to_string().contains("prefix unchanged"));
+            }
+        }
+        let unrelated = "KV cache miss [low read] turn 2: ~15K tokens resent (detail mentions [prefix unchanged]).";
+        assert!(
+            !super::kv_cache_footer_summary(unrelated)
+                .unwrap()
+                .contains("prefix unchanged")
+        );
+    }
+
     #[test]
     fn summarizes_miss_reason_missed_and_hit_pct() {
         let s = super::kv_cache_footer_summary(

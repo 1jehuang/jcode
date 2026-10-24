@@ -2645,14 +2645,44 @@ impl App {
             return;
         }
 
+        let prefix_tag = if matches!(
+            reason,
+            KvCacheMissReason::LowRead | KvCacheMissReason::ZeroRead
+        ) && Self::kv_cache_checked_prefix_unchanged(request)
+        {
+            " [prefix unchanged]"
+        } else {
+            ""
+        };
         self.push_kv_cache_notice(format!(
-            "{} KV cache miss [{}] {}: ~{} tokens resent ({}). See KV_CACHE_USAGE in logs.",
+            "{} KV cache miss [{}]{} {}: ~{} tokens resent ({}). See KV_CACHE_USAGE in logs.",
             if harness_change { "⚠️" } else { "ℹ️" },
             reason.label(),
+            prefix_tag,
             usage,
             token_label,
             detail,
         ));
+    }
+
+    fn kv_cache_checked_prefix_unchanged(request: &PendingKvCacheRequest) -> bool {
+        let Some((previous, current)) = request
+            .baseline
+            .as_ref()
+            .and_then(|baseline| baseline.signature.as_ref())
+            .zip(request.signature.as_ref())
+        else {
+            return false;
+        };
+        previous.message_count > 0
+            && previous.system_static_hash != 0
+            && previous.tools_hash != 0
+            && previous.message_hashes.len() == previous.message_count
+            && current.message_hashes.len() == current.message_count
+            && current.system_static_hash == previous.system_static_hash
+            && current.tools_hash == previous.tools_hash
+            && current.tool_count == previous.tool_count
+            && Self::kv_cache_signatures_prefix_match(current, previous)
     }
 
     /// Specific, human-readable cause: what changed (from -> to) and the
