@@ -863,17 +863,16 @@ fn test_repeated_guardrail_refusals_stop_auto_poke_loop() {
     });
 }
 
-/// The deferred quality review must fire at turn end, and must re-arm when the
-/// auto-poke cycle finishes. Without the re-arm a session could only ever
-/// deliver one digest, so later work would silently lose the review.
+/// Legacy gate observations must never queue a digest or weak-point notice.
+/// Normal completion still requests a final response and ends the poke cycle.
 #[test]
-fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
+fn test_gate_digest_is_disabled_at_turn_end() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
 
-        // Completed work with validated confidence, so the completion gate is
-        // satisfied and the digest is the only thing left to say.
+        // Completed work with validated confidence satisfies the completion gate.
+        // A stale observation must not delay the normal final-response handoff.
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
@@ -923,40 +922,29 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
 
         assert!(
             app.schedule_auto_poke_followup_if_needed(),
-            "an unresolved review point should schedule the digest"
+            "normal completion should still request the final response"
         );
-        let digest = app
-            .queued_messages
-            .last()
-            .expect("digest should be queued")
-            .clone();
-        assert!(digest.starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
-        assert!(app.todo_gate_digest_delivered);
-        // Consumed, so the same points cannot be raised twice.
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
+        assert!(!app.todo_gate_digest_delivered);
+        assert!(app.display_messages().iter().all(|message| {
+            !message.content.contains("double-check this turn's weak points")
+        }));
+        // Discarded without delivering a review.
         assert!(
             crate::todo::load_gate_observations(&app.session.id)
                 .expect("reload")
                 .is_empty()
         );
 
-        // Simulate the turn running, then the cycle completing.
-        app.queued_messages.clear();
-        app.pending_queued_dispatch = false;
-        assert!(
-            app.schedule_auto_poke_followup_if_needed(),
-            "with nothing left outstanding the final response should be requested"
-        );
-        assert_eq!(
-            app.queued_messages,
-            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
-        );
+        // Simulate the final-response turn completing. No extra turn is queued.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         assert!(!app.schedule_auto_poke_followup_if_needed());
-        assert!(
-            !app.todo_gate_digest_delivered,
-            "a finished cycle must re-arm the review for later work"
-        );
+        assert!(app.queued_messages.is_empty());
+        assert!(!app.todo_gate_digest_delivered);
     });
 }
 
