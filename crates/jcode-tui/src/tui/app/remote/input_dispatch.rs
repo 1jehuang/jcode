@@ -1,6 +1,7 @@
 use super::super::{PendingRemoteMessage, PendingSplitPrompt};
 use super::*;
 use crate::tui::app as app_mod;
+use std::path::PathBuf;
 
 #[expect(
     clippy::too_many_arguments,
@@ -78,6 +79,7 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
+    app.file_chips = prepared.file_chips;
 }
 
 pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> bool {
@@ -268,6 +270,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
             raw_input: prepared.raw_input,
             expanded: expanded_prompt,
             images: prepared.images,
+            file_chips: prepared.file_chips,
         },
     )
     .await
@@ -300,6 +303,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                     raw_input: prepared.raw_input,
                     expanded: prompt.content,
                     images: prompt.images,
+                    file_chips: prepared.file_chips,
                 });
             app.pending_split_model_override = None;
             app.pending_split_provider_key_override = None;
@@ -322,6 +326,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 raw_input: prepared.raw_input,
                 expanded: prompt.content,
                 images: prompt.images,
+                file_chips: prepared.file_chips,
             });
         app.pending_split_model_override = None;
         app.pending_split_provider_key_override = None;
@@ -543,7 +548,11 @@ struct StashedDraft {
     cursor_pos: usize,
     pasted_contents: Vec<String>,
     pending_images: Vec<(String, String)>,
-    undo: Vec<(String, usize)>,
+    undo: Vec<app_mod::InputUndoEntry>,
+    // Chips attached to the draft. The voice submission path expands and
+    // consumes chips from the composer, so they must be stashed with the
+    // rest of the draft or a restore would bring back chip-less text.
+    file_chips: Vec<PathBuf>,
 }
 
 fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {
@@ -553,6 +562,7 @@ fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {
         pasted_contents: std::mem::take(&mut app.pasted_contents),
         pending_images: std::mem::take(&mut app.pending_images),
         undo: std::mem::take(&mut app.input_undo_stack),
+        file_chips: std::mem::take(&mut app.file_chips),
     };
     app.input = jcode_session_types::wrap_transcription(transcript);
     app.cursor_pos = app.input.len();
@@ -570,7 +580,11 @@ fn restore_draft_after_voice(app: &mut App, stash: StashedDraft) {
     app.pasted_contents = stash.pasted_contents;
     app.pending_images = stash.pending_images;
     app.input_undo_stack = stash.undo;
+    // reset_tab_completion prunes chips against the current input text, which
+    // at this point is still the voice transcript. Restore the chips after
+    // the prune, alongside the draft text they belong to.
     app.reset_tab_completion();
+    app.file_chips = stash.file_chips;
     app.sync_model_picker_preview_from_input();
 }
 

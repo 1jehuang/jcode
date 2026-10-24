@@ -283,6 +283,7 @@ fn submit_prepared_remote_input_defers_until_history_loads() {
         raw_input: "hi".to_string(),
         expanded: "hi".to_string(),
         images: vec![],
+        file_chips: Vec::new(),
     };
     rt.block_on(crate::tui::app::remote::submit_prepared_remote_input(
         &mut app,
@@ -352,6 +353,7 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
             raw_input: "/remote-skill explain the change".to_string(),
             expanded: "/remote-skill explain the change".to_string(),
             images: vec![],
+            file_chips: Vec::new(),
         },
     ))
     .expect("remote skill prompt should send");
@@ -1152,6 +1154,7 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
             raw_input: dropped.clone(),
             expanded: dropped.clone(),
             images: vec![],
+            file_chips: Vec::new(),
         },
     ))
     .expect("dropped path should send as a normal remote turn");
@@ -1189,6 +1192,7 @@ fn remote_embedded_known_slash_commands_are_sent_as_prompt_text() {
             raw_input: prompt.to_string(),
             expanded: prompt.to_string(),
             images: vec![],
+            file_chips: vec![],
         },
     ))
     .expect("embedded command-looking text should use the remote prompt path");
@@ -1225,6 +1229,7 @@ fn remote_multiple_known_slash_commands_use_the_local_command_boundary() {
             raw_input: "/help compact /test help".to_string(),
             expanded: "/help compact /test help".to_string(),
             images: vec![],
+            file_chips: vec![],
         },
     ))
     .expect("known built-in slash commands should stay local");
@@ -1441,3 +1446,45 @@ fn history_restore_renders_swarm_deliveries_as_one_row() {
 }
 
 include!("remote_tests/recall_cancellation.rs");
+
+#[test]
+fn queue_for_reconnect_expands_and_consumes_file_chips() {
+    // Regression (PR #1268 review): a prompt submitted while the remote
+    // connection is down must carry the accepted file chip's contents into
+    // the queued message, and the chip must be consumed so it cannot leak
+    // into a later prompt.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let file = dir.path().join("notes.md");
+    std::fs::write(&file, "queued file contents").expect("write file");
+
+    app.set_input_for_test("review @notes.md".to_string());
+    app.file_chips.push(file.clone());
+    super::queue_message_for_reconnect(&mut app);
+
+    assert_eq!(
+        app.queued_messages.len(),
+        1,
+        "prompt must be queued exactly once"
+    );
+    let queued = &app.queued_messages[0];
+    assert!(
+        queued.contains("queued file contents"),
+        "queued message must embed the file contents, got: {queued}"
+    );
+    assert!(
+        queued.contains("notes.md"),
+        "queued message must reference the attached file, got: {queued}"
+    );
+    assert!(
+        app.file_chips.is_empty(),
+        "chips must be consumed by the queue path, not left to affect a later prompt"
+    );
+    assert!(
+        app.input.is_empty(),
+        "composer input must be consumed by the queue path"
+    );
+}

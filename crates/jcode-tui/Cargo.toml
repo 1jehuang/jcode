@@ -47,6 +47,9 @@ similar = "2"
 tempfile = "3"
 open = "5"
 
+# File watching support for @file index
+notify = "6"
+
 # OAuth / hashing helpers used by the login + account UI
 base64 = "0.22"
 sha2 = "0.10"

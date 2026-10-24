@@ -59,6 +59,7 @@ mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod cache_diagnostics;
 mod catchup;
+mod char_bag;
 mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;
@@ -76,6 +77,7 @@ mod copy_selection;
 mod debug;
 mod dictation;
 mod event_wrappers;
+mod file_mention;
 mod handterm_native_scroll;
 pub(crate) mod helpers;
 mod hotkey_feedback;
@@ -996,6 +998,10 @@ pub struct App {
     /// `command_suggestions_cache` to a single frame.
     command_suggestions_epoch: std::cell::Cell<u64>,
     cursor_pos: usize,
+    /// @file search cache and index
+    file_mention_cache: RefCell<crate::tui::app::file_mention::FileMentionCache>,
+    /// Confirmed @file references (absolute paths); loaded on send
+    file_chips: Vec<PathBuf>,
     scroll_offset: usize,
     /// Pauses auto-scroll when user scrolls up during streaming
     auto_scroll_paused: bool,
@@ -1677,14 +1683,17 @@ pub struct App {
     typing_scroll_lock: bool,
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
-    // Stashed input: saved via Ctrl+S for later retrieval
-    stashed_input: Option<(String, usize)>,
-    // Undo history for in-progress input editing (Ctrl+Z)
-    input_undo_stack: Vec<(String, usize)>,
+    // Stashed input: saved via Ctrl+S for later retrieval. Chips ride
+    // along so restoring does not silently drop attached files (A3).
+    stashed_input: Option<InputUndoEntry>,
+    // Undo history for in-progress input editing (Ctrl+Z). File chips are
+    // snapshot alongside the text so undo restores attachments too.
+    input_undo_stack: Vec<InputUndoEntry>,
     input_typing_undo: Option<(Instant, usize)>,
     // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
-    // restored when Down walks back past the newest entry
-    history_draft: Option<(String, usize)>,
+    // restored when Down walks back past the newest entry. Chips ride
+    // along like the stash above (A3).
+    history_draft: Option<InputUndoEntry>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press
@@ -1864,6 +1873,14 @@ pub struct App {
     /// Lazily-loaded persisted cross-session prompt history (oldest first,
     /// deduped). None until first use; see `prompt_history.rs`.
     persisted_prompt_history: Option<Vec<String>>,
+}
+
+/// One Ctrl+Z snapshot of the composer state.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct InputUndoEntry {
+    pub(crate) input: String,
+    pub(crate) cursor_pos: usize,
+    pub(crate) file_chips: Vec<PathBuf>,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.
