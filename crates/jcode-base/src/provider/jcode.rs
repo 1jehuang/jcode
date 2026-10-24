@@ -363,6 +363,7 @@ mod tests {
             "claude-sonnet-5-5",
             "claude-haiku-5-5",
             "gpt-6.1-sol",
+            "claude-sonnet-4-6",
         ];
 
         assert_eq!(
@@ -394,7 +395,7 @@ mod tests {
         assert_eq!(route_selection.api_method, "jcode-subscription");
         assert_eq!(route_selection.provider_label, "Jcode Subscription");
         assert_eq!(plus_routes, flagship_routes);
-        assert_eq!(flagship_routes.len(), 4);
+        assert_eq!(flagship_routes.len(), 5);
         assert!(
             !flagship_routes
                 .iter()
