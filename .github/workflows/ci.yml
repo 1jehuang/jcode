@@ -507,6 +507,24 @@ jobs:
             -TimeoutSeconds 900 `
             -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-base', '--no-default-features', '--lib', 'power_inhibit::tests::windows_', '--', '--nocapture')
 
+      - name: Run Windows search resource safety tests
+        shell: pwsh
+        run: |
+          & ./scripts/invoke_cargo_with_timeout.ps1 `
+            -Name 'Windows process memory telemetry tests' `
+            -TimeoutSeconds 300 `
+            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-base', '--no-default-features', '--lib', 'process_memory::tests::', '--', '--nocapture')
+
+          & ./scripts/invoke_cargo_with_timeout.ps1 `
+            -Name 'Windows search cancellation tests' `
+            -TimeoutSeconds 300 `
+            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-app-core', '--no-default-features', '--lib', 'tool::agentgrep::tests::', '--', '--nocapture')
+
+          & ./scripts/invoke_cargo_with_timeout.ps1 `
+            -Name 'Windows adopted background cancellation tests' `
+            -TimeoutSeconds 300 `
+            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-base', '--no-default-features', '--lib', 'background::tests::adopted_task_', '--', '--nocapture')
+
       - name: Run Windows e2e smoke tests
         shell: pwsh
         run: |
