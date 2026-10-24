@@ -2,15 +2,20 @@
 // while previous_response_id also owns the response output appended after it.
 #[tokio::test]
 async fn persistent_delta_wire_excludes_saved_response_output() {
-    assert_delta_wire_excludes_saved_response_output(false).await;
+    assert_delta_wire_excludes_saved_response_output(false, false).await;
 }
 
 #[tokio::test]
 async fn persistent_delta_wire_preserves_output_before_empty_completion() {
-    assert_delta_wire_excludes_saved_response_output(true).await;
+    assert_delta_wire_excludes_saved_response_output(true, false).await;
 }
 
-async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool) {
+#[tokio::test]
+async fn persistent_delta_wire_oauth_does_not_add_cache_options() {
+    assert_delta_wire_excludes_saved_response_output(true, true).await;
+}
+
+async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool, oauth: bool) {
     let _env_lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -34,6 +39,25 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
                     _ => {}
                 }
             };
+            // Check the actual serialized continuation, not a reconstruction
+            // of it. Tool callbacks and empty completion payloads must not
+            // change the routing key or the static cacheable prefix.
+            assert_eq!(request["prompt_cache_key"], "wire-session");
+            assert_eq!(request["instructions"], "stable system");
+            assert_eq!(request["tools"], serde_json::json!([]));
+            if oauth {
+                assert!(request.get("prompt_cache_options").is_none());
+            } else {
+                assert_eq!(request["prompt_cache_options"]["mode"], "implicit");
+                assert_eq!(
+                    request["prompt_cache_options"]["comparison_response_id"],
+                    if turn == 0 {
+                        "resp_previous"
+                    } else {
+                        "resp_wire_0"
+                    },
+                );
+            }
             if turn == 1 {
                 assert_eq!(request["previous_response_id"], "resp_wire_0");
                 assert_eq!(request["input"], serde_json::json!(expected_delta));
@@ -47,7 +71,8 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
             if turn == 0 {
                 for item in &output {
                     ws.send(WsMessage::Text(
-                        serde_json::json!({"type":"response.output_item.done", "item":item}).to_string(),
+                        serde_json::json!({"type":"response.output_item.done", "item":item})
+                            .to_string(),
                     ))
                     .await
                     .unwrap();
@@ -58,11 +83,16 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
         while ws.next().await.is_some() {}
     });
     let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
-    let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));
+    let mut creds = prewarm_test_credentials();
+    if oauth {
+        creds.refresh_token = "fixture-refresh".into();
+    }
+    let identity = openai_websocket_prewarm::prewarm_identity(&creds, Some("gpt-5.6-sol"), None);
+    let credentials = Arc::new(RwLock::new(creds));
     let state = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
-        cache_key: None,
+        identity,
+        cache_key: Some("wire-session".into()),
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
@@ -76,11 +106,20 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
     let mut input = vec![user, next];
     tokio::time::timeout(Duration::from_secs(3), async {
         for turn in 0..2 {
+            let mut request = serde_json::json!({
+                "model":"gpt-5.6-sol",
+                "prompt_cache_key":"wire-session",
+                "instructions":"stable system",
+                "tools":[],
+            });
+            if !oauth {
+                request["prompt_cache_options"] = serde_json::json!({"mode":"implicit"});
+            }
             assert!(matches!(
                 try_persistent_ws_continuation(
                     &state,
                     &credentials,
-                    &serde_json::json!({"model":"gpt-5.6-sol"}),
+                    &request,
                     &input,
                     input.len(),
                     &tx
@@ -196,7 +235,11 @@ async fn persistent_terminal_public_case(
     provider.set_transport("websocket").unwrap();
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
         cache_key: Some(provider.cache_routing_key()),
         last_response_id: "resp_stale".into(),
         connected_at: Instant::now(),
@@ -310,7 +353,11 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
     let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));
     let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
         cache_key: None,
         last_response_id: "resp_stale".into(),
         connected_at: Instant::now(),

@@ -1,6 +1,6 @@
 use super::openai_stream_cancellation::{after_authentication, while_consumer_open};
 use super::openai_stream_diagnostics::{
-    StreamProgress, reqwest_header_fields, tungstenite_header_fields,
+    StreamProgress, add_cache_comparison, reqwest_header_fields, tungstenite_header_fields,
 };
 use super::*;
 
@@ -1061,6 +1061,16 @@ async fn continue_persistent_ws_locked(
     }
     if let Some(prompt_cache_retention) = request.get("prompt_cache_retention") {
         continuation_request["prompt_cache_retention"] = prompt_cache_retention.clone();
+    }
+    if let Some(options) = request.get("prompt_cache_options") {
+        continuation_request["prompt_cache_options"] = options.clone();
+    }
+    if !full_replay && state.message_count > 0 {
+        add_cache_comparison(
+            &mut continuation_request,
+            OpenAIProvider::is_chatgpt_mode(&*credentials.read().await),
+            &previous_response_id,
+        );
     }
     continuation_request["store"] = serde_json::json!(false);
     continuation_request["parallel_tool_calls"] = serde_json::json!(false);
