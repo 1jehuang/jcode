@@ -518,7 +518,7 @@ jobs:
           & ./scripts/invoke_cargo_with_timeout.ps1 `
             -Name 'Windows search cancellation tests' `
             -TimeoutSeconds 300 `
-            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-app-core', '--no-default-features', '--lib', 'tool::agentgrep::tests::', '--', '--nocapture')
+            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-app-core', '--no-default-features', '--lib', 'tool::agentgrep::tests::search_cancellation_', '--', '--nocapture')
 
           & ./scripts/invoke_cargo_with_timeout.ps1 `
             -Name 'Windows adopted background cancellation tests' `
