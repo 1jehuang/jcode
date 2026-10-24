@@ -475,7 +475,9 @@ fn test_mermaid_block_detection() {
     // source code instead of becoming a half-block image or a text stub.
     let md = "```mermaid\nflowchart LR\n    A --> B\n```";
     let lines = with_mermaid_rendering_override(Some(true), || {
-        mermaid::with_image_protocol_override(Some(false), || render_markdown(md))
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(false), || render_markdown(md))
+        })
     });
     let text: String = lines
         .iter()
@@ -504,8 +506,10 @@ fn test_mermaid_block_detection() {
 fn lazy_mermaid_without_native_protocol_also_renders_source() {
     let md = "```mermaid\nflowchart TD\n    Start --> Finish\n```";
     let lines = with_mermaid_rendering_override(Some(true), || {
-        mermaid::with_image_protocol_override(Some(false), || {
-            render_markdown_lazy(md, Some(80), 0..usize::MAX)
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(false), || {
+                render_markdown_lazy(md, Some(80), 0..usize::MAX)
+            })
         })
     });
     let text = lines_to_string(&lines);
@@ -522,8 +526,10 @@ fn lazy_mermaid_without_native_protocol_also_renders_source() {
 fn streaming_mermaid_without_native_protocol_keeps_source_visible() {
     let md = "```mermaid\nflowchart TD\n    Stream --> Source\n```";
     let lines = with_mermaid_rendering_override(Some(true), || {
-        mermaid::with_image_protocol_override(Some(false), || {
-            with_streaming_render_context(|| render_markdown_with_width(md, Some(80)))
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(false), || {
+                with_streaming_render_context(|| render_markdown_with_width(md, Some(80)))
+            })
         })
     });
     let text = lines_to_string(&lines);
@@ -541,11 +547,22 @@ fn streaming_mermaid_without_native_protocol_keeps_source_visible() {
 #[test]
 fn mermaid_gate_accepts_native_protocol_and_rejects_halfblock_fallback() {
     with_mermaid_rendering_override(Some(true), || {
-        mermaid::with_image_protocol_override(Some(false), || {
-            assert!(!should_render_mermaid_block(Some("mermaid")));
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(false), || {
+                assert!(!should_render_mermaid_block(Some("mermaid")));
+            });
         });
-        mermaid::with_image_protocol_override(Some(true), || {
-            assert!(should_render_mermaid_block(Some("mermaid")));
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(true), || {
+                assert!(should_render_mermaid_block(Some("mermaid")));
+            });
+        });
+        // The webui pane is the exception: Halfblocks text art there is
+        // exactly what the browser terminal can draw.
+        mermaid::with_herdr_webui_override(Some(true), || {
+            mermaid::with_image_protocol_override(Some(false), || {
+                assert!(should_render_mermaid_block(Some("mermaid")));
+            });
         });
     });
 }
