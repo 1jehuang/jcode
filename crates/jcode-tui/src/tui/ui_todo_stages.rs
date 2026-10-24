@@ -740,6 +740,7 @@ pub(crate) fn push_stage_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
+    background_tasks: &[TodoCardBackgroundTask],
     base_indent: &str,
     inner_width: usize,
 ) {
@@ -778,6 +779,23 @@ pub(crate) fn push_stage_lines(
         // dimmed (with its titles and dots) while the phase has not started.
         let later = current.is_some_and(|current| phase > current);
         let items = items_of(lane);
+        // Expand a waiting lane so its dependency progress belongs to the
+        // corresponding todo rather than an ambiguous lane-wide status dot.
+        if items
+            .iter()
+            .any(|todo| !todo_running_dependencies(todo, background_tasks).is_empty())
+        {
+            for todo in &items {
+                lines.push(render_todo_item_line_with_background(
+                    todo,
+                    agents,
+                    background_tasks,
+                    base_indent,
+                    inner_width,
+                ));
+            }
+            continue;
+        }
         let statuses = lane_item_statuses(&items, agents);
         let mut row = lane_strip_spans(&statuses, strip_width);
         if name_width > 0 {

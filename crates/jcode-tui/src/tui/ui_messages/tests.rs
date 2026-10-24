@@ -1211,26 +1211,122 @@ fn render_overnight_message_uses_rounded_progress_card() {
 }
 
 #[test]
-fn background_dependency_todo_card_annotation_is_width_safe() {
+fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
     use unicode_width::UnicodeWidthStr;
     let todo = crate::todo::TodoItem {
         id: "wait".into(),
-        content: "等待 build 🦀".into(),
+        content: "等待 build 🦀 with a long task title".into(),
         status: "pending".into(),
-        waiting_on: vec!["build-task".into()],
+        waiting_on: vec!["build-task".into(), "test-task".into()],
         ..Default::default()
     };
-    let wide = render_todo_card_item_line(&todo, "", 60);
-    assert!(extract_line_text(&wide).contains("[bg dependency]"));
-    for width in 0..40 {
-        let line = render_todo_card_item_line(&todo, "", width);
-        assert!(extract_line_text(&line).width() <= width);
+    let tasks = vec![
+        TodoCardBackgroundTask {
+            task_id: "build-task".into(),
+            label: "构建 🦀".into(),
+            percent: Some(40.0),
+        },
+        TodoCardBackgroundTask {
+            task_id: "test-task".into(),
+            label: "tests".into(),
+            percent: Some(75.0),
+        },
+    ];
+    let wide = render_todo_item_line_with_background(&todo, &[], &tasks, "", 160);
+    let text = extract_line_text(&wide);
+    assert!(text.contains("🕒"), "{text}");
+    assert!(!text.contains('○'), "{text}");
+    assert!(text.contains("构建 🦀") && text.contains("tests"), "{text}");
+    assert!(text.contains('▰') && text.contains('▱'), "{text}");
+    assert!(text.find("等待").unwrap() < text.find("构建").unwrap());
+    for width in 0..160 {
+        let line = render_todo_item_line_with_background(&todo, &[], &tasks, "", width);
+        assert!(extract_line_text(&line).width() <= width, "width={width}");
     }
-    let mut done = todo;
-    done.status = "completed".into();
-    assert!(
-        !extract_line_text(&render_todo_card_item_line(&done, "", 60)).contains("bg dependency")
-    );
+    // A terminal or unknown reference is absent from the live snapshot.
+    let resolved = extract_line_text(&render_todo_item_line_with_background(
+        &todo,
+        &[],
+        &[],
+        "",
+        80,
+    ));
+    assert!(!resolved.contains("🕒") && !resolved.contains('%'));
+    assert!(resolved.contains('○'));
+    for status in ["completed", "cancelled"] {
+        let mut done = todo.clone();
+        done.status = status.into();
+        let text = extract_line_text(&render_todo_item_line_with_background(
+            &done,
+            &[],
+            &tasks,
+            "",
+            80,
+        ));
+        assert!(!text.contains("🕒") && !text.contains('%'));
+    }
+}
+
+#[test]
+fn background_dependency_indeterminate_progress_is_not_fabricated() {
+    let todo = crate::todo::TodoItem {
+        waiting_on: vec!["task".into()],
+        status: "in_progress".into(),
+        content: "Wait for task".into(),
+        ..Default::default()
+    };
+    let tasks = vec![TodoCardBackgroundTask {
+        task_id: "task".into(),
+        label: "build".into(),
+        percent: None,
+    }];
+    let text = extract_line_text(&render_todo_item_line_with_background(
+        &todo,
+        &[],
+        &tasks,
+        "",
+        80,
+    ));
+    assert!(text.contains("🕒") && text.contains("running"));
+    assert!(!text.contains('%'));
+}
+
+#[test]
+fn background_dependency_clock_and_progress_render_in_flat_and_stage_cards() {
+    use unicode_width::UnicodeWidthStr;
+    for stage in [None, Some(1)] {
+        let todo = crate::todo::TodoItem {
+            id: "wait".into(),
+            content: "Await build".into(),
+            status: "in_progress".into(),
+            stage,
+            group: stage.map(|_| "compile".into()),
+            waiting_on: vec!["task".into()],
+            ..Default::default()
+        };
+        let message = DisplayMessage::todos(serde_json::json!({
+            "todos": [todo], "background_tasks": [{"task_id":"task", "label":"build", "percent":40.0}]
+        }).to_string());
+        let lines = render_todos_message(&message, 100, crate::config::DiffDisplayMode::Off);
+        let text = lines
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("🕒") && text.contains("build") && text.contains('%'),
+            "{text}"
+        );
+        for width in 20..100 {
+            for line in render_todos_message(&message, width, crate::config::DiffDisplayMode::Off) {
+                assert!(
+                    extract_line_text(&line).width() <= width as usize,
+                    "width={width}: {}",
+                    extract_line_text(&line)
+                );
+            }
+        }
+    }
 }
 
 #[test]

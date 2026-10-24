@@ -1207,6 +1207,14 @@ pub(crate) fn render_overnight_message(
     lines
 }
 
+/// Only currently running, session-validated dependencies enter this snapshot.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TodoCardBackgroundTask {
+    pub task_id: String,
+    pub label: String,
+    pub percent: Option<f32>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum TodoCardPayload {
@@ -1220,6 +1228,8 @@ enum TodoCardPayload {
         /// Swarm workers referenced by `TodoItem::assigned_to`.
         #[serde(default)]
         agents: Vec<TodoCardAgent>,
+        #[serde(default)]
+        background_tasks: Vec<TodoCardBackgroundTask>,
     },
     Legacy(Vec<crate::todo::TodoItem>),
 }
@@ -1264,6 +1274,7 @@ impl TodoCardPayload {
         crate::todo::TodoPlan,
         Vec<crate::todo::TodoGoal>,
         Vec<TodoCardAgent>,
+        Vec<TodoCardBackgroundTask>,
     ) {
         match self {
             Self::Current {
@@ -1271,10 +1282,12 @@ impl TodoCardPayload {
                 plan,
                 goals,
                 agents,
-            } => (todos, plan, goals, agents),
+                background_tasks,
+            } => (todos, plan, goals, agents, background_tasks),
             Self::Legacy(todos) => (
                 todos,
                 crate::todo::TodoPlan::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             ),
@@ -1433,7 +1446,7 @@ fn render_todos_message_with_cap(
     let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
     };
-    let (todos, plan, goals, agents) = payload.into_parts();
+    let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
     let centered = markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
@@ -1485,7 +1498,14 @@ fn render_todos_message_with_cap(
             ));
             let goal = todo_card_goal_for_group(&goals, None);
             push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-            push_stage_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
+            push_stage_lines(
+                &mut lines,
+                &all_refs,
+                &agents,
+                &background_tasks,
+                base_indent,
+                inner_width,
+            );
         } else if has_groups {
             lines.push(render_todo_stage_status_header(
                 &all_refs,
@@ -1514,7 +1534,14 @@ fn render_todos_message_with_cap(
                     inner_width,
                 ));
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-                push_todo_item_lines(&mut lines, items, &agents, base_indent, inner_width);
+                push_todo_item_lines(
+                    &mut lines,
+                    items,
+                    &agents,
+                    &background_tasks,
+                    base_indent,
+                    inner_width,
+                );
             }
         } else {
             let goal = todo_card_goal_for_group(&goals, None);
@@ -1527,7 +1554,14 @@ fn render_todos_message_with_cap(
             if goal.is_some() {
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
             }
-            push_todo_item_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
+            push_todo_item_lines(
+                &mut lines,
+                &all_refs,
+                &agents,
+                &background_tasks,
+                base_indent,
+                inner_width,
+            );
         }
     }
 
@@ -1722,13 +1756,15 @@ fn push_todo_item_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
+    background_tasks: &[TodoCardBackgroundTask],
     base_indent: &str,
     inner_width: usize,
 ) {
     for todo in todos {
-        lines.push(render_todo_item_line(
+        lines.push(render_todo_item_line_with_background(
             todo,
             agents,
+            background_tasks,
             base_indent,
             inner_width,
         ));
@@ -2264,6 +2300,108 @@ fn render_todo_card_item_line(
     todo_card_line(todo_card_item_spans(todo, false), base_indent, inner_width)
 }
 
+fn todo_running_dependencies<'a>(
+    todo: &crate::todo::TodoItem,
+    tasks: &'a [TodoCardBackgroundTask],
+) -> Vec<&'a TodoCardBackgroundTask> {
+    if !crate::todo::is_incomplete_todo(todo) {
+        return Vec::new();
+    }
+    tasks
+        .iter()
+        .filter(|task| todo.waiting_on.contains(&task.task_id))
+        .collect()
+}
+
+fn render_todo_item_line_with_background(
+    todo: &crate::todo::TodoItem,
+    agents: &[TodoCardAgent],
+    tasks: &[TodoCardBackgroundTask],
+    base_indent: &str,
+    inner_width: usize,
+) -> Line<'static> {
+    let dependencies = todo_running_dependencies(todo, tasks);
+    if dependencies.is_empty() {
+        return render_todo_item_line(todo, agents, base_indent, inner_width);
+    }
+    let mut spans = todo_card_item_spans(todo, false);
+    spans[1] = Span::styled("🕒 ", Style::default().fg(todo_warning_color()));
+    let progress = todo_dependency_progress(
+        &dependencies,
+        inner_width.saturating_sub(12).min(inner_width / 2),
+    );
+    let progress_width = progress.width();
+    if progress_width > 0 {
+        let left_width = inner_width.saturating_sub(progress_width + 2);
+        let mut left = super::truncate_line_with_ellipsis_to_width(&Line::from(spans), left_width);
+        let pad = inner_width.saturating_sub(left.width() + progress_width);
+        left.spans.push(Span::raw(" ".repeat(pad)));
+        left.spans.extend(progress.spans);
+        spans = left.spans;
+    }
+    todo_card_line(spans, base_indent, inner_width)
+}
+
+/// Reuse the info widget's bar cells, colors and used/remaining convention.
+/// Labels and separators are fitted separately so Unicode task names cannot
+/// wrap, even though the shared renderer's fixed label is ASCII-oriented.
+fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> Line<'static> {
+    if width < 10 {
+        return Line::default();
+    }
+    let mut spans = Vec::new();
+    let mut shown = 0;
+    for task in tasks {
+        let used: usize = spans
+            .iter()
+            .map(|span: &Span<'_>| span.content.width())
+            .sum();
+        let remaining = width.saturating_sub(used + if shown > 0 { 2 } else { 0 });
+        if remaining < 10 {
+            break;
+        }
+        let budget = remaining.min(28);
+        if shown > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let label_budget = budget.saturating_sub(15).min(10);
+        let clean_label = task.label.split_whitespace().collect::<Vec<_>>().join(" ");
+        let label =
+            super::truncate_line_with_ellipsis_to_width(&Line::raw(clean_label), label_budget);
+        let label_width = label.width();
+        if label_width > 0 {
+            spans.extend(label.spans);
+            spans.push(Span::raw(" "));
+        }
+        let bar_budget = budget.saturating_sub(label_width + usize::from(label_width > 0));
+        if let Some(percent) = task.percent.filter(|percent| percent.is_finite()) {
+            let used = percent.clamp(0.0, 100.0).round() as u8;
+            let bar = crate::tui::info_widget::render_usage_limit_bar(
+                "",
+                used,
+                100 - used,
+                None,
+                (bar_budget + 7).min(u16::MAX as usize) as u16,
+                crate::config::config().display.usage_display_used(),
+            );
+            spans.extend(bar.spans.into_iter().skip(1));
+        } else {
+            spans.push(Span::styled(
+                "running",
+                Style::default().fg(todo_meta_color()),
+            ));
+        }
+        shown += 1;
+    }
+    if shown < tasks.len() {
+        let suffix = format!(" +{}", tasks.len() - shown);
+        let room = width.saturating_sub(suffix.width());
+        spans = super::truncate_line_with_ellipsis_to_width(&Line::from(spans), room).spans;
+        spans.push(Span::styled(suffix, Style::default().fg(todo_meta_color())));
+    }
+    super::truncate_line_with_ellipsis_to_width(&Line::from(spans), width)
+}
+
 /// Spans for one todo row: two-cell gutter, status glyph, content, and
 /// (optionally) the confidence suffix. Callers own indent and truncation.
 fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> Vec<Span<'static>> {
@@ -2287,17 +2425,7 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(format!("{} ", glyph), Style::default().fg(glyph_color)),
-        Span::styled(
-            if !todo.waiting_on.is_empty()
-                && todo.status != "completed"
-                && todo.status != "cancelled"
-            {
-                format!("[bg dependency] {}", todo.content)
-            } else {
-                todo.content.clone()
-            },
-            Style::default().fg(text_color),
-        ),
+        Span::styled(todo.content.clone(), Style::default().fg(text_color)),
     ];
     if with_confidence && let Some(label) = todo_card_confidence_label(todo) {
         spans.push(Span::styled(

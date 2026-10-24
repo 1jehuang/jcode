@@ -152,20 +152,55 @@ fn background_dependency_dead_owner_or_detached_child_is_actionable() {
         // This PID is outside the OS PID range and cannot name a live process.
         let dead_pid = i32::MAX as u32;
         assert!(!crate::platform::is_process_running(dead_pid));
-        for detached in [false, true] {
+        for (detached, owner) in [
+            (false, Some(dead_pid)),
+            (true, Some(dead_pid)),
+            (false, None),
+        ] {
             let mut app = waiting_dependency_test_app();
             let task = format!("tui-orphan-{}", app.session.id);
             let fixture = live_dependency_fixture(&app, &task);
             let mut status: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&fixture.0).unwrap()).unwrap();
             status["detached"] = detached.into();
-            status[if detached { "pid" } else { "owner_pid" }] = dead_pid.into();
+            status[if detached { "pid" } else { "owner_pid" }] = owner.into();
             std::fs::write(&fixture.0, serde_json::to_vec(&status).unwrap()).unwrap();
             app.upsert_running_background_task(task.clone(), "Orphan build".into(), None);
             crate::todo::save_todos(&app.session.id, &[dependency_todo("recover", &task)]).unwrap();
             assert!(app.schedule_auto_poke_followup_if_needed());
             assert_eq!(app.queued_messages.len(), 1);
         }
+    });
+}
+
+#[test]
+fn background_dependency_card_refresh_tracks_only_live_task_progress() {
+    with_temp_jcode_home(|| {
+        let mut app = waiting_dependency_test_app();
+        let task = format!("tui-card-{}", app.session.id);
+        let _fixture = live_dependency_fixture(&app, &task);
+        let todo = dependency_todo("waiting", &task);
+        crate::todo::save_todos(&app.session.id, &[todo.clone()]).unwrap();
+        app.upsert_running_background_task(task.clone(), "Build 🦀".into(), Some(25.0));
+        app.show_todo_card();
+        let payload: serde_json::Value =
+            serde_json::from_str(&app.display_messages.last().unwrap().content).unwrap();
+        assert_eq!(payload["background_tasks"][0]["percent"], 25.0);
+        app.upsert_running_background_task(task.clone(), "Build 🦀".into(), Some(65.0));
+        assert!(app.refresh_todo_card_if_needed());
+        let payload: serde_json::Value =
+            serde_json::from_str(&app.display_messages.last().unwrap().content).unwrap();
+        assert_eq!(payload["background_tasks"][0]["percent"], 65.0);
+        app.finish_background_task(
+            task,
+            "Build 🦀".into(),
+            crate::tui::BackgroundTaskRowStatus::Completed,
+        );
+        assert!(app.refresh_todo_card_if_needed());
+        let payload: serde_json::Value =
+            serde_json::from_str(&app.display_messages.last().unwrap().content).unwrap();
+        assert_eq!(payload["background_tasks"], serde_json::json!([]));
+        assert!(app.todo_card_background_tasks(&[todo]).is_empty());
     });
 }
 
