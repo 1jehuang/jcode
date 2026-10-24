@@ -1060,6 +1060,9 @@ pub struct App {
     remote_interrupt_ack_deadline: Option<Instant>,
     // Reload reconnect is waiting for server history before deciding whether to continue.
     pending_reload_reconnect_status: Option<PendingReloadReconnectStatus>,
+    // Keep recovery identities after dispatch so delayed History cannot requeue
+    // the same continuation. Reset only when a new server reload begins.
+    scheduled_reload_recoveries: HashSet<(String, String)>,
     // Current status
     status: ProcessingStatus,
     // Subagent status (shown during Task tool execution)
