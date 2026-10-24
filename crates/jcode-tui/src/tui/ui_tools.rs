@@ -45,6 +45,35 @@ pub(crate) fn show_bash_output() -> bool {
     crate::config::config().display.show_bash_output
 }
 
+/// #1453: whether the compact tool duration badge is enabled. Strictly
+/// opt-in via `display.show_tool_duration` (default false).
+#[cfg(not(test))]
+pub(crate) fn show_tool_duration() -> bool {
+    crate::config::config().display.show_tool_duration
+}
+
+#[cfg(test)]
+pub(crate) fn show_tool_duration() -> bool {
+    tests_show_tool_duration_override::get()
+}
+
+#[cfg(test)]
+pub(crate) mod tests_show_tool_duration_override {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SHOW_DURATION: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn get() -> bool {
+        SHOW_DURATION.with(Cell::get)
+    }
+
+    pub(crate) fn set(value: bool) {
+        SHOW_DURATION.with(|cell| cell.set(value));
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn show_bash_output() -> bool {
     tests_show_bash_output_override::get()

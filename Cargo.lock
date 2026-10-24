@@ -3632,6 +3632,7 @@ dependencies = [
 name = "jcode-config-types"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
 ]
@@ -3814,6 +3815,7 @@ name = "jcode-protocol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "jcode-applet-types",
  "jcode-batch-types",
  "jcode-config-types",
@@ -4512,6 +4514,7 @@ dependencies = [
 name = "jcode-tui-messages"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "jcode-config-types",
  "jcode-message-types",
  "jcode-session-types",

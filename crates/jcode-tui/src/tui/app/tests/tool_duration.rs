@@ -16,6 +16,7 @@ fn tool_duration_remote_completion_and_local_update() {
                 name: "bash".into(),
                 output: output.into(),
                 error: None,
+                duration_ms: None,
             },
             &mut remote,
         );
@@ -37,6 +38,7 @@ fn tool_duration_remote_completion_and_local_update() {
             name: "bash".into(),
             output: "failed".into(),
             error: Some("failed".into()),
+            duration_ms: Some(1_234),
         },
         &mut remote,
     );
@@ -72,6 +74,7 @@ fn tool_duration_replay_does_not_measure_playback_clock() {
             name: "bash".into(),
             output: "done".into(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );

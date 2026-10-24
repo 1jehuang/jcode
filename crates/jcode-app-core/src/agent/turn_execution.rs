@@ -1306,6 +1306,8 @@ impl Agent {
                     Some(msg.tool_calls)
                 },
                 tool_data: msg.tool_data,
+                timestamp: msg.timestamp,
+                tool_duration_ms: msg.tool_duration_ms,
             })
             .collect()
     }
@@ -1332,6 +1334,8 @@ impl Agent {
                     Some(msg.tool_calls)
                 },
                 tool_data: msg.tool_data,
+                timestamp: msg.timestamp,
+                tool_duration_ms: msg.tool_duration_ms,
             })
             .collect();
         (history, images)
@@ -1362,6 +1366,8 @@ impl Agent {
                     Some(msg.tool_calls)
                 },
                 tool_data: msg.tool_data,
+                timestamp: msg.timestamp,
+                tool_duration_ms: msg.tool_duration_ms,
             })
             .collect();
         (history, images, compacted_info)

@@ -398,6 +398,8 @@ mod history_dedup_tests {
             content: content.to_string(),
             tool_calls: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -798,7 +800,16 @@ pub(in crate::tui::app) fn handle_server_event(
             name,
             output,
             error,
-        } => super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error),
+            duration_ms,
+        } => super::server_event_handlers::handle_tool_done(
+            app,
+            remote,
+            id,
+            name,
+            output,
+            error,
+            duration_ms,
+        ),
         ServerEvent::GeneratedImage {
             id,
             path,
@@ -1191,6 +1202,8 @@ pub(in crate::tui::app) fn handle_server_event(
                         duration_secs: app.display_turn_duration_secs(),
                         title: None,
                         tool_data: None,
+                        timestamp: None,
+                        tool_duration_ms: None,
                     });
                 }
             }
@@ -1319,6 +1332,8 @@ pub(in crate::tui::app) fn handle_server_event(
                             duration_secs: duration,
                             title: None,
                             tool_data: None,
+                            timestamp: None,
+                            tool_duration_ms: None,
                         });
                     }
                     app.push_turn_footer(duration);
@@ -1489,6 +1504,8 @@ pub(in crate::tui::app) fn handle_server_event(
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
             }
             app.is_processing = false;
@@ -1852,6 +1869,8 @@ pub(in crate::tui::app) fn handle_server_event(
                             content: msg.content,
                             tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
                             tool_data: msg.tool_data,
+                            timestamp: msg.timestamp,
+                            tool_duration_ms: msg.tool_duration_ms,
                         }),
                 );
                 messages.extend(tail);
@@ -2300,6 +2319,8 @@ pub(in crate::tui::app) fn handle_server_event(
                                 duration_secs: None,
                                 title: None,
                                 tool_data: msg.tool_data,
+                                timestamp: msg.timestamp,
+                                tool_duration_ms: msg.tool_duration_ms,
                             })
                             .collect();
                         super::super::remote_notifications::normalize_swarm_delivery_messages(
@@ -2500,6 +2521,8 @@ pub(in crate::tui::app) fn handle_server_event(
                     duration_secs: None,
                     title: None,
                     tool_data: msg.tool_data,
+                    timestamp: msg.timestamp,
+                    tool_duration_ms: msg.tool_duration_ms,
                 })
                 .collect();
             app.apply_compacted_history_window(
@@ -2960,6 +2983,8 @@ pub(in crate::tui::app) fn handle_server_event(
                         duration_secs: duration,
                         title: None,
                         tool_data: None,
+                        timestamp: None,
+                        tool_duration_ms: None,
                     });
                 }
                 app.push_turn_footer(duration);
@@ -2997,6 +3022,8 @@ pub(in crate::tui::app) fn handle_server_event(
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
             }
             if let Some(n) = tools_skipped {
