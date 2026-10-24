@@ -523,6 +523,30 @@ cross_provider_failover = "countdown"
 # WebSocket permessage-deflate for ChatGPT/OpenAI Responses sockets.
 # Env override: JCODE_REQUEST_COMPRESSION.
 # request_compression = "auto"
+#
+# Base delay (seconds) for linear backoff between auto-retry attempts after a
+# remote request error. The actual backoff is: base * attempt_number.
+# Default: 2 (2s, 4s, 6s, ...). Raise this for shared gateways that return 429
+# without a retry-after header, so retries are gentler instead of hammering.
+# Env override: JCODE_AUTO_RETRY_BASE_DELAY_SECS
+# auto_retry_base_delay_secs = 2
+#
+# Whether automatic retry scheduling is enabled for transient remote failures.
+# Default: true. Env override: JCODE_AUTO_RETRY_ENABLED
+# auto_retry_enabled = true
+#
+# Maximum auto-retry attempts before giving up and surfacing the error.
+# Default: 3. Raise this for shared services that need more time to free up
+# capacity. Env override: JCODE_AUTO_RETRY_MAX_ATTEMPTS
+# auto_retry_max_attempts = 3
+#
+# Both keys can also be overridden per named provider profile:
+#   [providers.my-gateway]
+#   auto_retry_base_delay_secs = 10
+#   auto_retry_enabled = true
+#   auto_retry_max_attempts = 10
+# Environment variables take precedence over per-provider values, which take
+# precedence over the global [provider] default when that provider is active.
 
 [server]
 # Who executes autonomous wake requests from background completion/stall,

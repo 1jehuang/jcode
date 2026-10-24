@@ -5,6 +5,14 @@ use super::state_ui::RestoredReloadInput;
 use super::*;
 use crate::tui::{backend, keybind};
 
+fn parse_auto_retry_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 impl App {
     /// Re-parse keybinding snapshots when the config cache has reloaded.
     ///
@@ -55,8 +63,134 @@ impl App {
         remote::begin_remote_send(self, remote, content, images, is_system, None, false, 0).await
     }
 
+    /// Resolve the config key of the provider profile whose auto-retry
+    /// overrides apply to the active turn.
+    ///
+    /// Local mode reads `session.provider_key`, set at session start and kept
+    /// current by the local model-switch paths. Remote mode cannot: a
+    /// server-side `/model` switch updates `remote_provider_name` but never
+    /// `session.provider_key`, so that key keeps naming the launch-time
+    /// provider (greptile 4307529097). When the server has reported a provider
+    /// name, derive the profile key from it instead: a catalog profile display
+    /// name (e.g. "NVIDIA NIM" -> `nvidia-nim`) or a named `[providers.<id>]`
+    /// key resolves directly, and a canonical provider name (e.g. "Claude" ->
+    /// `claude`) through the session-key vocabulary.
+    ///
+    /// The canonical map is inlined rather than reusing
+    /// `derive_session_provider_key`, because that function consults the
+    /// client process's provider env vars first (`JCODE_RUNTIME_PROVIDER`,
+    /// `JCODE_OPENROUTER_CACHE_NAMESPACE`, ...). In remote mode those describe
+    /// the client's local provider stack, not the server-side session, so they
+    /// would poison the mapping (a client that last used DeepSeek locally would
+    /// resolve a remote "Claude" to `deepseek`).
+    pub(crate) fn auto_retry_provider_profile_key(&self) -> Option<String> {
+        let remote_name = self
+            .is_remote
+            .then_some(self.remote_provider_name.as_deref())
+            .flatten()
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        let Some(remote_name) = remote_name else {
+            return self.session.provider_key.clone();
+        };
+        // Matches by display name ("NVIDIA NIM") and by profile id
+        // (`nvidia-nim`, the shape `remote_header_hint` stores).
+        if let Some(profile_id) =
+            crate::provider_catalog::openai_compatible_profile_id_for_display_name(remote_name)
+        {
+            return Some(profile_id.to_string());
+        }
+        // A named `[providers.<id>]` section id reported verbatim. Checked
+        // before the canonical map so a deliberately configured id wins over
+        // inference; the map's verbatim arm below still catches lowercase ids.
+        if crate::config::config().providers.contains_key(remote_name) {
+            return Some(remote_name.to_string());
+        }
+        let normalized = remote_name.to_ascii_lowercase();
+        let key = match normalized.as_str() {
+            "jcode" | "jcode subscription" => "jcode",
+            "anthropic" | "claude" | "claude cli" => "claude",
+            "openai" => "openai",
+            // The Azure slot reports its display name, while the local session
+            // key is the profile id.
+            "azure openai" => "azure-openai",
+            "github copilot" | "copilot" => "copilot",
+            "openrouter" => "openrouter",
+            "cursor" => "cursor",
+            "gemini" | "google" => "gemini",
+            "antigravity" => "antigravity",
+            "bedrock" | "aws bedrock" => "bedrock",
+            // Unknown label ("OpenAI-compatible", ...): keep the lowercased
+            // label as the key so a matching `[providers.<id>]` section (ids
+            // are lowercase) still applies; the callers' profile lookup
+            // decides the rest.
+            other => other,
+        };
+        Some(key.to_string())
+    }
+
+    /// Resolve the effective auto-retry base delay for the active provider.
+    /// Checks env first, then the named provider profile override, then falls
+    /// back to the global `[provider]` value stored on App at construction.
+    pub(crate) fn effective_auto_retry_base_delay_secs(&self) -> u64 {
+        if let Ok(raw) = std::env::var("JCODE_AUTO_RETRY_BASE_DELAY_SECS")
+            && let Ok(parsed) = raw.trim().parse::<u64>()
+        {
+            return jcode_config_types::clamp_auto_retry_base_delay_secs(parsed);
+        }
+        if let Some(key) = self.auto_retry_provider_profile_key()
+            && let Some(profile) = crate::config::config().providers.get(&key)
+            && let Some(override_val) = profile.auto_retry_base_delay_secs
+        {
+            return jcode_config_types::clamp_auto_retry_base_delay_secs(override_val);
+        }
+        jcode_config_types::clamp_auto_retry_base_delay_secs(self.auto_retry_base_delay_secs)
+    }
+
+    /// Resolve whether auto-retry is enabled for the active provider.
+    /// Precedence is env, named provider profile, then global `[provider]`.
+    pub(crate) fn effective_auto_retry_enabled(&self) -> bool {
+        if let Ok(raw) = std::env::var("JCODE_AUTO_RETRY_ENABLED")
+            && let Some(enabled) = parse_auto_retry_env_bool(&raw)
+        {
+            return enabled;
+        }
+        if let Some(key) = self.auto_retry_provider_profile_key()
+            && let Some(profile) = crate::config::config().providers.get(&key)
+            && let Some(override_val) = profile.auto_retry_enabled
+        {
+            return override_val;
+        }
+        self.auto_retry_enabled
+    }
+
+    /// Resolve the effective auto-retry max attempts for the active provider.
+    /// Checks env first, then the named provider profile override, then falls
+    /// back to the global `[provider]` value stored on App at construction.
+    pub(crate) fn effective_auto_retry_max_attempts(&self) -> u8 {
+        if let Ok(raw) = std::env::var("JCODE_AUTO_RETRY_MAX_ATTEMPTS")
+            && let Ok(parsed) = raw.trim().parse::<u8>()
+            && parsed > 0
+        {
+            return parsed;
+        }
+        if let Some(key) = self.auto_retry_provider_profile_key()
+            && let Some(profile) = crate::config::config().providers.get(&key)
+            && let Some(override_val) = profile.auto_retry_max_attempts
+        {
+            return override_val;
+        }
+        self.auto_retry_max_attempts
+    }
+
     pub(super) fn schedule_pending_remote_retry(&mut self, reason: &str) -> bool {
-        self.schedule_pending_remote_retry_with_limit(reason, Self::AUTO_RETRY_MAX_ATTEMPTS)
+        if !self.effective_auto_retry_enabled() {
+            return false;
+        }
+        self.schedule_pending_remote_retry_with_limit(
+            reason,
+            self.effective_auto_retry_max_attempts(),
+        )
     }
 
     pub(super) fn schedule_pending_remote_network_wait(&mut self, reason: &str) -> bool {
@@ -81,11 +215,15 @@ impl App {
         reason: &str,
         force: bool,
     ) -> bool {
+        if !self.effective_auto_retry_enabled() {
+            return false;
+        }
+        let max_attempts = self.effective_auto_retry_max_attempts();
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
         if force {
-            if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+            if pending.retry_attempts >= max_attempts {
                 return false;
             }
             pending.retry_attempts = pending.retry_attempts.saturating_add(1);
@@ -141,6 +279,17 @@ impl App {
         reason: &str,
         max_attempts: u8,
     ) -> bool {
+        if !self.effective_auto_retry_enabled() {
+            return false;
+        }
+        // A caller may ask for a short budget (the auto-poke "one more"
+        // retry), but no retry budget may exceed the configured
+        // `effective_auto_retry_max_attempts` cap. Otherwise a low
+        // per-provider/global limit would be silently blown through by the
+        // hard-coded short budgets and their "attempt N/2" notices would
+        // misreport the real budget.
+        let max_attempts = max_attempts.min(self.effective_auto_retry_max_attempts());
+        let base_delay_secs = self.effective_auto_retry_base_delay_secs();
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
@@ -154,7 +303,9 @@ impl App {
             } else {
                 pending.retry_attempts += 1;
                 let retry_attempts = pending.retry_attempts;
-                let backoff_secs = Self::AUTO_RETRY_BASE_DELAY_SECS * u64::from(retry_attempts);
+                let backoff_secs = base_delay_secs
+                    .saturating_mul(u64::from(retry_attempts))
+                    .min(jcode_config_types::MAX_AUTO_RETRY_BACKOFF_SECS);
                 let retry_at = Instant::now() + Duration::from_secs(backoff_secs);
                 pending.retry_at = Some(retry_at);
                 Ok((retry_attempts, backoff_secs, retry_at))
@@ -428,6 +579,9 @@ impl App {
             auto_poke_attempts: 0,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
+            auto_retry_base_delay_secs: config().provider.auto_retry_base_delay_secs,
+            auto_retry_enabled: config().provider.auto_retry_enabled,
+            auto_retry_max_attempts: config().provider.auto_retry_max_attempts,
             overnight_auto_poke: None,
             pending_provider_failover: None,
             pending_fallback_offer: None,
@@ -917,6 +1071,9 @@ impl App {
             auto_poke_attempts: 0,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
+            auto_retry_base_delay_secs: config().provider.auto_retry_base_delay_secs,
+            auto_retry_enabled: config().provider.auto_retry_enabled,
+            auto_retry_max_attempts: config().provider.auto_retry_max_attempts,
             overnight_auto_poke: None,
             pending_provider_failover: None,
             pending_fallback_offer: None,

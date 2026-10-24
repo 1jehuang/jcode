@@ -1107,6 +1107,10 @@ fn test_save_and_restore_startup_submission_preserves_pending_images() {
 
 #[test]
 fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
+    // The save/restore pair spans `JCODE_HOME`-scoped disk state; without a
+    // temp home a concurrently running `with_temp_jcode_home` test can flip
+    // the global home between the save and the restore.
+    with_temp_jcode_home(|| {
     let mut app = create_test_app();
     let session_id = format!("test-reload-pending-{}", std::process::id());
 
@@ -1158,6 +1162,7 @@ fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
     assert_eq!(pending.retry_attempts, 2);
     assert!(pending.retry_at.is_some());
     assert!(restored.rate_limit_reset.is_some());
+    });
 }
 
 #[test]
