@@ -161,11 +161,38 @@ pub(super) fn contains_registered_slash_command(input: &str) -> bool {
 pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
     let names: Vec<_> = super::registered_command_names().collect();
     let matches = super::slash_command_parser::find_known_commands(trimmed, &names);
+    // `/sessions <query>` (and its `/session` / `/resume` aliases) treat the
+    // rest of the line as free-text search, so a query that CONTAINS another
+    // slash command (`/sessions fix /help output`) must not be split into a
+    // command sequence: the sequence path would search only `fix` and run
+    // `/help output` as a second command. Dispatch the query form first,
+    // before any sequence splitting, so the search text stays intact.
+    if let Some(query_command_match) =
+        matches
+            .iter()
+            .find(|command| command.start == 0)
+            .filter(|command| {
+                is_session_picker_query_command(&trimmed[command.start..command.name_end])
+            })
+    {
+        let query = trimmed[query_command_match.name_end..].trim();
+        if !query.is_empty() {
+            app.open_session_picker_with_query(Some(query));
+            app.record_keybinding_slow(super::shortcut_hints::LearnableAction::Resume);
+            return true;
+        }
+    }
     if matches.first().is_some_and(|command| command.start > 0) || matches.len() > 1 {
         return dispatch_command_sequence(app, trimmed, &matches);
     }
 
     dispatch_single_local_command(app, trimmed)
+}
+
+/// Whether `name` is one of the session-picker commands that take a free-text
+/// search query after them (`/sessions`, `/session`, `/resume`).
+fn is_session_picker_query_command(name: &str) -> bool {
+    matches!(name, "/sessions" | "/session" | "/resume")
 }
 
 fn dispatch_command_sequence(
@@ -342,6 +369,40 @@ mod tests {
         app.submit_input();
         assert!(app.cancel_requested);
         assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn session_picker_query_keeps_embedded_slash_commands_as_search_text() {
+        // Opening the picker spawns its async session load, so the test needs
+        // a tokio runtime in scope.
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let _guard = runtime.enter();
+        // `/sessions <query>` treats the rest of the line as free-text search,
+        // so a query that contains another slash command must NOT be split
+        // into a command sequence: the sequence path searched only `fix` and
+        // ran `/help output` as a separate (unknown) command. The full query
+        // must reach the picker as one search string.
+        use crate::tui::app::tests::create_test_app;
+        let mut app = create_test_app();
+
+        assert!(super::dispatch_local_command(
+            &mut app,
+            "/sessions fix /help output"
+        ));
+        {
+            let picker = app
+                .session_picker_overlay
+                .as_ref()
+                .expect("session picker opened")
+                .borrow();
+            assert!(picker.search_is_active());
+            assert_eq!(picker.search_query(), "fix /help output");
+        }
+        // The sequence path is untouched for genuine command sequences: a
+        // prompt prefix before a real command still dispatches the command.
+        app.session_picker_overlay = None;
+        assert!(super::dispatch_local_command(&mut app, "note: /help"));
+        assert!(app.session_picker_overlay.is_none());
     }
 
     #[test]
