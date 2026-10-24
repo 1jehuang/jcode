@@ -1,6 +1,12 @@
 //! Recover transport affinity, never the response chain, after an interrupted turn.
 use super::*;
 
+// This is background recovery, not the latency of acknowledging Escape. A
+// subsecond deadline discards healthy sockets before ordinary generations can
+// finish, losing cache affinity on the next turn. Bound the wait for a successor
+// without assuming the provider will finish within a single network round trip.
+const CANCEL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum RecoveryPhase {
     Idle,
@@ -52,7 +58,7 @@ impl Drop for RecoverableAttempt {
             return;
         };
         let completed = self.phase == RecoveryPhase::Completed;
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let deadline = tokio::time::Instant::now() + CANCEL_DRAIN_TIMEOUT;
         runtime.spawn(async move {
             // Absolute deadline plus frame/byte budgets: activity cannot keep a
             // cancelled generation alive indefinitely. No response events are
@@ -77,7 +83,10 @@ impl Drop for RecoverableAttempt {
                 vec![
                     ("transport_retained", recovered.to_string()),
                     ("response_chain_retained", "false".to_string()),
-                    ("drain_timeout_ms", "500".to_string()),
+                    (
+                        "drain_timeout_ms",
+                        CANCEL_DRAIN_TIMEOUT.as_millis().to_string(),
+                    ),
                 ],
             );
         });
@@ -274,6 +283,36 @@ mod tests {
         assert!(state.last_input_item_hashes.is_empty());
         assert_eq!(state.last_input_item_count, 0);
         assert_eq!(state.message_count, 0);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_retains_affinity_when_completion_takes_over_half_a_second() {
+        let _env_lock = jcode_base::storage::lock_test_env();
+        let (state, mut peer) = pair().await;
+        let connected_at = state.connected_at;
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(650)).await;
+            peer.send(WsMessage::Text(
+                serde_json::json!({"type":"response.completed"}).to_string(),
+            ))
+            .await
+            .unwrap();
+            peer
+        });
+        let (attempt, slot) = attempt(state, RecoveryPhase::InFlight);
+        drop(attempt);
+        let guard = tokio::time::timeout(Duration::from_secs(2), slot.lock())
+            .await
+            .unwrap();
+        let state = guard
+            .as_ref()
+            .expect("delayed completion retains warm socket");
+        assert_eq!(state.connected_at, connected_at);
+        assert_eq!(state.cache_key.as_deref(), Some("fixture-cache"));
+        assert!(state.last_response_id.is_empty());
+        assert!(state.last_response_output.is_empty());
+        assert!(state.last_input_item_hashes.is_empty());
         server.await.unwrap();
     }
 

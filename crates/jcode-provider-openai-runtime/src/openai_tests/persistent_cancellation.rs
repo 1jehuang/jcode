@@ -417,14 +417,14 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
     .expect("fixture must accept the request");
     tokio::task::yield_now().await;
     drop(stream);
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(12), async {
         assert!(
             provider.persistent_ws.lock().await.is_none(),
             "cancelled response must be invalidated before mutex handoff"
         );
     })
     .await
-    .expect("dropping the consumer must release the persistent lock promptly");
+    .expect("dropping the consumer must release the persistent lock after bounded recovery");
     tokio::time::timeout(Duration::from_secs(2), async {
         let mut next = provider
             .complete(&messages, &[], "fixture", None)
@@ -515,7 +515,7 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
     tokio::task::yield_now().await;
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
-    tokio::time::timeout(Duration::from_secs(1), waiter)
+    tokio::time::timeout(Duration::from_secs(12), waiter)
         .await
         .unwrap()
         .unwrap();
