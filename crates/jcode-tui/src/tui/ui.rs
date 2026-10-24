@@ -1803,6 +1803,8 @@ mod draw_recovery;
 mod profile;
 #[path = "ui/selection_highlight.rs"]
 pub(crate) mod selection_highlight;
+#[path = "ui/todo_completion_flash.rs"]
+pub(crate) mod todo_completion_flash;
 #[path = "ui/url.rs"]
 mod url_regex_support;
 use self::copy_selection::{copy_point_from_snapshot, link_target_from_snapshot};

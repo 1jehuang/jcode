@@ -792,6 +792,28 @@ pub(super) fn draw_messages(
         }
     }
 
+    // A todo completion report that just arrived pulses its text color briefly.
+    if policy.enable_decorative_animations
+        && let Some((msg_idx, t)) =
+            super::todo_completion_flash::update(app.display_messages(), now_ms)
+        && let Some(body) = prepared
+            .sections
+            .iter()
+            .find(|section| section.kind == PreparedSectionKind::Body)
+        && let Some(end) = body.prepared.message_boundaries.get(msg_idx)
+    {
+        let start = msg_idx
+            .checked_sub(1)
+            .and_then(|i| body.prepared.message_boundaries.get(i))
+            .map_or(0, |b| b.wrapped_len);
+        let (start, end) = (body.line_start + start, body.line_start + end.wrapped_len);
+        for abs_idx in start.max(scroll)..end.min(visible_end) {
+            if let Some(line) = visible_lines.get_mut(abs_idx - scroll) {
+                super::todo_completion_flash::apply(line, t);
+            }
+        }
+    }
+
     if let Some(active) = &active_file_context {
         let highlight_style = Style::default().fg(file_link_color()).bold();
         let accent_style = Style::default().fg(file_link_color());
