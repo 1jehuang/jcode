@@ -1608,6 +1608,71 @@ fn render_todos_message_uses_readable_semantic_colors() {
 }
 
 #[test]
+fn finished_chat_todo_cards_show_only_dots_without_changing_saved_data() {
+    use unicode_width::UnicodeWidthStr;
+    for staged in [false, true] {
+        let todos = serde_json::json!([
+            {"id":"done", "content":"Finished title 🦀", "details":"Long description", "priority":"high",
+             "status":"completed", "group":"Implementation", "stage":if staged { Some(1) } else { None }},
+            {"id":"cancel", "content":"Cancelled title", "status":"cancelled", "priority":"medium",
+             "group":"Validation", "stage":if staged { Some(2) } else { None }}
+        ]);
+        for legacy in [false, true] {
+            let content = if legacy {
+                todos.to_string()
+            } else {
+                serde_json::json!({"todos":todos,
+                    "plan":{"user_intention":"Verbose intention", "understands_user_intent":"complete"},
+                    "goals":[{"closed_feedback_loop":"strong", "feedback_loop":"Verbose evidence"}]
+                }).to_string()
+            };
+            let msg = DisplayMessage::todos(content.clone());
+            let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1);
+            assert_eq!(extract_line_text(&lines[0]).trim(), "●○");
+            for width in 0..110 {
+                let lines = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                assert_eq!(lines.len(), 1);
+                assert!(
+                    extract_line_text(&lines[0]).width() <= width as usize,
+                    "width={width}"
+                );
+            }
+            assert_eq!(msg.content, content);
+            let pinned =
+                render_pinned_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
+                    .iter()
+                    .map(extract_line_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            assert!(pinned.contains("Finished title"), "{pinned}");
+        }
+    }
+}
+
+#[test]
+fn unfinished_chat_todo_cards_retain_item_titles() {
+    for status in ["pending", "in_progress", "blocked"] {
+        let msg = DisplayMessage::todos(
+            serde_json::json!({"todos":[
+                {"id":"done", "content":"Finished title", "status":"completed", "priority":"high"},
+                {"id":"open", "content":"Unfinished title", "status":status, "priority":"medium"}
+            ]})
+            .to_string(),
+        );
+        let text = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Finished title") && text.contains("Unfinished title"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn render_todos_message_hides_item_confidence_transitions() {
     let todo: crate::todo::TodoItem = serde_json::from_value(serde_json::json!({
         "id": "hidden-confidence", "content": "Completed task", "status": "completed",
@@ -1621,7 +1686,7 @@ fn render_todos_message_hides_item_confidence_transitions() {
             .map(extract_line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("✓ Completed"), "{text}");
+        assert_eq!(text.trim(), "●", "{text}");
         assert!(
             !text.contains("validated") && !text.contains("verified") && !text.contains('→'),
             "{text}"
@@ -1703,7 +1768,9 @@ fn render_todos_message_collapses_passing_quality_gates() {
     }];
     let msg =
         DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
-    let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    // The detailed pinned view still exposes assessments. Finished transcript
+    // cards deliberately hide all prose, including passing quality summaries.
+    let lines = render_pinned_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
     let plain = lines
         .iter()
         .map(extract_line_text)

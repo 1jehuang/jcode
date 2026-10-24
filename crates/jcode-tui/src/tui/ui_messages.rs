@@ -1465,6 +1465,27 @@ fn render_todos_message_with_cap(
     let compact_details = inner_width < 72;
 
     let mut lines = Vec::new();
+    // Finished transcript cards are a compact historical marker. Keep the
+    // saved payload intact and leave the pinned/live view detailed, but omit
+    // titles, descriptions, grouping and assessment prose from this view.
+    if cap_width
+        && !todos.is_empty()
+        && todos
+            .iter()
+            .all(|todo| !crate::todo::is_incomplete_todo(todo))
+    {
+        let mut spans = Vec::new();
+        push_todo_status_pips(&mut spans, &todos, inner_width);
+        lines.push(todo_card_line(spans, base_indent, inner_width));
+        if centered {
+            left_pad_lines_for_centered_mode(&mut lines, width);
+        }
+        // At widths below the normal card gutter, even the indent must fit.
+        return lines
+            .iter()
+            .map(|line| super::truncate_line_with_ellipsis_to_width(line, width as usize))
+            .collect();
+    }
     push_todo_plan_details(&mut lines, &plan, base_indent, inner_width, compact_details);
     if todos.is_empty() {
         lines.push(todo_card_line(
