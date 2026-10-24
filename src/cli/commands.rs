@@ -2682,7 +2682,12 @@ async fn run_single_message_with_agent(
     emit_json: bool,
     emit_ndjson: bool,
 ) -> Result<()> {
+    // A detached dependency can outlive a model turn without holding an
+    // in-process activity guard. Keep this CLI continuation alive across the
+    // wait too, rather than letting an idle-only runtime replacement lose it.
+    // run_once's nested read reservations are deliberately safe.
     let result: Result<()> = async {
+        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
         if emit_json {
             let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
             let report = RunCommandReport {
@@ -2851,6 +2856,155 @@ fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
     crate::todo::load_todos(session_id).unwrap_or_default()
 }
 
+fn run_task_is_waitable(task: &crate::background::TaskStatusFile, session_id: &str) -> bool {
+    task.session_id == session_id
+        && task.status == crate::bus::BackgroundTaskStatus::Running
+        // Old status files without an identifiable owner cannot be reconciled
+        // by the manager. Do not let a stale file hold a headless run forever.
+        && if task.detached {
+            task.pid.is_some()
+        } else {
+            task.owner_pid.is_some()
+        }
+}
+
+fn run_actionable_todos(
+    todos: &[crate::todo::TodoItem],
+    tasks: &[crate::background::TaskStatusFile],
+    session_id: &str,
+) -> Vec<crate::todo::TodoItem> {
+    todos
+        .iter()
+        .filter(|todo| {
+            !crate::todo::is_incomplete_todo(todo)
+                || !crate::todo::todo_waits_on_running_task(todo, |id| {
+                    tasks
+                        .iter()
+                        .any(|task| task.task_id == id && run_task_is_waitable(task, session_id))
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+fn run_actionable_poke_message(
+    message: String,
+    todos: &[crate::todo::TodoItem],
+    actionable: &[crate::todo::TodoItem],
+) -> String {
+    if todos.iter().any(|todo| !todo.waiting_on.is_empty()) {
+        let incomplete: Vec<_> = actionable
+            .iter()
+            .filter(|todo| crate::todo::is_incomplete_todo(todo))
+            .cloned()
+            .collect();
+        return crate::todo::build_actionable_poke_message(&incomplete);
+    }
+    message
+}
+
+/// CLI owns continuation while waiting. Unlike a daemon wake, this resumes the
+/// same in-memory agent and preserves capture/NDJSON output routing. Waits live
+/// outside run_once's runtime activity guard and never spend the todo budget.
+async fn prepare_run_todo_follow_up(
+    manager: &crate::background::BackgroundTaskManager,
+    session_id: &str,
+    todos: &[crate::todo::TodoItem],
+    may_resume: bool,
+) -> (Vec<crate::todo::TodoItem>, Option<String>) {
+    use futures::StreamExt;
+
+    let mut completion_messages = Vec::new();
+    let dependencies: BTreeSet<_> = todos
+        .iter()
+        .filter(|todo| crate::todo::is_incomplete_todo(todo))
+        .flat_map(|todo| todo.waiting_on.iter().cloned())
+        .filter(|id| {
+            // Persisted old/hand-edited todos are not necessarily tool-validated.
+            // A dependency is an ID, never a path outside the task directory.
+            let mut components = Path::new(id).components();
+            matches!(components.next(), Some(std::path::Component::Normal(_)))
+                && components.next().is_none()
+        })
+        .collect();
+    loop {
+        let mut tasks = Vec::new();
+        for id in &dependencies {
+            if let Some(task) = manager.status(id).await
+                && task.session_id == session_id
+                && task.task_id == *id
+            {
+                tasks.push(task);
+            }
+        }
+        let actionable = run_actionable_todos(todos, &tasks, session_id);
+        let waiting: Vec<_> = tasks
+            .iter()
+            .filter(|task| run_task_is_waitable(task, session_id))
+            .collect();
+        for task in &waiting {
+            // Prevent a second, daemon-owned turn for the same completion. Do this
+            // even for mixed work, whose independent todos remain actionable.
+            if task.wake {
+                let _ = manager
+                    .update_delivery(&task.task_id, task.notify, false)
+                    .await;
+            }
+            if task.stall_wake_seconds.is_some() {
+                manager.disarm_stall_watchdog(&task.task_id).await;
+            }
+        }
+        let all_waiting =
+            !waiting.is_empty() && !actionable.iter().any(crate::todo::is_incomplete_todo);
+        if !all_waiting || !may_resume {
+            return (
+                actionable,
+                (!completion_messages.is_empty()).then(|| completion_messages.join("\n\n")),
+            );
+        }
+
+        let mut waits = futures::stream::FuturesUnordered::new();
+        for task in waiting {
+            let id = task.task_id.clone();
+            waits.push(async move {
+                loop {
+                    let result = manager
+                        .wait(&id, std::time::Duration::from_secs(3600), false)
+                        .await;
+                    match result {
+                        Some(result) if run_task_is_waitable(&result.task, session_id) => {}
+                        _ => return id,
+                    }
+                }
+            });
+        }
+        // Resume when any dependency resolves, not only the first task in the todo
+        // list. Other tasks can remain in flight while newly unblocked work runs.
+        let resolved = waits.next().await.expect("nonempty dependency waits");
+        let status = manager.status(&resolved).await;
+        let mut message = format!(
+            "[auto] Background dependency {resolved} resolved. Reassess the waiting todos and continue newly actionable work. Do not retry failed tasks automatically or work on todos whose other dependencies are still running.\n"
+        );
+        match status.filter(|task| task.session_id == session_id) {
+            Some(task) => {
+                message.push_str(&format!(
+                    "Status: {:?}; exit code: {:?}; error: {:?}\n",
+                    task.status, task.exit_code, task.error
+                ));
+                if let Some(output) = manager.output(&resolved).await {
+                    message.push_str("Task output (tail):\n");
+                    let tail: String = output.chars().rev().take(16_000).collect();
+                    message.extend(tail.chars().rev());
+                }
+            }
+            None => {
+                message.push_str("Task status is unavailable. Inspect or repair the stale dependency instead of waiting for it again.");
+            }
+        }
+        completion_messages.push(message);
+    }
+}
+
 /// Build the deferred quality-check reminder for a headless run, consuming the
 /// turn's observation log.
 ///
@@ -2995,7 +3149,28 @@ async fn run_single_message_command_plain_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        if !incomplete_budget.allow_follow_up(&todos) {
+        let (actionable_todos, dependency_resume) = prepare_run_todo_follow_up(
+            crate::background::global(),
+            agent.session_id(),
+            &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await;
+        if let Some(message) = dependency_resume {
+            incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+            gate_digest_delivered = false;
+            next_message = message;
+            continue;
+        }
+        if todos.iter().any(crate::todo::is_incomplete_todo)
+            && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
+        {
+            eprintln!(
+                "Stopped at the turn limit with unfinished todos waiting on background dependencies."
+            );
+            break;
+        }
+        if !incomplete_budget.allow_follow_up(&actionable_todos) {
             eprintln!(
                 "We stopped poking after {} attempts without todo progress; unfinished todos remain.",
                 crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS
@@ -3009,7 +3184,7 @@ async fn run_single_message_command_plain_with_auto_poke(
             crate::config::config().features.todo_gate_digest,
         );
         match build_run_auto_poke_follow_up_from_todos(
-            &todos,
+            &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
         ) {
@@ -3050,6 +3225,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 continue;
             }
             Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                let message = run_actionable_poke_message(message, &todos, &actionable_todos);
                 gate_digest_delivered = false;
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
@@ -3090,7 +3266,28 @@ async fn run_single_message_command_capture_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        if !incomplete_budget.allow_follow_up(&todos) {
+        let (actionable_todos, dependency_resume) = prepare_run_todo_follow_up(
+            crate::background::global(),
+            agent.session_id(),
+            &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await;
+        if let Some(message) = dependency_resume {
+            incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+            gate_digest_delivered = false;
+            next_message = message;
+            continue;
+        }
+        if todos.iter().any(crate::todo::is_incomplete_todo)
+            && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
+        {
+            eprintln!(
+                "Stopped at the turn limit with unfinished todos waiting on background dependencies."
+            );
+            break;
+        }
+        if !incomplete_budget.allow_follow_up(&actionable_todos) {
             eprintln!(
                 "We stopped poking after {} attempts without todo progress; unfinished todos remain.",
                 crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS
@@ -3104,7 +3301,7 @@ async fn run_single_message_command_capture_with_auto_poke(
             crate::config::config().features.todo_gate_digest,
         );
         match build_run_auto_poke_follow_up_from_todos(
-            &todos,
+            &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
         ) {
@@ -3142,6 +3339,7 @@ async fn run_single_message_command_capture_with_auto_poke(
                 continue;
             }
             Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                let message = run_actionable_poke_message(message, &todos, &actionable_todos);
                 gate_digest_delivered = false;
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
@@ -3241,7 +3439,43 @@ async fn run_single_message_command_ndjson(
             break;
         }
         let todos = run_todos(&session_id);
-        if !incomplete_budget.allow_follow_up(&todos) {
+        let (actionable_todos, dependency_resume) = prepare_run_todo_follow_up(
+            crate::background::global(),
+            &session_id,
+            &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await;
+        if let Some(message) = dependency_resume {
+            incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+            gate_digest_delivered = false;
+            next_message = message;
+            write_json_line(
+                &mut stdout,
+                &serde_json::json!({
+                    "type": "auto_poke_dependency_resolved",
+                    "session_id": session_id,
+                    "message": next_message,
+                }),
+            )?;
+            continue;
+        }
+        if todos.iter().any(crate::todo::is_incomplete_todo)
+            && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
+        {
+            write_json_line(
+                &mut stdout,
+                &serde_json::json!({
+                    "type": "auto_poke_stopped",
+                    "session_id": session_id,
+                    "reason": "turn_limit",
+                    "waiting_on_background": true,
+                    "max_turns": max_turns,
+                }),
+            )?;
+            break;
+        }
+        if !incomplete_budget.allow_follow_up(&actionable_todos) {
             writeln!(
                 stdout,
                 "{}",
@@ -3261,7 +3495,7 @@ async fn run_single_message_command_ndjson(
             crate::config::config().features.todo_gate_digest,
         );
         match build_run_auto_poke_follow_up_from_todos(
-            &todos,
+            &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
         ) {
@@ -3315,6 +3549,7 @@ async fn run_single_message_command_ndjson(
                 continue;
             }
             Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                let message = run_actionable_poke_message(message, &todos, &actionable_todos);
                 gate_digest_delivered = false;
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
