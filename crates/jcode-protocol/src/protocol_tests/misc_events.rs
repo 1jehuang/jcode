@@ -200,7 +200,7 @@ fn test_set_route_deserializes_as_set_model_compat_alias() -> Result<()> {
     // Legacy/desktop compatibility shape: a bare model string under the
     // `set_route` tag. `decode_request` (not raw serde) normalizes it.
     let decoded = decode_request(r#"{"type":"set_route","id":42,"model":"claude-opus-4-5"}"#)?;
-    let Request::SetModel { id, model } = decoded else {
+    let Request::SetModel { id, model, .. } = decoded else {
         return Err(anyhow!(
             "expected set_route compatibility alias to decode as SetModel"
         ));
@@ -218,6 +218,7 @@ fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> 
     // not be shadowed by the legacy `set_model` compatibility path.
     let request = Request::SetRoute {
         automatic_failover: false,
+        persist_default: false,
         id: 7,
         selection: jcode_provider_core::RouteSelection {
             model: "gpt-5.5".to_string(),
@@ -235,6 +236,7 @@ fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> 
         id,
         selection,
         automatic_failover,
+        ..
     } = decoded
     else {
         return Err(anyhow!(
@@ -251,6 +253,7 @@ fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> 
 fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
     let request = Request::SetRoute {
         automatic_failover: false,
+        persist_default: false,
         id: 8,
         selection: jcode_provider_core::RouteSelection {
             model: "gpt-5.5".to_string(),
@@ -270,6 +273,7 @@ fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
         id,
         selection,
         automatic_failover,
+        ..
     } = decoded
     else {
         return Err(anyhow!("expected Jcode SetRoute, got {decoded:?}"));
@@ -298,6 +302,7 @@ fn test_automatic_failover_set_route_marker_and_legacy_default() -> Result<()> {
         id: 19,
         selection,
         automatic_failover: true,
+        persist_default: false,
     };
     let mut wire = serde_json::to_value(&request)?;
     assert_eq!(wire["automatic_failover"], true);
@@ -326,6 +331,7 @@ fn test_automatic_failover_set_route_marker_and_legacy_default() -> Result<()> {
 fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
     let request = Request::SetRoute {
         automatic_failover: false,
+        persist_default: false,
         id: 9,
         selection: jcode_provider_core::RouteSelection {
             model: "grok-build:grok-4.6".to_string(),
@@ -345,6 +351,7 @@ fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
         id,
         selection,
         automatic_failover,
+        ..
     } = decoded
     else {
         return Err(anyhow!("expected Grok Build SetRoute, got {decoded:?}"));
@@ -364,6 +371,7 @@ fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
 fn test_unknown_runtime_key_other_set_route_is_wire_safe() -> Result<()> {
     let request = Request::SetRoute {
         automatic_failover: false,
+        persist_default: false,
         id: 10,
         selection: jcode_provider_core::RouteSelection {
             model: "custom-model".to_string(),

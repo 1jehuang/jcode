@@ -559,7 +559,9 @@ async fn handle_remote_key_internal(
     }
     if let Some(direction) = app.model_switch_keys.direction_for(code, modifiers) {
         app.record_keybinding_fast(crate::tui::app::shortcut_hints::LearnableAction::ModelSwitch);
-        remote.cycle_model(direction).await?;
+        // persist_default=true: user-initiated cycling must persist like the
+        // picker and /model (Greptile P2 on PR #1881).
+        remote.cycle_model(direction, true).await?;
         return Ok(());
     }
     if let Some(direction) = app.effort_switch_keys.direction_for(code, modifiers) {
@@ -1365,7 +1367,9 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                 return Ok(());
             }
             app.upstream_provider = None;
-            remote.set_model(model_name).await?;
+            // persist_default=true: the server saves the confirmed model as
+            // its config default once it validates the switch.
+            remote.set_model(model_name, true).await?;
             app.remote_model_switch_in_flight = true;
             return Ok(());
         }

@@ -310,6 +310,10 @@ pub enum Request {
         id: u64,
         #[serde(default = "default_model_direction")]
         direction: i8,
+        /// Ask the server to persist the confirmed cycle as its own config
+        /// default. Default false keeps older clients unchanged.
+        #[serde(default, skip_serializing_if = "is_false")]
+        persist_default: bool,
     },
 
     #[serde(rename = "refresh_models")]
@@ -326,7 +330,16 @@ pub enum Request {
     /// below and make every structured route switch fail with
     /// `missing field \`model\``.
     #[serde(rename = "set_model")]
-    SetModel { id: u64, model: String },
+    SetModel {
+        id: u64,
+        model: String,
+        /// Ask the server to persist the confirmed switch as its own config
+        /// default (the server owns config.toml that new sessions read).
+        /// Default false keeps older clients and failover/auth switches from
+        /// overriding the user's configured default.
+        #[serde(default, skip_serializing_if = "is_false")]
+        persist_default: bool,
+    },
 
     /// Set the active model by structured route identity.
     #[serde(rename = "set_route")]
@@ -336,6 +349,11 @@ pub enum Request {
         /// Automatic retries must revalidate the server's current account pool.
         #[serde(default, skip_serializing_if = "is_false")]
         automatic_failover: bool,
+        /// Ask the server to persist the confirmed switch as its own config
+        /// default. Only user-initiated picker selections set this; failover
+        /// and auth switches must not override the configured default.
+        #[serde(default, skip_serializing_if = "is_false")]
+        persist_default: bool,
     },
 
     /// Set or clear the session-scoped subagent model preference.
