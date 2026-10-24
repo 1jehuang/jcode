@@ -7,6 +7,17 @@ use std::time::Instant;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+/// Own an adopted task rather than detaching it when its wrapper is aborted.
+/// Construct before the first await, including before spawning the wrapper, so
+/// cancellation during registration or before its first poll is also safe.
+pub(super) struct AbortAdoptedTask<T>(pub(super) JoinHandle<T>);
+
+impl<T> Drop for AbortAdoptedTask<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Directory for background task output files
 pub(super) fn task_dir() -> PathBuf {
     std::env::temp_dir().join("jcode-bg-tasks")

@@ -129,7 +129,7 @@ async fn assert_search_stopped(stopped: tokio::sync::oneshot::Receiver<String>) 
 }
 
 #[tokio::test]
-async fn cancelling_foreground_future_stops_linked_search() {
+async fn search_cancellation_foreground_future_stops_linked_search() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("input.rs"), "fn needle() {}\n").unwrap();
     let (handle, started, stopped) = repeating_search(root.path().to_path_buf());
@@ -149,7 +149,7 @@ async fn cancelling_foreground_future_stops_linked_search() {
 }
 
 #[tokio::test]
-async fn dropping_search_owner_stops_linked_search() {
+async fn search_cancellation_dropping_owner_stops_linked_search() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("input.rs"), "fn needle() {}\n").unwrap();
     let (handle, started, stopped) = repeating_search(root.path().to_path_buf());
@@ -163,7 +163,7 @@ async fn dropping_search_owner_stops_linked_search() {
 }
 
 #[tokio::test]
-async fn promoted_search_lives_until_background_cancel() {
+async fn search_cancellation_promoted_search_lives_until_background_cancel() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("input.rs"), "fn needle() {}\n").unwrap();
     let (handle, started, mut stopped) = repeating_search(root.path().to_path_buf());
@@ -193,7 +193,7 @@ async fn promoted_search_lives_until_background_cancel() {
 }
 
 #[tokio::test]
-async fn background_reload_stops_linked_search() {
+async fn search_cancellation_background_reload_stops_linked_search() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("input.rs"), "fn needle() {}\n").unwrap();
     let (handle, started, stopped) = repeating_search(root.path().to_path_buf());
