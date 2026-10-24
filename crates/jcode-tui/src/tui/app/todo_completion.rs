@@ -64,8 +64,15 @@ impl App {
             return false;
         }
 
-        let content =
-            crate::todo::completion_report::render_completion_report(&todos, &plan, &goals);
+        // Persist data rather than a reference to the live todo file so earlier
+        // completion cycles remain unchanged when work resumes.
+        let content = serde_json::json!({
+            "todo_completion_version": 1,
+            "todos": todos,
+            "plan": plan,
+            "goals": goals,
+        })
+        .to_string();
         let updating = self.todo_completion_report.fingerprint.is_some();
         self.todo_completion_report.fingerprint = Some(fingerprint);
         // Late evidence/assessment writes update this cycle's report rather

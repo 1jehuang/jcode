@@ -31,6 +31,10 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
         crate::todo::save_todos(&session_id, &todos).unwrap();
         assert!(!app.refresh_completed_todo_report(true));
         todos = completion_report_todos("completed");
+        todos[11].details = Some(format!(
+            "Evidence for task 11 {} FINAL_EVIDENCE_MARKER",
+            "long evidence with Unicode 測試 and punctuation * _ < > &. ".repeat(80)
+        ));
         crate::todo::save_todos(&session_id, &todos).unwrap();
         crate::todo::save_plan(
             &session_id,
@@ -51,6 +55,10 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
                 feedback_loop_relevance: Some(
                     crate::todo::FeedbackLoopRelevance::AcceptanceBlocked,
                 ),
+                feedback_loop_relevance_history: vec![
+                    crate::todo::FeedbackLoopRelevance::Indirect,
+                    crate::todo::FeedbackLoopRelevance::AcceptanceBlocked,
+                ],
                 iteration_maturity: Some(crate::todo::IterationMaturity::ConstraintsExhausted),
                 stopping_evidence: Some("External service unavailable".into()),
                 ..Default::default()
@@ -63,12 +71,13 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
         assert_eq!(reports.len(), 1);
         let report = (*reports[0]).clone();
         let content = &report.content;
+        let snapshot: serde_json::Value = serde_json::from_str(content).unwrap();
+        assert_eq!(snapshot["todo_completion_version"], 1);
         for expected in [
             "Report task 0",
             "Report task 11",
             "Evidence for task 11",
-            "acceptance&#95;blocked",
-            "acceptance path blocked",
+            "acceptance_blocked",
             "uncertain",
             "External service unavailable",
             "Show all evidence without another agent turn",
@@ -94,8 +103,22 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
                 .join("\n");
             let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(normalized.contains("Report task 11"), "{plain}");
-            if width >= 40 {
-                assert!(plain.contains("acceptance_blocked"), "{plain}");
+            // Removing wrap whitespace lets us assert every detail even when
+            // an individual word has to be split at a narrow terminal width.
+            let unwrapped: String = plain.chars().filter(|ch| !ch.is_whitespace()).collect();
+            for expected in [
+                "Evidence for task 11",
+                "FINAL_EVIDENCE_MARKER",
+                "acceptance_blocked",
+                "acceptance path blocked",
+                "Earlier weak states",
+                "feedback_loop_relevance was indirect",
+                "intent understanding was uncertain",
+                "External service unavailable",
+                "Current weaknesses, limitations, or missing assessments",
+            ] {
+                let expected: String = expected.chars().filter(|ch| !ch.is_whitespace()).collect();
+                assert!(unwrapped.contains(&expected), "missing {expected}: {plain}");
             }
             for line in &lines {
                 assert!(line.width() <= width as usize, "width {width}: {line}");
@@ -121,6 +144,12 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
                 .content
                 .contains("Additional acceptance evidence")
         );
+        let first_report = completion_report_messages(&app)[0].clone();
+        let first_render = crate::tui::ui::render_system_message(
+            &first_report,
+            40,
+            crate::config::DiffDisplayMode::Off,
+        );
 
         todos[0].status = "in_progress".into();
         crate::todo::save_todos(&session_id, &todos).unwrap();
@@ -133,6 +162,15 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
         assert_eq!(reports.len(), 2);
         assert!(!reports[0].content.contains("Second cycle task"));
         assert!(reports[1].content.contains("Second cycle task"));
+        assert_eq!(
+            crate::tui::ui::render_system_message(
+                reports[0],
+                40,
+                crate::config::DiffDisplayMode::Off,
+            ),
+            first_render,
+            "historic report must not read the current todo file"
+        );
         assert!(app.queued_messages.is_empty());
     });
 }
