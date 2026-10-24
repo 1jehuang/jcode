@@ -1656,6 +1656,7 @@ impl App {
             // equivalent work appears later, it is a new cycle and deserves
             // one fresh nudge rather than being mistaken for the old stall.
             self.last_auto_poke_fingerprint = None;
+            self.auto_poke_attempts = 0;
             if todos.is_empty() {
                 // No todo list exists yet for this session. Auto-poke is armed
                 // by default (`features.auto_poke`), so disarming here would
@@ -1808,7 +1809,10 @@ impl App {
         self.last_todo_ownership_fingerprint = None;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
-        if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
+        if self.last_auto_poke_fingerprint.as_ref() != Some(&fingerprint) {
+            self.auto_poke_attempts = 0;
+        }
+        if self.auto_poke_attempts >= crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS {
             crate::logging::info(&format!(
                 "AUTO_POKE_DECISION action=idle reason=unchanged_todos incomplete={}",
                 incomplete.len()
@@ -1836,6 +1840,7 @@ impl App {
         // exhaustion should only trip when the gate itself stops moving.
         self.todo_completion_gate_attempts = 0;
         self.last_auto_poke_fingerprint = Some(fingerprint);
+        self.auto_poke_attempts += 1;
         self.queued_messages.push(poke_message);
         self.pending_queued_dispatch = true;
         true
@@ -1896,7 +1901,10 @@ impl App {
         if let Some(fingerprint) = self.current_incomplete_poke_fingerprint()
             && text.starts_with("You have ")
         {
+            // A peer owns continuation for this unchanged state. Do not send
+            // competing retries from every attached window.
             self.last_auto_poke_fingerprint = Some(fingerprint);
+            self.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
         }
     }
 

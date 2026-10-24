@@ -1107,10 +1107,9 @@ pub struct App {
     /// Todo state at the final-response handoff. Unchanged finished work must
     /// not re-enter quality gates on later turn-end or timer callbacks.
     final_response_todo_fingerprint: Option<String>,
-    /// Exact continuation sent for the last incomplete todo state. An unchanged
-    /// list must not trigger another automatic turn: the agent may be parked on
-    /// a worker, wake, or human decision, and repeated pokes cannot help.
+    /// Last incomplete state and its bounded automatic continuation budget.
     last_auto_poke_fingerprint: Option<String>,
+    auto_poke_attempts: u8,
     /// Set when the current turn ended with a provider guardrail/refusal stop
     /// (ServerEvent::ProviderGuardrail). Consumed by the Done handler to
     /// update `consecutive_guardrail_stops`.

@@ -37,7 +37,7 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
 }
 
 #[test]
-fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
+fn auto_poke_retries_three_times_until_incomplete_todos_change() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
@@ -56,10 +56,27 @@ fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
         // Simulate dispatch and completion of the automatically poked turn.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
+        for expected in 2..=3 {
+            assert!(app.schedule_auto_poke_followup_if_needed());
+            assert_eq!(app.auto_poke_attempts, expected);
+            app.queued_messages.clear();
+            app.pending_queued_dispatch = false;
+        }
         assert!(
             !app.schedule_auto_poke_followup_if_needed(),
-            "an unchanged list must not consume another model turn"
+            "an unchanged list must stop after three attempts"
         );
+
+        app.save_input_for_reload(&app.session.id);
+        let restored = App::restore_input_for_reload(&app.session.id).expect("retry budget saved");
+        let mut reloaded = create_test_app();
+        reloaded.session.id = app.session.id.clone();
+        reloaded.auto_poke_incomplete_todos = true;
+        reloaded.auto_poke_default_on = true;
+        reloaded.apply_restored_reload_input(restored);
+        assert_eq!(reloaded.auto_poke_attempts, 3);
+        assert!(!reloaded.schedule_auto_poke_followup_if_needed());
+        app = reloaded;
 
         crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
             .expect("update");
@@ -67,6 +84,7 @@ fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
             app.schedule_auto_poke_followup_if_needed(),
             "changing the todo list must re-arm the automatic nudge"
         );
+        assert_eq!(app.auto_poke_attempts, 1);
 
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
