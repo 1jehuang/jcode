@@ -3487,11 +3487,27 @@ async fn start_processing_message(
         return;
     }
 
-    if !agent
-        .lock()
-        .await
-        .set_remote_active_skill(active_skill.clone())
-    {
+    // Serialize recovery acceptance with the agent lock across connections.
+    // A stale History frame may submit the same reminder after its first turn.
+    let mut agent_guard = agent.lock().await;
+    if let Some(reminder) = system_reminder.as_deref() {
+        match super::reload_recovery::is_delivered_continuation(client_session_id, reminder) {
+            Ok(true) => {
+                crate::logging::info(&format!(
+                    "Suppressing delivered reload recovery replay session={} id={}",
+                    client_session_id, id
+                ));
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => crate::logging::warn(&format!(
+                "Failed to inspect reload recovery replay session={}: {}",
+                client_session_id, error
+            )),
+        }
+    }
+    if !agent_guard.set_remote_active_skill(active_skill.clone()) {
         let skill_name = active_skill.as_deref().unwrap_or_default();
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
@@ -3500,10 +3516,6 @@ async fn start_processing_message(
         });
         return;
     }
-
-    *state.client_is_processing = true;
-    *state.message_id = Some(id);
-    *state.session_id = Some(client_session_id.to_string());
 
     if let Some(reminder) = system_reminder.as_deref()
         && let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
@@ -3517,6 +3529,11 @@ async fn start_processing_message(
             client_session_id, id, error
         ));
     }
+    drop(agent_guard);
+
+    *state.client_is_processing = true;
+    *state.message_id = Some(id);
+    *state.session_id = Some(client_session_id.to_string());
 
     update_member_status(
         client_session_id,

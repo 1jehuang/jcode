@@ -559,7 +559,19 @@ fn history_reload_recovery_snapshot_with(
             ));
             return Some(directive);
         }
-        Ok(None) => {}
+        Ok(None) => {
+            // A consumed durable intent is authoritative over leftover reload
+            // context and interruption markers. A new intent replaces it.
+            if super::reload_recovery::peek_for_session(session_id)
+                .ok()
+                .flatten()
+                .is_some_and(|record| {
+                    record.status == super::reload_recovery::ReloadRecoveryStatus::Delivered
+                })
+            {
+                return None;
+            }
+        }
         Err(err) => crate::logging::warn(&format!(
             "history_reload_recovery_snapshot: failed to read server-owned recovery intent for session={}: {}",
             session_id, err
