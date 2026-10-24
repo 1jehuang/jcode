@@ -1254,9 +1254,8 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
     assert!(plain.contains("✓ Wire the hotkey"), "{plain}");
     assert!(plain.contains("● Render the card"), "{plain}");
     assert!(plain.contains("○ Unrelated cleanup"), "{plain}");
-    // Completed items show completion confidence; open ones planning confidence.
-    assert!(plain.contains("plausible"), "{plain}");
-    assert!(plain.contains("plausible"), "{plain}");
+    // Confidence remains metadata rather than a visible item suffix.
+    assert!(!plain.contains("plausible"), "{plain}");
     // Priority remains metadata and is not repeated in the visible item label.
     assert!(!plain.contains("(high)"), "{plain}");
     assert!(
@@ -1323,7 +1322,8 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
     );
     assert!(!plain.contains("Feedback ·"), "{plain}");
     assert!(!plain.contains("Inspect a debug frame"), "{plain}");
-    assert!(plain.contains("● Render the card · plausible"), "{plain}");
+    assert!(plain.contains("● Render the card"), "{plain}");
+    assert!(!plain.contains(" · plausible"), "{plain}");
     assert!(!plain.contains("(high)"), "{plain}");
 }
 
@@ -1455,10 +1455,32 @@ fn render_todos_message_uses_readable_semantic_colors() {
     assert_eq!(color_for("Readable metadata"), Some(todo_meta_color()));
     assert_eq!(color_for("● "), Some(asap_color()));
     assert_eq!(color_for(" (high)"), None);
-    assert_eq!(color_for(" · plausible"), Some(todo_confidence_color()));
+    assert_eq!(color_for(" · plausible"), None);
     assert_eq!(color_for("strong"), Some(todo_warning_color()));
     assert_eq!(color_for("missing"), Some(todo_failure_color()));
     assert_ne!(todo_meta_color(), dim_color());
+}
+
+#[test]
+fn render_todos_message_hides_item_confidence_transitions() {
+    let todo: crate::todo::TodoItem = serde_json::from_value(serde_json::json!({
+        "id": "hidden-confidence", "content": "Completed task", "status": "completed",
+        "priority": "high", "confidence": "validated", "completion_confidence": "verified"
+    }))
+    .unwrap();
+    let msg = DisplayMessage::todos(serde_json::json!({"todos": [todo]}).to_string());
+    for width in [20, 40, 80] {
+        let text = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off)
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("✓ Completed"), "{text}");
+        assert!(
+            !text.contains("validated") && !text.contains("verified") && !text.contains('→'),
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -1724,10 +1746,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     assert!(plain.contains("Relevance missing"), "{plain}");
     assert!(plain.contains("Coverage missing"), "{plain}");
     assert!(!plain.contains("Delivery "), "{plain}");
-    assert!(
-        plain.contains("● Render the todo result · plausible"),
-        "{plain}"
-    );
+    assert!(plain.contains("● Render the todo result"), "{plain}");
     assert!(!plain.contains("(high)"), "{plain}");
     assert!(
         !plain.contains('╭'),

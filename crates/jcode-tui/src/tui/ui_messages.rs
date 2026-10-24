@@ -2162,7 +2162,7 @@ fn render_todo_card_item_line(
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
-    todo_card_line(todo_card_item_spans(todo, true), base_indent, inner_width)
+    todo_card_line(todo_card_item_spans(todo, false), base_indent, inner_width)
 }
 
 /// Spans for one todo row: two-cell gutter, status glyph, content, and
