@@ -157,6 +157,12 @@ fn disable_model_invocation_skill_is_hidden_from_model_list_but_still_resolvable
             prompt: Some("run it"),
         })
     );
+    let prompt = registry
+        .get("manual-only")
+        .expect("slash invocation resolves the hidden skill")
+        .get_prompt();
+    assert!(prompt.contains("# Skill: manual-only"), "{prompt}");
+    assert!(prompt.contains("Body"), "{prompt}");
 }
 
 #[test]
