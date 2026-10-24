@@ -116,7 +116,7 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
                 "feedback_loop_relevance was indirect",
                 "intent understanding was uncertain",
                 "Current weaknesses, limitations, or missing assessments",
-                "Disabled turn-end gate findings",
+                "Disabled gates that would have fired",
             ] {
                 let unexpected: String = unexpected
                     .chars()
@@ -190,9 +190,10 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
             .collect::<Vec<_>>()
             .join(" ");
         let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(normalized.contains("Disabled turn-end gate findings"));
-        assert!(normalized.contains("started this work without understanding"));
-        assert!(normalized.contains("flagged 2 times this turn"));
+        assert!(normalized.contains("Disabled gates that would have fired"));
+        assert!(normalized.contains("• Intent understanding"));
+        assert!(!normalized.contains("started this work without understanding"));
+        assert!(!normalized.contains("flagged 2 times this turn"));
         assert!(!plain.contains("[auto]"));
         assert!(!normalized.contains("Do not reply or wait for the user"));
         let snapshot: serde_json::Value = serde_json::from_str(&first_report.content).unwrap();
@@ -223,8 +224,9 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
         .collect::<Vec<_>>()
         .join(" ");
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(text.contains("never became solid"));
-        assert!(text.contains("flagged 2 times this turn"));
+        assert!(text.contains("• Intent understanding"));
+        assert!(!text.contains("never became solid"));
+        assert!(!text.contains("flagged 2 times this turn"));
         // This updated snapshot is the immutable record for the earlier cycle.
         let first_render = crate::tui::ui::render_system_message(
             &updated,
