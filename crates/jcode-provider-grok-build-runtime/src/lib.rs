@@ -315,6 +315,21 @@ mod tests {
     }
 
     #[test]
+    fn catalog_offers_grok_4_7_and_defaults_to_it() {
+        assert!(GROK_BUILD_MODELS.contains(&"grok-4.7"));
+        assert_eq!(default_model(), "grok-4.7");
+        assert_eq!(GrokBuildProvider::new().model(), "grok-4.7");
+
+        let on_older_model = GrokBuildProvider::with_model("grok-4.5");
+        assert!(
+            on_older_model
+                .model_routes()
+                .iter()
+                .any(|route| route.model == "grok-4.7")
+        );
+    }
+
+    #[test]
     fn classifies_proxy_401_messages() {
         assert!(is_unauthorized_text(
             "OpenAI-compatible chat request failed\n  status: 401 Unauthorized\n  response: {}"
