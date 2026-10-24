@@ -19,7 +19,7 @@ pub struct Skill {
     pub allowed_tools: Option<Vec<String>>,
     /// `disable-model-invocation: true`: only the user can invoke the skill,
     /// via `/name`. It is kept out of every model-facing skill listing and
-    /// `skill_manage` refuses to load or read it.
+    /// `skill_manage` refuses to load, read or reload it.
     pub disable_model_invocation: bool,
     pub content: String,
     pub path: PathBuf,

@@ -212,6 +212,9 @@ impl SkillTool {
             Ok(true) => {
                 // Re-read to get updated info
                 if let Some(skill) = registry.get(&name) {
+                    if skill.disable_model_invocation {
+                        return Err(model_invocation_disabled(&skill.name));
+                    }
                     Ok(ToolOutput::new(format!(
                         "Reloaded skill '{}'\n\nDescription: {}\nPath: {}",
                         name,
@@ -753,5 +756,66 @@ mod tests {
             .await
             .unwrap();
         assert!(read.output.contains("Project skill model-visible-skill"));
+    }
+
+    #[tokio::test]
+    async fn test_reload_of_disable_model_invocation_skill_is_refused_without_details() {
+        let repo = tempfile::tempdir().unwrap();
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+        let tool = SkillTool::new(Arc::new(RwLock::new(
+            SkillRegistry::load_for_working_dir(Some(repo.path())).unwrap(),
+        )));
+
+        let error = match tool
+            .execute(
+                json!({"action": "reload", "name": "manual-only-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+        {
+            Ok(output) => panic!(
+                "reload must refuse a disable-model-invocation skill, got: {}",
+                output.output
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("/manual-only-skill"), "{error}");
+        assert!(!error.contains("Manual only skill"), "{error}");
+        assert!(
+            !error.contains(&repo.path().display().to_string()),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reload_of_model_invocable_skill_still_reports_description_and_path() {
+        let repo = tempfile::tempdir().unwrap();
+        write_project_skill(repo.path(), "model-visible-skill");
+        write_manual_only_project_skill(repo.path(), "manual-only-skill");
+        let tool = SkillTool::new(Arc::new(RwLock::new(
+            SkillRegistry::load_for_working_dir(Some(repo.path())).unwrap(),
+        )));
+
+        let output = tool
+            .execute(
+                json!({"action": "reload", "name": "model-visible-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+            .unwrap();
+        let path = repo
+            .path()
+            .join(".agents/skills/model-visible-skill/SKILL.md");
+        assert_eq!(
+            output.output,
+            format!(
+                "Reloaded skill 'model-visible-skill'\n\nDescription: Project skill model-visible-skill\nPath: {}",
+                path.display()
+            )
+        );
+        assert_eq!(
+            output.title.as_deref(),
+            Some("Skills: Reloaded model-visible-skill")
+        );
     }
 }
