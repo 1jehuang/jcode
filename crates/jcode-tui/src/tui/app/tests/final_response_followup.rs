@@ -48,8 +48,8 @@ fn final_response_followup_does_not_repeat_answer_across_compaction() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         for compaction in [None, Some(false), Some(true)] {
             let mut app = completed_response_test_app();
-            let mut remote = crate::tui::backend::RemoteConnection::dummy();
             let guard = rt.enter();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
             app.handle_server_event(
                 ServerEvent::TextDelta {
                     text: "The review is complete.".into(),
@@ -150,8 +150,8 @@ fn final_response_followup_still_requests_missing_or_incomplete_answer() {
             ],
         ] {
             let mut app = completed_response_test_app();
-            let mut remote = crate::tui::backend::RemoteConnection::dummy();
             let _guard = rt.enter();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
             let has_end = events
                 .iter()
                 .any(|event| matches!(event, ServerEvent::MessageEnd { .. }));
@@ -178,8 +178,8 @@ fn final_response_followup_tracks_the_last_request_not_earlier_commentary() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         for final_answer in [false, true] {
             let mut app = completed_response_test_app();
-            let mut remote = crate::tui::backend::RemoteConnection::dummy();
             let _guard = rt.enter();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
             app.handle_server_event(
                 ServerEvent::TextDelta {
                     text: "Checking now.".into(),
@@ -234,8 +234,8 @@ fn final_response_followup_preserves_incomplete_and_validation_gates() {
                 todos[0].completion_confidence = Some(crate::todo::ConfidenceState::Plausible);
             }
             crate::todo::save_todos(&app.session.id, &todos).unwrap();
-            let mut remote = crate::tui::backend::RemoteConnection::dummy();
             let _guard = rt.enter();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
             app.handle_server_event(
                 ServerEvent::TextDelta {
                     text: "Here is the outcome.".into(),
