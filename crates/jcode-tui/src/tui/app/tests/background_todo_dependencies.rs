@@ -17,11 +17,36 @@ fn dependency_todo(id: &str, task_id: &str) -> crate::todo::TodoItem {
     }
 }
 
+struct DependencyTaskFixture(std::path::PathBuf);
+
+impl Drop for DependencyTaskFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn live_dependency_fixture(app: &App, task: &str) -> DependencyTaskFixture {
+    let path = crate::background::global().status_path_for(task);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "task_id": task, "tool_name": "bash", "session_id": app.session.id,
+            "status": "running", "started_at": "2026-10-24T09:00:00Z",
+            "owner_pid": std::process::id()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    DependencyTaskFixture(path)
+}
+
 #[test]
 fn background_dependency_waiting_only_suppresses_review_and_resets_budget() {
     with_temp_jcode_home(|| {
         let mut app = waiting_dependency_test_app();
         let task = format!("tui-wait-{}", app.session.id);
+        let _fixture = live_dependency_fixture(&app, &task);
         app.upsert_running_background_task(task.clone(), "Build".into(), None);
         crate::todo::save_todos(&app.session.id, &[dependency_todo("waiting", &task)]).unwrap();
         app.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
@@ -56,6 +81,7 @@ fn background_dependency_mixed_poke_targets_only_actionable_ids() {
     with_temp_jcode_home(|| {
         let mut app = waiting_dependency_test_app();
         let task = format!("tui-wait-{}", app.session.id);
+        let _fixture = live_dependency_fixture(&app, &task);
         app.upsert_running_background_task(task.clone(), "Build".into(), None);
         let mut actionable = dependency_todo("ready-id", &task);
         actionable.waiting_on.clear();
@@ -86,6 +112,7 @@ fn background_dependency_terminal_or_unknown_resumes_actionable_work() {
             crate::todo::save_todos(&app.session.id, &[dependency_todo("resume-id", &task)])
                 .unwrap();
             if let Some(status) = terminal {
+                let _fixture = live_dependency_fixture(&app, &task);
                 app.upsert_running_background_task(task.clone(), "Build".into(), None);
                 assert!(!app.schedule_auto_poke_followup_if_needed());
                 app.finish_background_task(task, "Build".into(), status);
@@ -100,6 +127,49 @@ fn background_dependency_terminal_or_unknown_resumes_actionable_work() {
 }
 
 #[test]
+fn background_dependency_stale_row_missing_or_malformed_state_is_actionable() {
+    with_temp_jcode_home(|| {
+        for malformed in [false, true] {
+            let mut app = waiting_dependency_test_app();
+            let task = format!("tui-stale-{}", app.session.id);
+            let fixture = live_dependency_fixture(&app, &task);
+            if malformed {
+                std::fs::write(&fixture.0, b"not valid task state").unwrap();
+            } else {
+                std::fs::remove_file(&fixture.0).unwrap();
+            }
+            app.upsert_running_background_task(task.clone(), "Stale build".into(), None);
+            crate::todo::save_todos(&app.session.id, &[dependency_todo("recover", &task)]).unwrap();
+            assert!(app.schedule_auto_poke_followup_if_needed());
+            assert_eq!(app.queued_messages.len(), 1);
+        }
+    });
+}
+
+#[test]
+fn background_dependency_dead_owner_or_detached_child_is_actionable() {
+    with_temp_jcode_home(|| {
+        // This PID is outside the OS PID range and cannot name a live process.
+        let dead_pid = i32::MAX as u32;
+        assert!(!crate::platform::is_process_running(dead_pid));
+        for detached in [false, true] {
+            let mut app = waiting_dependency_test_app();
+            let task = format!("tui-orphan-{}", app.session.id);
+            let fixture = live_dependency_fixture(&app, &task);
+            let mut status: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&fixture.0).unwrap()).unwrap();
+            status["detached"] = detached.into();
+            status[if detached { "pid" } else { "owner_pid" }] = dead_pid.into();
+            std::fs::write(&fixture.0, serde_json::to_vec(&status).unwrap()).unwrap();
+            app.upsert_running_background_task(task.clone(), "Orphan build".into(), None);
+            crate::todo::save_todos(&app.session.id, &[dependency_todo("recover", &task)]).unwrap();
+            assert!(app.schedule_auto_poke_followup_if_needed());
+            assert_eq!(app.queued_messages.len(), 1);
+        }
+    });
+}
+
+#[test]
 fn background_dependency_reload_reads_session_scoped_task_state() {
     with_temp_jcode_home(|| {
         let mut app = waiting_dependency_test_app();
@@ -108,7 +178,8 @@ fn background_dependency_reload_reads_session_scoped_task_state() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut status = serde_json::json!({
             "task_id": task, "tool_name": "bash", "session_id": app.session.id,
-            "status": "running", "started_at": "2026-10-24T09:00:00Z"
+            "status": "running", "started_at": "2026-10-24T09:00:00Z",
+            "owner_pid": std::process::id()
         });
         std::fs::write(&path, serde_json::to_vec(&status).unwrap()).unwrap();
         let todo = dependency_todo("reload-id", &task);

@@ -1221,14 +1221,16 @@ fn background_dependency_todo_card_annotation_is_width_safe() {
         ..Default::default()
     };
     let wide = render_todo_card_item_line(&todo, "", 60);
-    assert!(extract_line_text(&wide).contains("[waiting bg]"));
+    assert!(extract_line_text(&wide).contains("[bg dependency]"));
     for width in 0..40 {
         let line = render_todo_card_item_line(&todo, "", width);
         assert!(extract_line_text(&line).width() <= width);
     }
     let mut done = todo;
     done.status = "completed".into();
-    assert!(!extract_line_text(&render_todo_card_item_line(&done, "", 60)).contains("waiting"));
+    assert!(
+        !extract_line_text(&render_todo_card_item_line(&done, "", 60)).contains("bg dependency")
+    );
 }
 
 #[test]

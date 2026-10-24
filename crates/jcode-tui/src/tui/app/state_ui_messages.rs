@@ -252,11 +252,24 @@ impl App {
                     serde_json::from_slice::<crate::background::TaskStatusFile>(&bytes).ok()
                 });
             if let Some(status) = status {
+                // Retained UI rows are presentation history, not proof that a
+                // task survived a crash. Detached commands belong to their
+                // child PID, while in-process tasks belong to the daemon.
+                let owner = if status.detached {
+                    status.pid
+                } else {
+                    status.owner_pid.or(status.pid)
+                };
+                if owner.is_some_and(|pid| {
+                    pid == 0 || pid > i32::MAX as u32 || !crate::platform::is_process_running(pid)
+                }) {
+                    return false;
+                }
                 return status.task_id == task_id
                     && status.session_id == session_id
                     && status.status == crate::bus::BackgroundTaskStatus::Running;
             }
-            row.is_some()
+            false
         })
     }
 

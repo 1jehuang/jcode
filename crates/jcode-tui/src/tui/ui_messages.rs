@@ -2292,7 +2292,7 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
                 && todo.status != "completed"
                 && todo.status != "cancelled"
             {
-                format!("[waiting bg] {}", todo.content)
+                format!("[bg dependency] {}", todo.content)
             } else {
                 todo.content.clone()
             },
