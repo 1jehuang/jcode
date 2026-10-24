@@ -651,6 +651,83 @@ fn clicking_pinned_todo_more_row_expands_the_band() {
 }
 
 #[test]
+fn clicking_anywhere_on_pinned_todo_card_toggles_full_list() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    app.session.short_name = Some("test".to_string());
+    let todos: Vec<_> = (0..12)
+        .map(|i| pinned_band_todo(&format!("t{i}"), &format!("many item {i}"), "pending"))
+        .collect();
+    app.pinned_todos_payload = Some(serde_json::json!({"todos": todos}).to_string());
+    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
+
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 40)).unwrap();
+    let compact = render_and_snap(&app, &mut terminal);
+    assert!(compact.contains("many item 0"), "first TODO item missing:\n{compact}");
+    let compact_card = crate::tui::ui::viewport::pinned_todo_card_area()
+        .expect("compact TODO band should publish card bounds");
+    let compact_control = crate::tui::ui::viewport::pinned_todo_more_area()
+        .expect("long compact band should publish +more control bounds");
+    let first_item_row = compact
+        .lines()
+        .position(|line| line.contains("many item 0"))
+        .expect("first TODO row") as u16;
+    assert_ne!(first_item_row, compact_control.y, "test click must miss +more row");
+    assert!(
+        first_item_row >= compact_card.y
+            && first_item_row < compact_card.y.saturating_add(compact_card.height),
+        "first TODO row {first_item_row} outside compact card {compact_card:?}"
+    );
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: compact_card.x.saturating_add(7),
+        row: first_item_row,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.pinned_todos_expanded, "clicking an item in the compact card should expand it");
+
+    let expanded = render_and_snap(&app, &mut terminal);
+    assert!(expanded.contains("many item 11"), "last TODO row missing:\n{expanded}");
+    let last_item_row = expanded
+        .lines()
+        .position(|line| line.contains("many item 11"))
+        .expect("last TODO row");
+    let collapse_row = expanded
+        .lines()
+        .position(|line| line.contains("Collapse todos"))
+        .expect("collapse control row");
+    assert!(collapse_row > last_item_row, "collapse control must be below the last item:\n{expanded}");
+
+    let expanded_card = crate::tui::ui::viewport::pinned_todo_card_area()
+        .expect("expanded TODO band should publish card bounds");
+    let middle_item_row = expanded
+        .lines()
+        .position(|line| line.contains("many item 5"))
+        .expect("middle TODO row") as u16;
+    assert_ne!(middle_item_row as usize, collapse_row, "test click must miss collapse label");
+    assert!(
+        middle_item_row >= expanded_card.y
+            && middle_item_row < expanded_card.y.saturating_add(expanded_card.height),
+        "middle TODO row {middle_item_row} outside expanded card {expanded_card:?}"
+    );
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: expanded_card.x.saturating_add(7),
+        row: middle_item_row,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(!app.pinned_todos_expanded, "clicking an item in the expanded card should collapse it");
+
+    crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
+    crate::tui::ui::viewport::set_pinned_todo_card_area_for_test(None);
+}
+
+#[test]
 fn pinned_todo_card_shows_tasks_without_expanding() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
