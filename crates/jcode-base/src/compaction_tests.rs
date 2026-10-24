@@ -236,6 +236,7 @@ fn test_context_usage_prefers_observed_tokens() {
 
 #[test]
 fn reactive_threshold_accepts_tokens_or_percentage() {
+    let _lock = crate::storage::lock_test_env();
     let mut manager = CompactionManager::new().with_budget(1_000_000);
     manager.set_mode(crate::config::CompactionMode::Reactive);
     manager.compaction_config.reactive_threshold = 0.80;
@@ -1265,6 +1266,7 @@ fn max_context_tokens_zero_means_no_cap() {
 
 #[test]
 fn proactive_floor_accepts_tokens_or_percentage() {
+    let _lock = crate::storage::lock_test_env();
     let mut manager = CompactionManager::new().with_budget(1_000_000);
     manager.compaction_config = crate::config::CompactionConfig::default();
     manager.turns_since_last_compact = 10;
