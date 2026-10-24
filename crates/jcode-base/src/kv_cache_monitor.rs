@@ -366,7 +366,7 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
                 "provider, model"
             };
             format!(
-                "provider read {read} of the {prefix}-token prefix{timing}; same {same}, system prompt, tools and message prefix, so the provider evicted or rerouted the cache"
+                "provider read {read} of the {prefix}-token prefix{timing}; no detected change to {same}, system prompt, tools or message prefix; cause unconfirmed (possible provider routing, eviction or cache-boundary differences)"
             )
         }
     }
@@ -648,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_read_detail_rules_out_harness_and_reports_timing() {
+    fn zero_read_detail_reports_observations_without_claiming_eviction() {
         let mut monitor = KvCacheMonitor::new();
         warm(&mut monitor);
         monitor.begin_request(route(), sig(&[10, 11, 12]));
@@ -660,7 +660,9 @@ mod tests {
             miss.detail
         );
         assert!(miss.detail.contains("TTL 5m"), "{}", miss.detail);
-        assert!(miss.detail.contains("evicted"), "{}", miss.detail);
+        assert!(miss.detail.contains("cause unconfirmed"), "{}", miss.detail);
+        assert!(miss.detail.contains("no detected change"), "{}", miss.detail);
+        assert!(!miss.detail.contains("so the provider"), "{}", miss.detail);
     }
 
     #[test]
