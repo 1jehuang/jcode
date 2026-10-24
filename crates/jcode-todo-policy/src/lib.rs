@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod completion_report;
 pub mod followup;
 pub mod store;
 
