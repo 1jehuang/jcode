@@ -5,6 +5,10 @@ use super::streaming::{StreamUsageRecorder, find_wrap_marker_incremental};
 
 const TOOL_FOREGROUND_BUDGET: Duration = Duration::from_secs(3);
 
+fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
+    !(name == "bg" && input.get("action").and_then(|value| value.as_str()) == Some("wait"))
+}
+
 /// SDK callbacks and nonstreaming turns use the same policy as TUI turns.
 pub(super) async fn execute_with_background(
     registry: Registry,
@@ -12,13 +16,14 @@ pub(super) async fn execute_with_background(
     input: serde_json::Value,
     ctx: ToolContext,
 ) -> Result<crate::tool::ToolOutput> {
+    let auto_background = auto_background_allowed(&name, &input);
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
     let mut work = tokio::spawn(async move { registry.execute(&tool_name, input, ctx).await });
     tokio::select! {
         biased;
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
-        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET) => {
+        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET), if auto_background => {
             let info = crate::background::global().adopt(&name, &session_id, work).await;
             Ok(crate::tool::ToolOutput::new(format!(
                 "Tool '{}' was moved to background automatically after 3 seconds (task_id: {}).\n\n{}",
@@ -29,18 +34,45 @@ pub(super) async fn execute_with_background(
 }
 
 /// Returns true for an automatic handoff, false for a user/reload signal.
-async fn wait_for_tool_handoff(bg: &InterruptSignal, shutdown: &InterruptSignal) -> bool {
+async fn wait_for_tool_handoff(
+    bg: &InterruptSignal,
+    shutdown: &InterruptSignal,
+    auto_background: bool,
+) -> bool {
     tokio::select! {
         biased;
         _ = shutdown.notified() => false,
         _ = bg.notified() => false,
-        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET) => true,
+        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET), if auto_background => true,
     }
 }
 
 #[cfg(test)]
 mod handoff_tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn background_wait_is_not_automatically_backgrounded() {
+        let input = serde_json::json!({"action": "wait", "task_id": "task"});
+        assert!(!auto_background_allowed("bg", &input));
+        assert!(auto_background_allowed(
+            "bg",
+            &serde_json::json!({"action": "status"})
+        ));
+        assert!(auto_background_allowed("bash", &input));
+        let bg = InterruptSignal::new();
+        let shutdown = InterruptSignal::new();
+        tokio::select! {
+            biased;
+            _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("bg", &input)) => {
+                panic!("bg wait was backgrounded while waiting for its dependency");
+            }
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+        }
+        // Reloads still interrupt a wait safely, without waiting for its deadline.
+        shutdown.fire();
+        assert!(!wait_for_tool_handoff(&bg, &shutdown, false).await);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn slow_tool_handoff_occurs_after_three_seconds_without_cancelling_work() {
@@ -54,7 +86,7 @@ mod handoff_tests {
         tokio::select! {
             biased;
             _ = &mut work => panic!("slow work completed before handoff"),
-            automatic = wait_for_tool_handoff(&bg, &shutdown) => assert!(automatic),
+            automatic = wait_for_tool_handoff(&bg, &shutdown, true) => assert!(automatic),
         }
         assert_eq!(start.elapsed(), Duration::from_secs(3));
         assert!(!work.is_finished());
@@ -68,7 +100,7 @@ mod handoff_tests {
         tokio::select! {
             biased;
             _ = tokio::time::sleep(Duration::from_secs(1)) => {},
-            _ = wait_for_tool_handoff(&bg, &shutdown) => panic!("fast tool backgrounded"),
+            _ = wait_for_tool_handoff(&bg, &shutdown, true) => panic!("fast tool backgrounded"),
         }
     }
 
@@ -83,7 +115,7 @@ mod handoff_tests {
                 bg.fire();
             }
             let start = tokio::time::Instant::now();
-            assert!(!wait_for_tool_handoff(&bg, &shutdown).await);
+            assert!(!wait_for_tool_handoff(&bg, &shutdown, true).await);
             assert_eq!(start.elapsed(), Duration::ZERO);
         }
     }
@@ -1769,7 +1801,7 @@ impl Agent {
                             Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                         });
                     }
-                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal) => {
+                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, auto_background_allowed(&tc.name, &tc.input)) => {
                         automatic_background = automatic;
                         if self.is_graceful_shutdown() && allow_reload_handoff {
                             tool_result = match tokio::time::timeout(
