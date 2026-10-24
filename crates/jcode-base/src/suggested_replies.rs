@@ -483,6 +483,30 @@ pub fn detect_cyrillic_language(text: &str) -> bool {
     cyrillic >= 3 && (cyrillic * 2 >= latin || cyrillic >= 8)
 }
 
+fn is_none_default_action(action: &str) -> bool {
+    let cleaned = action
+        .trim()
+        .trim_matches(['*', '`', '"', '\''])
+        .trim()
+        .to_lowercase();
+    if cleaned.is_empty()
+        || cleaned.starts_with("no action")
+        || cleaned.starts_with("nothing")
+        || cleaned.starts_with("нет замечаний")
+        || cleaned.starts_with("замечаний нет")
+    {
+        return true;
+    }
+    let first_token = cleaned
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(c, '-' | '—' | '–' | ':' | ';' | ',' | '(' | '.' | '`' | '*')
+        })
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    matches!(first_token, "none" | "n/a" | "na" | "nil" | "null" | "нет")
+}
+
 /// Extract actionable findings or a `DEFAULT_ACTION:` directive from a 6-Lens Review reply.
 pub fn extract_six_lens_review_findings(text: &str) -> Option<String> {
     let trimmed = text.trim();
@@ -494,7 +518,8 @@ pub fn extract_six_lens_review_findings(text: &str) -> Option<String> {
     }
 
     for raw_line in trimmed.lines() {
-        let line = raw_line
+        let without_bold = raw_line.replace("**", "");
+        let line = without_bold
             .trim()
             .trim_start_matches(['-', '*', '•', '>', ' '])
             .trim_start_matches(['*', '`', ' ']);
@@ -507,14 +532,10 @@ pub fn extract_six_lens_review_findings(text: &str) -> Option<String> {
                 .trim()
                 .trim_matches(['*', '`', '"', '\''])
                 .trim();
-            if !action.is_empty()
-                && !matches!(
-                    action.to_ascii_lowercase().as_str(),
-                    "none" | "n/a" | "no action needed"
-                )
-            {
-                return Some(action.to_string());
+            if is_none_default_action(action) {
+                return None;
             }
+            return Some(action.to_string());
         }
     }
 
@@ -639,6 +660,7 @@ fn is_status_report_label(label: &str) -> bool {
                 | "jev / laya"
                 | "structured context"
                 | "default action"
+                | "default_action"
                 | "scored candidates"
                 | "security"
                 | "architecture"
@@ -668,6 +690,11 @@ fn clean_extracted_option(raw: &str) -> String {
         .trim()
         .trim_matches(|c: char| c == '`' || c == '"' || c == '«' || c == '»')
         .trim_end_matches([';', ',']);
+    if let Some((label, _)) = trimmed.split_once(':')
+        && is_status_report_label(label.trim())
+    {
+        return String::new();
+    }
     let head = if let Some((left, _)) = trimmed.split_once(" — ") {
         left.trim()
     } else if let Some((left, _)) = trimmed.split_once(": ") {

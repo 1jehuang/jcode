@@ -670,6 +670,22 @@ fn extract_assistant_options_tracks_code_fences_across_prefix_and_extracts_revie
         ),
         None
     );
+    assert_eq!(
+        extract_six_lens_review_findings(
+            "### 6-Lens Review Verdict: GO\n- **DEFAULT_ACTION:** `None` — все изменения протестированы, закоммичены и запушены."
+        ),
+        None
+    );
+    assert_eq!(
+        extract_six_lens_review_findings("DEFAULT_ACTION: None — all 6 lenses are GO"),
+        None
+    );
+    assert!(
+        extract_assistant_options(
+            "- **DEFAULT_ACTION:** `None` — все изменения протестированы, закоммичены и запушены."
+        )
+        .is_empty()
+    );
 }
 
 #[tokio::test]
