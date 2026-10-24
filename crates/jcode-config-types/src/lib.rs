@@ -1326,6 +1326,16 @@ pub struct ProviderConfig {
     /// (OpenAI API), and WebSocket permessage-deflate (Responses sockets).
     /// Overridable via `JCODE_REQUEST_COMPRESSION`.
     pub request_compression: String,
+    /// Whether the destructive-command risk gate is enabled.
+    /// When enabled (default), the bash tool refuses catastrophic commands
+    /// and requires justification for risky ones. When disabled, all commands
+    /// run without the gate. Overridable via `JCODE_RISK_GATE_ENABLED`.
+    #[serde(default = "default_risk_gate_enabled")]
+    pub risk_gate_enabled: bool,
+}
+
+fn default_risk_gate_enabled() -> bool {
+    true
 }
 
 impl Default for ProviderConfig {
@@ -1351,6 +1361,7 @@ impl Default for ProviderConfig {
             max_retries: 8,
             retry_backoff_cap_secs: 30,
             request_compression: "auto".to_string(),
+            risk_gate_enabled: true,
         }
     }
 }

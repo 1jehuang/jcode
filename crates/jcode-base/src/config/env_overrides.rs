@@ -919,6 +919,12 @@ impl Config {
             self.provider.request_compression = v.trim().to_ascii_lowercase();
         }
 
+        if let Ok(v) = std::env::var("JCODE_RISK_GATE_ENABLED") {
+            if let Some(enabled) = risk_gate::env_override(&v) {
+                self.provider.risk_gate_enabled = enabled;
+            }
+        }
+
         // Copilot premium mode: env var overrides config
         // If set in config but not in env, propagate config -> env
         if let Ok(v) = std::env::var("JCODE_COPILOT_PREMIUM") {
@@ -951,12 +957,51 @@ impl Config {
     }
 }
 
-fn parse_env_bool(raw: &str) -> Option<bool> {
-    match raw.trim().to_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
+/// Single source of truth for `JCODE_RISK_GATE_ENABLED` parsing.
+///
+/// Truthy/falsy spellings and garbage semantics match the historical
+/// `parse_env_bool` behavior exactly: recognized falsy values disable the
+/// gate, anything else keeps it on.
+pub mod risk_gate {
+    /// Accepted truthy spellings (trimmed, case-insensitive).
+    pub const TRUTHY: &[&str] = &["1", "true", "yes", "on"];
+    /// Accepted falsy spellings (trimmed, case-insensitive).
+    pub const FALSY: &[&str] = &["0", "false", "no", "off"];
+
+    /// Parse a `JCODE_RISK_GATE_ENABLED` value: `Some(true/false)` for a
+    /// recognized spelling, `None` otherwise.
+    pub fn parse_env_value(raw: &str) -> Option<bool> {
+        let normalized = raw.trim().to_lowercase();
+        if TRUTHY.contains(&normalized.as_str()) {
+            Some(true)
+        } else if FALSY.contains(&normalized.as_str()) {
+            Some(false)
+        } else {
+            None
+        }
     }
+
+    /// The raw `JCODE_RISK_GATE_ENABLED` value if set.
+    pub fn env_override_raw() -> Option<String> {
+        std::env::var("JCODE_RISK_GATE_ENABLED").ok()
+    }
+
+    /// The effective gate decision for an env value: explicit falsy spellings
+    /// disable the gate; truthy spellings and anything unrecognized keep it on
+    /// (the historical behavior of the bash gate and the /settings display).
+    pub fn env_allows_gate(raw: &str) -> bool {
+        !FALSY.contains(&raw.trim().to_lowercase().as_str())
+    }
+
+    /// `Some(enabled)` when the raw env value is a recognized spelling, else
+    /// `None`. Convenience alias of [`parse_env_value`] for override reading.
+    pub fn env_override(raw: &str) -> Option<bool> {
+        parse_env_value(raw)
+    }
+}
+
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    risk_gate::parse_env_value(raw)
 }
 
 fn parse_env_list(raw: &str) -> Vec<String> {
@@ -965,4 +1010,33 @@ fn parse_env_list(raw: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+#[cfg(test)]
+mod risk_gate_tests {
+    use super::risk_gate;
+
+    #[test]
+    fn parses_truthy_and_falsy_spellings_case_insensitively() {
+        for (raw, expected) in [
+            ("1", Some(true)),
+            ("TRUE", Some(true)),
+            (" yes ", Some(true)),
+            ("On", Some(true)),
+            ("0", Some(false)),
+            ("False", Some(false)),
+            (" NO ", Some(false)),
+            ("Off", Some(false)),
+        ] {
+            assert_eq!(risk_gate::parse_env_value(raw), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn unrecognized_values_do_not_parse_but_keep_the_gate_on() {
+        for raw in ["", "garbage", "2", "enabled"] {
+            assert_eq!(risk_gate::parse_env_value(raw), None, "{raw:?}");
+            assert!(risk_gate::env_allows_gate(raw), "{raw:?}");
+        }
+    }
 }

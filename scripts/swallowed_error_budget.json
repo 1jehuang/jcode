@@ -1,9 +1,9 @@
 {
-  "total": 3961,
+  "total": 3964,
   "totals_by_pattern": {
-    "dot_ok": 1553,
+    "dot_ok": 1555,
     "let_underscore": 1428,
-    "unwrap_or_default": 980
+    "unwrap_or_default": 981
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -461,6 +461,11 @@
       "let_underscore": 9,
       "unwrap_or_default": 4
     },
+    "crates/jcode-app-core/src/tool/bash_destructive_gate.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
+    },
     "crates/jcode-app-core/src/tool/bg.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
@@ -842,7 +847,7 @@
       "unwrap_or_default": 3
     },
     "crates/jcode-base/src/config/env_overrides.rs": {
-      "dot_ok": 1,
+      "dot_ok": 2,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
@@ -2144,7 +2149,7 @@
     "crates/jcode-tui/src/tui/app/commands.rs": {
       "dot_ok": 4,
       "let_underscore": 14,
-      "unwrap_or_default": 20
+      "unwrap_or_default": 21
     },
     "crates/jcode-tui/src/tui/app/commands_cloud.rs": {
       "dot_ok": 0,
