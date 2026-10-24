@@ -11,6 +11,8 @@ todo_gate_digest = true
 
 Set `todo_gate_digest = false` to disable it again. Auto-poke must also be enabled for a model follow-up to run (`features.auto_poke`, or `/poke on` in the TUI). `/poke off` does not hide completion reports. This setting does not disable the existing incomplete-todo, long-session review, ownership, completion-confidence, confidence-spike, or final-response follow-ups.
 
+With auto-poke enabled, an unchanged incomplete todo list receives at most three automatic continuation attempts. A change to the incomplete list or a new todo cycle resets that budget. The TUI preserves its remaining budget across self-development reloads. Explicitly turning auto-poke off still stops these retries.
+
 When enabled, recorded todo gate observations produce the existing aggregate reminder once per completion cycle, after open work finishes and before the completion gates. Repeated observations during that cycle do not trigger another aggregate reminder. New open work starts another cycle. The TUI and headless `jcode run` both respect this setting.
 
 SDK clients using the pure shared policy should apply their configuration explicitly:
