@@ -51,6 +51,7 @@ include!("tests/reasoning_region.rs");
 include!("tests/smoothness_benchmark.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
+include!("tests/background_todo_dependencies.rs");
 include!("tests/todo_completion.rs");
 include!("tests/final_response_followup.rs");
 include!("tests/reload_recovery_replay.rs");

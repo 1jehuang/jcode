@@ -2761,7 +2761,7 @@ pub(super) fn incomplete_poke_todos(app: &App) -> Vec<crate::todo::TodoItem> {
 }
 
 pub(super) fn build_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
-    crate::todo::build_auto_poke_message(incomplete.len())
+    crate::todo::build_actionable_poke_message(incomplete)
 }
 
 fn todo_confidence_weight(priority: &str) -> u32 {

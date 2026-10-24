@@ -1211,6 +1211,27 @@ fn render_overnight_message_uses_rounded_progress_card() {
 }
 
 #[test]
+fn background_dependency_todo_card_annotation_is_width_safe() {
+    use unicode_width::UnicodeWidthStr;
+    let todo = crate::todo::TodoItem {
+        id: "wait".into(),
+        content: "等待 build 🦀".into(),
+        status: "pending".into(),
+        waiting_on: vec!["build-task".into()],
+        ..Default::default()
+    };
+    let wide = render_todo_card_item_line(&todo, "", 60);
+    assert!(extract_line_text(&wide).contains("[waiting bg]"));
+    for width in 0..40 {
+        let line = render_todo_card_item_line(&todo, "", width);
+        assert!(extract_line_text(&line).width() <= width);
+    }
+    let mut done = todo;
+    done.status = "completed".into();
+    assert!(!extract_line_text(&render_todo_card_item_line(&done, "", 60)).contains("waiting"));
+}
+
+#[test]
 fn render_todos_message_shows_grouped_card_with_status_glyphs() {
     fn todo(id: &str, content: &str, status: &str, group: Option<&str>) -> crate::todo::TodoItem {
         crate::todo::TodoItem {
@@ -1223,6 +1244,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
             completion_confidence: (status == "completed")
                 .then_some(crate::todo::ConfidenceState::from_legacy_score(95)),
             confidence_history: Vec::new(),
+            waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
             stage: None,
@@ -1303,6 +1325,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
+        waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(80),
             crate::todo::ConfidenceState::from_legacy_score(85),
@@ -1362,6 +1385,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         confidence: None,
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1445,6 +1469,7 @@ fn render_todos_message_uses_readable_semantic_colors() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1563,6 +1588,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         confidence: None,
         completion_confidence: Some(crate::todo::ConfidenceState::Validated),
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1613,6 +1639,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1654,6 +1681,7 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
         stage: None,
@@ -1722,6 +1750,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(92)),
         completion_confidence: None,
+        waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(85),
             crate::todo::ConfidenceState::from_legacy_score(92),

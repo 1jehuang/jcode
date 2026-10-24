@@ -224,6 +224,50 @@ impl App {
         &self.background_task_rows
     }
 
+    /// Disk state survives a TUI reload and also overrides a retained running
+    /// row when completion arrived before the UI consumed its notification.
+    pub(super) fn todo_waits_on_background_task(&self, todo: &crate::todo::TodoItem) -> bool {
+        let session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&self.session.id);
+        crate::todo::todo_waits_on_running_task(todo, |task_id| {
+            if std::path::Path::new(task_id)
+                .file_name()
+                .and_then(|s| s.to_str())
+                != Some(task_id)
+            {
+                return false;
+            }
+            let row = self
+                .background_task_rows
+                .iter()
+                .find(|row| row.task_id == task_id);
+            if row.is_some_and(|row| row.status != crate::tui::BackgroundTaskRowStatus::Running) {
+                return false;
+            }
+            let status = std::fs::read(crate::background::global().status_path_for(task_id))
+                .ok()
+                .and_then(|bytes| {
+                    serde_json::from_slice::<crate::background::TaskStatusFile>(&bytes).ok()
+                });
+            if let Some(status) = status {
+                return status.task_id == task_id
+                    && status.session_id == session_id
+                    && status.status == crate::bus::BackgroundTaskStatus::Running;
+            }
+            row.is_some()
+        })
+    }
+
+    pub(super) fn all_open_todos_wait_on_background_tasks(&self) -> bool {
+        let open = super::commands::incomplete_poke_todos(self);
+        !open.is_empty()
+            && open
+                .iter()
+                .all(|todo| self.todo_waits_on_background_task(todo))
+    }
+
     fn retain_latest_background_tasks(&mut self) {
         const MAX_TRACKED_BACKGROUND_TASKS: usize = 8;
         if self.background_task_rows.len() > MAX_TRACKED_BACKGROUND_TASKS {

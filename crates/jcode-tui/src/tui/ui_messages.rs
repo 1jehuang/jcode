@@ -2287,7 +2287,17 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(format!("{} ", glyph), Style::default().fg(glyph_color)),
-        Span::styled(todo.content.clone(), Style::default().fg(text_color)),
+        Span::styled(
+            if !todo.waiting_on.is_empty()
+                && todo.status != "completed"
+                && todo.status != "cancelled"
+            {
+                format!("[waiting bg] {}", todo.content)
+            } else {
+                todo.content.clone()
+            },
+            Style::default().fg(text_color),
+        ),
     ];
     if with_confidence && let Some(label) = todo_card_confidence_label(todo) {
         spans.push(Span::styled(

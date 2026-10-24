@@ -241,6 +241,7 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
                 priority: "high".to_string(),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
                     crate::todo::ConfidenceState::from_legacy_score(100),
@@ -296,6 +297,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
                 priority: "high".to_string(),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                waiting_on: Vec::new(),
                 confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(50)],
                 ..Default::default()
             }],
@@ -359,6 +361,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
                 group: Some("release".to_string()),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                waiting_on: Vec::new(),
                 confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(100)],
                 ..Default::default()
             }],
@@ -411,6 +414,7 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
                 group: Some("release".to_string()),
                 confidence: Some(crate::todo::ConfidenceState::Verified),
                 completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+                waiting_on: Vec::new(),
                 confidence_history: vec![crate::todo::ConfidenceState::Verified],
                 ..Default::default()
             }],
@@ -451,6 +455,7 @@ fn save_unfinished_ownership_fixture(session_id: &str) {
             status: "completed".to_string(),
             confidence: Some(crate::todo::ConfidenceState::Verified),
             completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+            waiting_on: Vec::new(),
             confidence_history: vec![crate::todo::ConfidenceState::Verified],
             ..Default::default()
         }],
@@ -882,6 +887,7 @@ fn test_gate_digest_is_disabled_at_turn_end() {
                 priority: "high".to_string(),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::from_legacy_score(97),
                     crate::todo::ConfidenceState::from_legacy_score(100),
@@ -930,7 +936,9 @@ fn test_gate_digest_is_disabled_at_turn_end() {
         );
         assert!(!app.todo_gate_digest_delivered);
         assert!(app.display_messages().iter().all(|message| {
-            !message.content.contains("double-check this turn's weak points")
+            !message
+                .content
+                .contains("double-check this turn's weak points")
         }));
         // Discarded without delivering a review.
         assert!(
@@ -1015,19 +1023,15 @@ fn test_gate_digest_explicit_opt_in_runs_once_before_completion() {
 // session, followed by no pokes for the rest of the day).
 include!("auto_poke_cycles.rs");
 
-
-
-
-
-
-
 #[test]
 fn peer_user_prompt_renders_as_user_message() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.handle_peer_user_message("can you show me what he sent?");
-        assert!(app.display_messages().iter().any(
-            |msg| msg.role == "user" && msg.content == "can you show me what he sent?"
-        ));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.role == "user" && msg.content == "can you show me what he sent?")
+        );
     });
 }

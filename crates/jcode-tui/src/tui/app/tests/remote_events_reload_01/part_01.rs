@@ -1190,22 +1190,6 @@ fn test_handle_post_connect_requests_client_reload_after_server_reload_even_with
 
 include!("token_usage_streaming.rs");
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[test]
 fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
     let mut app = create_test_app();
@@ -1411,6 +1395,7 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
