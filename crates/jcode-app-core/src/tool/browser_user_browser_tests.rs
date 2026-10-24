@@ -60,7 +60,7 @@ else:
 "#;
 
 struct Fixture {
-    _env_guard: std::sync::MutexGuard<'static, ()>,
+    _env_guard: crate::storage::TestEnvGuard,
     temp: tempfile::TempDir,
     previous_home: Option<std::ffi::OsString>,
     previous_session: Option<std::ffi::OsString>,

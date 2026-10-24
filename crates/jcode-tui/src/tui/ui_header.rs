@@ -1103,18 +1103,7 @@ mod tests {
     }
 
     fn ensure_test_jcode_home_if_unset() {
-        static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
-
-        if std::env::var_os("JCODE_HOME").is_some() {
-            return;
-        }
-
-        let path = TEST_HOME.get_or_init(|| {
-            let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
-            let _ = std::fs::create_dir_all(&path);
-            path
-        });
-        crate::env::set_var("JCODE_HOME", path);
+        crate::storage::ensure_shared_test_jcode_home_if_unset();
     }
 
     fn create_test_app() -> crate::tui::app::App {
@@ -1168,6 +1157,11 @@ mod tests {
 
     #[test]
     fn combined_header_sections_match_individual_builders() {
+        // build_header_sections and the individual builders each re-read
+        // process env (account state lives under JCODE_HOME), so a scoped-home
+        // test dropping between the two calls flips the account row mid-body
+        // and fails the comparison. Hold the shared env lock across the body.
+        let _env_lock = crate::storage::lock_test_env();
         let app = create_test_app();
         let (persistent, secondary) = build_header_sections(&app, 80);
 
