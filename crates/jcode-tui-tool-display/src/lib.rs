@@ -268,15 +268,14 @@ pub fn parse_tool_failure(content: &str) -> Option<ToolFailureSummary> {
                 .split_once("panicked at ")
                 .and_then(|(_, location)| location.strip_suffix(':').map(str::to_string));
             score = 60;
-        } else if let Some(location) = panic_location.take() {
-            if !lower.starts_with("note:")
-                && !lower.starts_with("stack backtrace:")
-                && !lower.starts_with("backtrace:")
-                && !line.starts_with(|c: char| c.is_ascii_digit())
-            {
-                panic_reason = Some(format!("{location}: {line}"));
-                score = 85;
-            }
+        } else if let Some(location) = panic_location.take()
+            && !lower.starts_with("note:")
+            && !lower.starts_with("stack backtrace:")
+            && !lower.starts_with("backtrace:")
+            && !line.starts_with(|c: char| c.is_ascii_digit())
+        {
+            panic_reason = Some(format!("{location}: {line}"));
+            score = 85;
         }
         if let Some((kind, _)) = line.split_once(':')
             && (kind.ends_with("Error") || kind.ends_with("Exception"))

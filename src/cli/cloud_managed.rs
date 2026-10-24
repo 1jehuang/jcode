@@ -397,7 +397,7 @@ pub(super) fn relay_proxy(reply: &Reply, host: &str, known_hosts: &std::path::Pa
         .as_deref()
         .and_then(|a| a.parse().ok())
         .context("Jcode Cloud returned an invalid host address")?;
-    let keys = validated_host_keys(&reply)?;
+    let keys = validated_host_keys(reply)?;
     let known: String = keys.iter().map(|k| format!("{host} {k}\n")).collect();
     write_private(known_hosts, &known)?;
     let addr = std::net::SocketAddr::new(address, reply.port.unwrap_or(22));

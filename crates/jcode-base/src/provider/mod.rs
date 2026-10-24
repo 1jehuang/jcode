@@ -1452,7 +1452,7 @@ impl MultiProvider {
 
         let already_has_gemini = self.gemini_provider().is_some();
         if !already_has_gemini
-            && crate::auth::gemini::load_tokens().is_ok()
+            && (crate::auth::gemini::load_tokens().is_ok() || crate::auth::gemini::uses_api_key())
             && let Some(gemini) =
                 external::instantiate_expected_external_provider(external::GEMINI_RUNTIME)
         {
@@ -2200,23 +2200,7 @@ impl Provider for MultiProvider {
             );
         }
 
-        // Detect which provider an unprefixed model belongs to.
-        let target_provider = provider_for_model(model);
-        if let Some(target_provider) = target_provider
-            && let Some(target) = provider_from_model_key(target_provider)
-        {
-            self.set_model_on_provider(target, model)
-        } else if let Some(profile) = self.openai_compatible_profile_owning_model(model) {
-            // Bare ids from an OpenAI-compatible catalog (`celeris-1`,
-            // `mimo-v2.5`, ...) match none of the built-in model-name
-            // heuristics. Without this, `/model <bare-id>` fell through to
-            // whichever provider happened to be active and failed with a
-            // misleading "not supported by <active provider>" error.
-            self.set_model_on_openai_compatible_profile(profile, model)
-        } else {
-            // Unknown model - try current provider.
-            self.set_model_on_provider(self.active_provider(), model)
-        }
+        self.set_unprefixed_model(model)
     }
 
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
@@ -2326,21 +2310,20 @@ impl Provider for MultiProvider {
     }
 
     fn model_capabilities_need_refresh(&self) -> bool {
-        matches!(self.active_provider(), ActiveProvider::OpenAI)
+        (matches!(self.active_provider(), ActiveProvider::OpenAI)
             && self
                 .openai_provider()
-                .is_some_and(|provider| provider.model_capabilities_need_refresh())
+                .is_some_and(|p| p.model_capabilities_need_refresh()))
+            || self
+                .antigravity_provider()
+                .is_some_and(|p| p.model_capabilities_need_refresh())
     }
 
     async fn prefetch_models(&self) -> Result<()> {
         let anthropic = self.anthropic_provider();
         let openai = self.openai_provider();
         let openrouter = self.openrouter_provider();
-        let copilot = self
-            .copilot_api
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+        let copilot = self.copilot_provider();
         let antigravity = self.antigravity_provider();
         let gemini = self.gemini_provider();
         let cursor = self.cursor_provider();
