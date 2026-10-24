@@ -690,6 +690,10 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
         // Belvedir's router accepts `auto`, but does not expose `/models` at
         // its OpenAI-compatible inference base.
         "belvedir" => push("auto"),
+        "tsubasa" => {
+            push("tsubasa-pro");
+            push("tsubasa-fast");
+        }
         // Celeris serves exactly one model per base URL today, and `/models`
         // requires auth, so keep the documented id available pre-refresh.
         "celeris" => {
@@ -764,6 +768,7 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
 
     match profile_id.as_str() {
         "muse-subscription" if model == "muse-wonder-1.0" => Some(1_048_576),
+        "tsubasa" if matches!(model.as_str(), "tsubasa-pro" | "tsubasa-fast") => Some(32_768),
         "conifer" => conifer_context_limit(&model)
             .or_else(|| jcode_provider_core::models::open_weight_family_context_limit(&model)),
         // The selected upstream model may vary. Use Jcode's conservative
@@ -1337,3 +1342,7 @@ mod provider_catalog_tests;
 #[cfg(test)]
 #[path = "provider_catalog_muse_tests.rs"]
 mod provider_catalog_muse_tests;
+
+#[cfg(test)]
+#[path = "provider_catalog_tsubasa_tests.rs"]
+mod provider_catalog_tsubasa_tests;
