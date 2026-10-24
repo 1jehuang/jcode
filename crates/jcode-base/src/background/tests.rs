@@ -38,12 +38,12 @@ async fn assert_adopted_owner_cancelled(reload: bool) -> Result<()> {
 }
 
 #[tokio::test]
-async fn cancelling_adopted_task_drops_actual_owner() -> Result<()> {
+async fn adopted_task_cancellation_drops_actual_owner() -> Result<()> {
     assert_adopted_owner_cancelled(false).await
 }
 
 #[tokio::test]
-async fn reload_drops_adopted_task_owner() -> Result<()> {
+async fn adopted_task_reload_drops_owner() -> Result<()> {
     assert_adopted_owner_cancelled(true).await
 }
 

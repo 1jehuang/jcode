@@ -319,7 +319,11 @@ async fn await_or_background_search(
     session_id: String,
 ) -> Result<ToolOutput> {
     let mut owner = SearchTaskOwner(Some(work_handle));
-    match tokio::time::timeout(foreground_budget, owner.0.as_mut().unwrap()).await {
+    let work_handle = owner
+        .0
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("agentgrep task owner is missing"))?;
+    match tokio::time::timeout(foreground_budget, work_handle).await {
         Ok(joined) => {
             joined.map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?
         }
@@ -333,7 +337,10 @@ async fn await_or_background_search(
                     false,
                     // Transfer, do not cancel: the background manager becomes
                     // the sole owner, including while adoption is awaiting.
-                    owner.0.take().unwrap(),
+                    owner
+                        .0
+                        .take()
+                        .ok_or_else(|| anyhow::anyhow!("agentgrep task owner is missing"))?,
                 )
                 .await;
             Ok(ToolOutput::new(format!(
