@@ -9,6 +9,9 @@ pub(super) fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
     let Some(info) = &data.swarm_info else {
         return Framed::default();
     };
+    if inner.width == 0 || inner.height == 0 {
+        return Framed::default();
+    }
 
     // Dock mode: this session manages agents.
     if !info.managed_members.is_empty() {
@@ -42,7 +45,24 @@ pub(super) fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
         }
     }
 
-    Framed::body(lines).title(title)
+    let listed = if info.members.is_empty() {
+        info.session_names.len()
+    } else {
+        info.members.len()
+    };
+    let hidden = listed.saturating_sub(max_names.min(3));
+    if lines.is_empty() {
+        lines.push(Line::from(frame::dim("No named sessions")));
+    }
+    let mut framed = Framed::body(lines).title(title);
+    if hidden > 0 {
+        framed = framed.footer(frame::more(hidden));
+    }
+    if let Some(clients) = info.client_count {
+        let noun = if clients == 1 { "client" } else { "clients" };
+        framed = framed.footer_right(frame::dim(format!("{clients} {noun}")));
+    }
+    framed.footer_if_empty(frame::dim("same folder"))
 }
 
 /// Border layout: `⏳ Background · 3 running` top-left, one compact row per
@@ -55,14 +75,45 @@ pub(super) fn render_background_widget(data: &InfoWidgetData, inner: Rect) -> Fr
     let Some(summary) = background_summary(info) else {
         return Framed::default();
     };
+    if inner.width == 0 || inner.height == 0 {
+        return Framed::default();
+    }
     let max_rows = (inner.height as usize).clamp(1, WIDGET_MAX_TASK_ROWS);
-    let (rows, hidden) = background_task_rows(info, inner.width as usize, "", max_rows);
+    let (mut rows, hidden) = background_task_rows(info, inner.width as usize, "", max_rows);
+    if rows.is_empty() {
+        rows.push(Line::from(frame::dim("Awaiting task details")));
+    }
     let mut framed = Framed::body(rows).title(Line::from(vec![
         Span::styled("⏳ ", Style::default().fg(rgb(180, 140, 255))),
         frame::label(summary),
     ]));
     if hidden > 0 {
         framed = framed.footer(frame::more(hidden));
+    } else {
+        // Percent alone cannot distinguish a completed task from one still
+        // running at 100%, so explain the status glyphs rather than repeat
+        // the running count in the title or the percentages in the rows.
+        let has_completed = info
+            .rows
+            .iter()
+            .any(|row| row.status == crate::tui::BackgroundTaskRowStatus::Completed);
+        let has_running = info
+            .rows
+            .iter()
+            .any(|row| row.status == crate::tui::BackgroundTaskRowStatus::Running)
+            || !info.running_tasks.is_empty();
+        let legend = if has_completed && has_running {
+            "◌ running · ✓ complete"
+        } else if has_completed {
+            "✓ complete"
+        } else if has_running {
+            "◌ running"
+        } else if !info.rows.is_empty() {
+            "✗ failed"
+        } else {
+            "this session"
+        };
+        framed = framed.footer(frame::dim(legend));
     }
     framed
 }
@@ -128,16 +179,6 @@ fn render_swarm_stats_line(info: &SwarmInfo) -> Line<'static> {
             Style::default().fg(rgb(160, 160, 170)),
         ));
     }
-    if let Some(clients) = info.client_count {
-        if info.session_count > 0 {
-            stats_parts.push(Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))));
-        }
-        stats_parts.push(Span::styled(
-            format!("{}c", clients),
-            Style::default().fg(rgb(160, 160, 170)),
-        ));
-    }
-
     Line::from(stats_parts)
 }
 
@@ -355,21 +396,22 @@ fn dock_is_attention(status: &str) -> bool {
     dock_status_rank(status) == 0
 }
 
-/// The todo step the agent is currently on, if it keeps a todo list.
-fn dock_current_todo(member: &SwarmMemberStatus) -> Option<String> {
-    member
-        .todo_items
-        .iter()
-        .find(|item| item.status == "in_progress")
-        .map(|item| item.content.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// What the agent is doing, in the fewest words available: the error or
-/// blocker when it needs attention, otherwise the todo step it is on, the
-/// latest status detail, the last line it streamed, or the task it was
-/// spawned for.
+/// The dock owns lifecycle health and alerts. Task titles and ordinary live
+/// activity belong to the todo lanes, so do not echo them here.
 fn dock_activity(member: &SwarmMemberStatus) -> String {
+    let detail = member.detail.as_deref().unwrap_or_default().trim();
+    let is_message = detail.starts_with("DM from ") || detail.starts_with("Cross-swarm DM from ");
+    if !dock_is_attention(&member.status) && !is_message {
+        if jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+            && let Some(age) = member.runtime.activity_age_secs.filter(|age| *age >= 120)
+        {
+            return format!(
+                "quiet {}",
+                jcode_tui_render::swarm_gallery::humanize_age(age)
+            );
+        }
+        return member.status.replace('_', " ");
+    }
     let nonempty = |s: &Option<String>| {
         s.as_deref()
             .map(str::trim)
@@ -383,13 +425,12 @@ fn dock_activity(member: &SwarmMemberStatus) -> String {
         .map(str::to_string);
     let detail = nonempty(&member.detail);
     let task = nonempty(&member.task_label);
-    let todo = dock_current_todo(member);
     let picked = if dock_is_finished(&member.status) {
         task.or(detail)
     } else if dock_is_attention(&member.status) {
-        detail.or(todo).or(task).or(tail)
+        detail.or(task).or(tail)
     } else {
-        todo.or(detail).or(tail).or(task)
+        detail.or(tail).or(task)
     };
     picked
         .unwrap_or_else(|| member.status.clone())
@@ -398,19 +439,8 @@ fn dock_activity(member: &SwarmMemberStatus) -> String {
         .join(" ")
 }
 
-/// Swarm dock. Border layout: `🐝 2/4 active` top-left, attention count
-/// top-right, overflow bottom-left, task-graph meter bottom-right. Body: one
-/// row per agent, attention first, then working, idle, and finished. Working
-/// agents with a todo list show the step they are on.
-///
-/// ```text
-/// ╭ 🐝 2/4 active ────────────────── ⚠ 1 ╮
-/// │✗ reviewer  cargo test failed: 3 …    │
-/// │⠋ builder   wiring commits widget  2/5│
-/// │⠋ ★ lead    waiting on reviewer    1/3│
-/// │✓ research  map the swarm code      5m│
-/// ╰ +2 more ──────────── nodes 4/9 ▰▰▰▱▱ ╯
-/// ```
+/// Swarm dock with agent lifecycle status, activity, and status age.
+/// Planning details remain in the transcript rather than the info area.
 fn dock_member_label(member: &SwarmMemberStatus) -> String {
     super::swarm_gallery::member_icon(member).unwrap_or_else(|| swarm_member_label(member))
 }
@@ -469,16 +499,11 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
         let glyph = status_glyph(&member.status, info.spinner_frame);
         let finished = dock_is_finished(&member.status);
 
-        // Working agents show todo progress; finished or idle ones show how
-        // long ago they last changed.
-        let right = match member.todo_progress {
-            Some((done, total)) if total > 0 && !finished => format!("{done}/{total}"),
-            _ => member
-                .status_age_secs
-                .map(humanize_age)
-                .filter(|a| a != "now")
-                .unwrap_or_default(),
-        };
+        let right = member
+            .status_age_secs
+            .map(humanize_age)
+            .filter(|age| age != "now")
+            .unwrap_or_default();
 
         let star = member.role.as_deref() == Some("coordinator");
         let label_budget = name_w.saturating_sub(if star { 2 } else { 0 });
@@ -559,39 +584,149 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
     let hidden = order.len() - rows;
     if hidden > 0 {
         framed = framed.footer(frame::more(hidden));
+    } else {
+        let output: Option<u64> = members
+            .iter()
+            .filter_map(|m| m.runtime.output_tokens)
+            .fold(None, |total, n| Some(total.unwrap_or(0).saturating_add(n)));
+        let footer = if let Some(output) = output {
+            format!(
+                "{} out",
+                crate::kv_cache_monitor::format_token_count(output)
+            )
+        } else if let Some(clients) = info.client_count {
+            let noun = if clients == 1 { "client" } else { "clients" };
+            format!("{clients} {noun}")
+        } else {
+            "spawned here".into()
+        };
+        framed = framed.footer(frame::dim(footer));
     }
 
-    if let Some((done, running, total)) = info.plan_progress
-        && total > 0
-    {
-        framed = framed.footer_right(plan_meter(done, running, total));
-    }
     framed
 }
 
-/// `nodes 4/9 ▰▰▰▰▱▱▱▱` with green done, amber running, dim remainder.
-fn plan_meter(done: u32, running: u32, total: u32) -> Line<'static> {
-    const CELLS: u32 = 8;
-    let done = done.min(total);
-    let running = running.min(total - done);
-    let done_c = (done * CELLS / total).max(u32::from(done > 0));
-    let run_c = (((done + running) * CELLS / total).saturating_sub(done_c))
-        .max(u32::from(running > 0))
-        .min(CELLS - done_c);
-    let rest = CELLS - done_c - run_c;
-    Line::from(vec![
-        frame::dim(format!("nodes {done}/{total} ")),
-        Span::styled(
-            "▰".repeat(done_c as usize),
-            Style::default().fg(rgb(100, 200, 100)),
-        ),
-        Span::styled(
-            "▰".repeat(run_c as usize),
-            Style::default().fg(rgb(255, 200, 100)),
-        ),
-        Span::styled(
-            "▱".repeat(rest as usize),
-            Style::default().fg(rgb(80, 80, 90)),
-        ),
-    ])
+#[cfg(test)]
+mod substantive_footer_tests {
+    use super::*;
+
+    fn member(name: &str, status: &str) -> SwarmMemberStatus {
+        serde_json::from_value(serde_json::json!({
+            "session_id": name,
+            "friendly_name": name,
+            "status": status
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn swarm_no_overflow_moves_clients_to_footer() {
+        let data = InfoWidgetData {
+            swarm_info: Some(SwarmInfo {
+                session_count: 2,
+                client_count: Some(3),
+                session_names: vec!["one".into(), "two".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_swarm_widget(&data, Rect::new(0, 0, 40, 2));
+        assert_eq!(rendered.lines.len(), 2);
+        assert_eq!(rendered.footer_right.unwrap().to_string(), "3 clients");
+        assert!(!rendered.title.unwrap().to_string().contains("3c"));
+    }
+
+    #[test]
+    fn swarm_unnamed_sessions_keep_body_and_scope_footer() {
+        let data = InfoWidgetData {
+            swarm_info: Some(SwarmInfo {
+                session_count: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_swarm_widget(&data, Rect::new(0, 0, 40, 1));
+        assert_eq!(rendered.lines.len(), 1);
+        assert_eq!(rendered.footer.unwrap().to_string(), "same folder");
+    }
+
+    #[test]
+    fn dock_no_overflow_preserves_headline_and_adds_scope() {
+        let data = InfoWidgetData {
+            swarm_info: Some(SwarmInfo {
+                managed_members: vec![member("one", "running"), member("two", "completed")],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_swarm_widget(&data, Rect::new(0, 0, 40, 2));
+        assert_eq!(rendered.lines.len(), 2);
+        assert_eq!(rendered.title.unwrap().to_string(), "🐝 1/2 active");
+        assert_eq!(rendered.footer.unwrap().to_string(), "spawned here");
+        let clipped = render_swarm_widget(&data, Rect::new(0, 0, 40, 1));
+        assert_eq!(clipped.lines.len(), 1);
+        assert!(clipped.footer.unwrap().to_string().contains("+1 more"));
+    }
+
+    #[test]
+    fn background_no_overflow_explains_completion_glyph() {
+        let data = InfoWidgetData {
+            background_info: Some(BackgroundInfo {
+                rows: vec![crate::tui::BackgroundTaskRow {
+                    task_id: "task".into(),
+                    label: "build".into(),
+                    percent: Some(100.0),
+                    status: crate::tui::BackgroundTaskRowStatus::Completed,
+                    completed_at: Some(std::time::Instant::now()),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_background_widget(&data, Rect::new(0, 0, 40, 1));
+        assert_eq!(rendered.lines.len(), 1);
+        assert_eq!(rendered.footer.unwrap().to_string(), "✓ complete");
+    }
+
+    #[test]
+    fn dock_output_footer_does_not_repeat_headline_or_rows() {
+        let mut worker = member("one", "running");
+        worker.runtime.output_tokens = Some(12_000);
+        let data = InfoWidgetData {
+            swarm_info: Some(SwarmInfo {
+                managed_members: vec![worker],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_swarm_widget(&data, Rect::new(0, 0, 40, 2));
+        let footer = rendered.footer.unwrap().to_string();
+        assert_eq!(footer, "12K out");
+        assert!(!rendered.title.unwrap().to_string().contains("12K"));
+        assert!(
+            rendered
+                .lines
+                .iter()
+                .all(|line| !line.to_string().contains("12K"))
+        );
+    }
+
+    #[test]
+    fn background_overflow_keeps_more_and_missing_details_keep_body() {
+        let mut data = InfoWidgetData {
+            background_info: Some(BackgroundInfo {
+                running_count: 2,
+                running_tasks: vec!["one".into(), "two".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_background_widget(&data, Rect::new(0, 0, 40, 1));
+        assert_eq!(rendered.lines.len(), 1);
+        assert!(rendered.footer.unwrap().to_string().contains("+1 more"));
+        data.background_info.as_mut().unwrap().running_tasks.clear();
+        let rendered = render_background_widget(&data, Rect::new(0, 0, 40, 1));
+        assert_eq!(rendered.lines.len(), 1);
+        assert_eq!(rendered.footer.unwrap().to_string(), "this session");
+    }
 }

@@ -66,7 +66,8 @@ pub use jcode_provider_core::{
     RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
     explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
     inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
-    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
+    oauth_account_label, provider_from_model_key, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -1926,6 +1927,18 @@ impl Provider for MultiProvider {
 
     fn oauth_account_label(&self) -> Option<String> {
         self.selected_account_for_provider(self.active_provider())
+    }
+
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            _ => None,
+        }
     }
 
     fn active_oauth_account_email(&self) -> Option<String> {

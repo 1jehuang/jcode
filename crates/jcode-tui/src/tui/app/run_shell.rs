@@ -667,7 +667,11 @@ impl App {
 
         loop {
             self.sync_sleep_guard();
-            let desired_redraw = crate::tui::redraw_interval(&self);
+            let desired_redraw = if self.cloud_job.is_some() {
+                Duration::from_millis(100)
+            } else {
+                crate::tui::redraw_interval(&self)
+            };
             if desired_redraw != redraw_period {
                 redraw_period = desired_redraw;
                 redraw_interval = redraw_timer(redraw_period);
@@ -707,7 +711,7 @@ impl App {
                 self.process_turn_with_input(&mut terminal, &mut event_stream, &mut bus_receiver)
                     .await;
                 needs_redraw = true;
-            } else if self.pending_queued_dispatch {
+            } else if self.pending_queued_dispatch && !self.cloud_handoff_blocks_work() {
                 self.pending_queued_dispatch = false;
                 self.process_queued_messages(&mut terminal, &mut event_stream)
                     .await;
@@ -896,6 +900,8 @@ impl App {
                     // Nothing wakes the loop when the transcript thread
                     // finishes, so poll briefly until it does (~tens of ms).
                     STARTUP_TRANSCRIPT_POLL
+                } else if self.cloud_job.is_some() {
+                    Duration::from_millis(100)
                 } else {
                     crate::tui::redraw_interval(&self)
                 };
@@ -946,7 +952,7 @@ impl App {
                     break 'outer;
                 }
 
-                if self.pending_queued_dispatch {
+                if self.pending_queued_dispatch && !self.cloud_handoff_blocks_work() {
                     self.pending_queued_dispatch = false;
                     remote::process_remote_followups(&mut self, &mut remote_conn).await;
                     needs_redraw = true;

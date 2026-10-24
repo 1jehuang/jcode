@@ -1,4 +1,19 @@
 use super::*;
+#[test]
+fn latex_deferred_worker_batches_wakeups_and_bounds_batches() {
+    for count in [0usize, 3, 65] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for n in 0..count {
+            tx.send(n).unwrap();
+        }
+        drop(tx);
+        let mut rendered = Vec::new();
+        let mut wakeups = 0;
+        deferred_worker_with(rx, |n| rendered.push(n), || wakeups += 1);
+        assert_eq!(rendered, (0..count).collect::<Vec<_>>());
+        assert_eq!(wakeups, count.div_ceil(32));
+    }
+}
 
 #[test]
 fn distinct_fallback_errors_are_reported_once_across_redraws() {

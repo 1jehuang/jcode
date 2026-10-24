@@ -16,7 +16,8 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Keep going".to_string(),
@@ -27,6 +28,7 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -861,14 +863,12 @@ fn test_catalog_snapshot_invalidates_service_tiers_only_when_identity_changes() 
         app.remote_provider_model = Some("gpt-6-astra".into());
         app.remote_available_service_tiers = Some(vec!["priority".into()]);
 
-        app.replace_remote_model_catalog_snapshot(
-            jcode_provider_core::ModelCatalogSnapshot::new(
-                Some(provider.into()),
-                Some(model.into()),
-                vec![],
-                vec![],
-            ),
-        );
+        app.replace_remote_model_catalog_snapshot(jcode_provider_core::ModelCatalogSnapshot::new(
+            Some(provider.into()),
+            Some(model.into()),
+            vec![],
+            vec![],
+        ));
 
         assert_eq!(
             app.remote_available_service_tiers.is_none(),

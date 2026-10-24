@@ -57,6 +57,14 @@ pub const CHARS_PER_TOKEN: usize = 4;
 /// We charge a flat, slightly conservative per-image token budget instead.
 pub const IMAGE_TOKEN_COST: usize = 1_600;
 
+/// Approximate token cost charged for an OpenAI native compaction payload.
+///
+/// The payload is opaque ciphertext whose length bears no relation to the
+/// tokens the provider replays: a 1.1M-char payload was observed costing far
+/// less than 30k tokens while `len / 4` reported ~285k, so compaction appeared
+/// to *grow* the context. Charge a flat, conservative budget instead.
+pub const OPENAI_COMPACTION_TOKEN_COST: usize = 8_000;
+
 /// Fixed token overhead for system prompt + tool definitions.
 /// These are not counted in message content but do count toward the context limit.
 /// Estimated conservatively: ~8k tokens for system prompt + ~10k for 50+ tools.
@@ -352,7 +360,7 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
             // overestimates context by ~100x and triggers spurious repeated
             // compactions.
             ContentBlock::Image { .. } => IMAGE_TOKEN_COST * CHARS_PER_TOKEN,
-            ContentBlock::OpenAICompaction { encrypted_content } => encrypted_content.len(),
+            ContentBlock::OpenAICompaction { .. } => OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN,
             // The provider expands a reference into the full definition, but
             // that definition is already accounted for by the tool catalog.
             ContentBlock::ToolReference { tool_name, .. } => tool_name.len() + 20,
@@ -367,7 +375,7 @@ pub fn summary_payload_char_count(summary: &Summary) -> usize {
     summary
         .openai_encrypted_content
         .as_ref()
-        .map(|value| value.len())
+        .map(|_| OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN)
         .unwrap_or_else(|| summary.text.len())
 }
 
@@ -1123,6 +1131,32 @@ mod tests {
             "four images should cost ~{} tokens, got {}",
             SYSTEM_OVERHEAD_TOKENS + 4 * IMAGE_TOKEN_COST,
             tokens
+        );
+    }
+
+    #[test]
+    fn openai_native_compaction_cost_is_bounded_not_ciphertext_length() {
+        // Regression: a 1.1M-char encrypted payload was estimated at ~285k
+        // tokens, so compaction reported 294k -> 303k while the provider saw
+        // 219k -> 34k.
+        let summary = Summary {
+            text: String::new(),
+            openai_encrypted_content: Some("x".repeat(1_141_900)),
+            covers_up_to_turn: 229,
+            original_turn_count: 229,
+        };
+        assert_eq!(
+            estimate_compaction_tokens(Some(&summary), 0, DEFAULT_TOKEN_BUDGET),
+            OPENAI_COMPACTION_TOKEN_COST + SYSTEM_OVERHEAD_TOKENS
+        );
+
+        let mut msg = Message::user("");
+        msg.content = vec![ContentBlock::OpenAICompaction {
+            encrypted_content: "x".repeat(1_141_900),
+        }];
+        assert_eq!(
+            message_char_count(&msg),
+            OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN
         );
     }
 

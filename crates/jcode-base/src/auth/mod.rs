@@ -23,6 +23,7 @@ pub mod muse;
 pub mod oauth;
 pub(crate) mod refresh_coordinator;
 pub mod refresh_state;
+pub mod router_transfer;
 mod status_detail;
 mod status_types;
 #[cfg(any(test, feature = "test-support"))]

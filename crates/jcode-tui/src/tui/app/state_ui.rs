@@ -26,6 +26,8 @@ pub(super) struct RestoredReloadInput {
     pub todo_confidence_spike_challenged: bool,
     pub last_todo_ownership_fingerprint: Option<String>,
     pub final_response_todo_fingerprint: Option<String>,
+    pub last_auto_poke_fingerprint: Option<String>,
+    pub auto_poke_attempts: u8,
 }
 
 impl App {
@@ -264,6 +266,7 @@ impl App {
             && !self.todo_confidence_spike_challenged
             && self.last_todo_ownership_fingerprint.is_none()
             && self.final_response_todo_fingerprint.is_none()
+            && self.last_auto_poke_fingerprint.is_none()
         {
             // Nothing to save, but a stale file from an earlier run could
             // still hold old queued messages/input. Leaving it behind would
@@ -357,6 +360,8 @@ impl App {
                 "todo_confidence_spike_challenged": self.todo_confidence_spike_challenged,
                 "last_todo_ownership_fingerprint": self.last_todo_ownership_fingerprint,
                 "final_response_todo_fingerprint": self.final_response_todo_fingerprint,
+                "last_auto_poke_fingerprint": self.last_auto_poke_fingerprint,
+                "auto_poke_attempts": self.auto_poke_attempts,
             });
             let _ = std::fs::write(&path, data.to_string());
         }
@@ -613,6 +618,15 @@ impl App {
                     .get("final_response_todo_fingerprint")
                     .and_then(|v| v.as_str())
                     .map(str::to_owned),
+                last_auto_poke_fingerprint: value
+                    .get("last_auto_poke_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                auto_poke_attempts: value
+                    .get("auto_poke_attempts")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .min(u8::MAX as u64) as u8,
                 last_todo_ownership_fingerprint: value
                     .get("last_todo_ownership_fingerprint")
                     .and_then(|v| v.as_str())
@@ -646,6 +660,8 @@ impl App {
             todo_confidence_spike_challenged: false,
             last_todo_ownership_fingerprint: None,
             final_response_todo_fingerprint: None,
+            last_auto_poke_fingerprint: None,
+            auto_poke_attempts: 0,
         })
     }
 

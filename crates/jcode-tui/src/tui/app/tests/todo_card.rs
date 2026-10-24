@@ -86,9 +86,11 @@ fn refresh_todo_card_updates_content_when_todos_change() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(70)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
-        wave: None,
+        stage: None,
+        details: None,
     };
 
     crate::todo::save_todos(&session_id, &[todo("write the card", "pending")]).unwrap();
@@ -131,9 +133,11 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
-        wave: None,
+        stage: None,
+        details: None,
     }];
     let goal = |score| crate::todo::TodoGoal {
         group: None,
@@ -189,9 +193,11 @@ fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoI
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
-        wave: None,
+        stage: None,
+        details: None,
     }
 }
 
@@ -268,6 +274,55 @@ fn pinned_todos_payload_refreshes_and_clears_with_config_and_todos() {
 }
 
 #[test]
+fn session_todos_and_swarm_plan_are_not_info_widget_data() {
+    let _env_lock = crate::storage::lock_test_env();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    let content = "PLAN_INFO_MUST_NOT_APPEAR";
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo("t1", content, "in_progress")],
+    )
+    .unwrap();
+    // The private list remains available to transcript cards and tools.
+    assert_eq!(
+        crate::todo::load_todos(&session_id).unwrap()[0].content,
+        content
+    );
+    app.toggle_todo_card();
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|message| { message.role == "todos" && message.content.contains(content) })
+    );
+    let assert_no_plan = |app: &App| {
+        let info = app.info_widget_data();
+        assert!(!format!("{info:?}").contains(content));
+        assert!(
+            info.available_widgets()
+                .iter()
+                .all(|kind| { !matches!(kind.as_str(), "todos" | "plan") })
+        );
+    };
+    assert_no_plan(&app);
+    app.swarm_enabled = true;
+    app.swarm_plan_items = vec![crate::plan::PlanItem {
+        id: "task-1".into(),
+        content: content.into(),
+        status: "running".into(),
+        priority: "high".into(),
+        subsystem: None,
+        file_scope: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    }];
+    assert_no_plan(&app);
+    assert_eq!(app.swarm_plan_items[0].content, content);
+    crate::todo::save_todos(&session_id, &[]).unwrap();
+    invalidate_todos_cache(&session_id);
+}
+
+#[test]
 fn pinned_todos_are_omitted_from_info_widgets() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin = PinTodosEnvGuard::enable();
@@ -280,9 +335,12 @@ fn pinned_todos_are_omitted_from_info_widgets() {
     .unwrap();
 
     let info = app.info_widget_data();
-    assert!(info.todos.is_empty());
-    assert!(info.todo_goals.is_empty());
-    assert!(!info.has_data_for(crate::tui::info_widget::WidgetKind::Todos));
+    assert!(
+        info.available_widgets()
+            .iter()
+            .all(|kind| !matches!(kind.as_str(), "todos" | "plan"))
+    );
+    assert!(!format!("{info:?}").contains("only in pinned band"));
 
     crate::todo::save_todos(&session_id, &[]).unwrap();
 }
@@ -378,7 +436,10 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     app.auto_scroll_paused = true;
     let top_text = render_and_snap(&app, &mut terminal);
     assert!(
-        top_text.lines().take(6).any(|row| row.contains("pinned band item")),
+        top_text
+            .lines()
+            .take(6)
+            .any(|row| row.contains("pinned band item")),
         "pinned todo should remain visible at the top of scrollback, got:\n{}",
         top_text
     );
@@ -417,15 +478,23 @@ fn pinned_todo_band_uses_full_width_on_wide_terminals() {
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
     let long_item = format!("wide pinned item {} END", "x".repeat(140));
-    crate::todo::save_todos(&session_id, &[pinned_band_todo("t1", &long_item, "in_progress")])
-        .unwrap();
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo("t1", &long_item, "in_progress")],
+    )
+    .unwrap();
     app.refresh_pinned_todos_now();
 
     let width = 200u16;
     let (lines, _) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, width, 40);
     let row = lines
         .iter()
-        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
         .find(|row| row.contains("wide pinned item"))
         .expect("pinned todo item row");
     assert!(
@@ -443,11 +512,7 @@ fn background_tasks_render_in_widget_data_not_the_pinned_band() {
     let mut app = create_test_app();
     app.session.short_name = Some("test".to_string());
     app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
-    app.upsert_running_background_task(
-        "running".to_string(),
-        "cargo test".to_string(),
-        Some(42.0),
-    );
+    app.upsert_running_background_task("running".to_string(), "cargo test".to_string(), Some(42.0));
     app.finish_background_task(
         "failed".to_string(),
         "integration tests".to_string(),
@@ -498,11 +563,7 @@ fn background_task_rows_retain_the_most_recently_active_tasks() {
 #[test]
 fn indeterminate_background_update_preserves_last_known_percent() {
     let mut app = create_test_app();
-    app.upsert_running_background_task(
-        "build".to_string(),
-        "cargo build".to_string(),
-        Some(42.0),
-    );
+    app.upsert_running_background_task("build".to_string(), "cargo build".to_string(), Some(42.0));
 
     // A later phase-only parser update carries no percentage. It should update
     // activity/label state without resetting the visible bar to zero.
@@ -631,20 +692,22 @@ fn pinned_todo_card_shows_tasks_without_expanding() {
 }
 
 #[test]
-fn pinned_band_shows_wave_rails_and_live_swarm_agents_end_to_end() {
+fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
-    let mut a = pinned_band_todo("a", "wave one alpha", "in_progress");
-    a.wave = Some(1);
+    let mut a = pinned_band_todo("a", "stage one alpha", "in_progress");
+    a.stage = Some(1);
+    a.group = Some("alpha lane".into());
     a.assigned_to = Some("session_skunk_1792409785894_1068c05fb6cec63b".into());
-    let mut b = pinned_band_todo("b", "wave one beta", "completed");
-    b.wave = Some(1);
+    let mut b = pinned_band_todo("b", "stage one beta", "completed");
+    b.stage = Some(1);
+    b.group = Some("beta lane".into());
     b.assigned_to = Some("session_raccoon_1792409785942_de9eb8af240e42b7".into());
-    let mut c = pinned_band_todo("c", "wave two gamma", "pending");
-    c.wave = Some(2);
+    let mut c = pinned_band_todo("c", "stage two gamma", "pending");
+    c.stage = Some(2);
     crate::todo::save_todos(&session_id, &[a, b, c]).unwrap();
 
     // Live member status exactly as the server sends it.
@@ -678,19 +741,40 @@ fn pinned_band_shows_wave_rails_and_live_swarm_agents_end_to_end() {
         let backend = ratatui::backend::TestBackend::new(width, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let text = render_and_snap(&app, &mut terminal);
-        let band: Vec<&str> = text.lines().take(6).collect();
+        let band: Vec<&str> = text.lines().take(8).collect();
         let joined = band.join("\n");
-        assert!(joined.contains("┏ ● wave one alpha"), "rail at {width}:\n{text}");
-        assert!(joined.contains("┗ ✓ wave one beta"), "rail end at {width}:\n{text}");
-        assert!(joined.contains("🦨") && joined.contains("🦝"), "agent emoji at {width}:\n{text}");
+        assert!(
+            joined.contains("1 ●●") && joined.contains("2 ○"),
+            "phase pips at {width}:\n{text}"
+        );
+        let alpha = band
+            .iter()
+            .find(|row| row.contains("stage one alpha"))
+            .unwrap();
+        assert!(
+            alpha.contains("alpha lane 🦨"),
+            "lane row at {width}:\n{text}"
+        );
+        let beta = band
+            .iter()
+            .find(|row| row.contains("stage one beta"))
+            .unwrap();
+        assert!(
+            beta.contains("beta lane 🦝"),
+            "lane row at {width}:\n{text}"
+        );
         if width == 100 {
-            assert!(joined.contains("counting to 40 · 7s"), "live activity:\n{text}");
+            assert!(alpha.contains("counting to 40"), "live activity:\n{text}");
         }
     }
 
     // Activity changes trigger a redraw of the band.
     app.remote_swarm_members[0].status = "failed".into();
     app.refresh_pinned_todos_now();
-    assert!(app.pinned_todos_payload_ref().unwrap().contains("\"failed\""));
+    assert!(
+        app.pinned_todos_payload_ref()
+            .unwrap()
+            .contains("\"failed\"")
+    );
     let _ = crate::todo::save_todos(&session_id, &[]);
 }

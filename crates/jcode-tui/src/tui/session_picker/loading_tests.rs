@@ -567,10 +567,12 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
             group: Some("Improve resume session names".to_string()),
             confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
             completion_confidence: None,
+            waiting_on: Vec::new(),
             confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(90)],
             blocked_by: Vec::new(),
             assigned_to: None,
-            wave: None,
+            stage: None,
+            details: None,
         }],
     )
     .expect("save todos");
@@ -621,10 +623,12 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
             group: Some("Automatic todo title".to_string()),
             confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
             completion_confidence: None,
+            waiting_on: Vec::new(),
             confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(90)],
             blocked_by: Vec::new(),
             assigned_to: None,
-            wave: None,
+            stage: None,
+            details: None,
         }],
     )
     .expect("save todos");

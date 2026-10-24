@@ -1062,6 +1062,35 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
+    fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
+        let text =
+            |spans: &[Span<'static>]| spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let facts = OverscrollFacts {
+            machine: Some("jcode-cloud".into()),
+            dir: Some("~/jcode".into()),
+            branch: None,
+            git: None,
+            context: None,
+            auth: None,
+            provider: None,
+            model: Some("Opus".into()),
+            effort: None,
+        };
+        let (wide, _) = overscroll_fit_facts(&facts, 80);
+        assert_eq!(text(&wide), "☁ jcode-cloud:~/jcode Opus");
+        let (narrow, fit) = overscroll_fit_facts(&facts, 14);
+        assert!(fit);
+        assert_eq!(text(&narrow), "☁ ~/jcode Opus");
+        let (tiny, _) = overscroll_fit_facts(&facts, 12);
+        assert_eq!(text(&tiny), "☁ jcode Opus");
+        let local = OverscrollFacts {
+            machine: None,
+            ..facts
+        };
+        let (spans, _) = overscroll_fit_facts(&local, 80);
+        assert!(!text(&spans).contains('☁'));
+    }
+    #[test]
     fn reset_status_hint_requires_openai_oauth_and_fresh_exhausted_account() {
         use crate::tui::info_widget::AuthMethod;
         let mut usage = crate::usage::OpenAIUsageData {
@@ -1653,15 +1682,10 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
             };
             spans.push(Span::styled(feedback_text, feedback_style));
         }
-        spans.push(Span::styled(
-            super::viewport::copy_badge_alt_badge(),
+        spans.extend(super::viewport::shortcut_badge_spans(
+            key,
             alt_style,
-        ));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled("[⇧]", shift_style));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!("[{}]", key.to_ascii_uppercase()),
+            shift_style,
             key_style,
         ));
     }
@@ -1871,6 +1895,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| app.provider_name());
     let facts = OverscrollFacts {
+        machine: crate::tui::ssh_remote_host(),
         dir: app.working_dir().and_then(|d| overscroll_dir_label(&d)),
         branch: overscroll_git_branch(&data),
         git: data.git_info.clone(),
@@ -1905,6 +1930,8 @@ const OVERSCROLL_MODEL_PINK: Color = Color::Rgb(255, 135, 200);
 
 /// Raw facts for the overscroll status line, before width fitting.
 struct OverscrollFacts {
+    /// Remote machine this session runs on (cloud VM or SSH host).
+    machine: Option<String>,
     dir: Option<String>,
     branch: Option<String>,
     git: Option<crate::tui::info_widget::GitInfo>,
@@ -1919,6 +1946,7 @@ struct OverscrollFacts {
 /// compact, and the last level of each optional fact hides it.
 #[derive(Clone, Copy, Default)]
 struct OverscrollLevels {
+    machine: u8,
     dir: u8,
     branch: u8,
     git: u8,
@@ -1945,6 +1973,7 @@ const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
     |l| l.git = 2,      // hide git status
     |l| l.branch = 2,   // hide branch
     |l| l.model = 1,    // drop reasoning effort
+    |l| l.machine = 1,  // "☁ jcode-cloud:" -> "☁ "
     |l| l.dir = 1,      // "~/…/jcode" -> "jcode"
 ];
 
@@ -1955,6 +1984,24 @@ fn overscroll_fact_spans(
     let muted = Style::default().fg(rgb(140, 140, 150));
     let mut out: Vec<Vec<Span<'static>>> = Vec::new();
 
+    let machine_spans = |levels: OverscrollLevels| -> Vec<Span<'static>> {
+        let Some(machine) = &facts.machine else {
+            return Vec::new();
+        };
+        let cloud = Style::default().fg(rgb(170, 200, 255));
+        let mut spans = vec![Span::styled("☁ ", cloud)];
+        if levels.machine == 0 {
+            spans.push(Span::styled(
+                overscroll_truncate_label(machine, 24),
+                cloud.bold(),
+            ));
+            if facts.dir.is_some() {
+                spans.push(Span::styled(":", muted));
+            }
+        }
+        spans
+    };
+
     if let Some(dir) = &facts.dir {
         let label = if levels.dir == 0 {
             dir.clone()
@@ -1964,10 +2011,14 @@ fn overscroll_fact_spans(
                 .unwrap_or(dir)
                 .to_string()
         };
-        out.push(vec![
-            Span::styled(" ", Style::default().fg(rgb(140, 180, 255))),
-            Span::styled(label, muted),
-        ]);
+        let mut group = machine_spans(levels);
+        if group.is_empty() {
+            group.push(Span::styled(" ", Style::default().fg(rgb(140, 180, 255))));
+        }
+        group.push(Span::styled(label, muted));
+        out.push(group);
+    } else if facts.machine.is_some() {
+        out.push(machine_spans(levels));
     }
 
     if let Some(branch) = &facts.branch {

@@ -1,13 +1,13 @@
 #[path = "ui_messages/gmail_drafts.rs"]
 mod gmail_drafts;
 use gmail_drafts::*;
-#[path = "ui_todo_waves.rs"]
-mod todo_waves;
-pub(crate) use todo_waves::TodoCardAgent;
-use todo_waves::{
-    RailPos, agent_roster_spans, has_parallel_waves, push_wave_pips, render_wave_item_line,
-    wave_rail_positions,
-};
+#[path = "ui_messages/todo_completion.rs"]
+mod todo_completion;
+#[path = "ui_todo_stages.rs"]
+mod todo_stages;
+pub(crate) use todo_stages::TodoCardAgent;
+pub(crate) use todo_stages::animate_lane_spinners;
+use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
 
 use super::*;
 #[path = "ui_messages_cache.rs"]
@@ -73,8 +73,10 @@ fn render_single_line_system_notice(
     // Ordinary notices are always compact, not just plain one-line strings.
     // Keep deliberately requested reports, command output and login prompts
     // readable. Markdown or a newline alone is not a reason to expand a notice.
-    if matches!(msg.title.as_deref(), Some("Skills" | "Context" | "Support"))
-        || msg.content.starts_with("Shell command · ")
+    if matches!(
+        msg.title.as_deref(),
+        Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion")
+    ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
     {
@@ -93,6 +95,16 @@ fn render_single_line_system_notice(
         .starts_with("[auto] Your session was interrupted by a server reload")
     {
         "Server reloaded; resuming interrupted work."
+    } else if ["Reload succeeded (", "Reload complete."]
+        .iter()
+        .any(|prefix| {
+            msg.content
+                .strip_prefix("[auto] ")
+                .unwrap_or(&msg.content)
+                .starts_with(prefix)
+        })
+    {
+        "Reload complete. Resuming your task."
     } else if msg.content.starts_with("Reload complete - continuing") {
         "Reload complete - continuing."
     } else if msg.content.starts_with("📡 Network appears offline") {
@@ -506,11 +518,100 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
     out
 }
 
+/// KV cache notices describe the response directly above them, so render
+/// them as a dim `╰` corner hanging off that response rather than a
+/// standalone notice that reads as a header for what follows.
+fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'static>>> {
+    let content = msg.content.trim();
+    let body = content
+        .trim_start_matches("⚠️")
+        .trim_start_matches("ℹ️")
+        .trim_start();
+    if !(body.starts_with("KV cache miss") || body.starts_with("KV cache refresh")) {
+        return None;
+    }
+    let warn = content.starts_with("⚠️");
+    let summary = kv_cache_footer_summary(body);
+    let body = summary.as_deref().unwrap_or(body);
+    let prefix = "╰ ";
+    let max = (width as usize).saturating_sub(prefix.len() + 1).max(1);
+    let text = if unicode_width::UnicodeWidthStr::width(body) > max {
+        let mut out = String::new();
+        let mut used = 0;
+        for ch in body.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + w + 1 > max {
+                break;
+            }
+            used += w;
+            out.push(ch);
+        }
+        out.push('…');
+        out
+    } else {
+        body.to_string()
+    };
+    let color = if warn {
+        system_message_color()
+    } else {
+        dim_color()
+    };
+    Some(vec![Line::from(vec![
+        Span::styled(prefix, Style::default().fg(dim_color())),
+        Span::styled(text, Style::default().fg(color)),
+    ])])
+}
+
+fn parse_kv_token_count(s: &str) -> Option<f64> {
+    let s = s.trim().trim_start_matches('~');
+    let (num, mult) = match s.chars().last()? {
+        'K' | 'k' => (&s[..s.len() - 1], 1e3),
+        'M' | 'm' => (&s[..s.len() - 1], 1e6),
+        _ => (s, 1.0),
+    };
+    num.replace(',', "").parse::<f64>().ok().map(|n| n * mult)
+}
+
+/// `19K KV cache miss · provider switch · 60% hit` from the full
+/// notice text. Returns None when the notice is not in a recognized shape.
+fn kv_cache_footer_summary(body: &str) -> Option<String> {
+    let kind = if body.starts_with("KV cache refresh") {
+        "KV cache refresh"
+    } else {
+        "KV cache miss"
+    };
+    let reason = body
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(r, _)| r.trim().to_string())?;
+    let missed = body
+        .split_once('~')
+        .and_then(|(_, rest)| rest.split_once(" tokens"))
+        .map(|(n, _)| n.trim().to_string());
+    let hit = body.split_once(" cached / ").and_then(|(before, after)| {
+        let cached = parse_kv_token_count(before.rsplit(' ').next()?)?;
+        let expected = parse_kv_token_count(after.split(' ').next()?)?;
+        (expected > 0.0).then(|| ((cached / expected) * 100.0).round().clamp(0.0, 100.0))
+    });
+    let lead = match missed {
+        Some(missed) => format!("{missed} {kind}"),
+        None => kind.to_string(),
+    };
+    let mut parts = vec![lead, reason];
+    if let Some(hit) = hit {
+        parts.push(format!("{hit:.0}% hit"));
+    }
+    Some(parts.join(" · "))
+}
+
 pub(crate) fn render_system_message(
     msg: &DisplayMessage,
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if let Some(lines) = todo_completion::render(msg, width, _diff_mode) {
+        return lines;
+    }
     if msg.title.as_deref() == Some("OpenAI login")
         && let Some(parsed) = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
     {
@@ -560,6 +661,9 @@ pub(crate) fn render_system_message(
         return markdown::wrap_lines(lines, width.max(1) as usize);
     }
     if let Some(lines) = render_scheduled_session_message(msg, width) {
+        return lines;
+    }
+    if let Some(lines) = render_kv_cache_footer(msg, width) {
         return lines;
     }
     // Routine notices occupy one row regardless of compact_notifications.
@@ -1103,6 +1207,14 @@ pub(crate) fn render_overnight_message(
     lines
 }
 
+/// Only currently running, session-validated dependencies enter this snapshot.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TodoCardBackgroundTask {
+    pub task_id: String,
+    pub label: String,
+    pub percent: Option<f32>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum TodoCardPayload {
@@ -1116,6 +1228,8 @@ enum TodoCardPayload {
         /// Swarm workers referenced by `TodoItem::assigned_to`.
         #[serde(default)]
         agents: Vec<TodoCardAgent>,
+        #[serde(default)]
+        background_tasks: Vec<TodoCardBackgroundTask>,
     },
     Legacy(Vec<crate::todo::TodoItem>),
 }
@@ -1160,6 +1274,7 @@ impl TodoCardPayload {
         crate::todo::TodoPlan,
         Vec<crate::todo::TodoGoal>,
         Vec<TodoCardAgent>,
+        Vec<TodoCardBackgroundTask>,
     ) {
         match self {
             Self::Current {
@@ -1167,10 +1282,12 @@ impl TodoCardPayload {
                 plan,
                 goals,
                 agents,
-            } => (todos, plan, goals, agents),
+                background_tasks,
+            } => (todos, plan, goals, agents, background_tasks),
             Self::Legacy(todos) => (
                 todos,
                 crate::todo::TodoPlan::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             ),
@@ -1329,7 +1446,7 @@ fn render_todos_message_with_cap(
     let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
     };
-    let (todos, plan, goals, agents) = payload.into_parts();
+    let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
     let centered = markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
@@ -1370,8 +1487,27 @@ fn render_todos_message_with_cap(
         };
         let has_groups = todos.iter().any(|t| group_of(t).is_some());
         let all_refs: Vec<&crate::todo::TodoItem> = todos.iter().collect();
-        if has_groups {
-            lines.push(render_todo_wave_status_header(
+        if crate::todo::stages::has_stages(todos.iter()) {
+            // Stage grid: groups become lanes inside each stage, so they are
+            // drawn as column headers instead of goal sections.
+            lines.push(render_todo_stage_status_header(
+                &all_refs,
+                &agents,
+                base_indent,
+                inner_width,
+            ));
+            let goal = todo_card_goal_for_group(&goals, None);
+            push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
+            push_stage_lines(
+                &mut lines,
+                &all_refs,
+                &agents,
+                &background_tasks,
+                base_indent,
+                inner_width,
+            );
+        } else if has_groups {
+            lines.push(render_todo_stage_status_header(
                 &all_refs,
                 &agents,
                 base_indent,
@@ -1390,18 +1526,26 @@ fn render_todos_message_with_cap(
             for (group, items) in &groups {
                 let label = group.as_deref().unwrap_or("other");
                 let goal = todo_card_goal_for_group(&goals, group.as_deref());
-                lines.push(render_todo_goal_header(
+                lines.push(todo_stages::render_group_header(
                     label,
                     items,
+                    &agents,
                     base_indent,
                     inner_width,
                 ));
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-                push_wave_item_lines(&mut lines, items, &agents, base_indent, inner_width);
+                push_todo_item_lines(
+                    &mut lines,
+                    items,
+                    &agents,
+                    &background_tasks,
+                    base_indent,
+                    inner_width,
+                );
             }
         } else {
             let goal = todo_card_goal_for_group(&goals, None);
-            lines.push(render_todo_wave_status_header(
+            lines.push(render_todo_stage_status_header(
                 &all_refs,
                 &agents,
                 base_indent,
@@ -1410,7 +1554,14 @@ fn render_todos_message_with_cap(
             if goal.is_some() {
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
             }
-            push_wave_item_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
+            push_todo_item_lines(
+                &mut lines,
+                &all_refs,
+                &agents,
+                &background_tasks,
+                base_indent,
+                inner_width,
+            );
         }
     }
 
@@ -1524,21 +1675,6 @@ fn todo_goal_score_segments(goal: &crate::todo::TodoGoal) -> Vec<Vec<Span<'stati
         ]);
     }
 
-    // Delivery is progress toward the outcome, not a quality gate. Keep it
-    // visible and visually separate from failures so it cannot read as one.
-    if let Some(state) = goal.delivery_state {
-        let color = if state >= crate::todo::DeliveryState::WorkflowValidated {
-            todo_score_color()
-        } else if state == crate::todo::DeliveryState::Integrated {
-            todo_warning_color()
-        } else {
-            todo_failure_color()
-        };
-        segments.push(vec![
-            Span::styled("Delivery ", Style::default().fg(todo_label_color())),
-            Span::styled(state.as_str().to_string(), Style::default().fg(color)),
-        ]);
-    }
     segments
 }
 
@@ -1594,68 +1730,41 @@ fn push_todo_status_pips<'a>(
     }
 }
 
-fn render_todo_status_header<'a>(
-    todos: impl IntoIterator<Item = &'a crate::todo::TodoItem>,
-    base_indent: &str,
-    inner_width: usize,
-) -> Line<'static> {
-    let mut spans = Vec::new();
-    push_todo_status_pips(&mut spans, todos, inner_width);
-    todo_card_line(spans, base_indent, inner_width)
-}
-
-fn render_todo_goal_header(
-    label: &str,
-    todos: &[&crate::todo::TodoItem],
-    base_indent: &str,
-    inner_width: usize,
-) -> Line<'static> {
-    let label_width = label.width();
-    let mut spans = vec![Span::styled(
-        label.to_string(),
-        Style::default().fg(todo_group_color()).bold(),
-    )];
-    spans.push(Span::raw("  "));
-    push_wave_pips(
-        &mut spans,
-        todos,
-        inner_width.saturating_sub(label_width + 2),
-    );
-    todo_card_line(spans, base_indent, inner_width)
-}
-
-/// Overall card header: progress pips (split by parallel waves) plus the
-/// roster of swarm agent emoji working on this list.
-fn render_todo_wave_status_header(
+/// Overall card header: progress pips (numbered per stage) plus the roster
+/// of swarm agent emoji working on this list.
+fn render_todo_stage_status_header(
     todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
-    if !has_parallel_waves(todos) && todos.iter().all(|todo| todo.assigned_to.is_none()) {
-        return render_todo_status_header(todos.iter().copied(), base_indent, inner_width);
-    }
     let mut spans = Vec::new();
-    push_wave_pips(&mut spans, todos, inner_width);
-    spans.extend(agent_roster_spans(todos, agents));
+    let roster = agent_roster_spans(todos, agents);
+    let blocked = todo_stages::blocked_phase_spans(todos, agents);
+    let side: usize = roster
+        .iter()
+        .chain(blocked.iter())
+        .map(|span| span.content.width())
+        .sum();
+    push_stage_pips(&mut spans, todos, inner_width.saturating_sub(side));
+    spans.extend(blocked);
+    spans.extend(roster);
     todo_card_line(spans, base_indent, inner_width)
 }
 
-fn push_wave_item_lines(
+fn push_todo_item_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
+    background_tasks: &[TodoCardBackgroundTask],
     base_indent: &str,
     inner_width: usize,
 ) {
-    let positions = wave_rail_positions(todos);
-    let any_rails = positions.iter().any(|pos| *pos != RailPos::None);
-    for (todo, pos) in todos.iter().zip(positions) {
-        lines.push(render_wave_item_line(
+    for todo in todos {
+        lines.push(render_todo_item_line_with_background(
             todo,
-            pos,
-            any_rails,
             agents,
+            background_tasks,
             base_indent,
             inner_width,
         ));
@@ -2188,7 +2297,109 @@ fn render_todo_card_item_line(
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
-    todo_card_line(todo_card_item_spans(todo, true), base_indent, inner_width)
+    todo_card_line(todo_card_item_spans(todo, false), base_indent, inner_width)
+}
+
+fn todo_running_dependencies<'a>(
+    todo: &crate::todo::TodoItem,
+    tasks: &'a [TodoCardBackgroundTask],
+) -> Vec<&'a TodoCardBackgroundTask> {
+    if !crate::todo::is_incomplete_todo(todo) {
+        return Vec::new();
+    }
+    tasks
+        .iter()
+        .filter(|task| todo.waiting_on.contains(&task.task_id))
+        .collect()
+}
+
+fn render_todo_item_line_with_background(
+    todo: &crate::todo::TodoItem,
+    agents: &[TodoCardAgent],
+    tasks: &[TodoCardBackgroundTask],
+    base_indent: &str,
+    inner_width: usize,
+) -> Line<'static> {
+    let dependencies = todo_running_dependencies(todo, tasks);
+    if dependencies.is_empty() {
+        return render_todo_item_line(todo, agents, base_indent, inner_width);
+    }
+    let mut spans = todo_card_item_spans(todo, false);
+    spans[1] = Span::styled("🕒 ", Style::default().fg(todo_warning_color()));
+    let progress = todo_dependency_progress(
+        &dependencies,
+        inner_width.saturating_sub(12).min(inner_width / 2),
+    );
+    let progress_width = progress.width();
+    if progress_width > 0 {
+        let left_width = inner_width.saturating_sub(progress_width + 2);
+        let mut left = super::truncate_line_with_ellipsis_to_width(&Line::from(spans), left_width);
+        let pad = inner_width.saturating_sub(left.width() + progress_width);
+        left.spans.push(Span::raw(" ".repeat(pad)));
+        left.spans.extend(progress.spans);
+        spans = left.spans;
+    }
+    todo_card_line(spans, base_indent, inner_width)
+}
+
+/// Reuse the info widget's bar cells, colors and used/remaining convention.
+/// Labels and separators are fitted separately so Unicode task names cannot
+/// wrap, even though the shared renderer's fixed label is ASCII-oriented.
+fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> Line<'static> {
+    if width < 10 {
+        return Line::default();
+    }
+    let mut spans = Vec::new();
+    let mut shown = 0;
+    for task in tasks {
+        let used: usize = spans
+            .iter()
+            .map(|span: &Span<'_>| span.content.width())
+            .sum();
+        let remaining = width.saturating_sub(used + if shown > 0 { 2 } else { 0 });
+        if remaining < 10 {
+            break;
+        }
+        let budget = remaining.min(28);
+        if shown > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let label_budget = budget.saturating_sub(15).min(10);
+        let clean_label = task.label.split_whitespace().collect::<Vec<_>>().join(" ");
+        let label =
+            super::truncate_line_with_ellipsis_to_width(&Line::raw(clean_label), label_budget);
+        let label_width = label.width();
+        if label_width > 0 {
+            spans.extend(label.spans);
+            spans.push(Span::raw(" "));
+        }
+        let bar_budget = budget.saturating_sub(label_width + usize::from(label_width > 0));
+        if let Some(percent) = task.percent.filter(|percent| percent.is_finite()) {
+            let used = percent.clamp(0.0, 100.0).round() as u8;
+            let bar = crate::tui::info_widget::render_usage_limit_bar(
+                "",
+                used,
+                100 - used,
+                None,
+                (bar_budget + 7).min(u16::MAX as usize) as u16,
+                crate::config::config().display.usage_display_used(),
+            );
+            spans.extend(bar.spans.into_iter().skip(1));
+        } else {
+            spans.push(Span::styled(
+                "running",
+                Style::default().fg(todo_meta_color()),
+            ));
+        }
+        shown += 1;
+    }
+    if shown < tasks.len() {
+        let suffix = format!(" +{}", tasks.len() - shown);
+        let room = width.saturating_sub(suffix.width());
+        spans = super::truncate_line_with_ellipsis_to_width(&Line::from(spans), room).spans;
+        spans.push(Span::styled(suffix, Style::default().fg(todo_meta_color())));
+    }
+    super::truncate_line_with_ellipsis_to_width(&Line::from(spans), width)
 }
 
 /// Spans for one todo row: two-cell gutter, status glyph, content, and
@@ -2806,8 +3017,119 @@ pub(crate) fn render_background_task_message(
         parsed.display_name.as_deref(),
     );
     let is_swarm = parsed.tool_name == "swarm";
-    if is_swarm {
+    if is_swarm && !parsed.status.starts_with('✗') {
         return render_compact_swarm_background_completion(&parsed, width);
+    }
+    if parsed.status.starts_with('✓') {
+        let muted = Style::default().fg(dim_color());
+        let block_width = if centered {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let mut header = Line::from(vec![
+            Span::styled("  ✓ ", Style::default().fg(rgb(120, 210, 140))),
+            Span::styled(
+                tools_ui::resolve_display_tool_name(&parsed.tool_name).to_string(),
+                Style::default().fg(tool_color()),
+            ),
+        ]);
+        if task_label != parsed.tool_name {
+            header.spans.push(Span::styled(" · ", muted));
+            header.spans.push(Span::styled(
+                task_label.clone(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        let timing = Line::from(Span::styled(format!(" · took {}", parsed.duration), muted));
+        let mut lines = vec![super::truncate_line_preserving_suffix_to_width(
+            &header,
+            &timing,
+            block_width.saturating_sub(1),
+        )];
+        if centered {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return lines;
+    }
+    if parsed.status.starts_with('✗') {
+        let muted = Style::default().fg(dim_color());
+        let failure = Style::default().fg(rgb(220, 100, 100));
+        let block_width = if centered {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let row_width = block_width.saturating_sub(1);
+        let timing = msg
+            .content
+            .lines()
+            .find_map(|line| {
+                let timestamp = line.strip_prefix("_Called at:_ `")?.strip_suffix('`')?;
+                let called = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+                let seconds = (chrono::Utc::now() - called.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0);
+                Some(if seconds < 60 {
+                    format!("{seconds}s ago")
+                } else if seconds < 3600 {
+                    format!("{}m ago", seconds / 60)
+                } else {
+                    format!("{}h ago", seconds / 3600)
+                })
+            })
+            .unwrap_or_else(|| format!("took {}", parsed.duration));
+        // The notification's explicit failure field is already known to be an
+        // error even when its text has no severity prefix. Feed that evidence
+        // into the same parser; a stronger diagnostic in the preview can win.
+        let output = format!(
+            "Error: {}\n{}",
+            parsed.failure_summary.as_deref().unwrap_or(""),
+            parsed.preview.as_deref().unwrap_or("")
+        );
+        let clean = strip_ansi_escape_sequences(&output);
+        let detail = tools_ui::parse_tool_failure(&clean)
+            .map(|failure| {
+                let reason = failure
+                    .reason
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if reason == parsed.exit_label {
+                    reason
+                } else {
+                    format!("{} · {}", parsed.exit_label, reason)
+                }
+            })
+            .unwrap_or_else(|| format!("{} · no diagnostic captured", parsed.exit_label));
+        let mut header = Line::from(vec![
+            Span::styled("  ✗ ", failure),
+            Span::styled(
+                tools_ui::resolve_display_tool_name(&parsed.tool_name).to_string(),
+                Style::default().fg(tool_color()),
+            ),
+        ]);
+        if task_label != parsed.tool_name {
+            header.spans.push(Span::styled(" · ", muted));
+            header.spans.push(Span::styled(
+                task_label.clone(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        let timing = Line::from(Span::styled(format!(" · {timing}"), muted));
+        header = super::truncate_line_preserving_suffix_to_width(&header, &timing, row_width);
+        let reason = Line::from(vec![
+            Span::styled("  ╰─", muted),
+            Span::styled(detail, muted),
+        ]);
+        let mut lines = vec![
+            header,
+            super::truncate_line_with_ellipsis_to_width(&reason, row_width),
+        ];
+        if centered {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return lines;
     }
     let (title, border_color, status_color, preview_color) = if parsed.status.starts_with('✓') {
         (
@@ -3997,6 +4319,133 @@ fn render_discovery_card(
     Some(content)
 }
 
+/// Fit diff chrome to one row, preserving the filename before path prefixes.
+fn inline_diff_header(
+    prefix: &str,
+    counts: Option<(usize, usize)>,
+    file_path: Option<&str>,
+    width: usize,
+) -> Line<'static> {
+    let dim = Style::default().fg(dim_color());
+    let mut header = vec![Span::styled(format!("{prefix} diff"), dim)];
+    if let Some((additions, deletions)) =
+        counts.filter(|&(additions, deletions)| additions > 0 || deletions > 0)
+    {
+        header.extend([
+            Span::styled(" · ", dim),
+            Span::styled(
+                format!("+{additions}"),
+                Style::default().fg(diff_add_color()),
+            ),
+            Span::styled(" ", dim),
+            Span::styled(
+                format!("-{deletions}"),
+                Style::default().fg(diff_del_color()),
+            ),
+        ]);
+    }
+    let mut header = Line::from(header);
+    if let Some(path) = file_path {
+        let path_width = width.saturating_sub(header.width().saturating_add(3));
+        if path_width > 0 {
+            header.spans.push(Span::styled(
+                format!(" · {}", tools_ui::truncate_path_display(path, path_width)),
+                dim,
+            ));
+        }
+    }
+    super::truncate_line_with_ellipsis_to_width(&header, width)
+        .alignment(ratatui::layout::Alignment::Left)
+}
+
+/// Keep expanded source lines inside their frame. Wrap the styled source, not
+/// the gutter, so continuation rows cannot masquerade as another changed line.
+fn expanded_diff_row(
+    line: &ParsedDiffLine,
+    file_ext: Option<&str>,
+    number_width: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(dim_color());
+    let color = if line.kind == DiffLineKind::Add {
+        diff_add_color()
+    } else {
+        diff_del_color()
+    };
+    let sign = if line.kind == DiffLineKind::Add {
+        "+"
+    } else {
+        "-"
+    };
+    let number = line.prefix.trim().trim_end_matches(['+', '-']);
+    let gutter = vec![
+        Span::styled(format!("│ {number:>number_width$} "), dim),
+        Span::styled(format!("{sign} "), Style::default().fg(color)),
+    ];
+    let gutter_width = number_width + 5;
+    // Leave room for a wide source character even on very narrow terminals.
+    if width < gutter_width + 2 {
+        return vec![super::truncate_line_with_ellipsis_to_width(
+            &Line::from(gutter),
+            width,
+        )];
+    }
+    let content_width = width - gutter_width;
+    let mut rows = Vec::new();
+    let mut spans = gutter;
+    let mut used = 0;
+    // Expand tabs in source-column coordinates, independent of the gutter.
+    let mut column = 0usize;
+    let mut source = String::new();
+    for ch in line.content.chars() {
+        if ch == '\t' {
+            let spaces = 4 - column % 4;
+            source.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else {
+            source.push(ch);
+            column += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    for span in markdown::highlight_line(&source, file_ext) {
+        let span = tint_span_with_diff_color(span, color);
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cells > content_width {
+                if !text.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut text), span.style));
+                }
+                rows.push(Line::from(std::mem::take(&mut spans)).alignment(Alignment::Left));
+                spans.push(Span::styled(format!("│ {:>number_width$} ↪ ", ""), dim));
+                used = 0;
+            }
+            text.push(ch);
+            used += cells;
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, span.style));
+        }
+    }
+    rows.push(Line::from(spans).alignment(Alignment::Left));
+    rows
+}
+
+fn render_tool_failure_reason(content: &str, width: usize, indent: usize) -> Line<'static> {
+    let clean = strip_ansi_escape_sequences(content);
+    let summary = tools_ui::parse_tool_failure(&clean)
+        .map(|failure| failure.reason)
+        .unwrap_or_else(|| "Tool call failed".to_string());
+    let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    super::truncate_line_with_ellipsis_to_width(
+        &Line::from(Span::styled(
+            format!("{}╰─{}", " ".repeat(indent), summary),
+            Style::default().fg(dim_color()),
+        )),
+        width,
+    )
+}
+
 pub(crate) fn render_tool_message(
     msg: &DisplayMessage,
     width: u16,
@@ -4007,7 +4456,9 @@ pub(crate) fn render_tool_message(
     }
 
     let centered = markdown::center_code_blocks();
-    let token_badge = tool_output_token_badge(&msg.content);
+    let mut token_badge = tool_output_token_badge(&msg.content);
+    token_badge.label =
+        tools_ui::tool_usage_label(&token_badge.label, msg.duration_secs, &msg.content);
 
     // A restored or remotely mirrored transcript can occasionally retain the
     // todo result while losing its paired ToolCall metadata. Recognize the
@@ -4056,7 +4507,7 @@ pub(crate) fn render_tool_message(
         return lines;
     };
 
-    if tools_ui::is_memory_store_tool(tc) && !msg.content.starts_with("Error:") {
+    if tools_ui::is_memory_store_tool(tc) && !tools_ui::tool_output_looks_failed(&msg.content) {
         let content = tc
             .input
             .get("content")
@@ -4094,7 +4545,7 @@ pub(crate) fn render_tool_message(
         return lines;
     }
 
-    if tools_ui::is_memory_recall_tool(tc) && !msg.content.starts_with("Error:") {
+    if tools_ui::is_memory_recall_tool(tc) && !tools_ui::tool_output_looks_failed(&msg.content) {
         let border_style = Style::default().fg(rgb(150, 180, 255));
         let text_style = Style::default().fg(dim_color());
 
@@ -4168,6 +4619,9 @@ pub(crate) fn render_tool_message(
         (0, 0)
     };
     let has_diff_changes = additions > 0 || deletions > 0;
+    let show_header_diff_counts = is_edit_tool
+        && has_diff_changes
+        && !(diff_mode.is_inline() && edit_tool_has_inline_diff(tc, &msg.content));
 
     let block_width = if centered {
         super::centered_content_block_width(width, 96)
@@ -4179,7 +4633,7 @@ pub(crate) fn render_tool_message(
     let base_prefix = format!("  {} {} ", icon, display_name);
     let token_suffix_width =
         UnicodeWidthStr::width(format!(" · {}", token_badge.label.as_str()).as_str());
-    let edit_suffix_width = if is_edit_tool && has_diff_changes {
+    let edit_suffix_width = if show_header_diff_counts {
         UnicodeWidthStr::width(format!(" (+{} -{})", additions, deletions).as_str())
     } else {
         0
@@ -4212,8 +4666,6 @@ pub(crate) fn render_tool_message(
         } else {
             format!("{} calls", counts.total())
         }
-    } else if let Some(error_summary) = tools_ui::concise_tool_error_summary(&msg.content) {
-        error_summary
     } else if tc.name == "subagent" {
         msg.title
             .as_deref()
@@ -4232,7 +4684,7 @@ pub(crate) fn render_tool_message(
     };
     // Edit rows read like every other tool row: the intent. The file path is
     // already shown on the inline diff header right below, so repeating it on
-    // the row is noise. Errors keep their summary so failures stay diagnosable.
+    // the row is noise. Failures keep their call description on the header.
     let edit_path_on_diff_header = is_edit_tool
         && !is_error
         && diff_mode.is_inline()
@@ -4253,9 +4705,7 @@ pub(crate) fn render_tool_message(
             intent.to_string(),
             Style::default().fg(tool_color()),
         ));
-        // Error summaries always render so failures stay diagnosable even
-        // when technical details are hidden.
-        let show_detail = tools_ui::show_tool_call_details() || is_error || is_partial_batch;
+        let show_detail = tools_ui::show_tool_call_details() || is_partial_batch;
         if show_detail && !summary.is_empty() && summary != intent {
             tool_line.push(Span::styled(" · ", Style::default().fg(dim_color())));
             tool_line.push(Span::styled(summary, Style::default().fg(dim_color())));
@@ -4266,7 +4716,7 @@ pub(crate) fn render_tool_message(
             Style::default().fg(dim_color()),
         ));
     }
-    if is_edit_tool && has_diff_changes {
+    if show_header_diff_counts {
         tool_line.push(Span::styled(" (", Style::default().fg(dim_color())));
         tool_line.push(Span::styled(
             format!("+{}", additions),
@@ -4279,10 +4729,14 @@ pub(crate) fn render_tool_message(
         ));
         tool_line.push(Span::styled(")", Style::default().fg(dim_color())));
     }
-    let token_suffix = Line::from(vec![
-        Span::styled(" · ", Style::default().fg(dim_color())),
-        Span::styled(token_badge.label, Style::default().fg(token_badge.color)),
-    ]);
+    let mut usage_spans = vec![Span::styled(" · ", Style::default().fg(dim_color()))];
+    usage_spans.extend(tools_ui::tool_usage_spans(
+        token_badge.label,
+        token_badge.color,
+        msg.duration_secs,
+        &msg.content,
+    ));
+    let token_suffix = Line::from(usage_spans);
 
     let rendered_tool_line = super::truncate_line_preserving_suffix_to_width(
         &Line::from(tool_line),
@@ -4291,6 +4745,13 @@ pub(crate) fn render_tool_message(
     );
     let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
+    if is_error && (tc.name != "batch" || batch_counts.is_none()) {
+        lines.push(render_tool_failure_reason(&msg.content, row_width, 2));
+        if centered {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return lines;
+    }
     if let Some(draft_lines) = render_gmail_draft_card(tc, &msg.content, is_error, row_width) {
         lines.extend(draft_lines);
     }
@@ -4405,6 +4866,17 @@ pub(crate) fn render_tool_message(
                 sub_result.map(|result| result.content.as_str()),
             ));
 
+            if sub_errored {
+                lines.push(render_tool_failure_reason(
+                    sub_result
+                        .map(|result| result.content.as_str())
+                        .unwrap_or("Error: Tool call failed"),
+                    row_width,
+                    4,
+                ));
+                continue;
+            }
+
             if let Some(result) = sub_result
                 && let Some(mut draft_lines) = render_gmail_draft_card(
                     &sub_tc,
@@ -4515,21 +4987,20 @@ pub(crate) fn render_tool_message(
         let diff_file_path =
             |line: &ParsedDiffLine| line.file_path.clone().or_else(|| file_path_for_ext.clone());
         let first_file_path = display_lines.first().and_then(|line| diff_file_path(line));
-        let diff_header = |prefix: &str, file_path: Option<&str>| match file_path {
-            Some(path) => format!("{pad_str}{prefix} diff · {path}"),
-            None => format!("{pad_str}{prefix} diff"),
-        };
-
-        lines.push(
-            Line::from(Span::styled(
-                diff_header("┌─", first_file_path.as_deref()),
-                Style::default().fg(dim_color()),
-            ))
-            .alignment(ratatui::layout::Alignment::Left),
-        );
+        lines.push(inline_diff_header(
+            "╭─",
+            Some((additions, deletions)),
+            first_file_path.as_deref(),
+            row_width,
+        ));
 
         let mut shown_truncation = false;
         let mut previous_file_path = first_file_path;
+        let number_width = change_lines
+            .iter()
+            .map(|line| line.prefix.trim().trim_end_matches(['+', '-']).len())
+            .max()
+            .unwrap_or(0);
 
         for (i, line) in display_lines.iter().enumerate() {
             if truncated && !shown_truncation && i >= half_point {
@@ -4546,15 +5017,23 @@ pub(crate) fn render_tool_message(
 
             let current_file_path = diff_file_path(line);
             if i > 0 && current_file_path != previous_file_path {
-                lines.push(
-                    Line::from(Span::styled(
-                        diff_header("├─", current_file_path.as_deref()),
-                        Style::default().fg(dim_color()),
-                    ))
-                    .alignment(ratatui::layout::Alignment::Left),
-                );
+                lines.push(inline_diff_header(
+                    "├─",
+                    None,
+                    current_file_path.as_deref(),
+                    row_width,
+                ));
             }
             previous_file_path = current_file_path.clone();
+
+            if full_inline {
+                let file_ext = current_file_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).extension())
+                    .and_then(|e| e.to_str());
+                lines.extend(expanded_diff_row(line, file_ext, number_width, row_width));
+                continue;
+            }
 
             let base_color = if line.kind == DiffLineKind::Add {
                 diff_add_color()
@@ -4565,7 +5044,7 @@ pub(crate) fn render_tool_message(
             let border_prefix = format!("{}│ ", pad_str);
             let prefix_visual_width = unicode_width::UnicodeWidthStr::width(border_prefix.as_str())
                 + unicode_width::UnicodeWidthStr::width(line.prefix.as_str());
-            let max_content_width = (width as usize).saturating_sub(prefix_visual_width + 1);
+            let max_content_width = row_width.saturating_sub(prefix_visual_width);
 
             let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(border_prefix, Style::default().fg(dim_color())),
@@ -4608,14 +5087,13 @@ pub(crate) fn render_tool_message(
             lines.push(Line::from(spans).alignment(ratatui::layout::Alignment::Left));
         }
 
-        let footer = if total_changes > 0 && truncated {
-            format!("{}└─ (+{} -{} total)", pad_str, additions, deletions)
-        } else {
-            format!("{}└─", pad_str)
-        };
+        let footer = format!("{pad_str}╰─");
         lines.push(
-            Line::from(Span::styled(footer, Style::default().fg(dim_color())))
-                .alignment(ratatui::layout::Alignment::Left),
+            super::truncate_line_with_ellipsis_to_width(
+                &Line::from(Span::styled(footer, Style::default().fg(dim_color()))),
+                width as usize,
+            )
+            .alignment(ratatui::layout::Alignment::Left),
         );
     }
 
@@ -4647,3 +5125,17 @@ fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
 #[cfg(test)]
 #[path = "ui_messages/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod kv_cache_footer_tests {
+    #[test]
+    fn summarizes_miss_reason_missed_and_hit_pct() {
+        let s = super::kv_cache_footer_summary(
+            "KV cache miss [provider switch] turn 3 call 2: 28.6K cached / 47.6K expected tokens: ~19.0K tokens resent (x). See KV_CACHE_USAGE in logs.",
+        );
+        assert_eq!(
+            s.as_deref(),
+            Some("19.0K KV cache miss · provider switch · 60% hit")
+        );
+    }
+}

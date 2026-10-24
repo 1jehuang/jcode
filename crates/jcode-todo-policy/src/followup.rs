@@ -2,8 +2,8 @@
 //!
 //! This is the client-side state machine that decides, after a turn ends, what
 //! (if anything) to send next: the incomplete-todo poke, the one-shot
-//! long-session review, the deferred gate digest, the ownership gate, the
-//! completion-confidence and confidence-spike checks, and the final-response
+//! long-session review, the ownership gate, the completion-confidence and
+//! confidence-spike checks, and the final-response
 //! handoff. It is a faithful port of the TUI's `schedule_auto_poke_followup`
 //! so every client (TUI, Desktop, SDK users) runs the same policy.
 //!
@@ -13,17 +13,53 @@
 
 use crate::{
     ConfidenceState, GateObservation, TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
-    TODO_LONG_SESSION_REVIEW_MESSAGE, TodoGoal, TodoItem, TodoPlan, build_auto_poke_message,
-    build_gate_digest, build_todo_completion_continuation_message,
-    build_todo_confidence_spike_continuation_message, build_todo_ownership_continuation_message,
-    completed_groups_have_sufficient_delivery, completion_confidence_passes, spike_completed_todos,
-    todo_status_is_cancelled, todo_status_is_completed,
+    TODO_LONG_SESSION_REVIEW_MESSAGE, TodoGoal, TodoItem, TodoPlan, build_actionable_poke_message,
+    build_todo_completion_continuation_message, build_todo_confidence_spike_continuation_message,
+    build_todo_ownership_continuation_message, completed_groups_have_sufficient_delivery,
+    completion_confidence_passes, spike_completed_todos, todo_status_is_cancelled,
+    todo_status_is_completed,
 };
 use serde::{Deserialize, Serialize};
 
 /// Gate turns allowed per completion cycle before the policy gives up rather
 /// than loop on a gate the model is no longer making progress on.
 pub const MAX_GATE_ATTEMPTS: u8 = 5;
+
+/// Automatic incomplete-todo follow-ups allowed for one unchanged open state.
+pub const INCOMPLETE_TODO_MAX_ATTEMPTS: u8 = 3;
+
+/// Shared retry budget for clients that handle their own turn-end loop.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IncompleteTodoBudget {
+    fingerprint: Option<String>,
+    attempts: u8,
+}
+
+impl IncompleteTodoBudget {
+    /// Consume an incomplete follow-up attempt. Completed/empty lists clear
+    /// the cycle and return true so unrelated completion gates can proceed.
+    pub fn allow_follow_up(&mut self, todos: &[TodoItem]) -> bool {
+        let incomplete: Vec<_> = todos
+            .iter()
+            .filter(|todo| is_incomplete_todo(todo))
+            .collect();
+        if incomplete.is_empty() {
+            *self = Self::default();
+            return true;
+        }
+        let fingerprint =
+            serde_json::to_string(&incomplete).expect("todo items must serialize to JSON");
+        if self.fingerprint.as_ref() != Some(&fingerprint) {
+            self.fingerprint = Some(fingerprint);
+            self.attempts = 0;
+        }
+        if self.attempts >= INCOMPLETE_TODO_MAX_ATTEMPTS {
+            return false;
+        }
+        self.attempts += 1;
+        true
+    }
+}
 
 /// Everything the policy reads about a session's todo state at turn end.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -40,6 +76,20 @@ pub struct TodoSnapshot {
     /// The private one-shot long-session review is due and not yet delivered.
     #[serde(default)]
     pub long_session_review_due: bool,
+    /// Session-scoped background tasks confirmed to still be running. Missing
+    /// or terminal task IDs must not suppress actionable work.
+    #[serde(default)]
+    pub running_background_tasks: Vec<String>,
+}
+
+/// A dependency blocks a todo only while the referenced task is running.
+/// Keeping the runtime lookup outside this pure helper lets every client use
+/// the same rule without guessing from the todo's status or model prose.
+pub fn todo_waits_on_running_task(
+    todo: &TodoItem,
+    mut is_running: impl FnMut(&str) -> bool,
+) -> bool {
+    todo.waiting_on.iter().any(|task_id| is_running(task_id))
 }
 
 /// Persistent side effects a decision requires. Apply them whether or not a
@@ -76,7 +126,8 @@ pub struct FollowUp {
     pub kind: FollowUpKind,
     /// Model-facing text. Recognized by `is_auto_poke_message`.
     pub message: String,
-    /// Short user-facing notice describing what happened.
+    /// Short user-facing notice describing what happened. Empty for a silent
+    /// final-response handoff.
     pub notice: String,
 }
 
@@ -113,11 +164,12 @@ pub struct FollowUpPolicy {
     default_on: bool,
     final_response_requested: bool,
     final_response_fingerprint: Option<String>,
-    digest_delivered: bool,
     gate_attempts: u8,
     spike_challenged: bool,
     last_ownership_fingerprint: Option<String>,
-    last_poke_fingerprint: Option<String>,
+    incomplete_budget: IncompleteTodoBudget,
+    gate_digest_enabled: bool,
+    gate_digest_delivered: bool,
 }
 
 pub fn is_incomplete_todo(todo: &TodoItem) -> bool {
@@ -138,14 +190,24 @@ impl FollowUpPolicy {
         self.armed || self.default_on
     }
 
+    /// Configure `features.todo_gate_digest` (default false), independently of
+    /// report display. Changing this does not reset the current cycle.
+    pub fn set_gate_digest_enabled(&mut self, enabled: bool) {
+        self.gate_digest_enabled = enabled;
+    }
+
     /// `/poke on`: arm, restore default-on re-arming, and start a fresh cycle.
     pub fn enable(&mut self) {
-        *self = Self::new(true);
+        self.default_on = true;
+        self.armed = true;
+        self.reset_cycle();
     }
 
     /// `/poke off` or a circuit breaker that must stick for the session.
     pub fn disable(&mut self) {
-        *self = Self::new(false);
+        self.default_on = false;
+        self.armed = false;
+        self.reset_cycle();
     }
 
     /// Forget per-cycle progress without changing whether poking is enabled.
@@ -153,13 +215,26 @@ impl FollowUpPolicy {
     pub fn reset_cycle(&mut self) {
         let enabled = self.default_on;
         let armed = self.armed;
+        let gate_digest_enabled = self.gate_digest_enabled;
         *self = Self::new(enabled);
         self.armed = armed;
+        self.gate_digest_enabled = gate_digest_enabled;
     }
 
     /// Decide the next follow-up after a turn ended. The caller must already
     /// have checked that no user prompt or other follow-up is pending.
     pub fn decide(&mut self, snapshot: &TodoSnapshot) -> Decision {
+        self.decide_after_turn(snapshot, false)
+    }
+
+    /// Decide after a turn, suppressing only the final-response handoff when
+    /// that turn already delivered a final response. All work and quality
+    /// gates still run, and clean completion is latched for this todo state.
+    pub fn decide_after_turn(
+        &mut self,
+        snapshot: &TodoSnapshot,
+        final_response_delivered: bool,
+    ) -> Decision {
         let todos = &snapshot.todos;
         let goals = &snapshot.goals;
         // A circuit breaker clears `armed` while every todo is complete. Re-arm
@@ -180,10 +255,30 @@ impl FollowUpPolicy {
             }
             self.final_response_fingerprint = None;
             self.final_response_requested = false;
-            self.digest_delivered = false;
             self.gate_attempts = 0;
             self.spike_challenged = false;
+            self.gate_digest_delivered = false;
             self.last_ownership_fingerprint = None;
+        }
+
+        let incomplete: Vec<&TodoItem> = todos.iter().filter(|t| is_incomplete_todo(t)).collect();
+        let actionable: Vec<&TodoItem> = incomplete
+            .iter()
+            .copied()
+            .filter(|todo| {
+                !todo_waits_on_running_task(todo, |id| {
+                    snapshot
+                        .running_background_tasks
+                        .iter()
+                        .any(|running| running == id)
+                })
+            })
+            .collect();
+        if !incomplete.is_empty() && actionable.is_empty() {
+            // Waiting is not resistance or completion. A completion wake will
+            // re-enter the policy with fresh runtime facts and a fresh budget.
+            self.incomplete_budget = IncompleteTodoBudget::default();
+            return Decision::default();
         }
 
         if !todos.is_empty() && snapshot.long_session_review_due {
@@ -198,36 +293,39 @@ impl FollowUpPolicy {
             });
         }
 
-        let incomplete: Vec<&TodoItem> = todos.iter().filter(|t| is_incomplete_todo(t)).collect();
         if !incomplete.is_empty() {
-            return self.poke_incomplete(&incomplete);
+            return self.poke_incomplete(&actionable);
         }
 
         // Completing or removing the list ends the prior poke cycle.
-        self.last_poke_fingerprint = None;
+        self.incomplete_budget = IncompleteTodoBudget::default();
         if todos.is_empty() {
             // Stay armed: a todo-free turn must not disable poking for later
             // turns that do leave work open.
             self.final_response_requested = false;
             self.last_ownership_fingerprint = None;
+            self.gate_digest_delivered = false;
             return Decision::default();
         }
 
-        // Deferred quality checks land once, at the end of the work.
-        let mut effects = TodoEffects::default();
-        if !self.digest_delivered && !snapshot.gate_observations.is_empty() {
-            effects.clear_gate_observations = true;
-            if let Some(digest) =
-                build_gate_digest(&snapshot.gate_observations, &snapshot.plan, goals)
-            {
-                self.digest_delivered = true;
-                return Decision::send(
-                    FollowUpKind::GateDigest,
-                    digest,
-                    "🔍 We asked the agent to double-check this turn's weak points.",
-                )
-                .with_effects(effects);
-            }
+        // Observations are diagnostic by default. Explicit opt-in allows one
+        // aggregate reminder before the existing completion gates.
+        let effects = TodoEffects {
+            clear_gate_observations: !snapshot.gate_observations.is_empty(),
+            ..TodoEffects::default()
+        };
+        if self.gate_digest_enabled
+            && !self.gate_digest_delivered
+            && let Some(message) =
+                crate::build_gate_digest(&snapshot.gate_observations, &snapshot.plan, goals)
+        {
+            self.gate_digest_delivered = true;
+            return Decision::send(
+                FollowUpKind::GateDigest,
+                message,
+                "🔍 Double-checking this turn's weak points...",
+            )
+            .with_effects(effects);
         }
 
         let ownership_needs_followup = !completed_groups_have_sufficient_delivery(todos, goals);
@@ -278,7 +376,6 @@ impl FollowUpPolicy {
             self.armed = false;
             self.spike_challenged = false;
             self.gate_attempts = 0;
-            self.digest_delivered = false;
             return Decision {
                 notice: Some(
                     "⚠️ We nudged the agent several times but its validation still isn't holding up. We stopped poking; review the remaining todos yourself."
@@ -291,18 +388,20 @@ impl FollowUpPolicy {
 
         // Cycle finished cleanly.
         self.armed = self.default_on;
-        self.digest_delivered = false;
         self.gate_attempts = 0;
         if !self.final_response_requested {
             self.final_response_requested = true;
             self.final_response_fingerprint = fingerprint;
+            if final_response_delivered {
+                return Decision {
+                    effects,
+                    ..Decision::default()
+                };
+            }
             return Decision::send(
                 FollowUpKind::FinalResponse,
                 TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string(),
-                format!(
-                    "✅ All todos done. Completion confidence: {}.",
-                    summary.label()
-                ),
+                String::new(),
             )
             .with_effects(effects);
         }
@@ -312,19 +411,19 @@ impl FollowUpPolicy {
     fn poke_incomplete(&mut self, incomplete: &[&TodoItem]) -> Decision {
         self.final_response_requested = false;
         // Open work begins a new completion cycle.
+        self.gate_digest_delivered = false;
         self.spike_challenged = false;
         self.last_ownership_fingerprint = None;
-        let message = build_auto_poke_message(incomplete.len());
-        let fingerprint = serde_json::to_string(incomplete).unwrap_or_else(|_| message.clone());
-        if self.last_poke_fingerprint.as_ref() == Some(&fingerprint) {
-            // Same open work as the last poke: the model is stalled, not
-            // progressing. Do not loop.
+        let todos: Vec<_> = incomplete.iter().map(|todo| (*todo).clone()).collect();
+        let message = build_actionable_poke_message(&todos);
+        if !self.incomplete_budget.allow_follow_up(&todos) {
+            // Stop after three automatic retries without progress. Keep the
+            // configured enablement so changed work can start a fresh budget.
             return Decision::default();
         }
         // Open todos mean the model is iterating; gate exhaustion only trips
         // when the gate itself stops moving.
         self.gate_attempts = 0;
-        self.last_poke_fingerprint = Some(fingerprint);
         let count = incomplete.len();
         Decision::send(
             FollowUpKind::IncompleteTodos,

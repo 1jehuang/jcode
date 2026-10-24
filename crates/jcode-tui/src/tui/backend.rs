@@ -294,6 +294,10 @@ pub(crate) trait RemoteEventState {
     fn get_tool_input(&self, id: &str) -> serde_json::Value;
     fn handle_tool_exec(&mut self, id: &str, name: &str);
     fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String;
+    // Replays deliberately do not use wall-clock time: playback speed is arbitrary.
+    fn take_tool_duration(&mut self, _id: &str) -> Option<f32> {
+        None
+    }
     fn clear_pending(&mut self);
     fn call_output_tokens_seen(&mut self) -> &mut u64;
     fn reset_call_output_tokens_seen(&mut self);
@@ -967,6 +971,14 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Ask the daemon to write the active session to disk now.
+    pub async fn persist_session(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::PersistSession { id }).await?;
+        Ok(id)
+    }
+
     pub async fn rename_session(&mut self, title: Option<String>) -> Result<()> {
         let request = Request::RenameSession {
             id: self.next_request_id,
@@ -1536,6 +1548,10 @@ impl RemoteEventState for RemoteConnection {
 
     fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
         Self::handle_tool_done(self, id, name, output)
+    }
+
+    fn take_tool_duration(&mut self, id: &str) -> Option<f32> {
+        self.tool_diff.take_tool_duration(id)
     }
 
     fn clear_pending(&mut self) {

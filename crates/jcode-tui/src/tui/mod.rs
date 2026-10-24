@@ -28,10 +28,13 @@ pub struct BackgroundTaskRow {
 }
 
 pub mod backend;
+mod cloud_git;
+mod cloud_status;
 pub(crate) mod color_support;
 mod core;
 pub(crate) mod fuzzy;
 pub mod herdr;
+mod info_widget_cloud;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.
@@ -984,7 +987,7 @@ pub trait TuiState {
     fn client_update_available(&self) -> bool;
     /// Whether a newer server binary is available (remote mode)
     fn server_update_available(&self) -> Option<bool>;
-    /// Get info widget data (todos, client count, etc.)
+    /// Get info widget data (runtime, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
 
     /// Whether the inline swarm gallery band should be shown above the chat.
@@ -1551,7 +1554,7 @@ pub struct LoginImportPrompt {
     pub summary_pill: ImportSummaryPill,
     /// `Some` while the telemetry settings sub-page is open, holding the
     /// highlighted choice.
-    pub telemetry: Option<TelemetryChoice>,
+    pub telemetry: Option<TelemetryPage>,
     /// Whether the environment (JCODE_NO_TELEMETRY / DO_NOT_TRACK) already
     /// forces telemetry off, so the sub-page should say so.
     pub telemetry_env_forced_off: bool,
@@ -1572,15 +1575,13 @@ pub enum ImportSummaryPill {
     Telemetry,
 }
 
-/// The highlighted option on the telemetry settings sub-page.
+/// The telemetry settings sub-page: a Continue button (row 0) followed by one
+/// checkbox per [`crate::telemetry::TelemetryCategory`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TelemetryChoice {
-    /// Usage stats plus prompt/transcript content.
-    Everything,
-    /// Usage stats and crash reports only.
-    NoContent,
-    /// Nothing at all.
-    Nothing,
+pub struct TelemetryPage {
+    /// 0 = Continue, 1.. = category rows.
+    pub cursor: usize,
+    pub checked: [bool; 6],
 }
 
 /// One row in the login-import checkbox list.

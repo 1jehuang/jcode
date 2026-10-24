@@ -6,24 +6,32 @@ a standard config file. Edit freely: override globally at
 -->
 
 Model routing guidance for spawned swarm agents. Pass `model` to choose a model
-for newly spawned workers, including workers created by assignment or `run_plan`.
+for newly spawned workers, including workers created by assignment or `launch`.
 An explicit model overrides `agents.swarm_model`. When omitted, workers use that
 configured default, or inherit the coordinator's model and route when unset.
 Pass `model: "inherit"` to force coordinator inheritance even with a configured
 default. Model selection does not change reused workers. Run `swarm list_models`
 to check available models/routes. Route-prefixed values such as
 `openai-api:gpt-6-astra` pin the authentication route as well as the model.
-Pass `effort` when spawning or assigning swarm work:
+Use `[agents] swarm_model` to set the default for future worker spawns, and
+the `model` parameter for task-specific choices. Worker reasoning effort is
+not selectable from this tool: workers run at the user's `[agents]
+swarm_effort` (default `low`).
 
-- Implementation tasks: `effort: "low"`.
-- Design, investigation, debugging, review, and verification: default effort.
-- Context fetching / bulk reading / summarization: `effort: "none"`.
-- Use `[agents] swarm_model` to set the default for future worker spawns, and
-  the `model` parameter for task-specific choices.
+What to spawn workers for:
+
+- Spawn workers to implement: build features, fix bugs, write tests, migrate
+  or refactor code. Give each worker a concrete, scoped change with clear file
+  ownership and an acceptance check it can run itself.
+- Do not spawn reviewers, auditors, critics, or verifier agents. Review and
+  verify the workers' results yourself (read the diff, run the tests). Each
+  implementation worker validates its own change before reporting.
+- Avoid pure research or scouting workers. Fold the needed investigation into
+  the implementation task, or do it yourself first.
 
 Structure guidance for spawned swarm agents:
 
-- Always pass `label` when spawning (e.g. `label: "api reviewer"`) so the swarm
+- Always pass `label` when spawning (e.g. `label: "auth refactor"`) so the swarm
   UI shows what each agent is for. The explicit `spawn` action rejects missing or
   blank labels.
 - Only the root session may spawn agents. Workers must complete their assigned

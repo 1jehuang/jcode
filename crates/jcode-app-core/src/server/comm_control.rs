@@ -1427,7 +1427,9 @@ async fn handle_comm_assign_task_with_mode(
             .get(&req_session_id)
             .and_then(|member| member.friendly_name.clone())
     };
-    let notification = if let Some(ref extra) = message {
+    let brief =
+        super::swarm_todo_link::assignment_brief(&req_session_id, &selected_task_id, &content);
+    let mut notification = if let Some(ref extra) = message {
         format!(
             "Task assigned to you by coordinator: {} — {}",
             content, extra
@@ -1435,6 +1437,10 @@ async fn handle_comm_assign_task_with_mode(
     } else {
         format!("Task assigned to you by coordinator: {}", content)
     };
+    if let Some(brief) = brief.as_deref() {
+        notification.push_str("\n\n");
+        notification.push_str(brief);
+    }
     let queued_task_prompt = append_swarm_completion_report_instructions(&notification);
     let assignment_text = combine_assignment_text(&content, message.as_deref());
     set_member_task_label(&target_session, &assignment_text, swarm_members).await;

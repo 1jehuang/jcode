@@ -44,7 +44,7 @@ use tokio::sync::mpsc;
 #[cfg(feature = "aws-sdk")]
 use tokio_stream::wrappers::ReceiverStream;
 
-const DEFAULT_MODEL: &str = "anthropic.claude-3-5-sonnet-20241022-v2:0";
+const DEFAULT_MODEL: &str = "anthropic.claude-opus-5-5";
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4096;
 
 #[cfg(feature = "aws-sdk")]
@@ -95,6 +95,7 @@ struct PersistedCatalog {
 
 pub struct BedrockProvider {
     model: Arc<RwLock<String>>,
+    effort: Arc<RwLock<Option<String>>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
     fetched_inference_profiles: Arc<RwLock<Vec<String>>>,
     profile_required_models: Arc<RwLock<HashSet<String>>>,
@@ -113,7 +114,12 @@ impl BedrockProvider {
     /// the current model is anything other than the placeholder, so explicit
     /// user, env and session choices always win. Returns whether it switched.
     pub fn replace_placeholder_default_model(&self, model: &str) -> bool {
-        if std::env::var_os("JCODE_BEDROCK_MODEL").is_some() || model.trim().is_empty() {
+        if std::env::var_os("JCODE_BEDROCK_MODEL").is_some()
+            || model.trim().is_empty()
+            // Resolve the built-in flagship against the runtime client's actual
+            // region, not an automatically ranked global/foreign catalog route.
+            || Self::normalize_model_id(model) == DEFAULT_MODEL
+        {
             return false;
         }
         match self.model.write() {
@@ -143,6 +149,7 @@ impl BedrockProvider {
             std::env::var("JCODE_BEDROCK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let provider = Self {
             model: Arc::new(RwLock::new(model)),
+            effort: Arc::new(RwLock::new(Self::env_or_config("JCODE_BEDROCK_EFFORT"))),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
             fetched_inference_profiles: Arc::new(RwLock::new(Vec::new())),
             profile_required_models: Arc::new(RwLock::new(HashSet::new())),
@@ -661,7 +668,23 @@ impl BedrockProvider {
     }
 
     #[cfg(feature = "aws-sdk")]
-    fn inference_config() -> Option<InferenceConfiguration> {
+    fn additional_request_fields(&self) -> Result<Option<aws_smithy_types::Document>> {
+        let Some(effort) = self.reasoning_effort() else {
+            return Ok(None);
+        };
+        let effort = effort.trim().to_ascii_lowercase();
+        if !matches!(effort.as_str(), "low" | "medium" | "high" | "xhigh" | "max") {
+            anyhow::bail!(
+                "Invalid JCODE_BEDROCK_EFFORT: expected low, medium, high, xhigh, or max"
+            );
+        }
+        Ok(Some(Self::json_to_document(
+            &json!({"output_config": {"effort": effort}}),
+        )))
+    }
+
+    #[cfg(feature = "aws-sdk")]
+    fn inference_config(model: &str) -> Option<InferenceConfiguration> {
         let max_tokens = std::env::var("JCODE_BEDROCK_MAX_TOKENS")
             .ok()
             .and_then(|v| v.trim().parse::<i32>().ok())
@@ -684,6 +707,13 @@ impl BedrockProvider {
                     .collect::<Vec<_>>()
             })
             .filter(|v| !v.is_empty());
+        // Opus 5.5 rejects non-default sampling parameters. Omit them,
+        // including legacy environment overrides, while preserving token/stop settings.
+        let (temperature, top_p) = if Self::normalize_model_id(model) == DEFAULT_MODEL {
+            (None, None)
+        } else {
+            (temperature, top_p)
+        };
         if max_tokens.is_none()
             && temperature.is_none()
             && top_p.is_none()
@@ -701,12 +731,40 @@ impl BedrockProvider {
         )
     }
 
+    /// Resolve only the bare Opus default. Explicit profiles (including global)
+    /// and application profile ARNs are user choices and are never rewritten.
+    /// Keep this allowlist aligned with AWS's Opus 5.5 model card. Unknown and
+    /// global-only regions fail closed rather than silently exporting data.
+    // Canada is intentionally not mapped to US: that profile can leave Canada.
+    // GovCloud is also left explicit rather than assuming commercial routing.
+    #[cfg_attr(not(feature = "aws-sdk"), allow(dead_code))]
+    fn opus_default_route(model: &str, region: Option<&str>) -> Result<String> {
+        if model != DEFAULT_MODEL {
+            return Ok(model.to_string());
+        }
+        let prefix = match region {
+            Some("eu-west-2") => return Ok(model.to_string()),
+            Some("us-east-1" | "us-east-2" | "us-west-1" | "us-west-2") => "us",
+            Some(
+                "eu-central-1" | "eu-central-2" | "eu-north-1" | "eu-south-1" | "eu-south-2"
+                | "eu-west-1" | "eu-west-3",
+            ) => "eu",
+            Some("ap-southeast-2" | "ap-southeast-4") => "au",
+            Some("ap-northeast-1" | "ap-northeast-3") => "jp",
+            _ => anyhow::bail!(
+                "No geography-safe Claude Opus 5.5 default for Bedrock region {:?}. Choose an explicit inference profile with JCODE_BEDROCK_MODEL (global profiles allow worldwide routing), or choose a supported region.",
+                region
+            ),
+        };
+        Ok(format!("{prefix}.{DEFAULT_MODEL}"))
+    }
+
     fn normalize_model_id(model: &str) -> String {
         let mut value = model.trim().to_string();
         if let Some((_, tail)) = value.rsplit_once('/') {
             value = tail.to_string();
         }
-        for prefix in ["us.", "eu.", "apac.", "global."] {
+        for prefix in ["us.", "eu.", "au.", "jp.", "apac.", "global."] {
             if let Some(stripped) = value.strip_prefix(prefix) {
                 value = stripped.to_string();
                 break;
@@ -733,7 +791,7 @@ impl BedrockProvider {
     fn foundation_model_id_from_profile_id(profile_id: &str) -> Option<String> {
         let id = profile_id.trim();
         let id = Self::inference_profile_id_from_arn(id).unwrap_or_else(|| id.to_string());
-        for prefix in ["us.", "eu.", "apac.", "global."] {
+        for prefix in ["us.", "eu.", "au.", "jp.", "apac.", "global."] {
             if let Some(model) = id.strip_prefix(prefix)
                 && !model.is_empty()
             {
@@ -815,6 +873,11 @@ impl BedrockProvider {
             return None;
         }
 
+        // The new default must never inherit a cached global/foreign profile.
+        if model == DEFAULT_MODEL {
+            return Some(model.to_string());
+        }
+
         if let Ok(routes) = self.inference_profile_routes.read()
             && let Some(route) = routes.get(model).cloned()
         {
@@ -868,7 +931,16 @@ impl BedrockProvider {
 
     fn model_info(model: &str) -> BedrockModelInfo {
         let id = Self::normalize_model_id(model).to_ascii_lowercase();
-        if id.contains("claude-opus-4") || id.contains("claude-sonnet-4") {
+        if id == DEFAULT_MODEL {
+            BedrockModelInfo {
+                context_tokens: 1_000_000,
+                max_output_tokens: 128_000,
+                supports_tools: true,
+                supports_vision: true,
+                supports_reasoning: true,
+                pricing: None,
+            }
+        } else if id.contains("claude-opus-4") || id.contains("claude-sonnet-4") {
             BedrockModelInfo {
                 context_tokens: 200_000,
                 max_output_tokens: 64_000,
@@ -997,6 +1069,7 @@ impl BedrockProvider {
 
     fn known_models() -> Vec<&'static str> {
         vec![
+            DEFAULT_MODEL,
             "anthropic.claude-3-5-sonnet-20241022-v2:0",
             "anthropic.claude-3-5-haiku-20241022-v1:0",
             "anthropic.claude-3-7-sonnet-20250219-v1:0",
@@ -1019,7 +1092,7 @@ impl BedrockProvider {
             .map(|guard| guard.clone())
             .unwrap_or_default();
         let should_hide_duplicate_foundation_model =
-            |model: &str| inference_profile_routes.contains_key(model);
+            |model: &str| model != DEFAULT_MODEL && inference_profile_routes.contains_key(model);
         for model in Self::known_models().into_iter().map(str::to_string) {
             if should_hide_duplicate_foundation_model(&model) {
                 continue;
@@ -1173,7 +1246,11 @@ impl Provider for BedrockProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         Self::validate_credentials_if_requested().await?;
-        let model = self.model();
+        let client = Self::runtime_client().await;
+        let model = Self::opus_default_route(
+            &self.model(),
+            client.config().region().map(|region| region.as_ref()),
+        )?;
         let info = Self::model_info(&model);
         let request_messages = Self::to_bedrock_messages(messages, info.supports_vision)?;
         let tool_config = if info.supports_tools {
@@ -1181,7 +1258,8 @@ impl Provider for BedrockProvider {
         } else {
             None
         };
-        let inference_config = Self::inference_config();
+        let inference_config = Self::inference_config(&model);
+        let additional_fields = self.additional_request_fields()?;
         let system_blocks = if system.trim().is_empty() {
             None
         } else {
@@ -1226,10 +1304,10 @@ impl Provider for BedrockProvider {
         );
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(64);
         tokio::spawn(async move {
-            let client = Self::runtime_client().await;
             let mut req = client
                 .converse_stream()
                 .model_id(model.clone())
+                .set_additional_model_request_fields(additional_fields)
                 .set_messages(Some(request_messages));
             if let Some(system_blocks) = system_blocks {
                 req = req.set_system(Some(system_blocks));
@@ -1347,6 +1425,34 @@ impl Provider for BedrockProvider {
 
     fn model(&self) -> String {
         self.model.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        if Self::normalize_model_id(&self.model()) != DEFAULT_MODEL {
+            return None;
+        }
+        Some(
+            self.effort
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+                .unwrap_or_else(|| "low".to_string()),
+        )
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let effort = effort.trim().to_ascii_lowercase();
+        if !matches!(
+            effort.as_str(),
+            "low" | "medium" | "high" | "xhigh" | "max" | "default"
+        ) {
+            anyhow::bail!(
+                "Bedrock Opus 5.5 effort must be low, medium, high, xhigh, max, or default"
+            );
+        }
+        *self.effort.write().unwrap_or_else(|p| p.into_inner()) =
+            (effort != "default").then_some(effort);
+        Ok(())
     }
 
     fn supports_image_input(&self) -> bool {
@@ -1487,6 +1593,12 @@ impl Provider for BedrockProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             model: Arc::new(RwLock::new(self.model())),
+            effort: Arc::new(RwLock::new(
+                self.effort
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            )),
             fetched_models: self.fetched_models.clone(),
             fetched_inference_profiles: self.fetched_inference_profiles.clone(),
             profile_required_models: self.profile_required_models.clone(),

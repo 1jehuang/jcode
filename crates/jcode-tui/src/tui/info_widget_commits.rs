@@ -2,14 +2,15 @@
 //!
 //! The Changes widget answers "what is dirty". This one answers "what did we
 //! just commit, and has it been pushed". Border layout: `Commits` top-left,
-//! the unpushed count top-right, overflow bottom-left.
+//! overflow bottom-left, the unpushed count bottom-right. Fully shown pushed
+//! history confirms its push state on the bottom border instead.
 //!
 //! ```text
-//! ╭ Commits ──────────────────── ↑2 unpushed ╮
+//! ╭ Commits ────────────────────────────────╮
 //! │● e4b4d3a swarm dock lists each ag… 2m  │
 //! │● e205d0f info widgets put headers… 14m │
 //! │  4f6bf8e replay reasoning before t… 1h │
-//! ╰ +5 more ─────────────────────────────────╯
+//! ╰ +5 more ─────────────────── ↑2 unpushed ╯
 //! ```
 
 use super::frame::{self, Framed};
@@ -81,7 +82,7 @@ fn render_commits_at(data: &InfoWidgetData, inner: Rect, now: i64) -> Framed {
     // `ahead` counts past the fetched window; prefer it when larger.
     let unpushed = unpushed.max(info.ahead);
     if unpushed > 0 {
-        framed = framed.title_right(Span::styled(
+        framed = framed.footer_right(Span::styled(
             format!("↑{unpushed} unpushed"),
             Style::default().fg(rgb(140, 180, 255)),
         ));
@@ -89,6 +90,8 @@ fn render_commits_at(data: &InfoWidgetData, inner: Rect, now: i64) -> Framed {
     let hidden = info.recent_commits.len() - rows;
     if hidden > 0 {
         framed = framed.footer(frame::more(hidden));
+    } else if unpushed == 0 {
+        framed = framed.footer(frame::dim("all pushed"));
     }
     framed
 }
@@ -209,7 +212,7 @@ mod tests {
         assert!(first.ends_with(" 2m"), "{first}");
         assert!(first.contains("+120 −46"), "{first}");
         assert!(text(&f.lines[2]).starts_with("  4f6bf8e"));
-        assert!(text(f.title_right.as_ref().unwrap()).contains("↑2 unpushed"));
+        assert!(text(f.footer_right.as_ref().unwrap()).contains("↑2 unpushed"));
         for line in &f.lines {
             assert!(line.width() <= 60);
         }
@@ -223,6 +226,20 @@ mod tests {
         let f = render_commits_at(&data(commits, 0), Rect::new(0, 0, 40, 20), NOW);
         assert_eq!(f.lines.len(), COMMITS_MAX_ROWS);
         assert!(text(f.footer.as_ref().unwrap()).contains("+3 more"));
+    }
+
+    #[test]
+    fn pushed_history_footer_reports_push_state_not_duplicate_age() {
+        let d = data(
+            vec![
+                commit("aaa", "first", 60, false),
+                commit("bbb", "second", 180, false),
+            ],
+            0,
+        );
+        let card = render_commits_at(&d, Rect::new(0, 0, 40, 5), NOW);
+        assert_eq!(text(card.footer.as_ref().unwrap()), "all pushed");
+        assert!(card.title_right.is_none());
     }
 
     #[test]

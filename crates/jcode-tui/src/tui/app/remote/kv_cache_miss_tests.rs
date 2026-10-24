@@ -253,9 +253,14 @@ fn remote_compaction_notice_follows_buffered_response() {
     assert!(
         app.display_messages[count - 1]
             .content
-            .starts_with("📦 Compacted (automatic): ~216,517 tokens")
+            .starts_with("📦 Compacted (automatic): from ~216,517 tokens")
     );
     assert!(!app.display_messages[count - 1].content.contains("unknown"));
+    assert!(
+        !app.display_messages[count - 1]
+            .content
+            .contains("unavailable")
+    );
     assert!(app.streaming.streaming_text.is_empty());
 }
 

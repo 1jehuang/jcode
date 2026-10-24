@@ -13,14 +13,74 @@ fn with_ssh_remote_test_home(f: impl FnOnce()) {
             }
         }
         let _restore = RestoreEnv(
-            ["JCODE_SSH_REMOTE", "JCODE_SOCKET", "JCODE_SELFDEV"]
-                .into_iter()
-                .map(|key| (key, std::env::var_os(key)))
-                .collect(),
+            [
+                "JCODE_SSH_REMOTE",
+                "JCODE_SOCKET",
+                "JCODE_SELFDEV",
+                "JCODE_CLOUD_HANDOFF_PREVIEW_SESSION",
+                "JCODE_CLOUD_CONTINUE_MESSAGE",
+            ]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
         );
         crate::env::set_var("JCODE_SSH_REMOTE", "test-remote");
         crate::env::remove_var("JCODE_SELFDEV");
         f();
+    });
+}
+
+#[test]
+fn ssh_cloud_handoff_previews_matching_transcript_once() {
+    with_ssh_remote_test_home(|| {
+        let mut local = crate::session::Session::create(None, None);
+        local.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "conversation before cloud handoff".into(),
+                cache_control: None,
+            }],
+        );
+        local.model = Some("gpt-5.4".into());
+        local.save().expect("save handoff source");
+        crate::env::set_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", &local.id);
+        let app = App::new_for_remote(Some(local.id.clone()));
+        assert!(app.display_messages().iter().any(|message| {
+            message
+                .content
+                .contains("conversation before cloud handoff")
+        }));
+        assert!(app.session.messages.is_empty());
+        assert!(app.session.working_dir.is_none());
+        assert!(app.remote_startup_phase.is_some());
+        assert_eq!(
+            app.effective_remote_provider_model().as_deref(),
+            Some("gpt-5.4")
+        );
+        assert!(std::env::var_os("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION").is_none());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
+        let frame_text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            frame_text.contains("conversation before cloud handoff"),
+            "{frame_text}"
+        );
+        assert!(!frame_text.contains("loading session"), "{frame_text}");
+
+        let ordinary_resume = App::new_for_remote(Some(local.id.clone()));
+        assert!(ordinary_resume.display_messages().is_empty());
+        crate::env::set_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "another-session");
+        let mismatched = App::new_for_remote(Some(local.id));
+        assert!(mismatched.display_messages().is_empty());
     });
 }
 

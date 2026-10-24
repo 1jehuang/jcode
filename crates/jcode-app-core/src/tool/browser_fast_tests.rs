@@ -1,3 +1,4 @@
+use super::browser_fast_actions::risky;
 use super::*;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -223,9 +224,9 @@ async fn sensitive_pages_never_reach_transport() {
         result["reason"]
             .as_str()
             .unwrap()
-            .contains("Never reset passwords")
+            .contains("complete a CAPTCHA")
     );
-    // #1743: the main agent must know to ask the user to sign in and resume.
+    // The main agent must know to ask the user to complete the challenge and resume.
     assert_eq!(result["requested_help"], "user_login");
     assert!(result["reason"].as_str().unwrap().contains("same tab_id"));
     assert!(transport.observed.lock().unwrap().is_empty());
@@ -456,14 +457,40 @@ fn auto_candidates_filter_risky_controls_and_use_only_supplied_text() {
     assert!(
         !options
             .iter()
-            .any(|c| matches!(c.input.selector.as_deref(), Some("#bad" | "#send" | "#pw")))
+            .any(|c| matches!(c.input.selector.as_deref(), Some("#bad" | "#send")))
     );
-    let typing = options.iter().find(|c| c.input.action == "type").unwrap();
+    let typing = options
+        .iter()
+        .find(|c| c.input.action == "type" && c.input.selector.as_deref() == Some("#q"))
+        .unwrap();
+    let password = options
+        .iter()
+        .find(|c| c.input.action == "type" && c.input.selector.as_deref() == Some("#pw"))
+        .unwrap();
+    assert_eq!(password.input.text.as_deref(), Some("trusted query"));
+    assert_eq!(password.input.submit, Some(false));
     assert_eq!(typing.input.text.as_deref(), Some("trusted query"));
     assert_eq!(typing.input.submit, Some(false));
     let select = options.iter().find(|c| c.input.action == "select").unwrap();
     assert_eq!(select.input.text.as_deref(), Some("en"));
 }
+#[test]
+fn password_workflows_are_not_blanket_blocked() {
+    for label in [
+        "Reset password",
+        "Password",
+        "OTP",
+        "Verification code",
+        "Security code",
+    ] {
+        assert!(!risky(label), "{label}");
+    }
+    assert!(risky("CAPTCHA"));
+    assert!(risky("Pay now"));
+    assert!(!OBSERVE_SCRIPT.contains("type==='password'"));
+    assert!(OBSERVE_SCRIPT.contains("if(/captcha/i.test(body))sensitive=true;"));
+}
+
 #[test]
 fn candidates_are_capped_below_model_limit() {
     let mut input = input();
@@ -631,6 +658,7 @@ async fn credentials_in_page_never_reach_transport_or_parent() {
         assert_eq!(value["status"], "hand_back");
         assert!(!value.to_string().contains(secret));
         assert!(value["final_observation"]["sensitive"] == true);
+        assert_eq!(value["requested_help"], "direct_actions");
         assert!(transport.observed.lock().unwrap().is_empty());
     }
 }

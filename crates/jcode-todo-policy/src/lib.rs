@@ -7,12 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod completion_report;
 pub mod followup;
 pub mod store;
 
 pub use followup::{
-    ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy, MAX_GATE_ATTEMPTS,
-    TodoEffects, TodoSnapshot, is_incomplete_todo,
+    ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy,
+    INCOMPLETE_TODO_MAX_ATTEMPTS, IncompleteTodoBudget, MAX_GATE_ATTEMPTS, TodoEffects,
+    TodoSnapshot, is_incomplete_todo, todo_waits_on_running_task,
 };
 
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
@@ -654,6 +656,29 @@ pub fn build_auto_poke_message(incomplete_count: usize) -> String {
     )
 }
 
+/// Name the actionable subset so a model is not nudged to work on other todos
+/// whose background dependencies are still running. Keep the historical prefix
+/// for transcript classification and cap labels like the other gate prompts.
+pub fn build_actionable_poke_message(actionable: &[TodoItem]) -> String {
+    let mut message = build_auto_poke_message(actionable.len());
+    message.push_str("\nActionable todos:");
+    for todo in actionable.iter().take(GATE_NAMED_TODO_LIMIT) {
+        message.push_str(&format!("\n- {}: {}", todo.id, quoted_todo_label(todo)));
+    }
+    if actionable.len() > GATE_NAMED_TODO_LIMIT {
+        message.push_str(&format!(
+            "\n- {} more actionable todos",
+            actionable.len() - GATE_NAMED_TODO_LIMIT
+        ));
+    }
+    message.push('\n');
+    message.push_str(ACTIONABLE_POKE_WAIT_GUIDANCE);
+    message
+}
+
+const ACTIONABLE_POKE_WAIT_GUIDANCE: &str =
+    "Leave todos waiting on still-running background tasks alone until their dependencies finish.";
+
 /// Longest list of named todos a gate continuation will spell out, so a big
 /// plan cannot turn one nudge into a wall of text.
 const GATE_NAMED_TODO_LIMIT: usize = 6;
@@ -743,9 +768,13 @@ pub fn build_todo_confidence_spike_continuation_message(todos: &[TodoItem]) -> S
 /// reload/resume/remote attach.
 pub fn is_auto_poke_message(message: &str) -> bool {
     let trimmed = message.trim();
+    let first_line = trimmed.lines().next().unwrap_or_default();
     (trimmed.starts_with("You have ")
-        && trimmed.contains(" incomplete todo")
-        && trimmed.ends_with("update the todo tool."))
+        && first_line.contains(" incomplete todo")
+        && first_line.ends_with("update the todo tool.")
+        && (trimmed == first_line
+            || (trimmed[first_line.len()..].starts_with("\nActionable todos:")
+                && trimmed.ends_with(ACTIONABLE_POKE_WAIT_GUIDANCE))))
         || trimmed.starts_with(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_TODO_REMINDER_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
@@ -893,3 +922,5 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+pub mod stages;

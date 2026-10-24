@@ -3,6 +3,173 @@ use super::*;
 
 use super::streaming::{StreamUsageRecorder, find_wrap_marker_incremental};
 
+const TOOL_FOREGROUND_BUDGET: Duration = Duration::from_secs(3);
+
+fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
+    !(name == "bg" && input.get("action").and_then(|value| value.as_str()) == Some("wait"))
+}
+
+/// SDK callbacks and nonstreaming turns use the same policy as TUI turns.
+pub(super) async fn execute_with_background(
+    registry: Registry,
+    name: String,
+    input: serde_json::Value,
+    ctx: ToolContext,
+) -> Result<crate::tool::ToolOutput> {
+    let auto_background = auto_background_allowed(&name, &input);
+    let session_id = ctx.session_id.clone();
+    let tool_name = name.clone();
+    let mut work = tokio::spawn(async move { registry.execute(&tool_name, input, ctx).await });
+    tokio::select! {
+        biased;
+        result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
+        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET), if auto_background => {
+            let info = crate::background::global().adopt(&name, &session_id, work).await;
+            Ok(crate::tool::ToolOutput::new(format!(
+                "Tool '{}' was moved to background automatically after 3 seconds (task_id: {}).\n\n{}",
+                name, info.task_id, crate::tool::BACKGROUND_WAIT_GUIDANCE
+            )))
+        }
+    }
+}
+
+/// Returns true for an automatic handoff, false for a user/reload signal.
+async fn wait_for_tool_handoff(
+    bg: &InterruptSignal,
+    shutdown: &InterruptSignal,
+    auto_background: bool,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = shutdown.notified() => false,
+        _ = bg.notified() => false,
+        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET), if auto_background => true,
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    struct WaitProbe;
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for WaitProbe {
+        fn name(&self) -> &str {
+            "bg"
+        }
+        fn description(&self) -> &str {
+            "Wait probe"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: ToolContext,
+        ) -> Result<crate::tool::ToolOutput> {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            Ok(crate::tool::ToolOutput::new("wait finished"))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nonstreaming_background_wait_returns_original_result_after_budget() {
+        let registry = Registry::empty();
+        registry.register("bg".into(), Arc::new(WaitProbe)).await;
+        let ctx = ToolContext {
+            session_id: "foreground-wait-probe".into(),
+            message_id: "message".into(),
+            tool_call_id: "wait-probe".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+        let start = tokio::time::Instant::now();
+        let result = execute_with_background(
+            registry,
+            "bg".into(),
+            serde_json::json!({"action":"wait"}),
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.output, "wait finished");
+        assert_eq!(start.elapsed(), Duration::from_secs(8));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_wait_is_not_automatically_backgrounded() {
+        let input = serde_json::json!({"action": "wait", "task_id": "task"});
+        assert!(!auto_background_allowed("bg", &input));
+        assert!(auto_background_allowed(
+            "bg",
+            &serde_json::json!({"action": "status"})
+        ));
+        assert!(auto_background_allowed("bash", &input));
+        let bg = InterruptSignal::new();
+        let shutdown = InterruptSignal::new();
+        tokio::select! {
+            biased;
+            _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("bg", &input)) => {
+                panic!("bg wait was backgrounded while waiting for its dependency");
+            }
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+        }
+        // Reloads still interrupt a wait safely, without waiting for its deadline.
+        shutdown.fire();
+        assert!(!wait_for_tool_handoff(&bg, &shutdown, false).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_tool_handoff_occurs_after_three_seconds_without_cancelling_work() {
+        let bg = InterruptSignal::new();
+        let shutdown = InterruptSignal::new();
+        let mut work = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            42
+        });
+        let start = tokio::time::Instant::now();
+        tokio::select! {
+            biased;
+            _ = &mut work => panic!("slow work completed before handoff"),
+            automatic = wait_for_tool_handoff(&bg, &shutdown, true) => assert!(automatic),
+        }
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+        assert!(!work.is_finished());
+        assert_eq!(work.await.unwrap(), 42);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fast_tool_finishes_in_foreground() {
+        let bg = InterruptSignal::new();
+        let shutdown = InterruptSignal::new();
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+            _ = wait_for_tool_handoff(&bg, &shutdown, true) => panic!("fast tool backgrounded"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_background_and_shutdown_do_not_wait_for_budget() {
+        for shutdown_requested in [false, true] {
+            let bg = InterruptSignal::new();
+            let shutdown = InterruptSignal::new();
+            if shutdown_requested {
+                shutdown.fire();
+            } else {
+                bg.fire();
+            }
+            let start = tokio::time::Instant::now();
+            assert!(!wait_for_tool_handoff(&bg, &shutdown, true).await);
+            assert_eq!(start.elapsed(), Duration::ZERO);
+        }
+    }
+}
+
 fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
     if tc.name == "selfdev" {
         return ("Reload initiated. Process restarting...".to_string(), false);
@@ -239,7 +406,7 @@ impl Agent {
             // `ModelChanged` and resync the UI/context-limit.
             let model_at_request_start = provider.model().to_string();
             let credential_at_request_start = provider.active_resolved_credential();
-            let oauth_account_label_at_request_start = provider.oauth_account_label();
+            let oauth_account_label_at_request_start = provider.serving_oauth_account_label();
             let oauth_email_at_request_start =
                 crate::server::provider_oauth_email(provider.as_ref());
             let resume_session_id = self.provider_session_id.clone();
@@ -313,17 +480,7 @@ impl Agent {
                                                 Self::MAX_CONTEXT_LIMIT_RETRIES
                                             ));
                                         }
-                                        let _ = event_tx.send(ServerEvent::Compaction {
-                                            trigger: "auto_recovery".to_string(),
-                                            pre_tokens: None,
-                                            post_tokens: None,
-                                            tokens_saved: None,
-                                            duration_ms: None,
-                                            messages_dropped: None,
-                                            messages_compacted: None,
-                                            summary_chars: None,
-                                            active_messages: None,
-                                        });
+                                        let _ = event_tx.send(self.take_recovery_compaction_event());
                                         continue;
                                     }
                                     return Err(e);
@@ -499,17 +656,7 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
-                            let _ = event_tx.send(ServerEvent::Compaction {
-                                trigger: "auto_recovery".to_string(),
-                                pre_tokens: None,
-                                post_tokens: None,
-                                tokens_saved: None,
-                                duration_ms: None,
-                                messages_dropped: None,
-                                messages_compacted: None,
-                                summary_chars: None,
-                                active_messages: None,
-                            });
+                            let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
                         log_agent_provider_stream_lifecycle(
@@ -1043,10 +1190,13 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = self
-                            .registry
-                            .execute(&tool_name, ToolCall::normalize_input_to_object(input), ctx)
-                            .await;
+                        let tool_result = super::turn_streaming_mpsc::execute_with_background(
+                            self.registry.clone(),
+                            tool_name.clone(),
+                            ToolCall::normalize_input_to_object(input),
+                            ctx,
+                        )
+                        .await;
                         if tool_result.is_err() {
                             crate::telemetry::record_tool_failure();
                         }
@@ -1107,17 +1257,7 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
-                            let _ = event_tx.send(ServerEvent::Compaction {
-                                trigger: "auto_recovery".to_string(),
-                                pre_tokens: None,
-                                post_tokens: None,
-                                tokens_saved: None,
-                                duration_ms: None,
-                                messages_dropped: None,
-                                messages_compacted: None,
-                                summary_chars: None,
-                                active_messages: None,
-                            });
+                            let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
                         log_agent_provider_stream_lifecycle(
@@ -1267,7 +1407,7 @@ impl Agent {
             let oauth_email_after_stream =
                 crate::server::provider_oauth_email(self.provider.as_ref());
             let credential_after_stream = self.provider.active_resolved_credential();
-            let oauth_account_label_after_stream = self.provider.oauth_account_label();
+            let oauth_account_label_after_stream = self.provider.serving_oauth_account_label();
             if model_after_stream != model_at_request_start
                 || credential_after_stream != credential_at_request_start
                 || oauth_email_after_stream != oauth_email_at_request_start
@@ -1365,7 +1505,8 @@ impl Agent {
             if let Some((encrypted_content, compacted_count, native_pre_tokens, native_trigger)) =
                 openai_native_compaction.take()
             {
-                self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
+                let (estimated_pre_tokens, estimated_post_tokens) =
+                    self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
                 // Native OpenAI compaction is applied after the provider stream,
                 // so `messages_for_provider()` did not have an event to emit at
                 // the top of this iteration. Notify clients now, before any
@@ -1373,14 +1514,18 @@ impl Agent {
                 // The FIFO event ordering lets the TUI invalidate its old
                 // append-only baseline before seeing the compacted signature.
                 //
-                // Only a provider-supplied pre-compaction count is trustworthy
-                // here. The response's own input usage is not the pre-compaction
-                // context size, so omit the value rather than mislabel it (#1178).
+                // Prefer a provider-supplied pre-compaction count. Otherwise use
+                // jcode's own context estimate, never the response's input usage,
+                // which is not the pre-compaction context size (#1178).
+                let pre_tokens = native_pre_tokens.or(estimated_pre_tokens);
+                let post_tokens = estimated_post_tokens;
                 let _ = event_tx.send(ServerEvent::Compaction {
                     trigger: native_trigger,
-                    pre_tokens: native_pre_tokens,
-                    post_tokens: None,
-                    tokens_saved: None,
+                    pre_tokens,
+                    post_tokens,
+                    tokens_saved: pre_tokens
+                        .zip(post_tokens)
+                        .map(|(pre, post)| pre.saturating_sub(post)),
                     duration_ms: None,
                     messages_dropped: None,
                     messages_compacted: Some(compacted_count),
@@ -1674,7 +1819,7 @@ impl Agent {
                 }
                 let tool_start = Instant::now();
 
-                // Spawn tool in its own task so we can detach it to background on Alt+B
+                // Spawn independently so automatic and Alt+B handoffs keep it running.
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
@@ -1687,12 +1832,13 @@ impl Agent {
                 // Reset background signal before waiting
                 self.background_tool_signal.reset();
 
-                // Wait for tool completion OR background signal from user (Alt+B)
-                // OR graceful shutdown signal from server reload
+                // All tools share the same default foreground budget, including
+                // tools without their own background execution support.
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
+                let mut automatic_background = false;
                 let mut tool_handle = tool_handle;
                 let running_tool_guard =
                     crate::running_tool_registry::register(self.session_id(), &tc.id, &tc.name);
@@ -1704,12 +1850,8 @@ impl Agent {
                             Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                         });
                     }
-                    _ = async {
-                        tokio::select! {
-                            _ = bg_signal.notified() => {}
-                            _ = shutdown_signal.notified() => {}
-                        }
-                    } => {
+                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, auto_background_allowed(&tc.name, &tc.input)) => {
+                        automatic_background = automatic;
                         if self.is_graceful_shutdown() && allow_reload_handoff {
                             tool_result = match tokio::time::timeout(
                                 Duration::from_millis(750),
@@ -1853,7 +1995,7 @@ impl Agent {
                     self.session.save()?;
                     return Ok(());
                 } else {
-                    // User pressed Alt+B — move tool to background
+                    // Foreground budget expired or user pressed Alt+B.
                     logging::info(&format!(
                         "Tool '{}' moved to background after {:.1}s",
                         tc.name,
@@ -1864,11 +2006,17 @@ impl Agent {
                         .adopt(&tc.name, &self.session.id, tool_handle)
                         .await;
 
+                    let reason = if automatic_background {
+                        "automatically after 3 seconds"
+                    } else {
+                        "by the user"
+                    };
                     let bg_msg = format!(
-                        "Tool '{}' was moved to background by the user (task_id: {}). \
-                         Use the `bg` tool with action 'wait' to wait for completion/checkpoints, \
-                         or action 'status'/'output' to inspect it.",
-                        tc.name, bg_info.task_id
+                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
+                        tc.name,
+                        reason,
+                        bg_info.task_id,
+                        crate::tool::BACKGROUND_WAIT_GUIDANCE
                     );
 
                     let _ = event_tx.send(ServerEvent::ToolDone {

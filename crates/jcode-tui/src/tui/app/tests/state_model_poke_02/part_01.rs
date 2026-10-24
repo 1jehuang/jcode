@@ -650,7 +650,13 @@ fn test_alt_g_opens_and_closes_commit_log_overlay() {
     };
     git(&["init", "-q"]);
     for n in 0..3 {
-        git(&["commit", "-q", "--allow-empty", "-m", &format!("commit {n}")]);
+        git(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            &format!("commit {n}"),
+        ]);
     }
     app.session.working_dir = Some(repo.path().to_string_lossy().to_string());
     let diff_mode_before = app.diff_mode;
@@ -660,7 +666,10 @@ fn test_alt_g_opens_and_closes_commit_log_overlay() {
         KeyCode::Char('g'),
         KeyModifiers::ALT
     ));
-    assert_eq!(app.diff_mode, diff_mode_before, "Alt+G no longer cycles diffs");
+    assert_eq!(
+        app.diff_mode, diff_mode_before,
+        "Alt+G no longer cycles diffs"
+    );
     let overlay = app.commit_log_overlay.as_ref().expect("overlay opens");
     assert!(overlay.error.is_none(), "{:?}", overlay.error);
     assert!(!overlay.entries.is_empty());
@@ -688,7 +697,11 @@ fn test_swarm_effort_autocomplete_and_help() {
         .expect("swarm mode should be suggested");
     assert_eq!(*label, super::effort_display_label("swarm"));
     assert!(label.contains("[Beta]"));
-    assert!(!suggestions.iter().any(|(cmd, _)| cmd == "/effort swarm-deep"));
+    assert!(
+        !suggestions
+            .iter()
+            .any(|(cmd, _)| cmd == "/effort swarm-deep")
+    );
     let help = app.command_help("effort").expect("effort help");
     assert!(help.contains("swarm_root_effort"));
     assert!(!help.contains("swarm_deep_root_effort"));
@@ -1175,7 +1188,8 @@ fn test_context_command_reports_session_context_snapshot() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
+                details: None,
                 group: None,
                 id: "one".to_string(),
                 content: "Inspect context summary".to_string(),
@@ -1186,6 +1200,7 @@ fn test_context_command_reports_session_context_snapshot() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(77)),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");

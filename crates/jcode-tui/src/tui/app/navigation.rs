@@ -188,6 +188,12 @@ impl App {
         else {
             return false;
         };
+        // A collapsed tool-image label is also a show action. Honor it even
+        // when the global image visibility preference was previously off.
+        if !self.inline_images_visible {
+            self.inline_images_visible = true;
+            super::ui_prefs::save_inline_images_visible(true);
+        }
         let level = self.cycle_image_expand(image_id);
         let size = match level {
             crate::tui::ui::inline_image_ui::ImageExpandLevel::Fit => "fit",
@@ -1150,9 +1156,14 @@ impl App {
             .get(&image_id)
             .copied()
             .unwrap_or_default();
-        let next = ImageExpandLevel::from_index(
+        let mut next = ImageExpandLevel::from_index(
             crate::tui::mermaid::next_distinct_mermaid_inline_level(image_id, current as u8),
         );
+        // Fit is also the default collapsed state for tool images. Even a
+        // width-bound image with identical size caps must be able to open.
+        if current == ImageExpandLevel::Fit && next == ImageExpandLevel::Fit {
+            next = ImageExpandLevel::Large;
+        }
         if matches!(next, ImageExpandLevel::Fit) {
             self.expanded_images.remove(&image_id);
         } else {

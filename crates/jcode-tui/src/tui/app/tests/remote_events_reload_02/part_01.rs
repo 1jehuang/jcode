@@ -9,7 +9,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Continue working".to_string(),
@@ -20,6 +21,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -53,7 +55,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
-                    wave: None,
+                    stage: None,
+                    details: None,
                     group: None,
                     id: "todo-1".to_string(),
                     content: "Continue working".to_string(),
@@ -64,9 +67,11 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
-                    wave: None,
+                    stage: None,
+                    details: None,
                     group: None,
                     id: "todo-2".to_string(),
                     content: "Handle the newly discovered follow-up".to_string(),
@@ -77,6 +82,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    waiting_on: Vec::new(),
                 },
             ],
         )
@@ -89,7 +95,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
         assert!(app.queued_messages()[0].contains("You have 2 incomplete todos"));
-        assert!(!app.queued_messages()[0].contains("Handle the newly discovered follow-up"));
+        assert!(app.queued_messages()[0].contains("Handle the newly discovered follow-up"));
         assert!(!app.queued_messages()[0].contains("/poke off"));
     });
 }
@@ -157,7 +163,8 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
-                wave: None,
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Resume after interrupt".to_string(),
@@ -168,6 +175,7 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -770,10 +778,11 @@ fn test_handle_server_event_notification_background_task_scope_uses_failed_row()
     let text = render_and_snap(&app, &mut terminal);
 
     assert_eq!(app.display_messages().len(), 1);
-    assert!(!app
-        .display_messages()
-        .iter()
-        .any(|message| message.role == "background_task"));
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| message.role == "background_task")
+    );
     assert_eq!(
         app.background_task_rows_ref()[0].status,
         crate::tui::BackgroundTaskRowStatus::Failed
@@ -815,6 +824,8 @@ fn test_swarm_completion_notification_inserts_agent_snapshot_without_report_pros
             auth_method: Some("OAuth".to_string()),
             effort: Some("high".to_string()),
             elapsed_secs: Some(35),
+            activity_age_secs: None,
+            ..Default::default()
         },
     }];
     let rt = tokio::runtime::Runtime::new().unwrap();

@@ -896,6 +896,30 @@ impl Provider for AntigravityProvider {
         Ok(())
     }
 
+    fn context_window(&self) -> usize {
+        let selected = self.model();
+        let resolved = self.resolve_model_for_request(&selected);
+        let catalog = self.fetched_catalog();
+        // Use this route's limit and resolve aliases just as inference does.
+        let limit_for = |id: &str| {
+            catalog
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.max_tokens)
+                .and_then(|limit| usize::try_from(limit).ok())
+                .filter(|limit| *limit > 0)
+        };
+        limit_for(&resolved)
+            .or_else(|| limit_for(&selected))
+            .or_else(|| {
+                jcode_provider_core::models::context_limit_for_model_with_provider(
+                    &resolved,
+                    Some("antigravity"),
+                )
+            })
+            .unwrap_or(jcode_provider_core::models::DEFAULT_CONTEXT_LIMIT)
+    }
+
     fn supports_compaction(&self) -> bool {
         // No native server-side compaction exists for this provider, so jcode's
         // own summary compaction is the only thing standing between a long

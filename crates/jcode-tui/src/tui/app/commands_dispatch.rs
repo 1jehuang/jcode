@@ -35,6 +35,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/keys"
             | "/keybindings"
             | "/alignment"
+            | "/latex"
             | "/reasoning"
             | "/thinking"
             | "/thinking-display"
@@ -231,6 +232,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::commands::handle_dictation_command(app, trimmed)
         || app.handle_suggestions_command(trimmed)
         || super::commands::handle_config_command(app, trimmed)
+        || super::commands::handle_latex_command(app, trimmed)
         || super::commands_colors::handle_colors_command(app, trimmed)
         || super::commands::handle_log_command(app, trimmed)
         || super::commands::handle_diff_command(app, trimmed)
@@ -287,7 +289,14 @@ mod tests {
         use crate::tui::app::{input, tests::create_test_app};
         let mut app = create_test_app();
         app.is_remote = true;
-        for command in ["/config init", "/logout", "/save test", "/reload", "/git"] {
+        for command in [
+            "/config init",
+            "/logout",
+            "/save test",
+            "/reload",
+            "/git",
+            "/latex unicode",
+        ] {
             assert!(super::dispatch_local_command(&mut app, command));
             assert!(
                 app.display_messages
@@ -353,6 +362,7 @@ mod tests {
             "/rebuild",
             "/fast default on",
             "/agents",
+            "/latex unicode",
             "/subagent-model",
             "/transcript path",
             "!cat ~/.ssh/config",
