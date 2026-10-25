@@ -33,6 +33,9 @@ Structure guidance for spawned swarm agents:
 
 - Always pass `label` when spawning (e.g. `label: "auth refactor"`) so the swarm
   UI shows what each agent is for. The explicit `spawn` action rejects missing or
-  blank labels.
+  blank labels. The named todo lane is the source of truth: its tasks and details
+  are prepopulated into the worker and sent before it starts, with updates synced
+  only to that lane. `prompt` is optional extra context, not a duplicate task list.
+  If the lane does not exist, one is created from `prompt` or `label`.
 - Only the root session may spawn agents. Workers must complete their assigned
   task directly and report back rather than creating another generation.

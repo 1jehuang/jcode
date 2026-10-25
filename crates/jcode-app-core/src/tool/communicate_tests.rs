@@ -734,7 +734,7 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
 }
 
 #[test]
-fn format_awaited_members_includes_completion_reports() {
+fn format_awaited_members_includes_recent_outputs() {
     let members = vec![AwaitedMemberStatus {
         session_id: "session_worker".to_string(),
         friendly_name: Some("worker".to_string()),
@@ -755,7 +755,7 @@ fn format_awaited_members_includes_completion_reports() {
     )
     .output;
 
-    assert!(output.contains("Completion reports:"));
+    assert!(output.contains("Recent outputs:"));
     assert!(output.contains("--- worker (ready) ---"));
     assert!(output.contains("Structured report wins."));
     assert!(!output.contains("Outcome: finished"));
@@ -834,6 +834,17 @@ fn schema_requires_a_nonblank_label_for_spawn() {
         .find(|branch| branch["properties"]["action"]["enum"] == json!(["spawn"]))
         .expect("spawn schema branch");
     assert_eq!(spawn_branch["required"], json!(["action", "label"]));
+    let prompt_description = schema["properties"]["prompt"]["description"]
+        .as_str()
+        .expect("prompt description");
+    assert!(prompt_description.contains("Optional extra context"));
+    assert!(prompt_description.contains("do not repeat its tasks"));
+    assert!(
+        schema["properties"]["label"]["description"]
+            .as_str()
+            .expect("label description")
+            .contains("source of truth")
+    );
 
     let non_spawn_branch = branches
         .iter()

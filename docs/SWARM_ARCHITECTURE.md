@@ -76,7 +76,11 @@ concurrently would make the shared plan incoherent.
 ### Agents
 
 - Execute tasks in parallel.
-- Receive the full plan plus their scoped instructions on spawn.
+- Receive their assigned todo lane, prepopulated and rendered before work starts.
+  The existing lane is the source of truth and syncs only with that worker.
+  The spawn `prompt` is optional extra context, so coordinators need not repeat
+  lane tasks or details in a long prompt. A missing lane is created from the
+  prompt or label. The spawn result confirms the lane and seeded item count.
 - Propose plan updates when they discover issues or new requirements.
 - Coordinate directly with other agents via DM or channels.
 - Emit lifecycle events when they start, finish, or stop unexpectedly.

@@ -1420,6 +1420,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         // `agents.swarm_effort` (default "low").
         effort: None,
         label: None,
+        lane_id: None,
     };
 
     match send_request(spawn_request).await {
@@ -1660,8 +1661,7 @@ impl CommunicateTool {
     }
 
     fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
-        const BASE_DESCRIPTION: &str =
-            "Coordinate agents: spawn workers with a prompt, message them, and manage swarm plans.";
+        const BASE_DESCRIPTION: &str = "Coordinate agents: spawn workers for todo lanes, message them, and manage swarm plans.";
         let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
         let description = if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
@@ -1855,7 +1855,7 @@ impl Tool for CommunicateTool {
                 "action": {
                     "type": "string",
                     "enum": ADVERTISED_SWARM_ACTIONS,
-                    "description": "Action. launch runs your todo list (one agent per lane). spawn starts one worker on a lane; spawn requires label and should include prompt. message sends to one agent (to_session) or a channel; only the coordinator may omit both to message everyone. list_models shows available models/routes."
+                    "description": "Action. launch runs your todo list (one agent per lane). spawn starts one worker on a lane; spawn requires label; its existing todo lane is the source of truth and prompt is optional extra context. message sends to one agent (to_session) or a channel; only the coordinator may omit both to message everyone. list_models shows available models/routes."
                 },
                 "message": {
                     "type": "string",
@@ -1884,7 +1884,7 @@ impl Tool for CommunicateTool {
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn: the worker's lane name (e.g. 'auth refactor'). Each spawned worker owns that lane in your todo list (created from the prompt if missing); its todo list is the lane and syncs only it."
+                    "description": "Required for spawn: the worker's lane name (e.g. 'auth refactor'). The existing lane is the source of truth, prepopulated into the worker before it starts and synced only to that lane. If missing, a lane is created from prompt or label."
                 },
                 "phase": {
                     "type": "integer",
@@ -1897,7 +1897,7 @@ impl Tool for CommunicateTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Initial task/instructions for spawn. Spawning without it creates an idle agent."
+                    "description": "Optional extra context for spawn. The assigned todo lane is already prepopulated and sent to the worker before startup, so do not repeat its tasks here."
                 },
                 "initial_message": {
                     "type": "string",
@@ -2468,7 +2468,7 @@ impl Tool for CommunicateTool {
                 // phase), created from the prompt when it does not exist. The
                 // worker's own todo list is that lane and syncs only it.
                 let prompt = params.spawn_initial_message();
-                let lane_id = {
+                let (lane_id, seeded_count) = {
                     let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
                     let title = prompt
                         .as_deref()
@@ -2492,7 +2492,9 @@ impl Tool for CommunicateTool {
                     if updated != todos {
                         crate::todo::save_todos(&ctx.session_id, &updated)?;
                     }
-                    lane_id
+                    let seeded_count =
+                        crate::todo::stages::lane_todos_for_worker(&updated, &lane_id).len();
+                    (lane_id, seeded_count)
                 };
                 let request = Request::CommSpawn {
                     id: REQUEST_ID,
@@ -2506,23 +2508,18 @@ impl Tool for CommunicateTool {
                     // `agents.swarm_effort` (default "low").
                     effort: None,
                     label: Some(label),
+                    lane_id: Some(lane_id.clone()),
                 };
 
                 match send_request(request).await {
                     Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
                         if !new_session_id.is_empty() =>
                     {
-                        crate::server::swarm_todo_link::link_assignment(
-                            &ctx.session_id,
-                            &lane_id,
-                            "",
-                            &new_session_id,
-                        );
                         Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {new_session_id}"
+                            "Spawned new agent: {new_session_id}\nLane {lane_id}: {seeded_count} todo item(s) prepopulated before startup and synced to your lane. The worker received its lane tasks automatically."
                         ))
                         .with_metadata(
-                            serde_json::json!({"session_id": new_session_id, "lane": lane_id}),
+                            serde_json::json!({"session_id": new_session_id, "lane": lane_id, "seeded_todo_count": seeded_count, "lane_synced": true}),
                         ))
                     }
                     Ok(response) => {
