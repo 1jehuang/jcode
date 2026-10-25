@@ -387,6 +387,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
     state: &mut RemoteRunState,
     session_to_resume: Option<&str>,
     remote_working_dir: Option<&str>,
+    agent_profile_name: Option<&str>,
 ) -> Result<ConnectOutcome> {
     if let Some(outcome) =
         wait_for_reload_handoff_before_reconnect(app, terminal, event_stream, state).await?
@@ -399,12 +400,13 @@ pub(in crate::tui::app) async fn connect_with_retry(
         && !app.display_messages().is_empty();
     let client_instance_id = app.remote_client_instance_id.clone();
     let allow_session_takeover = should_allow_reconnect_takeover(app, state, session_to_resume);
-    let connect = RemoteConnection::connect_with_session(
+    let connect = RemoteConnection::connect_with_session_and_profile(
         session_to_resume,
         Some(client_instance_id.as_str()),
         client_has_local_history,
         allow_session_takeover,
         remote_working_dir,
+        agent_profile_name,
     );
     crate::logging::info(&format!(
         "Remote reconnect attempt: resume={:?}, reconnect_attempts={}, client_instance_id={}, local_history={}, allow_takeover={}",

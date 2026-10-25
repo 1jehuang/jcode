@@ -37,6 +37,9 @@ impl App {
             "refresh-model-list" => {
                 "/refresh-model-list\nForce-refresh provider model catalogs, update /model, and persist the refreshed cache."
             }
+            "agent" => {
+                "/agent\nList profiles available on the server and show the current selection.\n\n/agent NAME\nLoad additive plain Markdown instructions from the session working directory's .jcode/agents/NAME.md, or ~/.jcode/agents/NAME.md. Project files override user files.\n\n/agent reload\nExplicitly reload the selected profile from disk.\n\n/agent off\nClear the profile without changing base instructions. Changes apply on the next turn and the saved snapshot survives resume. Busy sessions reject changes; retry after the turn. /agents still configures role models."
+            }
             "agents" => {
                 "/agents\nConfigure agent models for this session only, preserved on resume.\n\n/agents <swarm|review|judge|memory|ambient>\nChoose a session override. Use global default clears it, while inherit bypasses a global pin.\n\n/agents default [role] (or /agents global [role])\nEdit saved global defaults for all sessions without a session override. Ambient session choices apply to scheduled workers spawned from this session, not the daemon's independent ambient loop."
             }

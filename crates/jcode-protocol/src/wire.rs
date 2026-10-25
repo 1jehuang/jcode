@@ -192,6 +192,9 @@ pub enum Request {
     #[serde(rename = "subscribe")]
     Subscribe {
         id: u64,
+        /// Named agent profile, resolved on the server for new sessions only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_profile_name: Option<String>,
         /// Full system prompt override for a new session only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,

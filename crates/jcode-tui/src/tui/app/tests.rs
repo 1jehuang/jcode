@@ -1,4 +1,6 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+#[path = "tests/agent_profile_commands.rs"]
+mod agent_profile_commands;
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/commands_accounts_01/part_01.rs");

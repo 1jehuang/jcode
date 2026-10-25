@@ -1,6 +1,18 @@
 use super::*;
 use std::time::Duration;
 
+#[tokio::test]
+async fn named_profile_rejects_resume_before_connecting() {
+    let result = RemoteConnection::connect_with_session_and_profile(
+        Some("existing-session"), None, false, false, None, Some("reviewer"),
+    ).await;
+    let error = match result {
+        Ok(_) => panic!("resume with a creation-only profile must fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("--agent cannot be used"));
+}
+
 #[test]
 fn cli_account_pins_fill_first_subscribe_only() {
     let _guard = crate::storage::lock_test_env();

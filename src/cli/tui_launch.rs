@@ -87,10 +87,14 @@ pub async fn run_tui_client(
     server_spawning: bool,
     fresh_spawn: bool,
     remote_working_dir: Option<String>,
+    agent_profile_name: Option<String>,
     onboarding_sim: bool,
     update_sim: bool,
 ) -> Result<()> {
     startup_profile::mark("tui_client_enter");
+    if agent_profile_name.is_some() && resume_session.is_some() {
+        anyhow::bail!("--agent cannot be used when resuming or attaching to a session");
+    }
     let (terminal, tui_runtime) = init_tui_runtime()?;
     startup_profile::mark("tui_terminal_init");
     startup_profile::mark("mermaid_picker");
@@ -164,7 +168,7 @@ pub async fn run_tui_client(
     startup_profile::mark("pre_run_remote");
     startup_profile::report_to_log();
 
-    let result = app.run_remote(terminal, remote_working_dir).await;
+    let result = app.run_remote(terminal, remote_working_dir, agent_profile_name).await;
 
     // On the error path, `?` returns here while `tui_runtime` is still alive, so
     // its `Drop` guarantees the terminal is restored (issue #214). On the happy

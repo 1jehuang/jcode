@@ -1144,6 +1144,11 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
 
+        if let Some(args) = app_mod::agent_profiles::agent_profile_args(trimmed) {
+            app_mod::agent_profiles::send_agent_profile_command(app, remote, args).await;
+            return Ok(());
+        }
+
         if trimmed == "/continue" || trimmed == "/resumeall" || trimmed == "/resume-all" {
             app.push_display_message(DisplayMessage::system(
                 "Continuing all interrupted sessions...".to_string(),

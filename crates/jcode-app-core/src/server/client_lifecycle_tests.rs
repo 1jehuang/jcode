@@ -848,6 +848,7 @@ fn ping_request_is_lightweight_control_request() {
 
 fn subscribe_request(working_dir: Option<&str>) -> Request {
     Request::Subscribe {
+        agent_profile_name: None,
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
@@ -2144,3 +2145,5 @@ async fn client_turn_usage_limit_error_carries_retry_after_secs() {
 }
 #[path = "client_lifecycle_tests/system_prompt.rs"]
 mod system_prompt;
+#[path = "client_lifecycle_tests/agent_profile.rs"]
+mod agent_profile;

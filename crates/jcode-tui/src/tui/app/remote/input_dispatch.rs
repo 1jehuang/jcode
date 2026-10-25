@@ -179,6 +179,11 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
 ) -> Result<()> {
     let raw_input = prepared.routing_input().to_string();
 
+    if let Some(args) = app_mod::agent_profiles::agent_profile_args(&raw_input) {
+        app_mod::agent_profiles::send_agent_profile_command(app, remote, args).await;
+        return Ok(());
+    }
+
     if crate::tui::is_ssh_remote() {
         let trimmed = prepared.routing_input().trim();
         if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {

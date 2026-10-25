@@ -47,6 +47,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/model-status", "Alias for /provider-test-coverage"),
     RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),
     RegisteredCommand::public("/agents", "Configure models for agent roles"),
+    RegisteredCommand::remote("/agent", "List or select an additive Markdown agent profile"),
     RegisteredCommand::public(
         "/swarm-prompt",
         "Open the active swarm routing prompt in your editor",
@@ -614,6 +615,16 @@ impl App {
                 return vec![("/model".into(), "Open model picker")];
             }
             return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix.starts_with("/agent ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    ("/agent off".into(), "Clear the selected agent profile"),
+                    ("/agent reload".into(), "Explicitly reload the selected profile from the server"),
+                ],
+            );
         }
 
         if prefix.starts_with("/agents ") {
@@ -1840,6 +1851,7 @@ impl App {
                 | "/split-view"
                 | "/model"
                 | "/agents"
+                | "/agent"
                 | "/effort"
                 | "/fast"
                 | "/transport"

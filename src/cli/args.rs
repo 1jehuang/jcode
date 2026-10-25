@@ -76,6 +76,10 @@ pub(crate) struct Args {
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     pub(crate) resume: Option<String>,
 
+    /// Named agent profile to load on the server when creating a session
+    #[arg(long = "agent", global = true, value_name = "NAME", conflicts_with = "resume")]
+    pub(crate) agent_profile_name: Option<String>,
+
     /// Internal: launched as a freshly spawned window, so skip heavy local resume bootstrap.
     #[arg(long, global = true, hide = true)]
     pub(crate) fresh_spawn: bool,
@@ -153,6 +157,15 @@ pub(crate) struct Args {
 
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
+}
+
+impl Args {
+    pub(crate) fn validate_agent_profile_selection(&self) -> Result<(), String> {
+        if self.agent_profile_name.is_some() && (self.resume.is_some() || self.command.is_some()) {
+            return Err("--agent is only supported when creating a new interactive session; it cannot be combined with --resume or a subcommand".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Subcommand, Debug)]

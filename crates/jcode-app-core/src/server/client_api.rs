@@ -81,6 +81,7 @@ impl Client {
         };
 
         let request = Request::Subscribe {
+            agent_profile_name: None,
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,

@@ -472,6 +472,21 @@ pub(in crate::tui::app) fn handle_server_event(
         _ => {}
     }
 
+    // Profile replies are control traffic and must not settle an active turn.
+    match &event {
+        ServerEvent::RuntimeCommandResult { id, message, .. }
+            if app.agent_profile_request_ids.remove(id) => {
+                app.push_display_message(DisplayMessage::system(message.clone()).with_title("Agent profile"));
+                return true;
+            }
+        ServerEvent::Error { id, message, .. }
+            if app.agent_profile_request_ids.remove(id) => {
+                app.push_display_message(DisplayMessage::error(message.clone()));
+                return true;
+            }
+        _ => {}
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());

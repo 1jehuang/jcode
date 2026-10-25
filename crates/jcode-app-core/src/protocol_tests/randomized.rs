@@ -63,6 +63,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         let crash_on_disconnect = rng.random_bool(0.5);
         let continue_on_disconnect = rng.random_bool(0.5);
         let req = Request::Subscribe {
+            agent_profile_name: None,
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
@@ -81,6 +82,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         };
         let decoded = parse_request_json(&serde_json::to_string(&req)?)?;
         let Request::Subscribe {
+            agent_profile_name: _,
             system_prompt: _,
             supports_pdf_panels: _,
             supports_user_response: _,

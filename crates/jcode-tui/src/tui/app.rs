@@ -58,6 +58,7 @@ mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod catchup;
+mod agent_profiles;
 mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;
@@ -1801,6 +1802,8 @@ pub struct App {
     login_picker_overlay: Option<RefCell<super::login_picker::LoginPicker>>,
     /// Account picker overlay (None = not visible)
     account_picker_overlay: Option<RefCell<super::account_picker::AccountPicker>>,
+    /// Profile command replies are control traffic, never turn completion.
+    agent_profile_request_ids: std::collections::HashSet<u64>,
     /// Usage overlay (None = not visible)
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.

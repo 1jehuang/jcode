@@ -14,6 +14,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) custom_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) agent_profile: Option<crate::agent_profile::AgentProfile>,
     pub(super) updated_at: DateTime<Utc>,
     pub(super) compaction: Option<StoredCompactionState>,
     pub(super) provider_session_id: Option<String>,
@@ -94,6 +96,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.title != current.title
         || prev.custom_title != current.custom_title
         || prev.system_prompt != current.system_prompt
+        || prev.agent_profile != current.agent_profile
         || prev.provider_key != current.provider_key
         || prev.reasoning_effort != current.reasoning_effort
         || prev.subagent_model != current.subagent_model
