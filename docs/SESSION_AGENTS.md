@@ -50,6 +50,14 @@ jcode --agent reviewer
 
 Selection is resolved on the server using the session's project directory, including SSH sessions. It is not a change to `AGENTS.md` or a global default. `/agents` also retains its role/model configuration entries. Their global scope controls never make an instruction profile global; profiles always apply only to the current session.
 
+### If the picker cannot load profiles
+
+Both the TUI client and its connected server must support instruction profiles. Updating the client binary alone does not replace an already-running server. An older server can reject the profile-list request even though the new client shows the picker entry.
+
+The picker keeps the failure visible without changing any instructions. If the server is busy, finish the current turn and reopen `/agents`. If it reports an unsupported command or incompatible response, upgrade the connected server too. For SSH sessions, that means the remote server.
+
+Reloading a shared server can interrupt running turns and background work across sessions. Wait for that work to finish before using `jcode server reload`; do not reload it merely to dismiss a picker error.
+
 ## Persistence and composition
 
 The session stores a snapshot of the profile name and instructions. Resuming retains that snapshot even if the source file changes or disappears. Forks inherit the snapshot; unrelated sessions do not. Use `/agent reload` when you deliberately want updated file contents.

@@ -239,10 +239,11 @@ fn agents_profiles_cancel_stale_discovery_and_session_switch_do_not_mutate() {
 }
 
 #[test]
-fn agents_profiles_old_server_error_returns_to_role_picker_without_ending_turn() {
+fn agents_profiles_old_server_error_stays_visible_without_ending_turn() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut app = create_test_app();
     rt.block_on(async {
+        app.onboarding_flow = None;
         app.is_remote = true;
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         remote.mark_history_loaded();
@@ -252,7 +253,29 @@ fn agents_profiles_old_server_error_returns_to_role_picker_without_ending_turn()
         app.handle_server_event(crate::protocol::ServerEvent::Error {
             id, message: "Unknown runtime command: agent".into(), retry_after_secs: None, server_resumes: false,
         }, &mut remote);
-        assert!(app.inline_interactive_state.as_ref().unwrap().is_agent_target_picker());
+        assert!(app.showing_agent_profiles());
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        assert_eq!(picker.entries[0].name, "Instruction profiles unavailable");
+        let option = picker.entries[0].active_option().unwrap();
+        assert!(!option.available);
+        assert!(option.detail.contains("Unknown runtime command: agent"));
+        assert!(option.detail.starts_with("Server upgrade required"));
+        let rendered = render_profiles(&app);
+        assert!(rendered.contains("Instruction profiles unavailable"));
+        assert!(rendered.contains("Server upgrade required"), "{rendered}");
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
+        assert!(app.showing_agent_profiles());
+        assert!(app.agent_profile_request_ids.is_empty());
+        assert!(app.session.agent_profile.is_none());
+        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote).await.unwrap();
+        assert!(app.inline_interactive_state.is_none());
+        let id = open_profiles_from_agents(&mut app, &mut remote).await;
+        app.handle_server_event(crate::protocol::ServerEvent::Error {
+            id, message: "Agent is busy; try again".into(), retry_after_secs: None, server_resumes: false,
+        }, &mut remote);
+        let rendered = render_profiles(&app);
+        assert!(rendered.contains("Reopen /agents to retry"), "{rendered}");
+        assert!(!rendered.contains("Server upgrade required"), "{rendered}");
         assert!(app.is_processing);
         assert_eq!(app.current_message_id, Some(999));
         assert!(!app.pending_turn);

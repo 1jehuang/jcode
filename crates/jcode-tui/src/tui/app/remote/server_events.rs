@@ -482,13 +482,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 return true;
             }
         ServerEvent::Error { id, message, .. }
-            if app.agent_profile_picker_request_id == Some(*id) => {
-                app.agent_profile_picker_request_id = None;
-                app.agent_profile_request_ids.remove(id);
-                if app.showing_agent_profiles() {
-                    app.open_agents_picker();
-                }
-                app.push_display_message(DisplayMessage::error(message.clone()));
+            if app.handle_agent_profile_list_error(*id, message) => {
                 return true;
             }
         ServerEvent::RuntimeCommandResult { id, message, .. }
