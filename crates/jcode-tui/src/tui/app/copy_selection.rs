@@ -548,7 +548,13 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) => {
                 if !self.copy_selection_dragging {
                     let pending = self.copy_selection_pending_anchor?;
-                    let point = point.filter(|point| point.pane == pending.pane)?;
+                    // Motion may skip directly past the pane before the first
+                    // drag event. Clamp it just like an already-active drag.
+                    let point = crate::tui::ui::copy_pane_drag_point(
+                        pending.pane,
+                        mouse.column,
+                        mouse.row,
+                    )?;
                     // Kitty reports mouse motion at pixel granularity, so a
                     // plain click with sub-cell hand jitter still delivers
                     // Drag events for the *same* cell between press and
