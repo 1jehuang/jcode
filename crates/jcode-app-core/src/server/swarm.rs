@@ -1608,7 +1608,7 @@ pub(super) async fn update_member_status_with_report_tldr(
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
-    let completion_report = normalize_completion_report(completion_report);
+    let mut completion_report = normalize_completion_report(completion_report);
     let detail_present = detail.is_some();
     let (
         swarm_id,
@@ -1621,6 +1621,22 @@ pub(super) async fn update_member_status_with_report_tldr(
     ) = {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.get_mut(session_id) {
+            // Forced stops and crashes may abort the turn before its transcript
+            // can be collected. Preserve the already streamed public tail before
+            // the terminal transition clears the gallery buffer.
+            if completion_report.is_none()
+                && matches!(
+                    status,
+                    "ready" | "completed" | "done" | "failed" | "crashed" | "stopped"
+                )
+            {
+                completion_report = member.output_tail.as_deref().and_then(|tail| {
+                    jcode_swarm_core::recent_output_tail(
+                        std::iter::once(tail),
+                        jcode_swarm_core::SWARM_OUTPUT_TAIL_TOKENS,
+                    )
+                });
+            }
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;
@@ -1719,7 +1735,7 @@ pub(super) async fn update_member_status_with_report_tldr(
         let should_notify_coordinator = status_changed
             && ((status == "completed")
                 || (report_back_to_session_id.is_some()
-                    && old_status == "running"
+                    && matches!(old_status.as_str(), "running" | "streaming" | "thinking" | "running_stale")
                     && matches!(status, "ready" | "failed" | "stopped"))
                 // A crash is never routine: notify whoever is responsible
                 // (owner, else coordinator) whenever a member dies while it
@@ -1986,9 +2002,7 @@ mod tests {
     use crate::plan::PlanItem;
     use crate::protocol::{NotificationType, ServerEvent};
     use crate::server::{SwarmMember, VersionedPlan};
-    use jcode_swarm_core::{
-        append_swarm_completion_report_instructions, summarize_plan_items, truncate_detail,
-    };
+    use jcode_swarm_core::{summarize_plan_items, truncate_detail};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -2036,20 +2050,6 @@ mod tests {
         assert_eq!(tasks[0].description, "A");
         assert_eq!(tasks[0].prompt, "B");
         assert_eq!(tasks[0].subagent_type.as_deref(), Some("general"));
-    }
-
-    #[test]
-    fn append_swarm_completion_report_instructions_is_idempotent() {
-        let prompt = "Implement the task.";
-        let with_instructions = append_swarm_completion_report_instructions(prompt);
-
-        assert!(with_instructions.starts_with(prompt));
-        assert!(with_instructions.contains("SWARM COMPLETION REPORT REQUIRED"));
-        assert!(with_instructions.contains("swarm tool with action=\"report\""));
-        assert_eq!(
-            append_swarm_completion_report_instructions(&with_instructions),
-            with_instructions
-        );
     }
 
     fn swarm_member(
@@ -3089,10 +3089,50 @@ mod tests {
                     notification_type: NotificationType::Message { .. },
                     message,
                     ..
-                } if message.contains("Report:\nValidated the parser")
-                    && !message.contains("No final textual report")
+                } if message.contains("Recent output (automatically captured):\nValidated the parser")
+                    && !message.contains("No recent assistant output")
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn automatic_output_tail_survives_forced_stop_and_is_delivered_once() {
+        for status in ["stopped", "failed", "crashed"] {
+            let members = Arc::new(RwLock::new(HashMap::new()));
+            let swarms = Arc::new(RwLock::new(HashMap::from([(
+                "swarm-1".to_string(),
+                HashSet::from(["coord".to_string(), "worker".to_string()]),
+            )])));
+            let (coord, mut events) = swarm_member("coord", "coordinator", false);
+            let (mut worker, _rx) = swarm_member("worker", "agent", true);
+            worker.status = "running".into();
+            worker.report_back_to_session_id = Some("coord".into());
+            worker.output_tail = Some("Applied fix, running validation".into());
+            worker.latest_completion_report = Some("stale previous turn".into());
+            members
+                .write()
+                .await
+                .extend([("coord".into(), coord), ("worker".into(), worker)]);
+            for _ in 0..2 {
+                update_member_status("worker", status, None, &members, &swarms, None, None, None)
+                    .await;
+            }
+            let members = members.read().await;
+            assert_eq!(
+                members["worker"].latest_completion_report.as_deref(),
+                Some("Applied fix, running validation")
+            );
+            assert!(members["worker"].output_tail.is_none());
+            let notifications: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+                .filter_map(|event| match event {
+                    ServerEvent::Notification { message, .. } => Some(message),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(notifications.len(), 1, "{status}: {notifications:?}");
+            assert!(notifications[0].contains("Applied fix, running validation"));
+            assert!(!notifications[0].contains("stale previous turn"));
+        }
     }
 
     #[tokio::test]

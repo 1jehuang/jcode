@@ -151,10 +151,7 @@ pub(super) async fn spawn_tracked_live_turn(
             }
         })
         .await;
-        let completion_report = result
-            .is_ok()
-            .then(|| agent.latest_assistant_text_after(start_message_index))
-            .flatten();
+        let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
         // Keep the reservation until after the terminal status is published.
         // Releasing it earlier lets a follow-up wake reserve the agent and
         // publish `running`, which this turn's later `ready`/`failed` would
@@ -186,10 +183,11 @@ pub(super) async fn spawn_tracked_live_turn(
                     "Server-initiated turn failed for live session {}: {}",
                     session_id, error
                 ));
-                update_member_status(
+                update_member_status_with_report(
                     &session_id,
                     "failed",
                     Some(truncate_detail(&error.to_string(), 120)),
+                    completion_report,
                     &swarm.members,
                     &swarm.swarms_by_id,
                     Some(&swarm.event_history),

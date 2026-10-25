@@ -112,8 +112,7 @@ use crate::transport::Listener;
 use anyhow::Result;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use jcode_swarm_core::{
-    append_swarm_completion_report_instructions, format_structured_completion_report,
-    summarize_plan_items, truncate_detail,
+    format_structured_completion_report, summarize_plan_items, truncate_detail,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

@@ -3380,10 +3380,11 @@ async fn record_processing_completion(
         }
         Err(e) => {
             if let Some(session_id) = done_session {
-                update_member_status(
+                update_member_status_with_report(
                     session_id,
                     "failed",
                     Some(truncate_detail(&e.to_string(), 120)),
+                    completion_report,
                     swarm.members,
                     swarm.swarms_by_id,
                     Some(swarm.event_history),
@@ -3607,11 +3608,9 @@ async fn start_processing_message(
                 id, error
             )),
         }
-        let completion_report = if result.is_ok() {
+        let completion_report = {
             let agent = report_agent.lock().await;
-            agent.latest_assistant_text_after(start_message_index)
-        } else {
-            None
+            agent.recent_assistant_output_tail_after(start_message_index)
         };
         // Keep the terminal event on the same ordered fanout channel as the
         // stream. Sending it later from the owning client's event loop could

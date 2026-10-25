@@ -194,7 +194,7 @@ pub(super) fn coordinator_message(stall: &NewStall) -> String {
 
 pub(super) fn nudge_message(silent_secs: u64) -> String {
     format!(
-        "[swarm watchdog] No progress from this session for {}. If you are blocked, report it with `swarm report` (status blocked). Otherwise continue your assigned task.",
+        "[swarm watchdog] No progress from this session for {}. If you are blocked, explain the blocker in your response. Otherwise continue your assigned task. Recent output is forwarded automatically when you stop.",
         format_duration(silent_secs)
     )
 }

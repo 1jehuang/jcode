@@ -1,5 +1,101 @@
 use super::*;
 
+fn assistant_output_tail_after(messages: &[StoredMessage], start_index: usize) -> Option<String> {
+    use std::borrow::Cow;
+    let chunks: Vec<Cow<'_, str>> = messages
+        .iter()
+        .skip(start_index)
+        .filter(|message| message.role == Role::Assistant)
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(Cow::Borrowed(text.as_str())),
+            ContentBlock::ToolUse { name, input, .. } => {
+                let intent = ToolCall::intent_from_input(input)
+                    .map(|intent| jcode_swarm_core::truncate_detail(&intent, 240));
+                Some(Cow::Owned(match intent {
+                    Some(intent) => format!("[Tool: {name} · {intent}]"),
+                    None => format!("[Tool: {name}]"),
+                }))
+            }
+            // Never include private reasoning, user prompts, or tool result bodies.
+            _ => None,
+        })
+        .collect();
+    jcode_swarm_core::recent_output_tail(
+        chunks.iter().map(|chunk| chunk.as_ref()),
+        jcode_swarm_core::SWARM_OUTPUT_TAIL_TOKENS,
+    )
+}
+
+#[cfg(test)]
+mod output_tail_tests {
+    use super::*;
+
+    fn message(role: &str, content: serde_json::Value) -> StoredMessage {
+        serde_json::from_value(serde_json::json!({
+            "id": "message", "role": role, "content": content,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn automatic_output_tail_includes_commentary_when_turn_ends_on_tools() {
+        let messages = vec![
+            message(
+                "assistant",
+                serde_json::json!([{"type":"text", "text":"previous turn"}]),
+            ),
+            message(
+                "user",
+                serde_json::json!([{"type":"text", "text":"private user input"}]),
+            ),
+            message(
+                "assistant",
+                serde_json::json!([
+                    {"type":"text", "text":"Implemented the parser fix."},
+                    {"type":"tool_use", "id":"test", "name":"bash", "input":{"intent":"Run parser tests"}}
+                ]),
+            ),
+            message(
+                "user",
+                serde_json::json!([{"type":"text", "text":"tool stdout must not leak"}]),
+            ),
+            message("assistant", serde_json::json!([])),
+        ];
+        assert_eq!(
+            assistant_output_tail_after(&messages, 1).as_deref(),
+            Some("Implemented the parser fix.\n\n[Tool: bash · Run parser tests]")
+        );
+        assert_eq!(assistant_output_tail_after(&messages, messages.len()), None);
+    }
+
+    #[test]
+    fn automatic_output_tail_spans_assistant_messages_and_keeps_newest_text() {
+        let messages = vec![
+            message(
+                "assistant",
+                serde_json::json!([{"type":"text", "text":"first commentary"}]),
+            ),
+            message(
+                "assistant",
+                serde_json::json!([{"type":"text", "text":"final commentary"}]),
+            ),
+        ];
+        assert_eq!(
+            assistant_output_tail_after(&messages, 0).as_deref(),
+            Some("first commentary\n\nfinal commentary")
+        );
+        let long = format!("{}\nLATEST RESULT", "old".repeat(3000));
+        let messages = [message(
+            "assistant",
+            serde_json::json!([{"type":"text", "text":long}]),
+        )];
+        let tail = assistant_output_tail_after(&messages, 0).unwrap();
+        assert!(tail.len() <= jcode_swarm_core::SWARM_OUTPUT_TAIL_TOKENS * 4);
+        assert!(tail.ends_with("LATEST RESULT"));
+    }
+}
+
 impl Agent {
     /// Read-only source for splitting a new session before its first persistence.
     pub(crate) fn session_for_split(&self) -> &Session {
@@ -142,6 +238,12 @@ impl Agent {
                 let text = text.trim();
                 (!text.is_empty()).then(|| text.to_string())
             })
+    }
+
+    /// Recent public assistant output from this turn, including tool-call markers.
+    /// No final answer or explicit report tool call is needed for delivery.
+    pub fn recent_assistant_output_tail_after(&self, start_index: usize) -> Option<String> {
+        assistant_output_tail_after(&self.session.messages, start_index)
     }
 
     pub fn last_upstream_provider(&self) -> Option<String> {
