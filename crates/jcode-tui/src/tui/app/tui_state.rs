@@ -2410,6 +2410,63 @@ impl App {
         }
     }
 
+    pub(crate) fn handle_swarm_agent_shortcut(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> bool {
+        if code == crossterm::event::KeyCode::Char('p')
+            && modifiers == crossterm::event::KeyModifiers::ALT
+        {
+            self.pop_out_all_swarm_agents();
+            return true;
+        }
+        let Some(index) = swarm_agent_shortcut_index(code, modifiers) else {
+            return false;
+        };
+        if index >= self.inline_swarm_members().len() {
+            return false;
+        }
+        self.swarm_panel_selected = index;
+        self.pop_out_selected_swarm_agent();
+        true
+    }
+
+    /// Open only this session's managed subtree, not repository-wide peers.
+    pub(crate) fn pop_out_all_swarm_agents(&mut self) {
+        let members = self.inline_swarm_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        if order.is_empty() {
+            self.set_status_notice("No swarm workers to open");
+            return;
+        }
+        let mut opened = 0;
+        let mut failures = Vec::new();
+        for session_id in order {
+            match open_swarm_agent_window(&session_id) {
+                Ok(true) => opened += 1,
+                Ok(false) => failures.push(format!("{session_id}: no terminal emulator found")),
+                Err(error) => failures.push(format!("{session_id}: {error}")),
+            }
+        }
+        if failures.is_empty() {
+            self.set_status_notice(format!("Opened {opened} swarm workers in new windows"));
+        } else {
+            self.set_status_notice(format!(
+                "Opened {opened} swarm workers, {} failed: {}",
+                failures.len(),
+                failures.join(", ")
+            ));
+        }
+    }
+
+    pub(super) fn swarm_agent_shortcut_digit(&self, session_id: &str) -> Option<u8> {
+        let members = self.inline_swarm_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        let index = order.iter().position(|id| id == session_id)?;
+        (index < 10).then_some(((index + 1) % 10) as u8)
+    }
+
     /// Open the currently selected swarm agent's session in a new terminal
     /// window (pop-out), reusing the resume-in-new-terminal launcher.
     pub(crate) fn pop_out_selected_swarm_agent(&mut self) {
@@ -2430,16 +2487,41 @@ impl App {
             .and_then(|m| m.friendly_name.clone())
             .unwrap_or_else(|| session_id.chars().take(8).collect());
 
-        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match jcode_app_core::session_launch::spawn_resume_in_new_terminal(&exe, &session_id, &cwd)
-        {
+        match open_swarm_agent_window(&session_id) {
             Ok(true) => self.set_status_notice(format!("Opened {label} in a new window")),
             Ok(false) => self.set_status_notice(format!(
                 "Could not open a terminal for {label} (no emulator found)"
             )),
             Err(e) => self.set_status_notice(format!("Failed to open {label}: {e}")),
         }
+    }
+}
+
+fn open_swarm_agent_window(session_id: &str) -> anyhow::Result<bool> {
+    let exe = super::launch_client_executable();
+    let cwd = crate::session::Session::load_startup_stub(session_id)
+        .ok()
+        .and_then(|session| session.working_dir)
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let socket = std::env::var("JCODE_SOCKET").ok();
+    super::spawn_in_new_terminal(&exe, session_id, &cwd, socket.as_deref())
+}
+
+/// Decode direct agent badges without capturing plain digits or other chords.
+pub(crate) fn swarm_agent_shortcut_index(
+    code: crossterm::event::KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
+) -> Option<usize> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if modifiers != KeyModifiers::ALT {
+        return None;
+    }
+    match code {
+        KeyCode::Char('0') => Some(9),
+        KeyCode::Char(c @ '1'..='9') => Some((c as u8 - b'1') as usize),
+        _ => None,
     }
 }
 

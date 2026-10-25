@@ -547,7 +547,9 @@ async fn handle_remote_key_internal(
     }
     {
         use crate::tui::TuiState as _;
-        if app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers) {
+        if app.handle_swarm_agent_shortcut(code, modifiers)
+            || (app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers))
+        {
             return Ok(());
         }
     }

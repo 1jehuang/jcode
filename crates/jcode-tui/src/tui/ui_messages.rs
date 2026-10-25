@@ -1441,6 +1441,9 @@ pub(crate) fn render_pinned_todos_message(
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
     render_todos_message_with_cap(msg, width, diff_mode, false)
+        .into_iter()
+        .map(|line| super::truncate_line_with_ellipsis_to_width(&line, usize::from(width)))
+        .collect()
 }
 
 fn render_todos_message_with_cap(
