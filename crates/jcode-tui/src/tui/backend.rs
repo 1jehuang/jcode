@@ -342,6 +342,23 @@ impl RemoteConnection {
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
+        Self::connect_with_session_and_profile(
+            resume_session, client_instance_id, client_has_local_history,
+            allow_session_takeover, remote_working_dir, None,
+        ).await
+    }
+
+    pub async fn connect_with_session_and_profile(
+        resume_session: Option<&str>,
+        client_instance_id: Option<&str>,
+        client_has_local_history: bool,
+        allow_session_takeover: bool,
+        remote_working_dir: Option<&str>,
+        agent_profile_name: Option<&str>,
+    ) -> Result<Self> {
+        if resume_session.is_some() && agent_profile_name.is_some() {
+            anyhow::bail!("--agent cannot be used when resuming or attaching to a session");
+        }
         let connect_start = Instant::now();
         let socket_connect_start = Instant::now();
         let stream = Stream::connect(server::socket_path()).await?;
@@ -378,6 +395,7 @@ impl RemoteConnection {
             .map(|session_id| session_id.to_string());
         let (account_pins, supports_session_accounts) = take_subscribe_account_fields();
         conn.send_request(Request::Subscribe {
+            agent_profile_name: agent_profile_name.map(str::to_owned),
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
@@ -948,6 +966,20 @@ impl RemoteConnection {
         };
         self.next_request_id += 1;
         self.send_request(request).await
+    }
+
+    /// Run a server-owned runtime command and return its control request id.
+    /// Replies carry that id in `RuntimeCommandResult` or `Error`.
+    pub async fn runtime_command(&mut self, command: &str, args: Vec<String>) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RuntimeCommand {
+            id,
+            command: command.to_string(),
+            args,
+        })
+        .await?;
+        Ok(id)
     }
 
     /// Set connection transport on the server (for OpenAI models)

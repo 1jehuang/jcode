@@ -11,6 +11,7 @@ pub enum RuntimeCommand {
     Cache,
     Memory,
     Swarm,
+    Agent,
     Agents,
     SubagentModel,
     Autoreview,

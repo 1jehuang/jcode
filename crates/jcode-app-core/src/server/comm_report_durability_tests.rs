@@ -242,6 +242,7 @@ async fn report_roundtrip(subscribed: bool) {
     if subscribed {
         connection
             .send(Request::Subscribe {
+                agent_profile_name: None,
                 id: 1,
                 system_prompt: None,
                 supports_pdf_panels: false,

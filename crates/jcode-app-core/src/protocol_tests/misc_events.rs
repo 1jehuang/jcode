@@ -198,6 +198,7 @@ fn test_set_feature_roundtrip() -> Result<()> {
 #[test]
 fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result<()> {
     let req = Request::Subscribe {
+        agent_profile_name: None,
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
@@ -218,6 +219,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     assert!(json.contains("\"type\":\"subscribe\""));
     let decoded = parse_request_json(&json)?;
     let Request::Subscribe {
+        agent_profile_name: _,
         system_prompt: _,
         supports_pdf_panels: _,
         supports_user_response: _,
@@ -258,6 +260,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     let json = r#"{"type":"subscribe","id":91}"#;
     let decoded = parse_request_json(json)?;
     let Request::Subscribe {
+        agent_profile_name: _,
         system_prompt: _,
         supports_pdf_panels: _,
         supports_user_response: _,

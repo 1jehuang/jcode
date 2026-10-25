@@ -123,6 +123,10 @@ fn clone_split_session_uses_persisted_session_state() {
     parent.working_dir = Some("/tmp/jcode-split-test".to_string());
     parent.model = Some("gpt-test".to_string());
     parent.system_prompt = Some("forked system prompt".into());
+    parent.agent_profile = Some(crate::agent_profile::AgentProfile {
+        name: "writer".into(),
+        instructions: "saved profile".into(),
+    });
     parent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -142,6 +146,7 @@ fn clone_split_session_uses_persisted_session_state() {
     let mut unsaved_parent = parent.clone();
     unsaved_parent.model = Some("unsaved-model".into());
     unsaved_parent.system_prompt = Some("unsaved prompt".into());
+    unsaved_parent.agent_profile.as_mut().unwrap().instructions = "unsaved profile".into();
     unsaved_parent.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
@@ -155,6 +160,7 @@ fn clone_split_session_uses_persisted_session_state() {
 
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(child.system_prompt, parent.system_prompt);
+    assert_eq!(child.agent_profile, parent.agent_profile);
     assert_eq!(
         child.messages.len(),
         parent.messages.len() + 1,
@@ -373,10 +379,15 @@ fn transfer_preserves_system_prompt_including_empty_override() {
     for prompt in [None, Some(""), Some("custom system prompt")] {
         let mut parent = crate::session::Session::create(None, None);
         parent.system_prompt = prompt.map(str::to_string);
+        parent.agent_profile = Some(crate::agent_profile::AgentProfile {
+            name: "writer".into(),
+            instructions: "transfer profile snapshot".into(),
+        });
         let (child_id, _) = create_transfer_child_session(&parent.id, &parent, None)
             .expect("create transfer session");
         let child = crate::session::Session::load(&child_id).expect("load transfer session");
         assert_eq!(child.system_prompt, parent.system_prompt);
+        assert_eq!(child.agent_profile, parent.agent_profile);
     }
 }
 

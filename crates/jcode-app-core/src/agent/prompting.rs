@@ -7,6 +7,19 @@ use crate::message::{Message, ToolDefinition};
 mod recovery_tests;
 
 impl Agent {
+    /// Select a snapshotted profile without changing the full system prompt override.
+    pub fn set_agent_profile(
+        &mut self,
+        profile: Option<crate::agent_profile::AgentProfile>,
+    ) -> anyhow::Result<()> {
+        let previous = std::mem::replace(&mut self.session.agent_profile, profile);
+        if let Err(error) = self.session.save() {
+            self.session.agent_profile = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(crate) fn runtime_skills_snapshot(&self) -> serde_json::Value {
         let registry = self.current_skills_snapshot();
         let mut loaded = registry.list();
@@ -170,6 +183,12 @@ impl Agent {
             .flatten()
             .collect::<Vec<_>>()
             .join("\n\n");
+        }
+        if let Some(profile) = &self.session.agent_profile {
+            if !split.static_part.is_empty() {
+                split.static_part.push_str("\n\n");
+            }
+            split.static_part.push_str(&profile.instructions);
         }
         split
     }

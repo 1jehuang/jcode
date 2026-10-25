@@ -9,6 +9,43 @@ use std::sync::{Arc, Mutex};
 const CUSTOM_PROMPT: &str = "  Custom instructions, unchanged.\n";
 const RECOVERY_REMINDER: &str = "Resume from the last saved step after provider overload.";
 
+#[test]
+fn profile_is_additive_to_normal_override_and_own_provider_prompts() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    for own_system_prompt in [false, true] {
+        for override_prompt in [None, Some(""), Some(CUSTOM_PROMPT)] {
+            let provider = Arc::new(PromptCaptureProvider {
+                own_system_prompt,
+                ..Default::default()
+            });
+            let mut agent = Agent::new(provider, Registry::empty());
+            agent.session.system_prompt = override_prompt.map(str::to_owned);
+            let before = agent.build_system_prompt_split(None);
+            agent.session.agent_profile = Some(crate::agent_profile::AgentProfile {
+                name: "writer".into(),
+                instructions: "PROFILE_SENTINEL\n".into(),
+            });
+            let after = agent.build_system_prompt_split(None);
+            let separator = if before.static_part.is_empty() {
+                ""
+            } else {
+                "\n\n"
+            };
+            assert_eq!(
+                after.static_part,
+                format!("{}{separator}PROFILE_SENTINEL\n", before.static_part)
+            );
+            assert_eq!(after.dynamic_part, before.dynamic_part);
+            assert_eq!(agent.session.system_prompt.as_deref(), override_prompt);
+            agent.session.agent_profile = None;
+            assert_eq!(
+                agent.build_system_prompt_split(None).static_part,
+                before.static_part
+            );
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct PromptCaptureProvider {
     requests: Arc<Mutex<Vec<(String, String)>>>,

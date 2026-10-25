@@ -855,6 +855,7 @@ fn clone_split_session_with_feedback(
     child.replace_messages(parent.messages.clone());
     child.compaction = parent.compaction.clone();
     child.system_prompt = parent.system_prompt.clone();
+    child.agent_profile = parent.agent_profile.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     crate::session_accounts::AccountInheritance::from_session(&parent).apply_to_session(&mut child);
@@ -920,6 +921,7 @@ fn create_transfer_child_session(
     child.messages.clear();
     child.compaction = compaction;
     child.system_prompt = parent.system_prompt.clone();
+    child.agent_profile = parent.agent_profile.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();

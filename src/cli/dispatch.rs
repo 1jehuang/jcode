@@ -72,6 +72,7 @@ fn arm_debug_client_parent_death_signal() {
 fn arm_debug_client_parent_death_signal() {}
 
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    args.validate_agent_profile_selection().map_err(anyhow::Error::msg)?;
     arm_debug_client_parent_death_signal();
     if !args.account.is_empty() {
         // `jcode --account <label>`: pin the new window's session. Sent once
@@ -854,6 +855,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         || args.disabled_tools.is_some()
         || args.disable_base_tools;
     if args.resume.is_none()
+        && args.agent_profile_name.is_none()
         && !explicit_provider_or_model
         && !explicit_tool_options
         && commands::maybe_run_pending_restart_restore_on_startup().await?
@@ -1003,6 +1005,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         !server_running,
         args.fresh_spawn,
         args.remote_working_dir,
+        args.agent_profile_name,
         args.onboarding_sim,
         args.update_sim,
     )

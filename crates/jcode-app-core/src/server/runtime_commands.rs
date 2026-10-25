@@ -40,6 +40,7 @@ pub(super) async fn execute(
 ) -> Result<(Value, String)> {
     let config = crate::config::Config::load();
     let data = match command {
+        RuntimeCommand::Agent => return agent_profile(agent, args),
         RuntimeCommand::Review | RuntimeCommand::Judge | RuntimeCommand::Subagent => {
             let role = match command {
                 RuntimeCommand::Review => "review",
@@ -330,6 +331,60 @@ pub(super) async fn execute(
     };
     let message = serde_json::to_string_pretty(&data)?;
     Ok((data, message))
+}
+
+/// Profile files are read only by the runtime, relative to the session cwd.
+/// Load and validate before replacing the persisted instruction snapshot.
+fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> {
+    let working_dir = agent.working_dir().map(std::path::PathBuf::from);
+    let profile_dir = || working_dir.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("This session has no working directory; cannot resolve agent profiles.")
+    });
+    let current = agent
+        .session_for_split()
+        .agent_profile
+        .as_ref()
+        .map(|profile| profile.name.clone());
+    let changed = !args.is_empty();
+    let profile = match args {
+        [] => None,
+        [action] if action == "off" => Some(None),
+        [action] if action == "reload" => {
+            let name = current.as_deref().ok_or_else(|| anyhow::anyhow!("No agent profile is selected. Use /agent NAME first."))?;
+            Some(Some(crate::agent_profile::load(name, profile_dir()?)?))
+        }
+        [name] => Some(Some(crate::agent_profile::load(name, profile_dir()?)?)),
+        _ => bail!("Usage: /agent [NAME|off|reload]"),
+    };
+    if let Some(profile) = profile {
+        agent.set_agent_profile(profile)?;
+    }
+    // Discovery failures must not prevent clearing a selected snapshot or turn
+    // a successfully persisted selection into a reported failure.
+    let available = if changed {
+        working_dir.as_deref().and_then(|dir| crate::agent_profile::list(dir).ok()).unwrap_or_default()
+    } else {
+        crate::agent_profile::list(profile_dir()?)?
+    };
+    let current = agent
+        .session_for_split()
+        .agent_profile
+        .as_ref()
+        .map(|profile| profile.name.clone());
+    let message = if changed {
+        match current.as_deref() {
+            Some(name) => format!("Agent profile: {name}. Instructions apply on the next turn. Saved snapshot persists until /agent reload or /agent off."),
+            None => "Agent profile off. Base instructions remain unchanged; applies on the next turn.".into(),
+        }
+    } else {
+        let names = if available.is_empty() {
+            "(none)".into()
+        } else {
+            available.join(", ")
+        };
+        format!("Current agent profile: {}\nAvailable profiles: {names}\nUse /agent NAME, /agent reload, or /agent off. Project .jcode/agents/NAME.md overrides ~/.jcode/agents/NAME.md.", current.as_deref().unwrap_or("off"))
+    };
+    Ok((json!({"current": current, "available": available, "changed": changed, "effective": "next_turn"}), message))
 }
 
 fn role_args(args: &[String], default_label: &str) -> Result<(Option<String>, String, String)> {

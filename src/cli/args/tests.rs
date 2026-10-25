@@ -1441,3 +1441,28 @@ fn publish_build_parses_paths_and_validates_channels() {
     );
     assert!(Args::try_parse_from(["jcode", "publish-build"]).is_err());
 }
+#[test]
+fn agent_profile_name_is_forwarded_as_a_name() {
+    let args = Args::try_parse_from(["jcode", "--agent", "reviewer"]).unwrap();
+    assert_eq!(args.agent_profile_name.as_deref(), Some("reviewer"));
+}
+
+#[test]
+fn agent_profile_conflicts_with_resume() {
+    assert!(Args::try_parse_from(["jcode", "--agent", "reviewer", "--resume", "session"]).is_err());
+    assert!(Args::try_parse_from(["jcode", "--agent", "reviewer", "--resume"]).is_err());
+}
+
+#[test]
+fn agent_profile_is_supported_for_remote_creation() {
+    let args = Args::try_parse_from(["jcode", "--ssh", "host", "--agent", "reviewer"]).unwrap();
+    assert_eq!(args.agent_profile_name.as_deref(), Some("reviewer"));
+}
+
+#[test]
+fn agent_profile_rejects_subcommands_instead_of_being_ignored() {
+    let args = Args::try_parse_from(["jcode", "--agent", "reviewer", "run", "hello"]).unwrap();
+    assert!(args.validate_agent_profile_selection().is_err());
+    let args = Args::try_parse_from(["jcode", "--agent", "reviewer"]).unwrap();
+    assert!(args.validate_agent_profile_selection().is_ok());
+}

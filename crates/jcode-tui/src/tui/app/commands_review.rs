@@ -675,6 +675,7 @@ fn clone_session_for_review(
     let mut child = Session::create(Some(parent_session_id), Some(session_title.to_string()));
     child.replace_messages(app.session.messages.clone());
     child.compaction = app.session.compaction.clone();
+    child.agent_profile = app.session.agent_profile.clone();
     child.working_dir = app.session.working_dir.clone();
     child.model = Some(initial_model);
     child.provider_key = provider_key_override.or_else(|| app.session.provider_key.clone());
@@ -692,6 +693,7 @@ fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
     child.replace_messages(app.session.messages.clone());
     child.compaction = app.session.compaction.clone();
     child.system_prompt = app.session.system_prompt.clone();
+    child.agent_profile = app.session.agent_profile.clone();
     child.working_dir = app.session.working_dir.clone();
     child.model = app.session.model.clone();
     child.provider_key = app.session.provider_key.clone();

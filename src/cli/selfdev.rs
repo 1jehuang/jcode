@@ -232,6 +232,7 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
         !server_running,
         false,
         None,
+        None,
         false,
         false,
     )

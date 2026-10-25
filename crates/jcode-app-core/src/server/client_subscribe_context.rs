@@ -110,3 +110,49 @@ pub(super) fn initial_subscribe_terminal_env(request: &Request) -> Vec<(String, 
         _ => Vec::new(),
     }
 }
+
+pub(super) fn new_session_agent_profile(
+    provisional_session: bool,
+    target_session_id: Option<&str>,
+    agent_profile_name: Option<&str>,
+    working_dir: &str,
+) -> anyhow::Result<Option<crate::agent_profile::AgentProfile>> {
+    let Some(name) = agent_profile_name else {
+        return Ok(None);
+    };
+    if !provisional_session || target_session_id.is_some() {
+        anyhow::bail!("Agent profiles can only be selected when creating a new session, not when resuming or attaching");
+    }
+    crate::agent_profile::load(name, Path::new(working_dir)).map(Some)
+}
+
+#[cfg(test)]
+mod agent_profile_tests {
+    use super::*;
+
+    #[test]
+    fn profile_selection_is_creation_only() {
+        for (provisional, target) in [(false, None), (true, Some("existing")), (false, Some("existing"))] {
+            let error = new_session_agent_profile(provisional, target, Some("reviewer"), "/")
+                .unwrap_err();
+            assert!(error.to_string().contains("only be selected when creating"));
+            assert!(new_session_agent_profile(provisional, target, None, "/").unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn creation_loads_from_server_workspace_and_rejects_paths() {
+        let _lock = crate::storage::lock_test_env();
+        let workspace = tempfile::tempdir().unwrap();
+        let profiles = workspace.path().join(".jcode/agents");
+        std::fs::create_dir_all(&profiles).unwrap();
+        std::fs::write(profiles.join("reviewer.md"), "Review with care.\n").unwrap();
+        let profile = new_session_agent_profile(true, None, Some("reviewer"), workspace.path().to_str().unwrap())
+            .unwrap().unwrap();
+        assert_eq!(profile.name, "reviewer");
+        assert_eq!(profile.instructions, "Review with care.\n");
+        for name in ["../reviewer", "/reviewer.md", "", "missing-profile-728199"] {
+            assert!(new_session_agent_profile(true, None, Some(name), workspace.path().to_str().unwrap()).is_err());
+        }
+    }
+}

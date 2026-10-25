@@ -201,6 +201,12 @@ fn dispatch_command_sequence(
 }
 
 fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
+    if super::agent_profiles::agent_profile_args(trimmed).is_some() {
+        app.push_display_message(super::DisplayMessage::error(
+            "/agent requires a connected jcode server. Reconnect and retry; no profile was changed.",
+        ));
+        return true;
+    }
     if handle_ssh_unsupported_command(app, trimmed) {
         return true;
     }

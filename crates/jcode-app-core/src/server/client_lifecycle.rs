@@ -1503,6 +1503,7 @@ pub(super) async fn handle_client(
 
             Request::Subscribe {
                 id,
+                agent_profile_name,
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
@@ -1530,6 +1531,30 @@ pub(super) async fn handle_client(
                         server_resumes: false,
                     });
                     continue;
+                }
+                let profile = match new_session_agent_profile(
+                    provisional_session,
+                    target_session_id.as_deref(),
+                    agent_profile_name.as_deref(),
+                    subscribe_working_dir.as_deref().expect("validated working directory"),
+                ) {
+                    Ok(profile) => profile,
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id, message: format!("{error:#}"), retry_after_secs: None,
+                            server_resumes: false,
+                        });
+                        continue;
+                    }
+                };
+                if let Some(profile) = profile {
+                    if let Err(error) = agent.lock().await.set_agent_profile(Some(profile)) {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id, message: format!("Failed to save agent profile: {error:#}"),
+                            retry_after_secs: None, server_resumes: false,
+                        });
+                        continue;
+                    }
                 }
                 // Overrides are creation-only. In particular, never apply one to
                 // a target attachment or a repeated Subscribe on this connection.
@@ -2282,6 +2307,15 @@ pub(super) async fn handle_client(
             Request::RuntimeCommand { id, command, args } => {
                 let result: anyhow::Result<(serde_json::Value, String)> = async {
                     let parsed: jcode_harness_api::RuntimeCommand = serde_json::from_value(serde_json::json!(command))?;
+                    if parsed == jcode_harness_api::RuntimeCommand::Agent && !args.is_empty() {
+                        if client_is_processing || crate::turn_cancel_registry::has_active_turn(&client_session_id) {
+                            send_agent_busy_error(id, "change agent profile", &client_session_id, client_is_processing, &client_event_tx);
+                            return Ok((serde_json::Value::Null, String::new()));
+                        }
+                        if reject_if_agent_busy_for_request(id, "change agent profile", &client_session_id, client_is_processing, &agent, &client_event_tx) {
+                            return Ok((serde_json::Value::Null, String::new()));
+                        }
+                    }
                     if parsed == jcode_harness_api::RuntimeCommand::ServerReload {
                         if !args.is_empty() { anyhow::bail!("Server reload accepts no arguments. Forced reload is intentionally not exposed."); }
                         let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command: command.clone(),

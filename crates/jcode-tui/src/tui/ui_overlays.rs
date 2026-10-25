@@ -281,6 +281,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Show live-test evidence for the current provider/model",
     ));
     lines.push(help_entry("/agents", "Configure models for agent roles"));
+    lines.push(help_entry("/agent [NAME|off|reload]", "List or select an additive Markdown profile"));
     lines.push(help_entry(
         "/swarm-prompt",
         "Open the active swarm routing prompt in your editor",

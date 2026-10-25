@@ -390,6 +390,7 @@ pub(super) fn create_transfer_session_from_parent(
     child.messages.clear();
     child.compaction = compaction;
     child.system_prompt = parent.system_prompt.clone();
+    child.agent_profile = parent.agent_profile.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();

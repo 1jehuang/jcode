@@ -2945,6 +2945,47 @@ fn system_prompt_missing_in_legacy_session_defaults_to_none() -> Result<()> {
     assert!(json.get("system_prompt").is_none());
     let restored: Session = serde_json::from_value(json)?;
     assert_eq!(restored.system_prompt, None);
+    assert_eq!(restored.agent_profile, None);
+    Ok(())
+}
+
+#[test]
+fn agent_profile_persists_empty_session_journal_and_partial_loads() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let profile = crate::agent_profile::AgentProfile {
+        name: "writer".into(),
+        instructions: "  Frozen profile instructions.\n".into(),
+    };
+    let mut session = Session::create(None, None);
+    session.agent_profile = Some(profile.clone());
+    session.save()?;
+    for restored in [
+        Session::load(&session.id)?,
+        Session::load_startup_stub(&session.id)?,
+        Session::load_for_remote_startup(&session.id)?,
+    ] {
+        assert_eq!(restored.agent_profile.as_ref(), Some(&profile));
+        assert_eq!(restored.system_prompt, None);
+    }
+    // An unchanged profile survives a metadata journal entry.
+    session.model = Some("profile-model".into());
+    session.save()?;
+    assert_eq!(
+        Session::load_startup_stub(&session.id)?.agent_profile,
+        Some(profile)
+    );
+    // Changing instructions under the same name is a snapshot-worthy change.
+    session.agent_profile.as_mut().unwrap().instructions = "replacement".into();
+    session.save()?;
+    assert_eq!(
+        Session::load_for_remote_startup(&session.id)?.agent_profile,
+        session.agent_profile
+    );
+    session.agent_profile = None;
+    session.save()?;
+    assert_eq!(Session::load(&session.id)?.agent_profile, None);
     Ok(())
 }
 

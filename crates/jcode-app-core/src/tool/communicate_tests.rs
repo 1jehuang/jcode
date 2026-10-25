@@ -1484,6 +1484,7 @@ impl RawClient {
         let id = self.next_id;
         self.next_id += 1;
         self.send_request(Request::Subscribe {
+            agent_profile_name: None,
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
