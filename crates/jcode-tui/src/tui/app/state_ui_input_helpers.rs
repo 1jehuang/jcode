@@ -46,7 +46,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     ),
     RegisteredCommand::hidden("/model-status", "Alias for /provider-test-coverage"),
     RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),
-    RegisteredCommand::public("/agents", "Configure models for agent roles"),
+    RegisteredCommand::public("/agents", "Choose session instructions or configure role models"),
     RegisteredCommand::remote("/agent", "List or select an additive Markdown agent profile"),
     RegisteredCommand::public(
         "/swarm-prompt",
@@ -783,7 +783,7 @@ impl App {
         }
 
         if prefix_trimmed == "/agents" {
-            return vec![("/agents".into(), "Open agent model config picker")];
+            return vec![("/agents".into(), "Open instruction profile and role model picker")];
         }
 
         if prefix.starts_with("/help ") || prefix.starts_with("/? ") {

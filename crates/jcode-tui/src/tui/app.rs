@@ -1804,6 +1804,7 @@ pub struct App {
     account_picker_overlay: Option<RefCell<super::account_picker::AccountPicker>>,
     /// Profile command replies are control traffic, never turn completion.
     agent_profile_request_ids: std::collections::HashSet<u64>,
+    agent_profile_picker_request_id: Option<u64>,
     /// Usage overlay (None = not visible)
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.

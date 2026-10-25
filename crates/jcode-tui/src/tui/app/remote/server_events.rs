@@ -474,6 +474,23 @@ pub(in crate::tui::app) fn handle_server_event(
 
     // Profile replies are control traffic and must not settle an active turn.
     match &event {
+        ServerEvent::RuntimeCommandResult { id, data, .. }
+            if app.agent_profile_picker_request_id == Some(*id) => {
+                app.agent_profile_picker_request_id = None;
+                app.agent_profile_request_ids.remove(id);
+                app.apply_agent_profile_list(data);
+                return true;
+            }
+        ServerEvent::Error { id, message, .. }
+            if app.agent_profile_picker_request_id == Some(*id) => {
+                app.agent_profile_picker_request_id = None;
+                app.agent_profile_request_ids.remove(id);
+                if app.showing_agent_profiles() {
+                    app.open_agents_picker();
+                }
+                app.push_display_message(DisplayMessage::error(message.clone()));
+                return true;
+            }
         ServerEvent::RuntimeCommandResult { id, message, .. }
             if app.agent_profile_request_ids.remove(id) => {
                 app.push_display_message(DisplayMessage::system(message.clone()).with_title("Agent profile"));
@@ -1593,6 +1610,12 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::SessionId { session_id } => {
+            if app.remote_session_id.as_ref() != Some(&session_id) {
+                app.agent_profile_picker_request_id = None;
+                if app.showing_agent_profiles() {
+                    app.inline_interactive_state = None;
+                }
+            }
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
@@ -1728,6 +1751,12 @@ pub(in crate::tui::app) fn handle_server_event(
         } => {
             app.replace_window_accounts(account_labels);
             let prev_session_id = app.remote_session_id.clone();
+            if prev_session_id.as_ref() != Some(&session_id) {
+                app.agent_profile_picker_request_id = None;
+                if app.showing_agent_profiles() {
+                    app.inline_interactive_state = None;
+                }
+            }
             app.remote_provider_oauth_email = provider_oauth_email.clone();
             if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth)
                 && let Some(email) = provider_oauth_email

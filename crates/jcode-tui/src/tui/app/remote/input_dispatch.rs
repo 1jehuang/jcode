@@ -179,6 +179,11 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
 ) -> Result<()> {
     let raw_input = prepared.routing_input().to_string();
 
+    if raw_input.split_whitespace().next() == Some("/agents") {
+        app_mod::commands::handle_agents_command(app, raw_input.trim());
+        return Ok(());
+    }
+
     if let Some(args) = app_mod::agent_profiles::agent_profile_args(&raw_input) {
         app_mod::agent_profiles::send_agent_profile_command(app, remote, args).await;
         return Ok(());
