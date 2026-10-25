@@ -58,9 +58,9 @@ fn test_show_tps_disabled_hides_tps_from_status_line_and_info_panel() {
 
     // Status line path: the live feed must stay hidden while disabled.
     assert_eq!(app.output_tps(), None, "status line TPS must honor show_tps=false");
-    // Sanity: with the same streaming state the computation itself works,
-    // so the None above is the config gate, not a broken fixture.
-    assert!(app.compute_streaming_tps().is_some(), "fixture must produce a TPS value");
+    // The shared computation also honors the disabled setting now that the
+    // visibility gate lives inside compute_streaming_tps.
+    assert_eq!(app.compute_streaming_tps(), None);
 
     // Info panel path: the usage info is present (cost-based route) but its
     // live TPS must be None while disabled.
