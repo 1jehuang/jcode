@@ -283,6 +283,14 @@ pub enum ApiRequest {
 
     /// Bookmark (`saved: true`) or unbookmark a session. A non-empty `label`
     /// also becomes the session's title, announced with `SessionRenamed`.
+    /// Replace a session's env overrides for every process its tools start,
+    /// including background jobs. An empty map clears them. Not persisted.
+    SetSessionEnv {
+        session_id: String,
+        #[serde(default)]
+        env: std::collections::BTreeMap<String, String>,
+    },
+
     SetSessionSaved {
         session_id: String,
         saved: bool,

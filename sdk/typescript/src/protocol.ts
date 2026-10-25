@@ -215,6 +215,7 @@ export type ApiRequest =
   | { req: "compact"; session_id: string }
   | { req: "rename_session"; session_id: string; title?: string }
   | { req: "set_session_saved"; session_id: string; saved: boolean; label?: string }
+  | { req: "set_session_env"; session_id: string; env: Record<string, string> }
   | {
       req: "applet_action";
       session_id: string;
@@ -548,6 +549,7 @@ export const KNOWN_REQUEST_KINDS = [
   "compact",
   "rename_session",
   "set_session_saved",
+  "set_session_env",
   "applet_action",
   "close_applet",
   "rewind_undo",

@@ -427,6 +427,16 @@ pub enum Request {
     /// Bookmark (`saved: true`, optional label) or unbookmark the active
     /// session. Routed through the daemon so its in-memory session, which
     /// owns later writes, does not overwrite the flag.
+    /// Replace the active session's env overrides: every process its tools
+    /// start (foreground or background) gets these vars. An empty map
+    /// clears them. Not persisted: an embedder sets them on each attach.
+    #[serde(rename = "set_session_env")]
+    SetSessionEnv {
+        id: u64,
+        #[serde(default)]
+        env: std::collections::BTreeMap<String, String>,
+    },
+
     #[serde(rename = "set_session_saved")]
     SetSessionSaved {
         id: u64,

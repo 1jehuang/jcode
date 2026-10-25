@@ -1620,6 +1620,24 @@ fn a_scheduled_compaction_reports_its_status() {
     }
 }
 
+/// Session env forwards string vars only; anything else is dropped.
+#[test]
+fn set_session_env_forwards_string_vars() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "id": 9, "req": "set_session_env",
+        "env": {"HTTPS_PROXY": "http://x:tok@gw:10255", "BAD": 1},
+    }));
+    match &out[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["type"], "set_session_env");
+            assert_eq!(value["env"]["HTTPS_PROXY"], "http://x:tok@gw:10255");
+            assert!(value["env"].get("BAD").is_none());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// Saving forwards the flag and label so the daemon can title the session.
 #[test]
 fn set_session_saved_forwards_flag_and_label() {

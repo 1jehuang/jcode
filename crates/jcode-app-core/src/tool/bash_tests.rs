@@ -1289,3 +1289,53 @@ async fn test_detached_promoted_command_reports_intermediate_progress() {
     let _ = tokio::fs::remove_file(output_file).await;
     let _ = tokio::fs::remove_file(status_file).await;
 }
+
+/// Two sessions on one daemon, each with its own proxy: a foreground command
+/// and a background job that outlives its turn both see their OWN session's
+/// value, even when the other session changes its env meanwhile.
+#[tokio::test]
+async fn each_session_keeps_its_own_env_for_foreground_and_background() {
+    let ctx = |sid: &str| ToolContext {
+        session_id: sid.to_string(),
+        ..make_ctx(None)
+    };
+    crate::session_env::set_session_env(
+        "chat-tomer",
+        vec![("HTTPS_PROXY".into(), "http://x:tok-tomer@gw".into())],
+    );
+    crate::session_env::set_session_env(
+        "chat-owner",
+        vec![("HTTPS_PROXY".into(), "http://x:tok-owner@gw".into())],
+    );
+
+    let bg = BashTool::new()
+        .execute(
+            json!({"command": "sleep 1; printf %s \"$HTTPS_PROXY\"", "run_in_background": true}),
+            ctx("chat-tomer"),
+        )
+        .await
+        .expect("background start");
+    let id = bg.metadata.unwrap()["task_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // While Tomer's job runs, the owner's chat runs and Tomer's env changes.
+    let fg = BashTool::new()
+        .execute(
+            json!({"command": "printf %s \"$HTTPS_PROXY\""}),
+            ctx("chat-owner"),
+        )
+        .await
+        .expect("foreground");
+    assert!(fg.output.contains("tok-owner"), "{}", fg.output);
+    crate::session_env::set_session_env("chat-tomer", Vec::new());
+
+    crate::background::global()
+        .wait(&id, Duration::from_secs(10), false)
+        .await
+        .expect("task finished");
+    let out = std::fs::read_to_string(crate::background::global().output_path_for(&id)).unwrap();
+    assert!(out.contains("tok-tomer"), "{out}");
+    assert!(!out.contains("tok-owner"), "{out}");
+}

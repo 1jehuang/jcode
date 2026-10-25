@@ -1419,6 +1419,20 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Replace a session's env overrides: every process its tools start,
+    /// including background jobs, gets these vars. Empty clears them.
+    pub fn set_session_env(
+        &self,
+        session_id: &str,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetSessionEnv {
+            session_id: session_id.to_string(),
+            env,
+        })
+        .map(drop)
+    }
+
     /// Report a user action in an agent applet instance.
     pub fn applet_action(
         &self,

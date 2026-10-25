@@ -55,6 +55,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "compact",
     "rename_session",
     "set_session_saved",
+    "set_session_env",
     "get_runtime_info",
     "fork_session",
     "transfer_session",
@@ -1255,6 +1256,22 @@ impl BridgeState {
                     }
                 }
                 vec![Outbound::Legacy(out)]
+            }
+            "set_session_env" => {
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                let env = request
+                    .get("env")
+                    .and_then(Value::as_object)
+                    .map(|vars| {
+                        vars.iter()
+                            .filter_map(|(k, v)| Some((k.clone(), json!(v.as_str()?))))
+                            .collect::<serde_json::Map<_, _>>()
+                    })
+                    .unwrap_or_default();
+                vec![Outbound::Legacy(
+                    json!({"type": "set_session_env", "id": id, "env": env}),
+                )]
             }
             "set_session_saved" => {
                 let id = self.legacy_id();

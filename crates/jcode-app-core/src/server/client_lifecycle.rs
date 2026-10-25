@@ -2110,6 +2110,11 @@ pub(super) async fn handle_client(
                 handle_set_compaction_mode(id, mode, &agent, &client_event_tx).await;
             }
 
+            Request::SetSessionEnv { id, env } => {
+                crate::session_env::set_session_env(&client_session_id, env.into_iter().collect());
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+            }
+
             Request::SetSessionSaved { id, saved, label } => {
                 if reject_if_agent_busy_for_request(
                     id,

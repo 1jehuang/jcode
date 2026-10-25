@@ -957,6 +957,15 @@ export class JcodeClient extends EventEmitter {
   }
 
   /** Bookmark or unbookmark a session. A label also becomes its title. */
+  /**
+   * Replace a session's env overrides: every process its tools start,
+   * including background jobs, gets these vars. An empty object clears them.
+   * Not persisted: set them again after each attach.
+   */
+  async setSessionEnv(sessionId: string, env: Record<string, string>): Promise<void> {
+    await this.requestOk({ req: "set_session_env", session_id: sessionId, env });
+  }
+
   async setSessionSaved(sessionId: string, saved: boolean, label?: string): Promise<void> {
     await this.requestOk({ req: "set_session_saved", session_id: sessionId, saved, label });
   }
