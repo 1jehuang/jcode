@@ -2183,6 +2183,8 @@ fn test_preview_structured_messages_stay_left_aligned() {
         }
     }
     let _restore = RestorePin;
+    // Finished todo cards collapse to status dots, so keep this item in flight
+    // to exercise a structured card line in the preview.
     let todos = serde_json::json!([{
         // Finished lists intentionally collapse to status dots. Keep an active
         // item so this test exercises alignment of the structured card body.
