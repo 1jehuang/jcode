@@ -25,7 +25,11 @@ Use nonempty plain Markdown. YAML frontmatter is rejected, rather than interpret
 
 ## Select a profile
 
-In a session:
+Open `/agents`, choose **Instruction profile [session]**, then choose a profile. **None** leaves the session without an extra profile. Opening the picker or moving its highlight does not apply anything; confirm a row to change this session.
+
+Profiles are never selected automatically. A new session starts with None unless you explicitly pass `--agent`. Resuming a session keeps the profile you previously applied there.
+
+The text commands remain available:
 
 ```text
 /agent
@@ -44,7 +48,7 @@ jcode --agent reviewer
 
 `--agent` is for a new interactive session. It cannot be combined with `--resume` or a subcommand such as `run`. To change an existing session, use `/agent` inside it.
 
-Selection is resolved on the server using the session's project directory, including SSH sessions. It is not a change to `AGENTS.md` or a global default. `/agents`, the existing role/model configuration command, remains separate.
+Selection is resolved on the server using the session's project directory, including SSH sessions. It is not a change to `AGENTS.md` or a global default. `/agents` also retains its role/model configuration entries. Their global scope controls never make an instruction profile global; profiles always apply only to the current session.
 
 ## Persistence and composition
 

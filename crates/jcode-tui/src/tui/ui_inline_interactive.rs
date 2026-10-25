@@ -191,6 +191,12 @@ fn selected_route_notice_text(
 }
 
 fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<&'static str> {
+    if picker.selected_entry().is_some_and(|entry| matches!(
+        entry.action,
+        crate::tui::PickerAction::AgentProfiles | crate::tui::PickerAction::AgentProfileChoice(_)
+    )) {
+        return Some(" INSTRUCTION PROFILE · THIS SESSION ONLY · Enter choose/apply · Esc cancel · no global default");
+    }
     if picker.kind == crate::tui::PickerKind::Account {
         use crate::tui::{AccountPickerAction, PickerAction};
         return Some(match picker.selected_entry().map(|entry| &entry.action) {

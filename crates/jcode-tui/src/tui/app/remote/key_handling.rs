@@ -271,6 +271,33 @@ async fn handle_remote_key_internal(
         && !picker.preview
     {
         if code == KeyCode::Enter {
+            if app.agent_profile_picker_request_id.is_some() && app.showing_agent_profiles() {
+                return Ok(());
+            }
+            let action = picker.filtered.get(picker.selected)
+                .and_then(|index| picker.entries.get(*index))
+                .filter(|entry| entry.active_option().is_some_and(|option| option.available))
+                .map(|entry| entry.action.clone());
+            match action {
+                Some(crate::tui::PickerAction::AgentProfiles) => {
+                    app_mod::agent_profiles::open_agent_profiles(app, remote).await;
+                    return Ok(());
+                }
+                Some(crate::tui::PickerAction::AgentProfileChoice(name)) => {
+                    let already_current = name.is_some() && picker.selected_entry().is_some_and(|entry| entry.is_current);
+                    app.inline_interactive_state = None;
+                    app.agent_profile_picker_request_id = None;
+                    if already_current {
+                        app.set_status_notice("Instruction profile unchanged; use /agent reload to refresh its snapshot");
+                        return Ok(());
+                    }
+                    app_mod::agent_profiles::send_agent_profile_command(
+                        app, remote, vec![name.unwrap_or_else(|| "off".into())],
+                    ).await;
+                    return Ok(());
+                }
+                _ => {}
+            }
             let subagent_model = picker
                 .filtered
                 .get(picker.selected)
@@ -314,7 +341,11 @@ async fn handle_remote_key_internal(
                     Some(remote.set_agent_model(target, model, global).await?);
             }
         }
-        return app.handle_inline_interactive_key(code, modifiers);
+        let result = app.handle_inline_interactive_key(code, modifiers);
+        if !app.showing_agent_profiles() {
+            app.agent_profile_picker_request_id = None;
+        }
+        return result;
     }
 
     if app.handle_inline_interactive_preview_key(&code, modifiers)? {
@@ -1069,6 +1100,10 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
 
+        if trimmed.split_whitespace().next() == Some("/agents") {
+            app_mod::commands::handle_agents_command(app, trimmed);
+            return Ok(());
+        }
         if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
             return Ok(());
         }

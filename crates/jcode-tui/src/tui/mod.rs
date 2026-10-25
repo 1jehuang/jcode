@@ -1810,6 +1810,8 @@ pub enum PickerAction {
         detail_lines: Vec<String>,
     },
     AgentTarget(AgentModelTarget),
+    AgentProfiles,
+    AgentProfileChoice(Option<String>),
     AgentModelChoice {
         target: AgentModelTarget,
         clear_override: bool,
@@ -1895,9 +1897,11 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
         | PickerAction::RemoteLogin { .. }
         | PickerAction::RemoteImportDecision { .. }
         | PickerAction::AgentTarget(_)
+        | PickerAction::AgentProfiles
         | PickerAction::AgentModelChoice { .. }
         | PickerAction::SubagentModelChoice { .. }
         | PickerAction::LogoutAll => 0,
+        PickerAction::AgentProfileChoice(name) => name.as_ref().map_or(0, String::capacity),
         PickerAction::Account(
             AccountPickerAction::Switch { provider_id, label }
             | AccountPickerAction::SetDefault { provider_id, label },
@@ -1966,7 +1970,19 @@ fn estimate_picker_entry_bytes(entry: &PickerEntry) -> usize {
 
 impl InlineInteractiveState {
     pub fn schema(&self) -> InlineInteractiveSchema {
-        if self.is_agent_target_picker() {
+        if self.entries.iter().any(|entry| matches!(entry.action, PickerAction::AgentProfileChoice(_))) {
+            InlineInteractiveSchema {
+                layout: InlineInteractiveLayout::ThreeColumn,
+                primary_label: "INSTRUCTION PROFILE [SESSION]",
+                secondary_label: "SCOPE",
+                secondary_preview_label: "SCOPE",
+                tertiary_label: "DETAIL",
+                preview_submit_hint: "  ↵ choose",
+                active_submit_hint: "  ↑↓ ↵ apply · Esc cancel",
+                shows_default_shortcut_hint: false,
+                preview_activation_column: 0,
+            }
+        } else if self.is_agent_target_picker() {
             InlineInteractiveSchema {
                 layout: InlineInteractiveLayout::ThreeColumn,
                 primary_label: "TARGET",
@@ -2003,7 +2019,7 @@ impl InlineInteractiveState {
             && self
                 .entries
                 .iter()
-                .all(|entry| matches!(entry.action, PickerAction::AgentTarget(_)))
+                .all(|entry| matches!(entry.action, PickerAction::AgentTarget(_) | PickerAction::AgentProfiles))
     }
 
     pub fn uses_compact_navigation(&self) -> bool {
