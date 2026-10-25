@@ -348,12 +348,17 @@ mod macos {
         // and this runs inside the bash tool's poll loop.
         let count = (size / KINFO_PROC_SIZE).min(4096);
         let mut buf: Vec<u8> = vec![0u8; count * KINFO_PROC_SIZE];
+        // Pass the buffer capacity, not the probe's full-table size: macOS
+        // sysctl fills a partial buffer only when oldlen matches oldp, and a
+        // short buffer with the full-table length fails with ENOMEM, which
+        // would silently zero the snapshot on any machine with >4096 procs.
+        let mut filled_len = buf.len();
         let filled = unsafe {
             libc::sysctl(
                 mib.as_mut_ptr(),
                 3,
                 buf.as_mut_ptr() as *mut libc::c_void,
-                &mut size,
+                &mut filled_len,
                 std::ptr::null_mut(),
                 0,
             )
@@ -361,7 +366,7 @@ mod macos {
         if filled != 0 {
             return std::collections::HashMap::new();
         }
-        let count = (size / KINFO_PROC_SIZE).min(count);
+        let count = (filled_len / KINFO_PROC_SIZE).min(count);
         let read_pid = |entry: &[u8], offset: usize| -> u32 {
             i32::from_ne_bytes([
                 entry[offset],
