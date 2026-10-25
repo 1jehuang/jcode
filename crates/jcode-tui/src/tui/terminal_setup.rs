@@ -230,10 +230,19 @@ pub fn supports_modified_enter_reporting() -> Option<bool> {
     }
 }
 
+// Only a missing config is safe to treat as empty. In particular, invalid
+// UTF-8 must not turn an existing user's config into a new generated file.
+fn read_config_or_empty(path: &Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        result => result,
+    }
+}
+
 /// Configure tmux so a capable outer terminal's Shift+Enter reaches jcode.
 pub fn apply_tmux(home: &Path) -> std::io::Result<Applied> {
     let path = tmux_config_path(home);
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = read_config_or_empty(&path)?;
     match tmux_config_with_block(&existing) {
         None => Ok(Applied::AlreadyConfigured),
         Some(updated) => {
@@ -251,7 +260,7 @@ pub fn apply_tmux(home: &Path) -> std::io::Result<Applied> {
 /// Configure WezTerm to opt in to the kitty keyboard protocol.
 pub fn apply_wezterm(home: &Path) -> std::io::Result<Applied> {
     let path = wezterm_config_path(home);
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = read_config_or_empty(&path)?;
     if wezterm_config_is_configured(&existing) {
         return Ok(Applied::AlreadyConfigured);
     }
@@ -399,6 +408,38 @@ mod tests {
         assert_eq!(
             apply_wezterm(home.path()).expect("second apply"),
             Applied::AlreadyConfigured
+        );
+    }
+
+    #[test]
+    fn applying_tmux_setup_preserves_invalid_utf8_config() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = tmux_config_path(home.path());
+        let original = b"# user settings\n\xff\n";
+        std::fs::write(&path, original).expect("seed config");
+
+        let result = apply(SetupTarget::Tmux, home.path());
+
+        assert_eq!(std::fs::read(&path).expect("reread config"), original);
+        assert_eq!(
+            result.expect_err("must reject unreadable config").kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn applying_wezterm_setup_preserves_invalid_utf8_config() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = wezterm_config_path(home.path());
+        let original = b"-- user settings\n\xff\n";
+        std::fs::write(&path, original).expect("seed config");
+
+        let result = apply(SetupTarget::WezTerm, home.path());
+
+        assert_eq!(std::fs::read(&path).expect("reread config"), original);
+        assert_eq!(
+            result.expect_err("must reject unreadable config").kind(),
+            std::io::ErrorKind::InvalidData
         );
     }
 
