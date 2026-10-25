@@ -565,8 +565,9 @@ cross_provider_failover = "countdown"
 #   auto_retry_base_delay_secs = 10
 #   auto_retry_enabled = true
 #   auto_retry_max_attempts = 10
-# Environment variables take precedence over per-provider values, which take
-# precedence over the global [provider] default when that provider is active.
+# When that provider is active, its profile values take precedence over the
+# global [provider] section. Environment variables override the global
+# [provider] values only; they do not override per-provider profile values.
 
 [server]
 # Who executes autonomous wake requests from background completion/stall,

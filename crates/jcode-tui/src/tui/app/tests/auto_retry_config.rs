@@ -23,9 +23,12 @@ mod auto_retry_config {
             app.session.provider_key = None;
 
             assert_eq!(app.effective_auto_retry_base_delay_secs(), 7);
-            // The App field mirrors the global value parsed at construction, so
-            // the fallback path returns the same number stored on App.
-            assert_eq!(app.auto_retry_base_delay_secs, 7);
+            // The getter reads the live global config, so the fallback path
+            // reflects the parsed [provider] value without an App snapshot.
+            assert_eq!(
+                crate::config::config().provider.auto_retry_base_delay_secs,
+                7
+            );
         });
     }
 
@@ -48,9 +51,12 @@ mod auto_retry_config {
                 42,
                 "per-profile override must win over the global value"
             );
-            // The global value is still what App captured at construction; only
-            // the resolution prefers the live profile override.
-            assert_eq!(app.auto_retry_base_delay_secs, 7);
+            // The global value stays untouched; only the resolution prefers
+            // the live profile override.
+            assert_eq!(
+                crate::config::config().provider.auto_retry_base_delay_secs,
+                7
+            );
         });
     }
 
@@ -66,7 +72,7 @@ mod auto_retry_config {
             app.session.provider_key = None;
 
             assert_eq!(app.effective_auto_retry_max_attempts(), 4);
-            assert_eq!(app.auto_retry_max_attempts, 4);
+            assert_eq!(crate::config::config().provider.auto_retry_max_attempts, 4);
         });
     }
 
@@ -88,7 +94,7 @@ mod auto_retry_config {
                 9,
                 "per-profile override must win over the global value"
             );
-            assert_eq!(app.auto_retry_max_attempts, 4);
+            assert_eq!(crate::config::config().provider.auto_retry_max_attempts, 4);
         });
     }
 
@@ -158,9 +164,7 @@ mod auto_retry_config {
     #[test]
     fn remote_provider_label_resolves_catalog_profile() {
         with_temp_jcode_home(|| {
-            write_test_config(
-                "[providers.nvidia-nim]\nauto_retry_max_attempts = 2\n",
-            );
+            write_test_config("[providers.nvidia-nim]\nauto_retry_max_attempts = 2\n");
             crate::config::invalidate_config_cache();
 
             let mut app = create_test_app();

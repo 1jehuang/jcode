@@ -86,8 +86,10 @@ impl App {
 
     /// Resolve the effective auto-retry base delay for the active provider.
     /// Uses the named provider profile override, then the env-resolved global
-    /// `[provider]` value stored on App at construction. Environment overrides
-    /// are applied once by config resolution before App is created.
+    /// `[provider]` value. Reading the live config (instead of a value snapshotted
+    /// at construction) means a config.toml edit or env change applies to the
+    /// next retry without an app restart, matching how the per-profile overrides
+    /// already behave.
     pub(crate) fn effective_auto_retry_base_delay_secs(&self) -> u64 {
         if let Some(key) = self.auto_retry_provider_profile_key()
             && let Some(profile) = crate::config::config().providers.get(&key)
@@ -95,13 +97,15 @@ impl App {
         {
             return jcode_config_types::clamp_auto_retry_base_delay_secs(override_val);
         }
-        jcode_config_types::clamp_auto_retry_base_delay_secs(self.auto_retry_base_delay_secs)
+        jcode_config_types::clamp_auto_retry_base_delay_secs(
+            crate::config::config().provider.auto_retry_base_delay_secs,
+        )
     }
 
     /// Resolve whether auto-retry is enabled for the active provider.
     /// Uses the named provider profile override, then the env-resolved global
-    /// `[provider]` value stored on App at construction. Environment overrides
-    /// are applied once by config resolution before App is created.
+    /// `[provider]` value. Live config read: config.toml edits and env changes
+    /// apply to the running session without a restart.
     pub(crate) fn effective_auto_retry_enabled(&self) -> bool {
         if let Some(key) = self.auto_retry_provider_profile_key()
             && let Some(profile) = crate::config::config().providers.get(&key)
@@ -109,13 +113,13 @@ impl App {
         {
             return override_val;
         }
-        self.auto_retry_enabled
+        crate::config::config().provider.auto_retry_enabled
     }
 
     /// Resolve the effective auto-retry max attempts for the active provider.
     /// Uses the named provider profile override, then the env-resolved global
-    /// `[provider]` value stored on App at construction. Environment overrides
-    /// are applied once by config resolution before App is created.
+    /// `[provider]` value. Live config read: config.toml edits and env changes
+    /// apply to the running session without a restart.
     pub(crate) fn effective_auto_retry_max_attempts(&self) -> u8 {
         if let Some(key) = self.auto_retry_provider_profile_key()
             && let Some(profile) = crate::config::config().providers.get(&key)
@@ -123,7 +127,7 @@ impl App {
         {
             return override_val;
         }
-        self.auto_retry_max_attempts
+        crate::config::config().provider.auto_retry_max_attempts
     }
 
     pub(super) fn schedule_pending_remote_retry(&mut self, reason: &str) -> bool {
@@ -522,9 +526,6 @@ impl App {
             auto_poke_attempts: 0,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
-            auto_retry_base_delay_secs: config().provider.auto_retry_base_delay_secs,
-            auto_retry_enabled: config().provider.auto_retry_enabled,
-            auto_retry_max_attempts: config().provider.auto_retry_max_attempts,
             overnight_auto_poke: None,
             pending_provider_failover: None,
             pending_fallback_offer: None,
@@ -1020,9 +1021,6 @@ impl App {
             auto_poke_attempts: 0,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
-            auto_retry_base_delay_secs: config().provider.auto_retry_base_delay_secs,
-            auto_retry_enabled: config().provider.auto_retry_enabled,
-            auto_retry_max_attempts: config().provider.auto_retry_max_attempts,
             overnight_auto_poke: None,
             pending_provider_failover: None,
             pending_fallback_offer: None,
