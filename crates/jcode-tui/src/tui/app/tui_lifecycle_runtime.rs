@@ -142,7 +142,7 @@ impl App {
         if !crate::config::config().terminal_status_osc9 || self.is_replay {
             return None;
         }
-        let state: &'static str = if self.osc_blocked || self.lifecycle_osc_blocked() {
+        let state: &'static str = if self.lifecycle_osc_blocked() {
             "blocked"
         } else if self.is_processing() {
             "working"
@@ -957,54 +957,6 @@ mod tests {
             Some("working"),
             "terminal title suppression should not disable the dedicated OSC9 status channel"
         );
-    }
-
-    #[test]
-    fn osc_state_blocked_wins_over_processing() {
-        let mut app = create_test_app();
-        app.is_processing = true;
-        app.status = ProcessingStatus::Streaming;
-        app.osc_blocked = true;
-        assert_eq!(
-            app.agent_osc_state(),
-            Some("blocked"),
-            "blocked should take priority over working"
-        );
-    }
-
-    #[test]
-    fn osc_state_blocked_wins_over_idle() {
-        let mut app = create_test_app();
-        app.is_processing = false;
-        app.status = ProcessingStatus::Idle;
-        app.osc_blocked = true;
-        assert_eq!(
-            app.agent_osc_state(),
-            Some("blocked"),
-            "blocked should take priority over idle"
-        );
-    }
-
-    #[test]
-    fn osc_state_blocked_then_unblocked_returns_to_idle() {
-        let mut app = create_test_app();
-        app.osc_blocked = true;
-        assert_eq!(app.agent_osc_state(), Some("blocked"));
-        app.osc_blocked = false;
-        app.is_processing = false;
-        app.status = ProcessingStatus::Idle;
-        assert_eq!(app.agent_osc_state(), Some("idle"));
-    }
-
-    #[test]
-    fn osc_state_blocked_then_processing() {
-        let mut app = create_test_app();
-        app.osc_blocked = true;
-        assert_eq!(app.agent_osc_state(), Some("blocked"));
-        app.osc_blocked = false;
-        app.is_processing = true;
-        app.status = ProcessingStatus::Streaming;
-        assert_eq!(app.agent_osc_state(), Some("working"));
     }
 
     #[test]
