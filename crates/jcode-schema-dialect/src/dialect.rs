@@ -268,6 +268,11 @@ fn is_object_typed(map: &Map<String, Value>) -> bool {
 }
 
 /// Drop `required` names the same object does not declare (#655).
+///
+/// An object with no `properties` map declares no names, so its entire
+/// `required` list is dropped: Gemini rejects a `required` entry it cannot
+/// resolve to a property (see `7e6dec1e6`), and a surviving `required` list
+/// without a matching `properties` map is exactly that case.
 fn prune_dangling_required(out: &mut Map<String, Value>) {
     let defined: Vec<String> = out
         .get("properties")
