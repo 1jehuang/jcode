@@ -15,6 +15,9 @@ use std::sync::Arc;
 #[path = "remote_tests/korean_input.rs"]
 mod korean_input;
 
+#[path = "remote_tests/client_reload_safety.rs"]
+mod client_reload_safety;
+
 struct MockProvider;
 
 #[async_trait::async_trait]

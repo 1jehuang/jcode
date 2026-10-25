@@ -4,6 +4,23 @@ pub(super) mod reload_input;
 use super::*;
 use crate::tui::{backend, keybind};
 
+/// Hot-exec resumes must not turn a client-only handoff into a shared daemon
+/// reload. Older clients already export these markers, so this also protects
+/// handoffs from binaries that predate this policy. Ordinary `--resume` and
+/// fresh launches retain the configured behavior. Manual `/reload` is separate.
+pub(super) fn remote_auto_server_reload(
+    configured: bool,
+    has_resume_target: bool,
+    resuming_handoff: bool,
+    reload_fast_start: bool,
+) -> bool {
+    configured && !(has_resume_target && (resuming_handoff || reload_fast_start))
+}
+
+#[cfg(test)]
+#[path = "tui_lifecycle_reload_policy_tests.rs"]
+mod reload_policy_tests;
+
 impl App {
     /// Re-parse keybinding snapshots when the config cache has reloaded.
     ///
@@ -1537,6 +1554,15 @@ impl App {
         let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // Capture the inherited handoff before consuming its one-shot marker.
+        // Keep the effective policy for this client's lifetime, including
+        // reconnects, rather than consulting an already-consumed environment.
+        app.auto_server_reload = remote_auto_server_reload(
+            app.auto_server_reload,
+            resume_session.is_some(),
+            std::env::var_os("JCODE_RESUMING").is_some(),
+            reload_fast_start,
+        );
         // One-shot handoff flag. A later ordinary resume in the same process
         // must retain the existing eager local-history behavior.
         crate::env::remove_var("JCODE_RELOAD_FAST_START");
