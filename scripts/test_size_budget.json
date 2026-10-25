@@ -14,7 +14,7 @@
     "crates/jcode-base/src/live_tests.rs": 3087,
     "crates/jcode-base/src/provider/tests.rs": 1335,
     "crates/jcode-base/src/provider/tests/model_resolution.rs": 2248,
-    "crates/jcode-base/src/provider_catalog_tests.rs": 1426,
+    "crates/jcode-base/src/provider_catalog_tests.rs": 1429,
     "crates/jcode-base/src/session_tests/cases.rs": 3267,
     "crates/jcode-base/src/usage/tests.rs": 1317,
     "crates/jcode-harness-api-server/src/translate_tests.rs": 4199,
