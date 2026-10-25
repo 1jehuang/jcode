@@ -6,7 +6,7 @@ use super::swarm_mutation_state::{
 use super::turn_failover::process_server_initiated_message;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
-    append_swarm_completion_report_instructions, broadcast_swarm_plan, broadcast_swarm_status,
+    broadcast_swarm_plan, broadcast_swarm_status,
     create_headless_session, fanout_session_event, persist_swarm_state_for, record_swarm_event,
     record_swarm_event_for_session, remove_background_tool_signal,
     remove_session_channel_subscriptions, remove_session_from_swarm,
@@ -677,9 +677,7 @@ pub(super) async fn spawn_swarm_agent(
         spawn_route_api_method,
     ));
 
-    let startup_message = initial_message
-        .as_deref()
-        .map(append_swarm_completion_report_instructions);
+    let startup_message = initial_message.clone();
 
     let visible_spawn = match resolved_spawn_mode {
         // Inline workers run in-process like headless ones; the difference is
@@ -792,8 +790,7 @@ pub(super) async fn spawn_swarm_agent(
     }
     // Label the worker with what it was spawned for so the swarm strip and
     // member lists can show the task, not just the animal name. An explicit
-    // spawn `label` wins; otherwise the label is derived from the raw prompt
-    // (before completion-report boilerplate is appended).
+    // spawn `label` wins; otherwise the label is derived from the initial prompt.
     if let Some(label_text) = label.as_deref().or(initial_message.as_deref()) {
         set_member_task_label(&new_session_id, label_text, swarm_members).await;
     }
@@ -859,11 +856,9 @@ pub(super) async fn spawn_swarm_agent(
                     event_tx,
                 )
                 .await;
-                let completion_report = if result.is_ok() {
+                let completion_report = {
                     let agent = agent_arc.lock().await;
-                    agent.latest_assistant_text_after(start_message_index)
-                } else {
-                    None
+                    agent.recent_assistant_output_tail_after(start_message_index)
                 };
                 let (new_status, new_detail) = match result {
                     Ok(()) => ("ready", None),
