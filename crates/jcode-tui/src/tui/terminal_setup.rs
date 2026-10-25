@@ -285,7 +285,7 @@ pub fn apply_wezterm(home: &Path) -> std::io::Result<Applied> {
     }
     Ok(Applied::Manual {
         message: format!(
-            "Add `{WEZTERM_CONFIG_LINE}` to {} (before `return config`).",
+            "For Shift+Enter support, add `{WEZTERM_CONFIG_LINE}` to {} (before `return config`).",
             path.display()
         ),
     })
@@ -451,8 +451,9 @@ mod tests {
 
         let result = apply_wezterm(home.path()).expect("apply");
         assert!(
-            matches!(result, Applied::Manual { .. }),
-            "editing an unfamiliar Lua config could break it, so instruct instead: {result:?}"
+            matches!(result, Applied::Manual { ref message }
+                if message.contains("Shift+Enter") && message.contains(WEZTERM_CONFIG_LINE)),
+            "must explain Shift+Enter setup without editing unfamiliar Lua: {result:?}"
         );
         assert_eq!(
             std::fs::read_to_string(wezterm_config_path(home.path())).expect("reread"),
