@@ -11,6 +11,12 @@ pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-3-flash";
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
+    "gemini-4-argon-high",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-low",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low",
     "gemini-3.1-pro-high",
     "gemini-3.1-pro-low",
     "gemini-3-flash",
@@ -32,7 +38,7 @@ pub const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// environments that need a different Cloud Code host.
 pub const ENDPOINT_ENV: &str = "JCODE_ANTIGRAVITY_ENDPOINT";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-pub const ANTIGRAVITY_VERSION: &str = "1.18.3";
+pub const ANTIGRAVITY_VERSION: &str = "1.4.2";
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
 
@@ -113,6 +119,22 @@ pub fn catalog_matches_current_endpoint(catalog: &PersistedCatalog) -> bool {
         Some(endpoint) => endpoint == antigravity_endpoint(),
         None => true,
     }
+}
+
+/// Whether a persisted catalog includes the CLI-gated model set when it carries
+/// the full backend catalog. Legacy non-`cli/` User-Agent fetches return
+/// `gemini-3.8-flash-tiered` while omitting all `gemini-4-argon-*` tiers; such
+/// caches must be discarded so they do not mask Argon availability.
+pub fn catalog_has_cli_models(catalog: &PersistedCatalog) -> bool {
+    let has_legacy_non_cli_marker = catalog
+        .models
+        .iter()
+        .any(|model| model.id == "gemini-3.8-flash-tiered");
+    let has_argon = catalog
+        .models
+        .iter()
+        .any(|model| model.id.starts_with("gemini-4-argon"));
+    !has_legacy_non_cli_marker || has_argon
 }
 
 /// Result of parsing the backend `fetchAvailableModels` response: the ordered
@@ -199,18 +221,26 @@ pub fn metadata_platform() -> &'static str {
 pub fn antigravity_version() -> String {
     std::env::var(VERSION_ENV)
         .ok()
-        .map(|value| value.trim().to_string())
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed
+                .strip_prefix("cli/")
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string()
+        })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| ANTIGRAVITY_VERSION.to_string())
 }
 
 pub fn antigravity_user_agent() -> String {
+    let version = antigravity_version();
     if cfg!(target_os = "windows") {
-        format!("antigravity/{} windows/amd64", antigravity_version())
+        format!("antigravity/cli/{version} windows/amd64")
     } else if cfg!(target_arch = "aarch64") {
-        format!("antigravity/{} darwin/arm64", antigravity_version())
+        format!("antigravity/cli/{version} darwin/arm64")
     } else {
-        format!("antigravity/{} darwin/amd64", antigravity_version())
+        format!("antigravity/cli/{version} darwin/amd64")
     }
 }
 
@@ -257,7 +287,20 @@ pub fn merge_antigravity_model_ids(models: impl IntoIterator<Item = String>) -> 
 
 pub fn is_known_model(model: &str) -> bool {
     let normalized = model.trim();
-    !normalized.is_empty() && AVAILABLE_MODELS.contains(&normalized)
+    !normalized.is_empty()
+        && (AVAILABLE_MODELS.contains(&normalized)
+            || AVAILABLE_MODELS.contains(&remap_unsupported_model(normalized)))
+}
+
+/// Whether `model` is an Antigravity-only model id (or alias) that is not
+/// served by the standalone Gemini or Anthropic providers.
+pub fn is_antigravity_exclusive_model(model: &str) -> bool {
+    let normalized = model.trim();
+    is_known_model(normalized)
+        && !matches!(
+            remap_unsupported_model(normalized),
+            "claude-sonnet-4-6" | "gemini-3-flash"
+        )
 }
 
 pub fn parse_fetch_available_models_response(
@@ -543,13 +586,19 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
 pub fn remap_unsupported_model(model: &str) -> &str {
     match model {
         "gemini-3.1-pro-high" => "gemini-pro-agent",
+        "gemini-4-argon" | "argon" | "argon-medium" => "gemini-4-argon-medium",
+        "argon-high" => "gemini-4-argon-high",
+        "argon-low" => "gemini-4-argon-low",
+        "gemini-3.8-flash" => "gemini-3.8-flash-medium",
         other => other,
     }
 }
 
 /// Whether a resolved Antigravity model id targets a Gemini model.
 pub fn model_is_gemini(model: &str) -> bool {
-    model.trim().to_ascii_lowercase().starts_with("gemini")
+    remap_unsupported_model(model.trim())
+        .to_ascii_lowercase()
+        .starts_with("gemini")
 }
 
 /// The schema dialect the Antigravity backend will validate a request against,
@@ -816,6 +865,118 @@ mod endpoint_tests {
         ))));
         unsafe {
             std::env::remove_var(ENDPOINT_ENV);
+        }
+    }
+
+    struct VersionEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl VersionEnvGuard {
+        fn acquire() -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let prev = std::env::var_os(VERSION_ENV);
+            Self { _lock: lock, prev }
+        }
+    }
+
+    impl Drop for VersionEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(prev) = self.prev.as_ref() {
+                    std::env::set_var(VERSION_ENV, prev);
+                } else {
+                    std::env::remove_var(VERSION_ENV);
+                }
+            }
+        }
+    }
+
+    fn expected_platform_suffix() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "windows/amd64"
+        } else if cfg!(target_arch = "aarch64") {
+            "darwin/arm64"
+        } else {
+            "darwin/amd64"
+        }
+    }
+
+    #[test]
+    fn antigravity_user_agent_defaults_to_cli_version_with_platform_suffix() {
+        let _guard = VersionEnvGuard::acquire();
+        unsafe {
+            std::env::remove_var(VERSION_ENV);
+        }
+        assert_eq!(antigravity_version(), ANTIGRAVITY_VERSION);
+        assert_eq!(
+            antigravity_user_agent(),
+            format!(
+                "antigravity/cli/{ANTIGRAVITY_VERSION} {}",
+                expected_platform_suffix()
+            )
+        );
+    }
+
+    #[test]
+    fn antigravity_user_agent_ignores_empty_and_whitespace_overrides() {
+        let _guard = VersionEnvGuard::acquire();
+        let expected_ua = format!(
+            "antigravity/cli/{ANTIGRAVITY_VERSION} {}",
+            expected_platform_suffix()
+        );
+        for blank in ["", "   ", "\t\n", "cli/", "  cli/   "] {
+            unsafe {
+                std::env::set_var(VERSION_ENV, blank);
+            }
+            assert_eq!(
+                antigravity_version(),
+                ANTIGRAVITY_VERSION,
+                "blank override {blank:?} must fall back to default version"
+            );
+            assert_eq!(
+                antigravity_user_agent(),
+                expected_ua,
+                "blank override {blank:?} must produce default User-Agent"
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_user_agent_normalizes_custom_and_cli_prefixed_overrides() {
+        let _guard = VersionEnvGuard::acquire();
+        for (expected_ver, raw_variants) in [
+            (
+                "1.4.0",
+                ["1.4.0", "  1.4.0  ", "cli/1.4.0", "  cli/1.4.0  "],
+            ),
+            (
+                "1.5.0",
+                ["1.5.0", "  1.5.0  ", "cli/1.5.0", "  cli/1.5.0  "],
+            ),
+        ] {
+            let expected_ua = format!(
+                "antigravity/cli/{expected_ver} {}",
+                expected_platform_suffix()
+            );
+            for raw in raw_variants {
+                unsafe {
+                    std::env::set_var(VERSION_ENV, raw);
+                }
+                assert_eq!(
+                    antigravity_version(),
+                    expected_ver,
+                    "override {raw:?} must normalize to bare version"
+                );
+                assert_eq!(
+                    antigravity_user_agent(),
+                    expected_ua,
+                    "override {raw:?} must produce exact cli-prefixed User-Agent without double prefix"
+                );
+            }
         }
     }
 }
