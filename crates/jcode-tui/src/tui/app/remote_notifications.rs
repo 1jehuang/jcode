@@ -22,7 +22,23 @@ fn strip_message_prefix<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
     message.strip_prefix(prefix).map(str::trim)
 }
 
+fn parse_cross_swarm_direct_message(message: &str) -> Option<(&str, &str)> {
+    let rest = message.strip_prefix("Cross-swarm DM from ")?;
+    let (sender, metadata) = rest.split_once(" (swarm '")?;
+    if sender.is_empty() || sender.contains(char::is_whitespace) {
+        return None;
+    }
+    // Split at the end of the quoted label, not a colon inside that label
+    // or a later delimiter in the message body.
+    let (label, body) = metadata.split_once("'): ")?;
+    let title_end = sender.len() + " (swarm '".len() + label.len() + "')".len();
+    Some((&rest[..title_end], body))
+}
+
 fn compact_direct_message_body(message: &str) -> String {
+    if let Some((_, body)) = parse_cross_swarm_direct_message(message) {
+        return body.trim().to_string();
+    }
     if let Some((_, body)) = message
         .strip_prefix("DM from ")
         .and_then(|rest| rest.split_once(": "))
@@ -185,9 +201,8 @@ fn collapses_to_one_row(notification_type: &NotificationType) -> bool {
 /// return a one-row swarm display message for it instead of the raw text.
 pub(super) fn swarm_delivery_display_message(content: &str) -> Option<crate::tui::DisplayMessage> {
     let trimmed = content.trim();
-    let (title, body) = if let Some(rest) = trimmed.strip_prefix("Cross-swarm DM from ") {
-        let (sender, body) = rest.split_once(": ")?;
-        (format!("DM from {}", sender.trim()), body)
+    let (title, body) = if let Some((sender, body)) = parse_cross_swarm_direct_message(trimmed) {
+        (format!("DM from {}", sender), body)
     } else if let Some(rest) = trimmed.strip_prefix("DM from ") {
         let (sender, body) = rest.split_once(": ")?;
         if sender.contains(char::is_whitespace) {
@@ -303,7 +318,9 @@ fn present_swarm_notification_inner(
                     }
                 } else {
                     SwarmNotificationPresentation {
-                        title: format!("DM from {}", sender),
+                        title: parse_cross_swarm_direct_message(trimmed)
+                            .map(|(sender, _)| format!("DM from {}", sender))
+                            .unwrap_or_else(|| format!("DM from {}", sender)),
                         message: compact_direct_message_body(trimmed),
                         status_notice: format!("DM from {}", sender),
                     }
