@@ -1458,3 +1458,23 @@ fn reload_repo_resolver_prefers_session_working_dir_over_binary_origin() {
     );
     assert_eq!(resolved.as_deref(), Some(session_repo.path()));
 }
+
+/// Self-dev sessions hide the bundled docs tool, so the tool list must say where
+/// the same content lives instead of leaving the model to conclude no docs exist.
+#[test]
+fn selfdev_description_points_at_checkout_docs_where_bundled_docs_is_withheld() {
+    let selfdev = SelfDevTool::description_for(true);
+    assert!(
+        selfdev.contains("jcode_docs"),
+        "self-dev description must name the withheld docs tool: {selfdev}"
+    );
+    assert!(
+        selfdev.contains("docs/"),
+        "self-dev description must point at the checkout docs: {selfdev}"
+    );
+    let on_ramp = SelfDevTool::description_for(false);
+    assert!(
+        !on_ramp.contains("jcode_docs"),
+        "bundled docs are only withheld inside self-dev sessions: {on_ramp}"
+    );
+}

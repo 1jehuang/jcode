@@ -487,7 +487,10 @@ impl SelfDevTool {
     /// reload/find-config); inside self-dev it manages builds and reloads.
     pub fn description_for(is_selfdev: bool) -> &'static str {
         if is_selfdev {
-            "Manage self-dev builds, tests, and reloads while working on jcode itself."
+            "Manage self-dev builds, tests, and reloads while working on jcode itself. \
+             The bundled `jcode_docs` tool is withheld in self-dev sessions; read this \
+             checkout's `docs/` directory directly instead, since bundled docs are built \
+             from it."
         } else {
             "Enter self-dev mode to work on jcode itself: setup, reload, find config/paths."
         }
