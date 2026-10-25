@@ -1724,7 +1724,10 @@ pub(in crate::tui::app) fn handle_server_event(
             let history_mcp_count = mcp_servers.len();
             let history_model = provider_model.clone();
 
-            if !crate::tui::is_ssh_remote()
+            // Do not defer authoritative history behind a reload this client
+            // cannot perform automatically, including hot-exec resume handoffs.
+            if app.auto_server_reload
+                && !crate::tui::is_ssh_remote()
                 && should_defer_history_for_runtime_identity(
                     server_has_update,
                     server_version.as_deref(),
@@ -2022,7 +2025,8 @@ pub(in crate::tui::app) fn handle_server_event(
             app.workspace_client
                 .sync_after_history(&session_id, &app.remote_sessions);
 
-            if !crate::tui::is_ssh_remote()
+            if app.auto_server_reload
+                && !crate::tui::is_ssh_remote()
                 && server_has_update == Some(true)
                 && !app.pending_server_reload
             {
