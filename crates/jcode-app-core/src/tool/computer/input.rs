@@ -186,21 +186,110 @@ pub fn parse_chord(chord: &str) -> Result<(CGEventFlags, u16)> {
     Ok((flags, code))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChordKeyEvent {
+    code: u16,
+    down: bool,
+    modifier: bool,
+    flags: CGEventFlags,
+}
+
+fn chord_event_plan(flags: CGEventFlags, code: u16, baseline: CGEventFlags) -> Vec<ChordKeyEvent> {
+    let modifiers = [
+        (CGEventFlags::CGEventFlagCommand, 0x37),
+        (CGEventFlags::CGEventFlagShift, 0x38),
+        (CGEventFlags::CGEventFlagAlternate, 0x3A),
+        (CGEventFlags::CGEventFlagControl, 0x3B),
+        (CGEventFlags::CGEventFlagSecondaryFn, 0x3F),
+    ];
+    // Only release modifiers this chord introduced. A physically held modifier
+    // or an intentional key_hold must still be held when the chord finishes.
+    let introduced = flags & !baseline;
+    let mut active = baseline;
+    let mut plan = Vec::new();
+    for (flag, modifier_code) in modifiers {
+        if introduced.contains(flag) {
+            active.insert(flag);
+            plan.push(ChordKeyEvent {
+                code: modifier_code,
+                down: true,
+                modifier: true,
+                flags: active,
+            });
+        }
+    }
+    for down in [true, false] {
+        plan.push(ChordKeyEvent {
+            code,
+            down,
+            modifier: false,
+            flags: active,
+        });
+    }
+    for (flag, modifier_code) in modifiers.into_iter().rev() {
+        if introduced.contains(flag) {
+            active.remove(flag);
+            plan.push(ChordKeyEvent {
+                code: modifier_code,
+                down: false,
+                modifier: true,
+                flags: active,
+            });
+        }
+    }
+    plan
+}
+
+static KEY_CHORD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn run_chord_transaction<T>(inject: impl FnOnce() -> Result<T>) -> Result<T> {
+    // Concurrent chords must not adopt each other's transient modifiers as
+    // their baseline. This does not lock out physical keyboard activity.
+    let _guard = KEY_CHORD_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("keyboard chord lock poisoned by interrupted injection"))?;
+    inject()
+}
+
+fn prepare_and_post_chord<E>(
+    plan: &[ChordKeyEvent],
+    mut prepare: impl FnMut(&ChordKeyEvent) -> Result<E>,
+    mut emit: impl FnMut(E),
+) -> Result<()> {
+    // Creation can fail. Finish it before posting anything to the shared HID
+    // stream, so an allocation/source error cannot leave part of a chord down.
+    let events = plan.iter().map(&mut prepare).collect::<Result<Vec<_>>>()?;
+    for event in events {
+        emit(event);
+    }
+    Ok(())
+}
+
 pub fn key_chord(chord: &str) -> Result<()> {
     let (flags, code) = parse_chord(chord)?;
-    let src = source()?;
-    let down = CGEvent::new_keyboard_event(src, code, true)
-        .map_err(|_| anyhow::anyhow!("failed to create key-down event"))?;
-    down.set_flags(flags);
-    post(down);
-    sleep(Duration::from_millis(15));
-
-    let src_up = source()?;
-    let up = CGEvent::new_keyboard_event(src_up, code, false)
-        .map_err(|_| anyhow::anyhow!("failed to create key-up event"))?;
-    up.set_flags(flags);
-    post(up);
-    Ok(())
+    run_chord_transaction(|| {
+        let src = source()?;
+        let baseline = CGEvent::new(src.clone())
+            .map_err(|_| anyhow::anyhow!("failed to read keyboard modifier state"))?
+            .get_flags();
+        let plan = chord_event_plan(flags, code, baseline);
+        prepare_and_post_chord(
+            &plan,
+            |event| {
+                let cg_event = CGEvent::new_keyboard_event(src.clone(), event.code, event.down)
+                    .map_err(|_| anyhow::anyhow!("failed to create chord keyboard event"))?;
+                if event.modifier {
+                    cg_event.set_type(CGEventType::FlagsChanged);
+                }
+                cg_event.set_flags(event.flags);
+                Ok(cg_event)
+            },
+            |event| {
+                post(event);
+                sleep(Duration::from_millis(15));
+            },
+        )
+    })
 }
 
 /// Parse a chord into (modifier flags, optional main keycode). Unlike
@@ -283,6 +372,186 @@ pub fn key_hold(chord: &str, down_state: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan(chord: &str, baseline: CGEventFlags) -> Vec<ChordKeyEvent> {
+        let (flags, code) = parse_chord(chord).unwrap();
+        chord_event_plan(flags, code, baseline)
+    }
+
+    fn event(code: u16, down: bool, modifier: bool, flags: CGEventFlags) -> ChordKeyEvent {
+        ChordKeyEvent {
+            code,
+            down,
+            modifier,
+            flags,
+        }
+    }
+
+    #[test]
+    fn chord_plan_ctrl_g_releases_only_its_control_modifier() {
+        let ctrl = CGEventFlags::CGEventFlagControl;
+        let none = CGEventFlags::CGEventFlagNull;
+        assert_eq!(
+            plan("ctrl+g", none),
+            vec![
+                event(0x3B, true, true, ctrl),
+                event(0x05, true, false, ctrl),
+                event(0x05, false, false, ctrl),
+                event(0x3B, false, true, none),
+            ]
+        );
+    }
+
+    #[test]
+    fn chord_plan_cmd_shift_a_releases_in_reverse_order() {
+        let cmd = CGEventFlags::CGEventFlagCommand;
+        let both = cmd | CGEventFlags::CGEventFlagShift;
+        let none = CGEventFlags::CGEventFlagNull;
+        assert_eq!(
+            plan("cmd+shift+a", none),
+            vec![
+                event(0x37, true, true, cmd),
+                event(0x38, true, true, both),
+                event(0x00, true, false, both),
+                event(0x00, false, false, both),
+                event(0x38, false, true, cmd),
+                event(0x37, false, true, none),
+            ]
+        );
+    }
+
+    #[test]
+    fn chord_plan_bare_key_does_not_inject_modifier_events() {
+        let baseline = CGEventFlags::CGEventFlagShift | CGEventFlags::CGEventFlagAlphaShift;
+        for flags in [CGEventFlags::CGEventFlagNull, baseline] {
+            assert_eq!(
+                plan("g", flags),
+                vec![
+                    event(0x05, true, false, flags),
+                    event(0x05, false, false, flags),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn chord_plan_preserves_unrelated_held_modifiers() {
+        let baseline = CGEventFlags::CGEventFlagShift | CGEventFlags::CGEventFlagAlphaShift;
+        let active = baseline | CGEventFlags::CGEventFlagControl;
+        assert_eq!(
+            plan("ctrl+g", baseline),
+            vec![
+                event(0x3B, true, true, active),
+                event(0x05, true, false, active),
+                event(0x05, false, false, active),
+                event(0x3B, false, true, baseline),
+            ]
+        );
+    }
+
+    #[test]
+    fn chord_plan_does_not_release_an_already_held_requested_modifier() {
+        let baseline = CGEventFlags::CGEventFlagControl | CGEventFlags::CGEventFlagShift;
+        assert_eq!(
+            plan("ctrl+g", baseline),
+            vec![
+                event(0x05, true, false, baseline),
+                event(0x05, false, false, baseline),
+            ]
+        );
+    }
+
+    #[test]
+    fn chord_plan_fn_and_option_restore_unrelated_baseline_flags() {
+        let baseline = CGEventFlags::CGEventFlagAlphaShift | CGEventFlags::CGEventFlagCommand;
+        let alt = baseline | CGEventFlags::CGEventFlagAlternate;
+        let active = alt | CGEventFlags::CGEventFlagSecondaryFn;
+        assert_eq!(
+            plan("fn+alt+left", baseline),
+            vec![
+                event(0x3A, true, true, alt),
+                event(0x3F, true, true, active),
+                event(0x7B, true, false, active),
+                event(0x7B, false, false, active),
+                event(0x3F, false, true, alt),
+                event(0x3A, false, true, baseline),
+            ]
+        );
+    }
+
+    #[test]
+    fn chord_preparation_failure_at_any_event_posts_nothing() {
+        let plan = plan("cmd+shift+a", CGEventFlags::CGEventFlagNull);
+        for failure_index in 0..plan.len() {
+            let mut next_index = 0;
+            let mut posted = Vec::new();
+            let result = prepare_and_post_chord(
+                &plan,
+                |event| {
+                    let index = next_index;
+                    next_index += 1;
+                    if index == failure_index {
+                        bail!("simulated CGEvent creation failure");
+                    }
+                    Ok(*event)
+                },
+                |event| posted.push(event),
+            );
+            assert!(result.is_err());
+            assert!(posted.is_empty(), "partial chord at event {failure_index}");
+        }
+    }
+
+    #[test]
+    fn chord_preparation_success_posts_the_entire_plan_in_order() {
+        let plan = plan("ctrl+g", CGEventFlags::CGEventFlagNull);
+        let mut posted = Vec::new();
+        prepare_and_post_chord(&plan, |event| Ok(*event), |event| posted.push(event)).unwrap();
+        assert_eq!(posted, plan);
+    }
+
+    #[test]
+    fn chord_transactions_do_not_adopt_each_others_modifiers() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let baseline = CGEventFlags::CGEventFlagAlphaShift;
+        let fake_flags = Arc::new(AtomicU64::new(baseline.bits()));
+        let start = Arc::new(Barrier::new(3));
+        let workers: Vec<_> = ["ctrl+g", "cmd+shift+a"]
+            .into_iter()
+            .map(|chord| {
+                let fake_flags = Arc::clone(&fake_flags);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..32 {
+                        run_chord_transaction(|| {
+                            let before = fake_flags.load(Ordering::SeqCst);
+                            assert_eq!(before, baseline.bits());
+                            let plan = plan(chord, CGEventFlags::from_bits_truncate(before));
+                            prepare_and_post_chord(
+                                &plan,
+                                |event| Ok(*event),
+                                |event| {
+                                    fake_flags.store(event.flags.bits(), Ordering::SeqCst);
+                                    std::thread::yield_now();
+                                },
+                            )?;
+                            assert_eq!(fake_flags.load(Ordering::SeqCst), baseline.bits());
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(fake_flags.load(Ordering::SeqCst), baseline.bits());
+    }
 
     #[test]
     fn parses_modifier_only_chord() {
