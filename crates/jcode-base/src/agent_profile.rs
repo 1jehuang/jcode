@@ -17,11 +17,13 @@ fn validate_name(name: &str) -> Result<()> {
     if !bytes
         .next()
         .is_some_and(|byte| byte.is_ascii_alphanumeric())
-        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        || name.ends_with('.')
+        || name.contains("..")
         || matches!(name, "off" | "reload")
     {
         bail!(
-            "Invalid agent profile name {name:?}: use ASCII letters/digits followed by letters, digits, '_' or '-'; 'off' and 'reload' are reserved"
+            "Invalid agent profile name {name:?}: start with an ASCII letter/digit, then use letters, digits, '_', '-' or internal single dots; 'off' and 'reload' are reserved"
         );
     }
     Ok(())
@@ -124,7 +126,9 @@ mod tests {
             "a\\b",
             "/tmp/x",
             "two words",
-            "x.md",
+            "a..b",
+            "a.",
+            ".hidden",
             "é",
             "off",
             "reload",
@@ -132,7 +136,7 @@ mod tests {
         ] {
             assert!(validate_name(name).is_err(), "{name}");
         }
-        for name in ["x", "a-B_12", "123"] {
+        for name in ["x", "a-B_12", "123", "kimik3.1", "review.v2", "x.md"] {
             assert!(validate_name(name).is_ok());
         }
     }
@@ -160,9 +164,15 @@ mod tests {
         std::fs::create_dir_all(&project)?;
         std::fs::write(global.join("writer.md"), "global")?;
         std::fs::write(global.join("alpha.md"), "alpha")?;
+        std::fs::write(global.join("kimik3.1.md"), "global dotted profile")?;
+        std::fs::write(project.join("kimik3.1.md"), "project dotted profile")?;
         std::fs::write(project.join("writer.md"), "  project\n")?;
         std::fs::write(project.join("off.md"), "ignored")?;
-        assert_eq!(list(cwd.path())?, vec!["alpha", "writer"]);
+        assert_eq!(list(cwd.path())?, vec!["alpha", "kimik3.1", "writer"]);
+        assert_eq!(
+            load("kimik3.1", cwd.path())?.instructions,
+            "project dotted profile"
+        );
         let selected = load("writer", cwd.path())?;
         assert_eq!(selected.instructions, "  project\n");
         std::fs::write(project.join("writer.md"), "changed")?;
