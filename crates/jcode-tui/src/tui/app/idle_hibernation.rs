@@ -504,7 +504,17 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("Hibernated"));
-        assert!(screen.contains("private mem"));
+        // The notice only reports a memory figure when the platform can measure
+        // it: `process_memory::snapshot()` is implemented for Linux and Windows
+        // and returns `ProcessMemorySnapshot::default()` (no rss) everywhere
+        // else, so macOS renders "type to resume" without "private mem". CI only
+        // runs this target on Linux, so an ungated assertion here is green there
+        // and red for every macOS developer.
+        if private_memory_bytes().is_some() {
+            assert!(screen.contains("private mem"));
+        } else {
+            assert!(screen.contains("type to resume"));
+        }
         let snapshot = app.hibernation_frame().unwrap().clone();
         app.enter_idle_hibernation(Some(&Buffer::empty(Rect::new(0, 0, 5, 5))));
         assert_eq!(app.hibernation_frame().unwrap(), &snapshot);
