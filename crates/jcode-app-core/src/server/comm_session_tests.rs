@@ -938,6 +938,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
         super::spawn_swarm_agent(
             "routing_busy",
             "routing-swarm",
+            None,
             Some(temp.path().to_string_lossy().into_owned()),
             None,
             Some(crate::config::SwarmSpawnMode::Headless),

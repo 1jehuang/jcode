@@ -1621,6 +1621,7 @@ pub(super) async fn handle_comm_assign_next(
             match super::comm_session::spawn_swarm_agent(
                 &req_session_id,
                 &swarm_id,
+                None,
                 working_dir.clone(),
                 None,
                 None,

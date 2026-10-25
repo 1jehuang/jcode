@@ -619,6 +619,7 @@ pub(super) async fn handle_lightweight_control_request(
         Request::CommSpawn {
             id,
             session_id: req_session_id,
+            lane_id,
             working_dir,
             initial_message,
             request_nonce,
@@ -634,6 +635,7 @@ pub(super) async fn handle_lightweight_control_request(
             handle_comm_spawn(
                 id,
                 req_session_id,
+                lane_id,
                 working_dir,
                 initial_message,
                 request_nonce,

@@ -618,6 +618,7 @@ pub(super) fn resolve_swarm_spawn_mode(
 pub(super) async fn spawn_swarm_agent(
     req_session_id: &str,
     swarm_id: &str,
+    lane_id: Option<String>,
     working_dir: Option<String>,
     initial_message: Option<String>,
     spawn_mode: Option<SwarmSpawnMode>,
@@ -677,7 +678,17 @@ pub(super) async fn spawn_swarm_agent(
         spawn_route_api_method,
     ));
 
-    let startup_message = initial_message.clone();
+    // Validate the explicit lane before allocating or launching a worker.
+    let mut startup_message = if let Some(lane_id) = lane_id.as_deref() {
+        let brief = super::swarm_todo_link::assignment_brief(req_session_id, lane_id, "")
+            .ok_or_else(|| anyhow::anyhow!("Todo lane {lane_id} has no open tasks"))?;
+        Some(super::swarm_todo_link::spawn_lane_message(
+            initial_message.as_deref(),
+            &brief,
+        ))
+    } else {
+        initial_message.clone()
+    };
 
     let visible_spawn = match resolved_spawn_mode {
         // Inline workers run in-process like headless ones; the difference is
@@ -694,6 +705,18 @@ pub(super) async fn spawn_swarm_agent(
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
+                if let Some(lane_id) = lane_id.as_deref() {
+                    let brief = super::swarm_todo_link::seed_spawn_lane(
+                        req_session_id,
+                        session_id,
+                        lane_id,
+                    )?;
+                    let message = super::swarm_todo_link::spawn_lane_message(
+                        initial_message.as_deref(),
+                        &brief,
+                    );
+                    persist_headed_startup_message(session_id, &message);
+                }
                 // Tag the headed window as a swarm-agent spawn so spawn hooks
                 // and terminals can identify and reroute it (JCODE_SPAWN_*).
                 let context = crate::session_launch::SessionSpawnContext::kind("swarm-agent")
@@ -754,7 +777,16 @@ pub(super) async fn spawn_swarm_agent(
         }
     }?;
 
-    let startup_message = startup_message.clone();
+    if is_headless_fallback
+        && let Some(lane_id) = lane_id.as_deref()
+    {
+        let brief =
+            super::swarm_todo_link::seed_spawn_lane(req_session_id, &new_session_id, lane_id)?;
+        startup_message = Some(super::swarm_todo_link::spawn_lane_message(
+            initial_message.as_deref(),
+            &brief,
+        ));
+    }
     {
         let mut plans = swarm_plans.write().await;
         if let Some(plan) = plans.get_mut(swarm_id)
@@ -887,6 +919,7 @@ pub(super) async fn spawn_swarm_agent(
 pub(super) async fn handle_comm_spawn(
     id: u64,
     req_session_id: String,
+    lane_id: Option<String>,
     working_dir: Option<String>,
     initial_message: Option<String>,
     request_nonce: Option<String>,
@@ -944,6 +977,7 @@ pub(super) async fn handle_comm_spawn(
         "spawn",
         &[
             swarm_id.clone(),
+            lane_id.clone().unwrap_or_default(),
             working_dir.clone().unwrap_or_default(),
             initial_message.clone().unwrap_or_default(),
             request_nonce.clone().unwrap_or_default(),
@@ -971,6 +1005,7 @@ pub(super) async fn handle_comm_spawn(
     let response = match spawn_swarm_agent(
         &req_session_id,
         &swarm_id,
+        lane_id,
         working_dir,
         initial_message,
         spawn_mode,

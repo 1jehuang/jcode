@@ -663,6 +663,9 @@ pub enum Request {
     CommSpawn {
         id: u64,
         session_id: String,
+        /// Exact coordinator todo lane to seed before the worker starts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lane_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

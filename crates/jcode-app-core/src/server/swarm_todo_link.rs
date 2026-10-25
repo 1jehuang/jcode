@@ -224,6 +224,31 @@ fn lane_brief(lane: &[TodoItem]) -> String {
     brief.trim_end().to_string()
 }
 
+/// Persist a worker's linked lane before it can begin inference. Unlike the
+/// best-effort assignment hook, spawn must surface persistence failures.
+pub(crate) fn seed_spawn_lane(
+    coordinator_session: &str,
+    worker_session: &str,
+    task_id: &str,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(is_lane_task(task_id), "Invalid todo lane id: {task_id}");
+    let mut todos = crate::todo::load_todos(coordinator_session)?;
+    let lane = crate::todo::stages::lane_todos_for_worker(&todos, task_id);
+    anyhow::ensure!(!lane.is_empty(), "Todo lane {task_id} has no open tasks");
+    apply_assignment(&mut todos, task_id, "", worker_session);
+    crate::todo::save_todos(coordinator_session, &todos)?;
+    let seeded = crate::todo::link_worker_lane(coordinator_session, worker_session, task_id)?;
+    anyhow::ensure!(!seeded.is_empty(), "Todo lane {task_id} has no open tasks");
+    Ok(lane_brief(&seeded))
+}
+
+pub(crate) fn spawn_lane_message(initial_message: Option<&str>, brief: &str) -> String {
+    match initial_message.filter(|message| !message.trim().is_empty()) {
+        Some(message) => format!("{message}\n\nAuthoritative assigned todo lane:\n{brief}"),
+        None => format!("Begin your assigned todo lane.\n\n{brief}"),
+    }
+}
+
 fn details_for(todos: &mut [TodoItem], task_id: &str, content: &str) -> Option<String> {
     find_todo(todos, task_id, content)?
         .details
@@ -499,6 +524,60 @@ mod tests {
         let mut hand = plan.clone();
         hand[0].id = "custom".into();
         assert_eq!(resync_lane_plan(&todos, &hand), None);
+    }
+
+    #[test]
+    fn spawn_lane_message_starts_without_a_duplicate_prompt() {
+        let brief = lane_brief(&[laned("p1", 1, "parser")]);
+        let startup = spawn_lane_message(None, &brief);
+        assert!(startup.starts_with("Begin your assigned todo lane."));
+        assert!(startup.contains("task p1"));
+        assert_eq!(startup, spawn_lane_message(Some("  "), &brief));
+        let startup = spawn_lane_message(Some("Extra context"), &brief);
+        assert!(startup.starts_with("Extra context\n\nAuthoritative assigned todo lane:"));
+        assert!(startup.ends_with(&brief));
+    }
+
+    #[test]
+    fn spawn_lane_seeding_persists_only_the_explicit_phase_lane() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::todo::save_todos(
+            "spawn-coordinator",
+            &[
+                laned("p1", 1, "parser"),
+                laned("p2", 1, "parser"),
+                laned("later", 2, "parser"),
+            ],
+        )
+        .unwrap();
+        let brief = seed_spawn_lane("spawn-coordinator", "spawn-worker", "lane:1:parser").unwrap();
+        let seeded = crate::todo::load_todos("spawn-worker").unwrap();
+        assert_eq!(seeded.len(), 2);
+        assert!(brief.contains("task p1"));
+        assert!(!brief.contains("task later"));
+        let coordinator = crate::todo::load_todos("spawn-coordinator").unwrap();
+        assert_eq!(coordinator[0].assigned_to.as_deref(), Some("spawn-worker"));
+        assert_eq!(coordinator[2].assigned_to, None);
+        assert!(seed_spawn_lane("spawn-coordinator", "empty-worker", "lane:3:parser").is_err());
+        assert!(seed_spawn_lane("spawn-coordinator", "empty-worker", "parser").is_err());
+        let mut updated = seeded;
+        updated[0].status = "completed".into();
+        crate::todo::save_todos("spawn-worker", &updated).unwrap();
+        assert_eq!(
+            crate::todo::load_todos("spawn-coordinator").unwrap()[0].status,
+            "completed"
+        );
+        // A directory at the destination forces the atomic todo save to fail.
+        std::fs::create_dir(home.path().join("todos/blocked-worker.json")).unwrap();
+        assert!(seed_spawn_lane("spawn-coordinator", "blocked-worker", "lane:2:parser").is_err());
+        if let Some(previous_home) = previous_home {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[test]
