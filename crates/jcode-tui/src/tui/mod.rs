@@ -121,6 +121,24 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
         | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
+/// Whether this build's input backend can decode Kitty CSI-u key reports.
+///
+/// crossterm's Windows input implementation reads Win32 `KeyEventRecord`s and
+/// has no escape-sequence parser, so a terminal that honors the request delivers
+/// modified keys (shift/ctrl/alt chords, shift+enter, Escape) as literal escape
+/// text. Windows ConPTY hosts - including the one Herdr uses for panes - forward
+/// those `CSI code;modifier u` forms as text, so they land in the input box as
+/// garbage such as `[100;5u` (issue #1064).
+///
+/// Set `JCODE_KITTY_WINDOWS=1` to force the old behavior on a Windows terminal
+/// that genuinely translates CSI-u reports into key records.
+fn kitty_keyboard_input_supported() -> bool {
+    if cfg!(windows) {
+        return std::env::var_os("JCODE_KITTY_WINDOWS").is_some_and(|value| value == "1");
+    }
+    true
+}
+
 /// Whether this process still owns an unbalanced entry on the terminal's
 /// Kitty keyboard-protocol stack.
 ///
@@ -175,6 +193,21 @@ pub fn enable_keyboard_enhancement() -> bool {
         .unwrap_or_else(|poison| poison.into_inner());
     if termination_started() {
         crate::logging::info("Keyboard enhancement request skipped: termination already started");
+        return false;
+    }
+    if !kitty_keyboard_input_supported() {
+        // Self-heal stale state: an earlier run (or another TUI in this pane)
+        // may have left the terminal reporting CSI-u. The set form with zero
+        // flags makes the input box usable again on Windows, and unlike a pop it
+        // cannot remove a stack entry another program still owns.
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout();
+        if let Err(error) = stdout.write_all(b"\x1b[=0u").and_then(|()| stdout.flush()) {
+            crate::logging::warn(&format!("failed to clear stale kitty keyboard flags: {error}"));
+        }
+        crate::logging::info(
+            "Keyboard enhancement request: SKIPPED (input backend cannot decode kitty CSI-u; stale flags cleared)",
+        );
         return false;
     }
     let result = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux()).is_ok();
@@ -413,10 +446,15 @@ pub(crate) fn reapply_terminal_modes_to(
 
 pub(crate) fn reapply_configured_terminal_modes_after_focus() {
     let policy = crate::perf::tui_policy();
+    // The focus path writes Kitty's set sequence directly, bypassing crossterm,
+    // so it must gate on the input backend's real capability rather than on
+    // config intent. Without this, regaining focus re-arms CSI-u reporting that
+    // this build cannot decode (issue #1064).
+    let keyboard_enhanced = policy.enable_keyboard_enhancement && kitty_keyboard_input_supported();
     if let Err(error) = reapply_terminal_modes_after_focus_to(
         &mut std::io::stdout(),
         policy.enable_mouse_capture,
-        policy.enable_keyboard_enhancement,
+        keyboard_enhanced,
     ) {
         crate::logging::warn(&format!("failed to reapply terminal modes: {error}"));
     }
@@ -648,6 +686,21 @@ mod terminal_mode_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn kitty_keyboard_is_not_armed_when_the_input_backend_cannot_decode_csi_u() {
+        // Windows crossterm reads Win32 key events, so the focus-regain path
+        // must not write the Kitty set sequence there (issue #1064).
+        let gated = |policy: bool| policy && kitty_keyboard_input_supported();
+        if cfg!(windows) && std::env::var_os("JCODE_KITTY_WINDOWS").is_none() {
+            assert!(!gated(true), "Windows must not arm kitty keyboard reporting");
+            assert!(!kitty_keyboard_input_supported());
+        } else {
+            assert!(gated(true), "configured keyboard enhancement stays enabled");
+            assert!(kitty_keyboard_input_supported());
+        }
+        assert!(!gated(false), "a disabled policy stays disabled");
     }
 }
 
