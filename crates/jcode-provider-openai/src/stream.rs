@@ -506,6 +506,13 @@ pub fn parse_openai_response_event(
         }
         "response.reasoning.done" | "response.output_item.added" => {
             if let Some(item) = &event.item {
+                if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
+                    return Some(StreamEvent::ProviderNative {
+                        provider: jcode_message_types::provider_native::PROVIDER_NATIVE_OPENAI
+                            .to_string(),
+                        item: item.clone(),
+                    });
+                }
                 if item.get("type").and_then(|v| v.as_str()) == Some("reasoning") {
                     return Some(StreamEvent::ThinkingStart);
                 }

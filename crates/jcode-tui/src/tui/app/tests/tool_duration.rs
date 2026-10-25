@@ -1,6 +1,56 @@
 use super::*;
 
 #[test]
+fn native_search_duration_includes_execution_and_preserves_late_query() {
+    use crate::protocol::ServerEvent;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    for event in [
+        ServerEvent::ToolStart {
+            id: "ws_timed".into(),
+            name: "web_search".into(),
+        },
+        ServerEvent::ToolInput {
+            id: Some("ws_timed".into()),
+            delta: r#"{"query":""}"#.into(),
+        },
+        ServerEvent::ToolExec {
+            id: "ws_timed".into(),
+            name: "web_search".into(),
+        },
+    ] {
+        app.handle_server_event(event, &mut remote);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    app.handle_server_event(
+        ServerEvent::ToolInput {
+            id: Some("ws_timed".into()),
+            delta: r#"{"query":"jcode timing"}"#.into(),
+        },
+        &mut remote,
+    );
+    assert_eq!(remote.get_tool_input("ws_timed")["query"], "jcode timing");
+    assert_eq!(app.streaming_tool_calls[0].input["query"], "jcode timing");
+    app.handle_server_event(
+        ServerEvent::ToolDone {
+            id: "ws_timed".into(),
+            name: "web_search".into(),
+            output: "Searched: jcode timing".into(),
+            error: None,
+        },
+        &mut remote,
+    );
+    let message = app.display_messages().last().unwrap();
+    assert!(message.duration_secs.unwrap() >= 0.02);
+    assert_eq!(
+        message.tool_data.as_ref().unwrap().input["query"],
+        "jcode timing"
+    );
+}
+
+#[test]
 fn tool_duration_remote_completion_and_local_update() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

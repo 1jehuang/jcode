@@ -790,6 +790,15 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         ServerEvent::ToolInput { id, delta } => {
             remote.handle_tool_input(id.as_deref(), &delta);
+            if let Some(id) = id.as_deref() {
+                let input = remote.get_tool_input(id);
+                if !input.is_null()
+                    && let Some(tc) = app.streaming_tool_calls.iter_mut().find(|tc| tc.id == id)
+                {
+                    tc.input = input;
+                    tc.refresh_intent_from_input();
+                }
+            }
             false
         }
         ServerEvent::ToolExec { id, name } => {

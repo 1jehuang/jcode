@@ -773,6 +773,16 @@ impl Agent {
                                 output,
                                 is_error,
                             }) => {
+                                if already_open
+                                    && provider == jcode_message_types::provider_native::PROVIDER_NATIVE_OPENAI
+                                {
+                                    // OpenAI only supplies action/query metadata in
+                                    // the final snapshot, after execution started.
+                                    let _ = event_tx.send(ServerEvent::ToolInput {
+                                        id: Some(id.clone()),
+                                        delta: input.to_string(),
+                                    });
+                                }
                                 if !already_open {
                                     // Result without a start (e.g. OpenAI items
                                     // arrive whole): open the row first.

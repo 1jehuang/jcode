@@ -143,7 +143,7 @@ pub fn provider_native_display(provider: &str, item: &Value) -> Option<ProviderN
                 id: str_field(item, "id").unwrap_or_default().to_string(),
                 name: PROVIDER_NATIVE_WEB_SEARCH_TOOL.to_string(),
                 input: Some(serde_json::json!({ "query": query })),
-                output: Some(output),
+                output: (!matches!(status, "in_progress" | "searching")).then_some(output),
                 is_error,
             })
         }
@@ -263,6 +263,17 @@ pub struct ProviderNativeItems {
 impl ProviderNativeItems {
     /// Record an item that arrived after `text_len` bytes of response text.
     pub fn push(&mut self, text_len: usize, provider: String, item: Value) {
+        // OpenAI's added snapshot is a live timing signal, not a replayable
+        // output item. Only persist the authoritative completed snapshot.
+        if provider == PROVIDER_NATIVE_OPENAI
+            && str_field(&item, "type") == Some("web_search_call")
+            && matches!(
+                str_field(&item, "status"),
+                Some("in_progress" | "searching")
+            )
+        {
+            return;
+        }
         self.items.push((text_len, provider, item));
     }
 
