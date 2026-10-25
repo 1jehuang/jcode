@@ -303,7 +303,8 @@ async fn same_account_zero_read_explains_what_was_ruled_out() {
     );
     assert!(message.contains("after the previous call"), "{message}");
     assert!(
-        message.contains("same provider, model, account"),
+        message.contains("no detected change to provider, model, account"),
         "{message}"
     );
+    assert!(message.contains("cause unconfirmed"), "{message}");
 }

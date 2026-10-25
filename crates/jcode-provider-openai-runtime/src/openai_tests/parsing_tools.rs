@@ -554,13 +554,20 @@ fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools[0]["strict"], serde_json::json!(true));
+    // OpenAI rejects root combiners, so normalization flattens the branches
+    // before enforcing strictness. Optional branch fields remain nullable.
     assert_eq!(
-        api_tools[0]["parameters"]["anyOf"][0]["additionalProperties"],
-        serde_json::json!(false)
-    );
-    assert_eq!(
-        api_tools[0]["parameters"]["anyOf"][1]["additionalProperties"],
-        serde_json::json!(false)
+        api_tools[0]["parameters"],
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": { "type": "string" },
+                "wake_in_minutes": { "type": ["integer", "null"] },
+                "wake_at": { "type": ["string", "null"] }
+            },
+            "required": ["task", "wake_at", "wake_in_minutes"],
+            "additionalProperties": false
+        })
     );
 }
 

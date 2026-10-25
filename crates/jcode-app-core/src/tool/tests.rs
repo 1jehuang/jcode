@@ -1873,11 +1873,12 @@ fn the_dialect_sweep_catches_the_issue_754_schema() {
 /// name disappearing means a tool became strict-eligible and the list is stale.
 #[tokio::test]
 async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode() {
-    /// Built-ins that legitimately cannot be strict. Verified against master
-    /// before the #711/#713 eligibility changes, so this is pre-existing.
+    /// Built-ins that legitimately cannot be strict because their payloads
+    /// intentionally admit fields outside their declared properties.
     // applet and swarm used to be ineligible only because of a root combiner;
     // root combiners are now flattened (OpenAI rejects them outright).
-    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser"];
+    // todo's add/update patch payloads admit arbitrary item fields (3d72881a4).
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser", "todo"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
