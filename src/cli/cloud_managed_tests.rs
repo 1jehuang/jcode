@@ -38,7 +38,10 @@ fn release_policy_is_exact_and_development_has_no_fallback() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod shell {
     use super::*;
+    // Kept inside the Linux-only module: a top-level import is unused (and
+    // clippy-fatal) on macOS, where this module is compiled out.
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     struct Fixture {
         dir: tempfile::TempDir,
