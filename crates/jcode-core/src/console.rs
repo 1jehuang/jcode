@@ -8,6 +8,10 @@
 //! The [`emit_osc9_status`] helper centralises the OSC 9 escape format so every
 //! caller (main TUI, permissions viewer, future status emitters) shares one
 //! definition and cannot drift apart.
+//!
+//! Cross-reference: PR #1815 has a parallel ask_user-specific emitter in
+//! `crates/jcode-tui/src/tui/app/decision_osc9.rs`. Consolidate these emitters
+//! after both changes merge.
 
 /// Best-effort: enable ANSI (virtual terminal processing) on the stderr
 /// console, then report whether ANSI output is safe to emit.
