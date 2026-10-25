@@ -4414,6 +4414,8 @@ impl App {
                             "{} unavailable: {} · choose another model or route",
                             entry.name, detail
                         ));
+                    } else if matches!(entry.action, PickerAction::AgentProfileChoice(_)) {
+                        self.set_status_notice(format!("{} - {}", entry.name, detail));
                     } else {
                         self.inline_interactive_state = None;
                         self.set_status_notice(format!("{} - {}", entry.name, detail));

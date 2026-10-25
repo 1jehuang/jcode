@@ -34,6 +34,48 @@ pub(super) fn profile_entry(
 }
 
 impl App {
+    pub(super) fn fail_agent_profile_list(&mut self, error: &str) {
+        if !self.showing_agent_profiles() {
+            return;
+        }
+        let unsupported = error.contains("unknown variant")
+            || error
+                .to_ascii_lowercase()
+                .contains("unknown runtime command")
+            || error.contains("incompatible instruction-profile list");
+        let recovery = if unsupported {
+            "Server upgrade required for /agent support; reopen /agents after upgrading the live server"
+        } else {
+            "Reopen /agents to retry when the server is ready"
+        };
+        self.set_agent_profile_entries(vec![profile_entry(
+            "Instruction profiles unavailable".into(),
+            PickerAction::AgentProfileChoice(None),
+            false,
+            false,
+            &format!("{recovery} · Esc to close · no instructions changed · Server: {error}"),
+        )]);
+    }
+
+    pub(super) fn handle_agent_profile_list_error(&mut self, id: u64, message: &str) -> bool {
+        let Some(request_id) = self.agent_profile_picker_request_id else {
+            return false;
+        };
+        // Older daemons reject the unknown runtime-command variant before they
+        // can recover the request ID. Do not consume unrelated id-0 turn errors.
+        let legacy_unsupported = id == 0
+            && message.contains("unknown variant")
+            && (message.contains("`agent`") || message.contains("'agent'"));
+        if id != request_id && !legacy_unsupported {
+            return false;
+        }
+        self.agent_profile_picker_request_id = None;
+        self.agent_profile_request_ids.remove(&request_id);
+        self.fail_agent_profile_list(message);
+        self.push_display_message(DisplayMessage::error(message.to_owned()));
+        true
+    }
+
     pub(super) fn showing_agent_profiles(&self) -> bool {
         self.inline_interactive_state
             .as_ref()
@@ -78,10 +120,9 @@ impl App {
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|names| names.iter().all(serde_json::Value::is_string))
         {
-            self.open_agents_picker();
-            self.push_display_message(DisplayMessage::error(
+            self.fail_agent_profile_list(
                 "The server returned an incompatible instruction-profile list; no instructions changed.",
-            ));
+            );
             return;
         }
         let current = data.get("current").and_then(serde_json::Value::as_str);
@@ -136,7 +177,7 @@ pub(super) async fn open_agent_profiles(app: &mut App, remote: &mut RemoteConnec
         }
         Err(error) => {
             app.agent_profile_picker_request_id = None;
-            app.open_agents_picker();
+            app.fail_agent_profile_list(&format!("Failed to list instruction profiles: {error}"));
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to list instruction profiles: {error}"
             )));
@@ -162,5 +203,101 @@ pub(super) async fn send_agent_profile_command(
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
             "Failed to reach the jcode server for /agent: {error}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    fn loading_app() -> App {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.set_agent_profile_entries(vec![profile_entry(
+            "Loading instruction profiles…".into(),
+            PickerAction::AgentProfileChoice(None),
+            false,
+            false,
+            "Fetching profiles",
+        )]);
+        app.agent_profile_picker_request_id = Some(42);
+        app.agent_profile_request_ids.insert(42);
+        app
+    }
+
+    fn assert_unavailable(app: &App) {
+        assert!(app.showing_agent_profiles());
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        assert_eq!(picker.entries.len(), 1);
+        let entry = &picker.entries[0];
+        assert_eq!(entry.name, "Instruction profiles unavailable");
+        let option = entry.active_option().unwrap();
+        assert!(!option.available);
+        assert!(option.detail.contains("no instructions changed"));
+        assert!(!entry.is_current);
+        assert!(!entry.is_default);
+    }
+
+    #[test]
+    fn unsupported_profile_discovery_stays_visible_and_escape_closes() {
+        let mut app = loading_app();
+        assert!(app.handle_agent_profile_list_error(42, "Unknown runtime command: agent"));
+        assert_unavailable(&app);
+        assert!(
+            app.inline_interactive_state.as_ref().unwrap().entries[0]
+                .active_option()
+                .unwrap()
+                .detail
+                .starts_with("Server upgrade required")
+        );
+        assert!(app.agent_profile_picker_request_id.is_none());
+        assert!(!app.agent_profile_request_ids.contains(&42));
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_unavailable(&app);
+        app.handle_inline_interactive_key(KeyCode::Esc, KeyModifiers::NONE)
+            .unwrap();
+        assert!(app.inline_interactive_state.is_none());
+    }
+
+    #[test]
+    fn malformed_profile_list_stays_in_picker() {
+        let mut app = loading_app();
+        app.apply_agent_profile_list(&serde_json::json!({"available": []}));
+        assert_unavailable(&app);
+    }
+
+    #[test]
+    fn busy_profile_discovery_offers_retry_without_requiring_upgrade() {
+        let mut app = loading_app();
+        assert!(app.handle_agent_profile_list_error(42, "Agent is busy; try again"));
+        assert_unavailable(&app);
+        let detail = &app.inline_interactive_state.as_ref().unwrap().entries[0]
+            .active_option()
+            .unwrap()
+            .detail;
+        assert!(detail.contains("Agent is busy; try again"));
+        assert!(detail.contains("Reopen /agents to retry"));
+        assert!(!detail.contains("Server upgrade required"));
+    }
+
+    #[test]
+    fn unrelated_errors_do_not_settle_profile_discovery() {
+        let mut app = loading_app();
+        assert!(!app.handle_agent_profile_list_error(0, "Rate limit exceeded"));
+        assert!(!app.handle_agent_profile_list_error(43, "Unknown runtime command: agent"));
+        assert_eq!(app.agent_profile_picker_request_id, Some(42));
+        assert!(app.agent_profile_request_ids.contains(&42));
+        assert!(app.handle_agent_profile_list_error(0, "unknown variant `agent`, expected `mcp`"));
+        assert_unavailable(&app);
+    }
+
+    #[test]
+    fn late_discovery_error_does_not_reopen_dismissed_picker() {
+        let mut app = loading_app();
+        app.handle_inline_interactive_key(KeyCode::Esc, KeyModifiers::NONE)
+            .unwrap();
+        assert!(app.handle_agent_profile_list_error(42, "Unknown runtime command: agent"));
+        assert!(app.inline_interactive_state.is_none());
     }
 }
