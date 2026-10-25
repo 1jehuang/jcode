@@ -3550,8 +3550,17 @@ async fn start_processing_message(
     )
     .await;
 
+    let owned_worker = swarm
+        .members
+        .read()
+        .await
+        .get(client_session_id)
+        .is_some_and(|member| member.report_back_to_session_id.is_some());
     let (start_message_index, pending_queue) = {
-        let agent_guard = agent.lock().await;
+        let mut agent_guard = agent.lock().await;
+        if owned_worker {
+            agent_guard.set_inline_output_tap(true);
+        }
         (
             agent_guard.message_count(),
             agent_guard.soft_interrupt_queue(),

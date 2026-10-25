@@ -418,15 +418,17 @@ impl Agent {
         self.inline_output_tap = enabled;
     }
 
-    /// Whether this session streams an inline output tail to the bus.
+    /// Whether this session streams a public output tail to the bus. Owned
+    /// workers retain a tail in every spawn mode so forced stops can still
+    /// deliver recent output when transcript collection cannot finish.
     pub(crate) fn inline_output_tap(&self) -> bool {
-        self.inline_output_tap
+        self.inline_output_tap || self.session.parent_id.is_some()
     }
 
     /// Publish the current rolling activity tail to the bus for the
     /// coordinator's inline gallery. No-op unless the inline tap is enabled.
     pub(crate) fn publish_inline_tail(&self) {
-        if !self.inline_output_tap {
+        if !self.inline_output_tap() {
             return;
         }
         crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmOutputTail(

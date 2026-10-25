@@ -1455,7 +1455,7 @@ async fn handle_comm_assign_task_with_mode(
     let target_agent = task_agent_session(&target_session, sessions, swarm_members).await;
     let _ = queue_soft_interrupt_for_session(
         &target_session,
-        notification,
+        notification.clone(),
         false,
         SoftInterruptSource::System,
         soft_interrupt_queues,

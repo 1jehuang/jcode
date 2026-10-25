@@ -52,7 +52,9 @@ mod output_tail_tests {
             message(
                 "assistant",
                 serde_json::json!([
-                    {"type":"text", "text":"Implemented the parser fix."},
+                    {"type":"reasoning", "text":"private reasoning must not leak"},
+                {"type":"reasoning_trace", "text":"private trace must not leak"},
+                {"type":"text", "text":"Implemented the parser fix."},
                     {"type":"tool_use", "id":"test", "name":"bash", "input":{"intent":"Run parser tests"}}
                 ]),
             ),

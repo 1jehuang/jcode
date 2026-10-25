@@ -3584,7 +3584,11 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
             in_statuses = true;
             continue;
         }
-        if in_statuses && (line == "Completion reports:" || line.ends_with("reports:")) {
+        if in_statuses
+            && (line == "Recent outputs:"
+                || line == "Completion reports:"
+                || line.ends_with("reports:"))
+        {
             break;
         }
         if !in_statuses || line.is_empty() {

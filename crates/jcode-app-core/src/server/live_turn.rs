@@ -111,6 +111,15 @@ pub(super) async fn spawn_tracked_live_turn(
     let Ok(_admission) = crate::runtime_activity::global().try_enter() else {
         return false;
     };
+    if swarm
+        .members
+        .read()
+        .await
+        .get(session_id)
+        .is_some_and(|member| member.report_back_to_session_id.is_some())
+    {
+        agent.set_inline_output_tap(true);
+    }
     update_member_status(
         session_id,
         "running",
