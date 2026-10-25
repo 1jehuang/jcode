@@ -7,14 +7,6 @@ use super::state_ui::RestoredReloadInput;
 use super::*;
 use crate::tui::{backend, keybind};
 
-fn parse_auto_retry_env_bool(raw: &str) -> Option<bool> {
-    match raw.trim().to_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
 impl App {
     pub(super) async fn begin_remote_send(
         &mut self,
@@ -93,14 +85,10 @@ impl App {
     }
 
     /// Resolve the effective auto-retry base delay for the active provider.
-    /// Checks env first, then the named provider profile override, then falls
-    /// back to the global `[provider]` value stored on App at construction.
+    /// Uses the named provider profile override, then the env-resolved global
+    /// `[provider]` value stored on App at construction. Environment overrides
+    /// are applied once by config resolution before App is created.
     pub(crate) fn effective_auto_retry_base_delay_secs(&self) -> u64 {
-        if let Ok(raw) = std::env::var("JCODE_AUTO_RETRY_BASE_DELAY_SECS")
-            && let Ok(parsed) = raw.trim().parse::<u64>()
-        {
-            return jcode_config_types::clamp_auto_retry_base_delay_secs(parsed);
-        }
         if let Some(key) = self.auto_retry_provider_profile_key()
             && let Some(profile) = crate::config::config().providers.get(&key)
             && let Some(override_val) = profile.auto_retry_base_delay_secs
@@ -111,13 +99,10 @@ impl App {
     }
 
     /// Resolve whether auto-retry is enabled for the active provider.
-    /// Precedence is env, named provider profile, then global `[provider]`.
+    /// Uses the named provider profile override, then the env-resolved global
+    /// `[provider]` value stored on App at construction. Environment overrides
+    /// are applied once by config resolution before App is created.
     pub(crate) fn effective_auto_retry_enabled(&self) -> bool {
-        if let Ok(raw) = std::env::var("JCODE_AUTO_RETRY_ENABLED")
-            && let Some(enabled) = parse_auto_retry_env_bool(&raw)
-        {
-            return enabled;
-        }
         if let Some(key) = self.auto_retry_provider_profile_key()
             && let Some(profile) = crate::config::config().providers.get(&key)
             && let Some(override_val) = profile.auto_retry_enabled
@@ -128,15 +113,10 @@ impl App {
     }
 
     /// Resolve the effective auto-retry max attempts for the active provider.
-    /// Checks env first, then the named provider profile override, then falls
-    /// back to the global `[provider]` value stored on App at construction.
+    /// Uses the named provider profile override, then the env-resolved global
+    /// `[provider]` value stored on App at construction. Environment overrides
+    /// are applied once by config resolution before App is created.
     pub(crate) fn effective_auto_retry_max_attempts(&self) -> u8 {
-        if let Ok(raw) = std::env::var("JCODE_AUTO_RETRY_MAX_ATTEMPTS")
-            && let Ok(parsed) = raw.trim().parse::<u8>()
-            && parsed > 0
-        {
-            return parsed;
-        }
         if let Some(key) = self.auto_retry_provider_profile_key()
             && let Some(profile) = crate::config::config().providers.get(&key)
             && let Some(override_val) = profile.auto_retry_max_attempts
