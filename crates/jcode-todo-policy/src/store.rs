@@ -73,6 +73,30 @@ fn read_or_default<T: DeserializeOwned + Default>(path: &Path) -> T {
         .unwrap_or_default()
 }
 
+/// Prepare a session's todos for saving. Linked workers always retain their
+/// coordinator-assigned lane identity, including in their own persisted list.
+/// Coordinator-only links and unlinked sessions do not constrain authored lanes.
+pub fn canonicalize_worker_todos(
+    home: &Path,
+    session_id: &str,
+    todos: &[crate::TodoItem],
+) -> Vec<crate::TodoItem> {
+    let links: Vec<crate::stages::LaneLink> =
+        read_or_default(&todo_file_path(home, session_id, TodoFile::LaneLinks));
+    let Some(link) = links.iter().find(|link| link.worker == session_id) else {
+        return todos.to_vec();
+    };
+    if !is_safe_session_id(&link.coordinator) {
+        return todos.to_vec();
+    }
+    let coordinator_todos = read_or_default::<Vec<crate::TodoItem>>(&todo_file_path(
+        home,
+        &link.coordinator,
+        TodoFile::Todos,
+    ));
+    crate::stages::canonicalize_worker_lane(&coordinator_todos, link, todos)
+}
+
 /// Read everything the follow-up policy needs. Never fails: absent state is
 /// an empty snapshot.
 pub fn load_snapshot(home: &Path, session_id: &str) -> TodoSnapshot {
@@ -179,6 +203,101 @@ pub fn apply_effects(home: &Path, session_id: &str, effects: TodoEffects) -> std
 mod tests {
     use super::*;
     use crate::{GateObservation, GateObservationKind, TodoItem};
+
+    #[test]
+    fn worker_replacement_persists_coordinator_lane_and_phase_on_both_sides() {
+        let dir = std::env::temp_dir().join(format!("todo-canonical-lane-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("todos")).unwrap();
+        let write = |session, file, value: serde_json::Value| {
+            std::fs::write(todo_file_path(&dir, session, file), value.to_string()).unwrap();
+        };
+        let assigned = TodoItem {
+            id: "assigned".into(),
+            content: "original assignment".into(),
+            status: "pending".into(),
+            group: Some("automatic assignment reports".into()),
+            stage: Some(2),
+            ..Default::default()
+        };
+        let unrelated = TodoItem {
+            id: "other".into(),
+            group: Some("unrelated".into()),
+            stage: Some(3),
+            ..Default::default()
+        };
+        let coordinator = vec![assigned.clone(), unrelated.clone()];
+        let link = crate::stages::LaneLink {
+            coordinator: "root".into(),
+            worker: "worker".into(),
+            lane: crate::stages::lane_id(&assigned),
+        };
+        write(
+            "root",
+            TodoFile::Todos,
+            serde_json::to_value(&coordinator).unwrap(),
+        );
+        for session in ["root", "worker"] {
+            write(
+                session,
+                TodoFile::LaneLinks,
+                serde_json::to_value([&link]).unwrap(),
+            );
+        }
+        // A full phases replacement can change every item id, lane and phase.
+        let replacement = vec![TodoItem {
+            id: "replacement".into(),
+            content: "updated task content".into(),
+            status: "completed".into(),
+            details: Some("worker-authored details".into()),
+            group: Some("server output reports".into()),
+            stage: Some(9),
+            waiting_on: vec!["worker-task".into()],
+            ..Default::default()
+        }];
+        let canonical = canonicalize_worker_todos(&dir, "worker", &replacement);
+        let mut expected = replacement[0].clone();
+        expected.group = assigned.group.clone();
+        expected.stage = assigned.stage;
+        assert_eq!(canonical, [expected]);
+        write(
+            "worker",
+            TodoFile::Todos,
+            serde_json::to_value(&canonical).unwrap(),
+        );
+        let persisted_worker = load_snapshot(&dir, "worker").todos;
+        assert_eq!(persisted_worker, canonical);
+        let merged =
+            crate::stages::merge_worker_lane(&coordinator, &link, &persisted_worker).unwrap();
+        write(
+            "root",
+            TodoFile::Todos,
+            serde_json::to_value(&merged).unwrap(),
+        );
+        let persisted_root = load_snapshot(&dir, "root").todos;
+        assert_eq!(persisted_root[1], unrelated);
+        assert_eq!(persisted_root[0].group, persisted_worker[0].group);
+        assert_eq!(persisted_root[0].stage, Some(2));
+        assert_eq!(persisted_root[0].content, replacement[0].content);
+        assert_eq!(persisted_root[0].status, "completed");
+        assert_eq!(
+            canonicalize_worker_todos(&dir, "worker", &canonical),
+            canonical
+        );
+        assert_eq!(
+            canonicalize_worker_todos(&dir, "root", &replacement),
+            replacement
+        );
+        assert_eq!(
+            canonicalize_worker_todos(&dir, "unlinked", &replacement),
+            replacement
+        );
+        std::fs::remove_file(todo_file_path(&dir, "root", TodoFile::Todos)).unwrap();
+        assert_eq!(
+            canonicalize_worker_todos(&dir, "worker", &replacement),
+            replacement
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn snapshots_include_only_referenced_running_tasks_in_the_same_session() {

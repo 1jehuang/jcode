@@ -186,6 +186,30 @@ pub fn lane_todos_for_worker(coordinator_todos: &[TodoItem], lane: &str) -> Vec<
         .collect()
 }
 
+/// Pin worker-authored todos to their assigned coordinator lane before local
+/// persistence. Only lane identity changes: task edits and session-local
+/// bookkeeping stay with the worker. A missing lane leaves the list alone.
+pub fn canonicalize_worker_lane(
+    coordinator_todos: &[TodoItem],
+    link: &LaneLink,
+    worker_todos: &[TodoItem],
+) -> Vec<TodoItem> {
+    let Some(template) = coordinator_todos
+        .iter()
+        .find(|todo| lane_id(todo) == link.lane)
+    else {
+        return worker_todos.to_vec();
+    };
+    worker_todos
+        .iter()
+        .map(|todo| TodoItem {
+            stage: template.stage,
+            group: template.group.clone(),
+            ..todo.clone()
+        })
+        .collect()
+}
+
 /// Write a worker's current todo list back over its lane in the coordinator's
 /// list. Last save wins: the worker's version replaces the lane wholesale, in
 /// place, so items it added, split, reworded, or removed show up for the
@@ -311,6 +335,23 @@ mod lane_sync_tests {
         let ids: Vec<&str> = seeded.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["p1", "p2"]);
         assert!(seeded.iter().all(|t| t.assigned_to.is_none()));
+    }
+
+    #[test]
+    fn canonical_worker_lane_preserves_unstaged_and_ungrouped_assignments() {
+        for group in [Some("parser"), None] {
+            let boss = vec![item("p1", "pending", None, group)];
+            let link = LaneLink {
+                lane: lane_id(&boss[0]),
+                ..link()
+            };
+            let worker = vec![item("p1", "completed", Some(9), Some("renamed"))];
+            let canonical = canonicalize_worker_lane(&boss, &link, &worker);
+            assert_eq!(canonical[0].stage, None);
+            assert_eq!(canonical[0].group.as_deref(), group);
+            assert_eq!(canonical[0].status, "completed");
+            assert_eq!(canonicalize_worker_lane(&[], &link, &worker), worker);
+        }
     }
 
     #[test]
