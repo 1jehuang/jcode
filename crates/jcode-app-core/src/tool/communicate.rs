@@ -1675,7 +1675,7 @@ impl CommunicateTool {
 }
 
 /// Swarm actions advertised to models. Real usage is dominated by messaging,
-/// reports, listing and spawning; the plan/task-graph actions (propose_plan,
+/// listing and spawning; the plan/task-graph actions (propose_plan,
 /// assign_task, assign_next, fill_slots, run_plan, resync_plan, ...) are
 /// subsumed by `launch` and lane-owning `spawn`. Unlisted actions still
 /// execute for old transcripts and scripts, they are just not offered.
@@ -1683,7 +1683,6 @@ const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
     "launch",
     "spawn",
     "message",
-    "report",
     "status",
     "plan_status",
     "list",
@@ -1860,23 +1859,11 @@ impl Tool for CommunicateTool {
                 },
                 "message": {
                     "type": "string",
-                    "description": "Message body. Goes to to_session, or to channel; with neither, everyone (coordinator only). For report, the body."
+                    "description": "Message body. Goes to to_session, or to channel; with neither, everyone (coordinator only)."
                 },
                 "tldr": {
                     "type": "string",
                     "description": "Optional one-line summary (under ~120 chars); recommended for bodies over 240 chars, else auto-derived."
-                },
-                "status": {
-                    "type": "string",
-                    "description": "For report: usually ready, blocked, failed, or completed. Defaults to ready."
-                },
-                "validation": {
-                    "type": "string",
-                    "description": "For action=report: tests or validation performed."
-                },
-                "follow_up": {
-                    "type": "string",
-                    "description": "For action=report: blockers or follow-up work."
                 },
                 "to_session": {
                     "type": "string",
@@ -2653,6 +2640,8 @@ impl Tool for CommunicateTool {
                 }
             }
 
+            // Compatibility for old transcripts and scripts only. Worker output is
+            // collected automatically, so this action is not advertised to models.
             "report" => {
                 let message = params
                     .message
@@ -3147,7 +3136,7 @@ impl Tool for CommunicateTool {
 
             _ => Err(anyhow::anyhow!(
                 "Unknown action '{}'. Valid actions: share, share_append, read, message, broadcast, dm, channel, list, list_channels, channel_members, \
-                 propose_plan, approve_plan, reject_plan, spawn, stop, assign_role, status, report, plan_status, summary, read_context, \
+                 propose_plan, approve_plan, reject_plan, spawn, stop, assign_role, status, plan_status, summary, read_context, \
                  resync_plan, assign_task, assign_next, fill_slots, run_plan, cleanup, start, start_task, wake, resume, retry, reassign, replace, salvage, subscribe_channel, unsubscribe_channel, await_members. \
                  To read messages addressed to you, use action='read'.",
                 params.action

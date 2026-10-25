@@ -1047,6 +1047,32 @@ fn format_swarm_model_list_handles_empty_catalog() {
 }
 
 #[test]
+fn schema_does_not_advertise_explicit_completion_reporting() {
+    let tool = CommunicateTool::new();
+    let schema = tool.parameters_schema();
+    let serialized = schema.to_string();
+    assert!(!serialized.contains("report"), "{serialized}");
+    assert!(!serialized.contains("validation"), "{serialized}");
+    assert!(!serialized.contains("follow_up"), "{serialized}");
+}
+
+#[test]
+fn legacy_report_input_remains_compatible() {
+    let input: super::CommunicateInput = serde_json::from_value(json!({
+        "action": "report",
+        "message": "Implemented the change.",
+        "status": "completed",
+        "validation": "Tests passed.",
+        "follow_up": "None."
+    }))
+    .expect("old transcripts and scripts can still deserialize reports");
+    assert_eq!(input.action, "report");
+    assert_eq!(input.status.as_deref(), Some("completed"));
+    assert_eq!(input.validation.as_deref(), Some("Tests passed."));
+    assert_eq!(input.follow_up.as_deref(), Some("None."));
+}
+
+#[test]
 fn schema_advertises_a_lean_lane_first_action_set() {
     let schema = CommunicateTool::new().parameters_schema();
     let props = schema["properties"]
@@ -1062,7 +1088,6 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         "launch",
         "spawn",
         "message",
-        "report",
         "status",
         "plan_status",
         "list",
@@ -1079,6 +1104,7 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         );
     }
     for hidden in [
+        "report",
         "propose_plan",
         "approve_plan",
         "reject_plan",
@@ -1115,13 +1141,13 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         "retain_agents",
         "delivery",
         "wake",
-        "status",
-        "validation",
-        "follow_up",
     ] {
         assert!(props.contains_key(kept), "{kept} param should be offered");
     }
     for dropped in [
+        "status",
+        "validation",
+        "follow_up",
         "key",
         "value",
         "proposer_session",
