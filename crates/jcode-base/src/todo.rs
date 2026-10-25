@@ -31,8 +31,13 @@ pub fn todos_exist(session_id: &str) -> Result<bool> {
 
 /// Save a session's todos and mirror the change across any swarm lane links.
 pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
-    write_todos(session_id, todos)?;
-    sync_lanes_after_save(session_id, todos);
+    let todos = jcode_todo_policy::store::canonicalize_worker_todos(
+        &storage::jcode_dir()?,
+        session_id,
+        todos,
+    );
+    write_todos(session_id, &todos)?;
+    sync_lanes_after_save(session_id, &todos);
     Ok(())
 }
 
@@ -644,6 +649,72 @@ mod lane_sync_tests {
             "changed: add lexer + parser tests"
         );
 
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn worker_replacement_save_persists_assigned_lane_and_phase_on_both_sides() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::tempdir().unwrap();
+        crate::env::set_var("JCODE_HOME", dir.path());
+
+        let root = "session_canonical_root";
+        let worker = "session_canonical_worker";
+        let assigned = laned("assigned", 2, "automatic assignment reports");
+        let unrelated = laned("unrelated", 3, "other lane");
+        save_todos(root, &[assigned.clone(), unrelated.clone()]).unwrap();
+        link_worker_lane(root, worker, &stages::lane_id(&assigned)).unwrap();
+
+        // A worker-authored full phases replacement changes ids, lane and phase.
+        let mut replacement = vec![
+            laned("replacement", 9, "server output reports"),
+            laned("added", 10, "another worker lane"),
+        ];
+        replacement[0].content = "updated worker task".into();
+        replacement[0].status = "completed".into();
+        replacement[0].details = Some("keep worker details".into());
+        replacement[0].waiting_on = vec!["worker-local-task".into()];
+        replacement[1].status = "in_progress".into();
+        save_todos(worker, &replacement).unwrap();
+
+        let worker_saved = load_todos(worker).unwrap();
+        let root_saved = load_todos(root).unwrap();
+        let expected_worker: Vec<TodoItem> = replacement
+            .iter()
+            .map(|todo| TodoItem {
+                group: assigned.group.clone(),
+                stage: assigned.stage,
+                ..todo.clone()
+            })
+            .collect();
+        assert_eq!(worker_saved, expected_worker);
+        assert_eq!(root_saved.len(), 3);
+        assert_eq!(root_saved[2], unrelated);
+        for (root_todo, worker_todo) in root_saved[..2].iter().zip(&worker_saved) {
+            assert_eq!(root_todo.group, worker_todo.group);
+            assert_eq!(root_todo.stage, Some(2));
+            assert_eq!(root_todo.content, worker_todo.content);
+            assert_eq!(root_todo.status, worker_todo.status);
+            assert_eq!(root_todo.details, worker_todo.details);
+            assert_eq!(root_todo.assigned_to.as_deref(), Some(worker));
+            assert!(root_todo.waiting_on.is_empty());
+        }
+        assert_eq!(
+            jcode_todo_policy::store::load_snapshot(dir.path(), worker).todos,
+            worker_saved
+        );
+        assert_eq!(
+            jcode_todo_policy::store::load_snapshot(dir.path(), root).todos,
+            root_saved
+        );
+
+        save_todos("session_unlinked", &replacement).unwrap();
+        assert_eq!(load_todos("session_unlinked").unwrap(), replacement);
+        assert_eq!(load_todos(root).unwrap(), root_saved);
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
             None => crate::env::remove_var("JCODE_HOME"),
