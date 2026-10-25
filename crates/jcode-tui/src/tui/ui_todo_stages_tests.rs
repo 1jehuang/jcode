@@ -2,6 +2,47 @@ use super::*;
 use crate::todo::TodoItem;
 
 #[test]
+fn shortcut_badges_follow_payload_digits_and_respect_lane_width() {
+    let mut item = assigned(todo("1", "Read types", "in_progress", Some(1)), "fox");
+    item.group = Some("Parser".into());
+    let mut worker = agent("fox", "running", Some("Reading types"), Some(12));
+    for digit in [1, 9, 0] {
+        worker.shortcut = Some(digit);
+        let rows = render(&[item.clone()], &[worker.clone()], 120);
+        assert!(
+            rows.join("\n").contains(&format!("🦊 [alt+{digit}]")),
+            "{rows:?}"
+        );
+        for width in 1..60 {
+            for row in render(&[item.clone()], &[worker.clone()], width) {
+                assert!(row.width() <= usize::from(width), "width {width}: {row:?}");
+            }
+        }
+    }
+    worker.shortcut = Some(10);
+    assert!(worker.shortcut_span().is_none());
+}
+
+#[test]
+fn shortcut_payload_is_optional_and_round_trips() {
+    let mut worker: TodoCardAgent = serde_json::from_value(serde_json::json!({
+        "session_id": "session_fox_1700000000", "status": "running"
+    }))
+    .unwrap();
+    assert_eq!(worker.shortcut, None);
+    assert!(
+        serde_json::to_value(&worker)
+            .unwrap()
+            .get("shortcut")
+            .is_none()
+    );
+    worker.shortcut = Some(0);
+    let restored: TodoCardAgent =
+        serde_json::from_value(serde_json::to_value(&worker).unwrap()).unwrap();
+    assert_eq!(restored.shortcut, Some(0));
+}
+
+#[test]
 fn inactive_lanes_keep_ownership_without_live_activity() {
     for status in ["completed", "pending"] {
         let mut item = assigned(todo("1", "Read types", status, None), "fox");
@@ -44,6 +85,7 @@ fn agent(name: &str, status: &str, activity: Option<&str>, age: Option<u64>) -> 
         age_secs: age,
         activity_age_secs: age,
         todo_statuses: Vec::new(),
+        shortcut: None,
     }
 }
 

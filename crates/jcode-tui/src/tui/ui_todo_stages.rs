@@ -20,6 +20,9 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TodoCardAgent {
     pub session_id: String,
+    /// Global swarm navigation digit, assigned by session id in display order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcut: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub status: String,
@@ -63,6 +66,7 @@ impl TodoCardAgent {
             .filter(|text| !text.is_empty());
         Self {
             session_id: member.session_id.clone(),
+            shortcut: None,
             name: member.friendly_name.clone(),
             status: member.status.clone(),
             activity,
@@ -78,6 +82,15 @@ impl TodoCardAgent {
                 member.runtime.todo_statuses.clone()
             },
         }
+    }
+
+    fn shortcut_span(&self) -> Option<Span<'static>> {
+        self.shortcut.filter(|digit| *digit <= 9).map(|digit| {
+            Span::styled(
+                format!(" [alt+{digit}]"),
+                Style::default().fg(todo_meta_color()),
+            )
+        })
     }
 
     fn matches(&self, key: &str) -> bool {
@@ -406,6 +419,9 @@ fn lane_agent_chip(
                 .unwrap_or_else(|| fallback_icon(assigned)),
         ));
         if let Some(agent) = agent {
+            if let Some(badge) = agent.shortcut_span() {
+                spans.push(badge);
+            }
             if let Some((mark, color)) = agent_state_mark(&agent.status) {
                 spans.push(Span::styled(mark, Style::default().fg(color)));
             }
@@ -881,6 +897,9 @@ pub(crate) fn render_todo_item_line(
     let mut chip = vec![Span::raw("  "), Span::raw(icon)];
     let mut note = String::new();
     if let Some(agent) = agent {
+        if let Some(badge) = agent.shortcut_span() {
+            chip.push(badge);
+        }
         if let Some((mark, color)) = agent_state_mark(&agent.status) {
             chip.push(Span::styled(mark, Style::default().fg(color)));
         }

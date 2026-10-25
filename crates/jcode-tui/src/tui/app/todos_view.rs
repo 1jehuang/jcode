@@ -187,7 +187,11 @@ impl App {
         }
         self.remote_swarm_members
             .iter()
-            .map(crate::tui::ui::TodoCardAgent::from_member)
+            .map(|member| {
+                let mut agent = crate::tui::ui::TodoCardAgent::from_member(member);
+                agent.shortcut = self.swarm_agent_shortcut_digit(&member.session_id);
+                agent
+            })
             .filter(|agent| {
                 todos.iter().any(|todo| {
                     todo.assigned_to.as_deref().is_some_and(|assigned| {
@@ -535,6 +539,7 @@ fn hash_todo_card_agents(agents: &[crate::tui::ui::TodoCardAgent]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for agent in agents {
         agent.session_id.hash(&mut hasher);
+        agent.shortcut.hash(&mut hasher);
         agent.status.hash(&mut hasher);
         agent.activity.hash(&mut hasher);
         agent.todo_statuses.hash(&mut hasher);
@@ -724,6 +729,15 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_changes_invalidate_pinned_payload() {
+        let mut agent = crate::tui::ui::TodoCardAgent::default();
+        agent.shortcut = Some(1);
+        let before = hash_todo_card_agents(&[agent.clone()]);
+        agent.shortcut = Some(0);
+        assert_ne!(before, hash_todo_card_agents(&[agent]));
+    }
 
     #[test]
     fn worker_item_status_changes_invalidate_pinned_payload() {
