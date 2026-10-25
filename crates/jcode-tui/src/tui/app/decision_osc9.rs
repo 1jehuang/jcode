@@ -11,6 +11,10 @@
 //! emission work: it only handles the ask_user chooser transitions, it writes
 //! to stdout best-effort, and it dedups transitions so repeated calls with
 //! the same state are safe.
+//!
+//! Cross-reference: PR #1883 has the broader emitter in
+//! `crates/jcode-core/src/console.rs`. Consolidate these emitters after both
+//! changes merge.
 
 use std::sync::Mutex;
 
