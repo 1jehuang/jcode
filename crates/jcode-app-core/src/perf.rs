@@ -1,4 +1,7 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicPtr, Ordering},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceTier {
@@ -125,18 +128,16 @@ impl SystemProfile {
 
 static PROFILE: OnceLock<SystemProfile> = OnceLock::new();
 
-// The pin stores a `&'static` reference, so `profile()` can return it without
-// borrowing the mutex. The synthetic profile itself is built once and reused
-// for every pin call, so repeated pinning in a test suite does not leak.
-static PROFILE_OVERRIDE: Mutex<Option<&'static SystemProfile>> = Mutex::new(None);
+// The pin stores a stable pointer, so `profile()` can return it without
+// locking. The synthetic profile itself is built once and reused for every
+// pin call, so repeated pinning in a test suite does not leak.
+static PROFILE_OVERRIDE: AtomicPtr<SystemProfile> = AtomicPtr::new(std::ptr::null_mut());
 static FULL_TIER_PIN: OnceLock<SystemProfile> = OnceLock::new();
 
 pub fn profile() -> &'static SystemProfile {
-    let guard = PROFILE_OVERRIDE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(pinned) = guard.as_ref() {
-        return pinned;
+    let pointer = PROFILE_OVERRIDE.load(Ordering::Acquire);
+    if !pointer.is_null() {
+        return unsafe { &*pointer };
     }
     PROFILE.get_or_init(detect)
 }
@@ -152,9 +153,10 @@ pub fn profile() -> &'static SystemProfile {
 /// paths never call it.
 pub fn pin_full_profile_for_tests() {
     let pinned = FULL_TIER_PIN.get_or_init(|| synthetic_profile(SyntheticSystemProfile::Native));
-    *PROFILE_OVERRIDE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pinned);
+    PROFILE_OVERRIDE.store(
+        pinned as *const SystemProfile as *mut SystemProfile,
+        Ordering::Release,
+    );
 }
 
 pub fn synthetic_profile(kind: SyntheticSystemProfile) -> SystemProfile {
