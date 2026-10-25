@@ -9,7 +9,7 @@ Put a plain Markdown file in either location:
 - `~/.jcode/agents/<name>.md` for a reusable personal profile.
 - `<project>/.jcode/agents/<name>.md` for a project profile.
 
-When `JCODE_HOME` is set, it replaces `~/.jcode`. A project file with the same name takes precedence. Names start with an ASCII letter or digit and contain only ASCII letters, digits, `_`, or `-`. The names `off` and `reload` are reserved.
+When `JCODE_HOME` is set, it replaces `~/.jcode`. A project file with the same name takes precedence. Names start with an ASCII letter or digit and contain only ASCII letters, digits, `_`, `-`, or internal single dots, such as `kimik3.1`. Trailing dots, consecutive dots, and path separators are rejected. The names `off` and `reload` are reserved.
 
 For example, create `.jcode/agents/reviewer.md`:
 
