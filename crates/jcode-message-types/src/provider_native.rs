@@ -486,6 +486,51 @@ mod tests {
     }
 
     #[test]
+    fn openai_search_lifecycle_handles_concurrent_failure_and_rollback() {
+        let mut tracker = ProviderNativeTracker::default();
+        let mut items = ProviderNativeItems::default();
+        for (id, status) in [("ws_a", "in_progress"), ("ws_b", "searching")] {
+            let item = json!({"type":"web_search_call", "id":id, "status":status});
+            assert!(matches!(tracker.observe("openai", &item),
+                Some(ProviderNativeToolEvent::Started { id: got, .. }) if got == id));
+            assert!(provider_native_text_fallback("openai", &item, None).is_none());
+            items.push(0, "openai".into(), item);
+        }
+        assert!(items.is_empty());
+        let failed = json!({"type":"web_search_call", "id":"ws_b", "status":"failed"});
+        assert!(matches!(tracker.observe("openai", &failed),
+            Some(ProviderNativeToolEvent::Completed { id, is_error: true, output, .. })
+            if id == "ws_b" && output == "Web search failed"));
+        assert!(tracker.is_started("ws_a"));
+        assert!(!tracker.is_started("ws_b"));
+        items.push(0, "openai".into(), failed.clone());
+        assert!(matches!(items.interleave("").as_slice(),
+            [crate::ContentBlock::ProviderNative { item, .. }] if item == &failed));
+        tracker.clear();
+        assert!(!tracker.is_started("ws_a"));
+    }
+
+    #[test]
+    fn openai_completed_only_search_still_finishes_with_query_and_sources() {
+        for status in [Some("completed"), None] {
+            let mut item = json!({"type":"web_search_call", "id":"ws_legacy",
+                "action":{"type":"search", "queries":["one", "two"],
+                    "sources":[{"title":"Source", "url":"https://example.test"}]}});
+            if let Some(status) = status {
+                item["status"] = status.into();
+            }
+            let mut tracker = ProviderNativeTracker::default();
+            assert!(matches!(tracker.observe("openai", &item),
+                Some(ProviderNativeToolEvent::Completed { input, output, is_error: false, .. })
+                if input["query"] == "one, two" && output.contains("https://example.test")));
+            let mut items = ProviderNativeItems::default();
+            items.push(0, "openai".into(), item.clone());
+            assert!(matches!(items.interleave("").as_slice(),
+                [crate::ContentBlock::ProviderNative { item: saved, .. }] if saved == &item));
+        }
+    }
+
+    #[test]
     fn tracker_pairs_start_with_result() {
         let mut tracker = ProviderNativeTracker::default();
         let start = json!({
