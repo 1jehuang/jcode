@@ -821,8 +821,6 @@ type AuthResolver = Arc<dyn Fn() -> anyhow::Result<ProviderAuth> + Send + Sync>;
 pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
-    /// Cached lowercase model key for hot-path per-model capability lookups.
-    model_key: Arc<RwLock<String>>,
     reasoning_effort: Arc<RwLock<Option<String>>>,
     api_base: String,
     auth: AuthResolver,
@@ -1157,10 +1155,7 @@ impl OpenRouterProvider {
     }
 
     fn model_key_snapshot(&self) -> String {
-        self.model_key
-            .try_read()
-            .map(|model_key| model_key.clone())
-            .unwrap_or_default()
+        Self::normalized_model_key(&self.model.try_read().expect("model lock"))
     }
 
     fn model_reasoning_config(&self) -> Option<&(Option<bool>, Option<String>)> {
@@ -1839,7 +1834,6 @@ impl OpenRouterProvider {
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model.clone())),
-            model_key: Arc::new(RwLock::new(model_key.clone())),
             reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
                 profile.supports_reasoning_effort,
                 Some(profile_name),
@@ -2102,7 +2096,6 @@ impl OpenRouterProvider {
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model.clone())),
-            model_key: Arc::new(RwLock::new(Self::normalized_model_key(&model))),
             reasoning_effort: Arc::new(RwLock::new(if builtin_azure {
                 jcode_base::auth::azure::load_reasoning_effort()
                     .as_deref()
@@ -2171,7 +2164,6 @@ impl OpenRouterProvider {
         Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model.to_string())),
-            model_key: Arc::new(RwLock::new(model.to_ascii_lowercase())),
             reasoning_effort: Arc::new(RwLock::new(None)),
             api_base: jcode_base::auth::grok_build::chat_proxy_base_url(),
             auth: Arc::new(|| {
@@ -2233,7 +2225,6 @@ impl OpenRouterProvider {
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-            model_key: Arc::new(RwLock::new(Self::normalized_model_key(DEFAULT_MODEL))),
             reasoning_effort: Arc::new(RwLock::new(None)),
             api_base: DEFAULT_API_BASE.to_string(),
             auth,
@@ -2447,7 +2438,6 @@ impl OpenRouterProvider {
             let provider = OpenRouterProvider {
                 client,
                 model: Arc::new(RwLock::new(model_name.clone())),
-                model_key: Arc::new(RwLock::new(Self::normalized_model_key(&model_name))),
                 reasoning_effort: Arc::new(RwLock::new(None)),
                 api_base,
                 auth,

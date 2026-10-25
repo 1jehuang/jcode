@@ -720,7 +720,6 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
         supports_provider_features: false,
         supports_model_catalog: false,
         model: Arc::new(RwLock::new("kimi-for-coding".to_string())),
-        model_key: Arc::new(RwLock::new("kimi-for-coding".to_string())),
         ..make_custom_compatible_provider()
     };
 
@@ -815,7 +814,6 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
         supports_provider_features: false,
         supports_model_catalog: false,
         model: Arc::new(RwLock::new("deepseek-v4-flash-free".to_string())),
-        model_key: Arc::new(RwLock::new("deepseek-v4-flash-free".to_string())),
         ..make_custom_compatible_provider()
     };
 
@@ -1300,7 +1298,6 @@ fn make_provider() -> OpenRouterProvider {
     OpenRouterProvider {
         client: jcode_provider_core::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-        model_key: Arc::new(RwLock::new(DEFAULT_MODEL.to_ascii_lowercase())),
         reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: DEFAULT_API_BASE.to_string(),
         auth: Arc::new(|| {
@@ -1342,7 +1339,6 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
     OpenRouterProvider {
         client: jcode_provider_core::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-        model_key: Arc::new(RwLock::new(DEFAULT_MODEL.to_ascii_lowercase())),
         reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: "https://compat.example.test/v1".to_string(),
         auth: Arc::new(|| {
@@ -1590,7 +1586,6 @@ fn openrouter_chat_request_sends_unified_reasoning_effort() {
     let provider = OpenRouterProvider {
         api_base,
         model: Arc::new(RwLock::new("anthropic/claude-sonnet-4.6".to_string())),
-        model_key: Arc::new(RwLock::new("anthropic/claude-sonnet-4.6".to_string())),
         supports_model_catalog: false,
         ..make_provider()
     };
@@ -1929,7 +1924,6 @@ async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
                 })
             }),
             model: Arc::new(RwLock::new(model.clone())),
-            model_key: Arc::new(RwLock::new(model.trim().to_ascii_lowercase())),
             max_tokens: Some(max_tokens),
             ..make_provider()
         };
@@ -1977,7 +1971,6 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
     let provider = OpenRouterProvider {
         api_base,
         model: Arc::new(RwLock::new("deepseek-v4-pro".to_string())),
-        model_key: Arc::new(RwLock::new("deepseek-v4-pro".to_string())),
         profile_id: Some("deepseek".to_string()),
         supports_provider_features: false,
         supports_model_catalog: false,
@@ -2036,7 +2029,6 @@ fn sol_compatible_request_sends_low_reasoning_effort() {
     let provider = OpenRouterProvider {
         api_base,
         model: Arc::new(RwLock::new("gpt-6.1-sol".to_string())),
-        model_key: Arc::new(RwLock::new("gpt-6.1-sol".to_string())),
         supports_provider_features: false,
         supports_model_catalog: false,
         send_openrouter_headers: false,
@@ -2088,7 +2080,6 @@ fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
     let provider = OpenRouterProvider {
         api_base,
         model: Arc::new(RwLock::new("gpt-5.5".to_string())),
-        model_key: Arc::new(RwLock::new("gpt-5.5".to_string())),
         supports_provider_features: false,
         supports_model_catalog: false,
         send_openrouter_headers: false,
@@ -2152,7 +2143,6 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
     let provider = OpenRouterProvider {
         api_base,
         model: Arc::new(RwLock::new("live-login-flow-model".to_string())),
-        model_key: Arc::new(RwLock::new("live-login-flow-model".to_string())),
         auth: Arc::new(|| {
             Ok(ProviderAuth::AuthorizationBearer {
                 token: "sk-live-catalog".to_string(),
@@ -2209,7 +2199,6 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
     let fresh_provider = OpenRouterProvider {
         api_base: provider.api_base.clone(),
         model: Arc::new(RwLock::new("live-login-flow-model".to_string())),
-        model_key: Arc::new(RwLock::new("live-login-flow-model".to_string())),
         auth: provider.auth.clone(),
         supports_provider_features: false,
         supports_model_catalog: true,
@@ -2750,7 +2739,6 @@ fn test_background_refresh_is_throttled_between_attempts() {
 fn test_kimi_routing_uses_endpoints_or_fallback() {
     let provider = OpenRouterProvider {
         model: Arc::new(RwLock::new("moonshotai/kimi-k2.5".to_string())),
-        model_key: Arc::new(RwLock::new("moonshotai/kimi-k2.5".to_string())),
         ..make_provider()
     };
 
@@ -2776,7 +2764,6 @@ fn observed_session_provider_pin_sticks_without_fallbacks() {
     let model = "anthropic/claude-sonnet-4.6";
     let provider = OpenRouterProvider {
         model: Arc::new(RwLock::new(model.to_string())),
-        model_key: Arc::new(RwLock::new(model.trim().to_ascii_lowercase())),
         provider_pin: Arc::new(Mutex::new(Some(ProviderPin {
             model: model.to_string(),
             provider: "anthropic".to_string(),
@@ -2815,7 +2802,6 @@ fn observed_pin_yields_to_explicit_user_routing_order() {
     };
     let provider = OpenRouterProvider {
         model: Arc::new(RwLock::new(model.to_string())),
-        model_key: Arc::new(RwLock::new(model.trim().to_ascii_lowercase())),
         provider_routing: Arc::new(RwLock::new(base)),
         provider_pin: Arc::new(Mutex::new(Some(ProviderPin {
             model: model.to_string(),
@@ -5143,7 +5129,6 @@ fn reasoning_map_overrides_deepseek_family_detection() {
     // ladder and wire values, not the built-in DeepSeek ladder.
     let mut provider = make_mapped_compatible_provider(opencode_style_reasoning_map());
     provider.model = Arc::new(RwLock::new("deepseek-v4-flash".to_string()));
-    provider.model_key = Arc::new(RwLock::new("deepseek-v4-flash".to_string()));
     provider.static_model_reasoning_maps.insert(
         "deepseek-v4-flash".to_string(),
         opencode_style_reasoning_map(),

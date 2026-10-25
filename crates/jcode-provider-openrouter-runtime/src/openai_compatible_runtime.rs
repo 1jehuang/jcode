@@ -58,7 +58,6 @@ impl OpenRouterProvider {
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model.clone())),
-            model_key: Arc::new(RwLock::new(Self::normalized_model_key(&model))),
             reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
                 None,
                 Some(&resolved.id),

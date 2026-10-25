@@ -53,7 +53,7 @@ impl Provider for OpenRouterProvider {
         let model = self.model.read().await.clone();
         let responses_api =
             model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
-        let model_key = self.model_key.read().await.clone();
+        let model_key = Self::normalized_model_key(&self.model.read().await);
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
         // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
@@ -459,13 +459,7 @@ impl Provider for OpenRouterProvider {
             .model
             .try_write()
             .map_err(|_| anyhow::anyhow!("Cannot change model while a request is in progress"))?;
-        let mut current_key = self
-            .model_key
-            .try_write()
-            .map_err(|_| anyhow::anyhow!("Cannot change model while a request is in progress"))?;
         *current = model_id.clone();
-        *current_key = Self::normalized_model_key(&model_id);
-        drop(current_key);
         drop(current);
 
         if self.supports_provider_features {
@@ -915,12 +909,6 @@ impl Provider for OpenRouterProvider {
             client: self.client.clone(),
             model: Arc::new(RwLock::new(
                 self.model.try_read().map(|m| m.clone()).unwrap_or_default(),
-            )),
-            model_key: Arc::new(RwLock::new(
-                self.model_key
-                    .try_read()
-                    .map(|m| m.clone())
-                    .unwrap_or_default(),
             )),
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             api_base: self.api_base.clone(),
