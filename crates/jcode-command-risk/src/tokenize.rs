@@ -158,6 +158,17 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                 op.is_operator = true;
                 tokens.push(op);
             }
+            '&' if chars.peek() == Some(&'>') => {
+                // `&>file` / `&>>file` redirect stdout+stderr; they are not a
+                // background `&`, so the command keeps its later arguments.
+                flush!();
+                chars.next();
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                } else {
+                    pending_redirect = true;
+                }
+            }
             '&' | '|' => {
                 flush!();
                 let mut text = c.to_string();
