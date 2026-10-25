@@ -1155,7 +1155,15 @@ impl OpenRouterProvider {
     }
 
     fn model_key_snapshot(&self) -> String {
-        Self::normalized_model_key(&self.model.try_read().expect("model lock"))
+        // try_read, not a blocking read: these capability lookups run on the
+        // sync request-setup path where a contended tokio RwLock would panic or
+        // block the reactor. A held write lock (model switch or placeholder
+        // promotion) degrades to an empty key, which every lookup treats as an
+        // unknown model instead of crashing mid-request.
+        self.model
+            .try_read()
+            .map(|model| Self::normalized_model_key(&model))
+            .unwrap_or_default()
     }
 
     fn model_reasoning_config(&self) -> Option<&(Option<bool>, Option<String>)> {
