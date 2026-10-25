@@ -491,9 +491,7 @@ Completed: 2 succeeded, 1 failed"
         "rendered={rendered:?}"
     );
     assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("✗ agentgrep")),
+        rendered.iter().any(|line| line.contains("✗ agentgrep")),
         "failed subcall should be attributed to agentgrep: {rendered:?}"
     );
     assert!(

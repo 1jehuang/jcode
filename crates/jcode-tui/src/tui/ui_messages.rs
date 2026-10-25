@@ -2863,7 +2863,11 @@ pub(crate) fn render_background_task_message(
         let clean = strip_ansi_escape_sequences(&output);
         let detail = tools_ui::parse_tool_failure(&clean)
             .map(|failure| {
-                let reason = failure.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+                let reason = failure
+                    .reason
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 if reason == parsed.exit_label {
                     reason
                 } else {
