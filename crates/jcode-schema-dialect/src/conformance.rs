@@ -173,6 +173,15 @@ fn walk(schema: &Value, spec: &DialectSpec, path: &str, errors: &mut Vec<Conform
                 if spec.transforms.prune_dangling_required && key == "required" {
                     check_required(map, value, path, errors);
                 }
+                if spec.transforms.scalar_type_only && key == "type" && value.is_array() {
+                    errors.push(ConformanceError {
+                        path: path.to_string(),
+                        message: format!(
+                            "array `type` survived dialect `{}` whose wire requires a scalar `type`",
+                            spec.id
+                        ),
+                    });
+                }
 
                 let child_path = format!("{path}.{key}");
                 match keyword_role(key) {

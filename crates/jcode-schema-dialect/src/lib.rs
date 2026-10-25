@@ -408,6 +408,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gemini_collapses_array_type_union_to_scalar_nullable() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "waiting_on": {
+                    "type": ["array", "null"],
+                    "items": { "type": "string" }
+                }
+            }
+        });
+        let errors = must_not_contain_unsupported_constructs(&schema, &registry::GEMINI);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("array `type` survived")),
+            "{errors:?}"
+        );
+        for spec in [
+            &registry::GEMINI,
+            &registry::ANTIGRAVITY_CLAUDE,
+            &registry::ANTIGRAVITY_BRIDGE,
+        ] {
+            let out = dialect::apply(&schema, spec);
+            assert_eq!(out["properties"]["waiting_on"]["type"], "array");
+            assert_eq!(out["properties"]["waiting_on"]["nullable"], true);
+            assert!(must_not_contain_unsupported_constructs(&out, spec).is_empty());
+        }
+    }
+
     /// The regression that made #754 a bug in the first place: a top-level-only
     /// filter left the nested copy in place.
     #[test]
@@ -623,6 +653,51 @@ mod tests {
                 spec.id
             );
             assert_eq!(out["properties"]["label"]["type"], "string");
+        }
+    }
+
+    #[test]
+    fn gemini_and_antigravity_collapse_array_type_to_scalar_nullable() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "waiting_on": {
+                    "type": ["array", "null"],
+                    "items": { "type": "string" },
+                    "description": "background task ids"
+                },
+                "config": {
+                    "allOf": [
+                        { "type": ["object", "null"] },
+                        { "properties": { "name": { "type": ["string", "null"] } } }
+                    ]
+                }
+            }
+        });
+        for spec in [
+            &registry::GEMINI,
+            &registry::ANTIGRAVITY_CLAUDE,
+            &registry::ANTIGRAVITY_BRIDGE,
+        ] {
+            let out = dialect::apply(&schema, spec);
+            assert_eq!(out["properties"]["waiting_on"]["type"], "array");
+            assert_eq!(out["properties"]["waiting_on"]["nullable"], true);
+            assert_eq!(out["properties"]["waiting_on"]["items"]["type"], "string");
+            assert_eq!(out["properties"]["config"]["type"], "object");
+            assert_eq!(out["properties"]["config"]["nullable"], true);
+            assert_eq!(
+                out["properties"]["config"]["properties"]["name"]["type"],
+                "string"
+            );
+            assert_eq!(
+                out["properties"]["config"]["properties"]["name"]["nullable"],
+                true
+            );
+            assert!(
+                must_not_contain_unsupported_constructs(&out, spec).is_empty(),
+                "normalized schema must pass conformance for `{}`: {out}",
+                spec.id
+            );
         }
     }
 }

@@ -93,6 +93,18 @@ pub fn classify(message: &str) -> Option<SchemaRejection> {
         });
     }
 
+    // Gemini / Antigravity (#1956):
+    //   Invalid JSON payload received. Unknown name "type" at
+    //   'request.tools[0].function_declarations[26].parameters...':
+    //   Proto field is not repeating, cannot start list.
+    if message.contains("Proto field is not repeating") {
+        return Some(SchemaRejection {
+            keywords: Vec::new(),
+            format: None,
+            tool,
+        });
+    }
+
     // OpenAI (#713): "schema must have a 'type' key". Structural: nothing can be
     // stripped to fix it, so it is reported as a recognized-but-unactionable
     // schema error. That labels the failure for the user instead of surfacing a
