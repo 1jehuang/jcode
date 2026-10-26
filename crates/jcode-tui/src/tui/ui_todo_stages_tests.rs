@@ -56,7 +56,7 @@ fn terminal_worker_reason_beats_stale_intent_with_or_without_telemetry() {
 }
 
 #[test]
-fn lane_live_status_matches_opened_status_and_preserves_stop_precedence() {
+fn lane_live_status_omits_transport_and_preserves_stop_precedence() {
     let mut item = assigned(todo("1", "Verify result", "in_progress", Some(1)), "fox");
     let mut worker = agent("fox", "running", Some("Verify result"), Some(1));
     worker.live_status = Some(crate::protocol::SwarmLiveStatus {
@@ -69,8 +69,10 @@ fn lane_live_status_matches_opened_status_and_preserves_stop_precedence() {
         tool_intent: Some("Run 界 tests".into()),
         ..Default::default()
     });
+    let mut compact = worker.live_status.clone().unwrap();
+    compact.connection_type = None;
     let expected = super::super::super::input_ui::live_processing_status_line(
-        worker.live_status.as_ref().unwrap(),
+        &compact,
         Some(1.0),
         LIVE_DOT_SENTINEL,
     );
@@ -78,6 +80,8 @@ fn lane_live_status_matches_opened_status_and_preserves_stop_precedence() {
     push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", 160);
     assert_eq!(rows.len(), 1);
     assert!(rows[0].to_string().contains(&expected.to_string()));
+    assert!(!rows[0].to_string().contains("https"));
+    assert!(!rows[0].to_string().contains(&worker.icon()));
     assert!(
         rows[0]
             .spans
@@ -101,6 +105,33 @@ fn lane_live_status_matches_opened_status_and_preserves_stop_precedence() {
     rows.clear();
     push_lane_status_lines(&mut rows, &[&item], &[worker], "", 160);
     assert!(rows.is_empty(), "User action suppresses live telemetry");
+}
+
+#[test]
+fn pinned_worker_status_hides_duplicate_intent_but_keeps_connection_progress() {
+    let item = assigned(todo("1", "Verify result", "in_progress", Some(1)), "fox");
+    let mut worker = agent("fox", "running", Some("Verify result"), Some(1));
+    worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+        phase: "running_tool".into(),
+        tool_name: Some("bash".into()),
+        tool_intent: Some("Verify result".into()),
+        connection_type: Some("websocket".into()),
+        status_detail: Some("opening websocket".into()),
+        ..Default::default()
+    });
+    let mut rows = Vec::new();
+    push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", 160);
+    let text = rows[0].to_string();
+    assert!(text.contains("bash"), "{text}");
+    assert!(!text.contains("Verify result"), "{text}");
+    assert!(!text.contains("websocket"), "{text}");
+
+    let live = worker.live_status.as_mut().unwrap();
+    live.phase = "connecting".into();
+    live.connection_phase = Some("authenticating".into());
+    rows.clear();
+    push_lane_status_lines(&mut rows, &[&item], &[worker], "", 160);
+    assert!(rows[0].to_string().contains("refreshing auth"));
 }
 
 #[test]

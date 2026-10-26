@@ -997,11 +997,23 @@ pub(super) fn push_lane_status_lines(
                 live.stop_reason = agent.activity.clone();
             }
         }
-        let mut row = vec![Span::raw(if agent.live_status.is_some() {
-            format!("  {} ", agent.icon())
-        } else {
-            "  ".to_string()
-        })];
+        // The lane heading already identifies the worker. Transport diagnostics
+        // belong in its opened view, not repeated under every pinned lane.
+        live.connection_type = None;
+        if matches!(
+            live.phase.as_str(),
+            "running" | "running_tool" | "streaming" | "sending" | "thinking" | "connecting"
+        ) {
+            live.status_detail = None;
+        }
+        if live.tool_intent.as_deref().is_some_and(|intent| {
+            todos
+                .iter()
+                .any(|todo| todo.content.trim() == intent.trim())
+        }) {
+            live.tool_intent = None;
+        }
+        let mut row = vec![Span::raw("  ")];
         row.extend(
             super::super::input_ui::live_processing_status_line(
                 &live,
