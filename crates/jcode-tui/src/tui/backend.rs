@@ -363,26 +363,15 @@ impl RemoteConnection {
         }
     }
 
-    pub(crate) fn cloud_expiry_clear(
-        &mut self,
+    pub(crate) fn cloud_expiry_revoke(
         live: Arc<std::sync::atomic::AtomicBool>,
         deadline: tokio::time::Instant,
     ) -> tokio::task::JoinHandle<()> {
-        let writer = Arc::clone(&self.writer);
-        let id = self.next_request_id;
-        self.next_request_id += 1;
         tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
-            let mut writer = writer.lock().await;
-            if live.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                let request = Request::ConfigureTools {
-                    id,
-                    tools: Default::default(),
-                };
-                if let Ok(json) = serde_json::to_string(&request) {
-                    let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
-                }
-            }
+            // ConfigureTools is rejected mid-turn. Revoke local access now,
+            // then let the app issue its one-shot cleanup after becoming idle.
+            live.store(false, std::sync::atomic::Ordering::SeqCst);
         })
     }
 

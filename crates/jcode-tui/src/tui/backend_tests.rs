@@ -52,24 +52,22 @@ async fn cloud_configuration_is_written_before_message() {
 }
 
 #[tokio::test]
-async fn cloud_expiry_clears_overlay_and_revokes_callbacks() {
+async fn cloud_expiry_revokes_without_midturn_protocol_write() {
     let mut remote = RemoteConnection::dummy();
     let peer = remote.take_dummy_peer().unwrap();
     let (reader, _writer) = peer.into_split();
     let mut reader = BufReader::new(reader);
     let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    remote
-        .cloud_expiry_clear(live.clone(), tokio::time::Instant::now())
+    RemoteConnection::cloud_expiry_revoke(live.clone(), tokio::time::Instant::now())
         .await
         .unwrap();
     assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
     let mut line = String::new();
-    reader.read_line(&mut line).await.unwrap();
-    let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(value["type"], "configure_tools");
-    assert_eq!(value["tools"]["custom"], serde_json::json!([]));
-    assert_eq!(value["tools"]["disabled"], serde_json::json!([]));
-    assert!(value["tools"]["enabled"].is_null());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
+            .await
+            .is_err()
+    );
 }
 
 #[test]

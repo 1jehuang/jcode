@@ -23,6 +23,9 @@ struct Grant {
     deadline: tokio::time::Instant,
     live: Arc<AtomicBool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    // The timer revokes locally without sending a control request mid-turn.
+    // Keep one idle cleanup due independently of the local live flag.
+    clear_after_idle: bool,
 }
 impl Grant {
     fn allows(&self, expected: Option<&str>, callback: &str) -> bool {
@@ -68,6 +71,9 @@ fn remaining(session: &str) -> Option<Duration> {
         &std::env::var("JCODE_SSH_REMOTE").ok()?,
         chrono::Utc::now(),
     )
+}
+fn installation_ready(is_processing: bool, history_loaded: bool) -> bool {
+    !is_processing && history_loaded
 }
 fn configuration() -> SessionToolConfig {
     SessionToolConfig {
@@ -166,6 +172,14 @@ impl Drop for FulfillProcessGroup {
 }
 
 impl App {
+    pub(super) fn cloud_environment_idle_clear_due(&self) -> bool {
+        !self.is_processing
+            && self.cloud_environment.grant.as_ref().is_some_and(|grant| {
+                grant.clear_after_idle
+                    && (!grant.live.load(Ordering::SeqCst)
+                        || tokio::time::Instant::now() >= grant.deadline)
+            })
+    }
     pub(super) fn revoke_cloud_environment(&mut self) {
         self.cloud_environment.grant = None;
     }
@@ -198,15 +212,22 @@ impl App {
             self.revoke_cloud_environment();
         }
         if let Some(grant) = &mut self.cloud_environment.grant {
-            if (remaining(&session).is_none() || tokio::time::Instant::now() >= grant.deadline)
-                && grant.live.swap(false, Ordering::SeqCst)
-            {
+            if remaining(&session).is_none() || tokio::time::Instant::now() >= grant.deadline {
+                grant.live.store(false, Ordering::SeqCst);
                 for task in grant.tasks.drain(..) {
                     task.abort();
                 }
-                remote.configure_cloud_tools(Default::default()).await?;
+                if grant.clear_after_idle && !self.is_processing {
+                    remote.configure_cloud_tools(Default::default()).await?;
+                    grant.clear_after_idle = false;
+                }
             }
             // Never renew even if another operation rewrites the lease timestamp.
+            return Ok(());
+        }
+        // On reconnect, SessionId can arrive before History tells us that a
+        // detached turn is still active. ConfigureTools is rejected mid-turn.
+        if !installation_ready(self.is_processing, remote.has_loaded_history()) {
             return Ok(());
         }
         let Some(left) = remaining(&session) else {
@@ -222,12 +243,13 @@ impl App {
         remote.configure_cloud_tools(configuration()).await?;
         let live = Arc::new(AtomicBool::new(true));
         remote.bind_cloud_authority(&live);
-        let expiry = remote.cloud_expiry_clear(live.clone(), deadline);
+        let expiry = RemoteConnection::cloud_expiry_revoke(live.clone(), deadline);
         self.cloud_environment.grant = Some(Grant {
             session,
             deadline,
             live,
             tasks: vec![expiry],
+            clear_after_idle: true,
         });
         Ok(())
     }
@@ -297,6 +319,77 @@ impl App {
 mod tests {
     use super::*;
     #[test]
+    fn installation_waits_for_idle_loaded_history() {
+        assert!(!installation_ready(true, false));
+        assert!(!installation_ready(true, true));
+        assert!(!installation_ready(false, false));
+        assert!(installation_ready(false, true));
+    }
+
+    #[test]
+    fn revoked_expiry_retries_clear_once_when_idle() {
+        use tokio::io::AsyncBufReadExt;
+        let mut app = super::super::tests::create_test_app();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut remote = RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            app.remote_session_id = Some("expired-bridge-test".into());
+            app.is_processing = true;
+            app.cloud_environment.grant = Some(Grant {
+                session: "expired-bridge-test".into(),
+                deadline: tokio::time::Instant::now(),
+                // The timer already revoked access during an active turn.
+                // Its false live flag must not suppress later idle cleanup.
+                live: Arc::new(AtomicBool::new(false)),
+                tasks: vec![],
+                clear_after_idle: true,
+            });
+            assert!(!app.cloud_environment_idle_clear_due());
+            app.prepare_cloud_environment(&mut remote).await.unwrap();
+            let mut line = String::new();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                app.cloud_environment
+                    .grant
+                    .as_ref()
+                    .unwrap()
+                    .clear_after_idle
+            );
+
+            app.is_processing = false;
+            assert!(app.cloud_environment_idle_clear_due());
+            app.prepare_cloud_environment(&mut remote).await.unwrap();
+            reader.read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["type"], "configure_tools");
+            assert_eq!(request["tools"]["custom"], json!([]));
+            assert!(!app.cloud_environment_idle_clear_due());
+            assert!(
+                !app.cloud_environment
+                    .grant
+                    .as_ref()
+                    .unwrap()
+                    .clear_after_idle
+            );
+            for _ in 0..3 {
+                app.prepare_cloud_environment(&mut remote).await.unwrap();
+            }
+            line.clear();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
+                    .await
+                    .is_err()
+            );
+        });
+    }
+    #[test]
     fn callback_grant_is_bound_to_active_session_and_expiry() {
         let live = Arc::new(AtomicBool::new(true));
         let mut grant = Grant {
@@ -304,6 +397,7 @@ mod tests {
             deadline: tokio::time::Instant::now() + Duration::from_secs(30),
             live: live.clone(),
             tasks: vec![],
+            clear_after_idle: true,
         };
         assert!(grant.allows(Some("expected"), "expected"));
         assert!(!grant.allows(Some("expected"), "other"));
@@ -323,6 +417,7 @@ mod tests {
             deadline: tokio::time::Instant::now() + Duration::from_secs(30),
             live: live.clone(),
             tasks: vec![],
+            clear_after_idle: true,
         });
         assert!(!live.load(Ordering::SeqCst));
     }
