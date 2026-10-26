@@ -13,6 +13,9 @@ Inside a local Jcode session, use `/cloud replace` to see usage,
 Append `--host <ssh-alias>` for a specific destination. The command waits for
 the current turn to finish and uses the session's local working directory.
 It does not move the conversation, close Jcode, or discard drafts.
+After a successful replacement, the next model turn receives the same environment
+parity guidance used by `/cloud`, adjusted to explain that this session is still
+local. A preview does not inject a migration notice.
 
 ```sh
 jcode cloud replace --dry-run
@@ -35,6 +38,13 @@ an initial commit. Ignored files (including ignored `.env` files), authenticatio
 stores, the origin URL, conversation transcripts, and session ownership are not
 transferred. Secrets already committed or present in non-ignored repository files
 are repository content and will be copied. Audit those files before transfer.
+
+Explicit requirements recorded in `.jcode/cloud-environment.json` are synchronized
+separately after replacement. This opt-in transfer can include ignored project
+configuration and approved credentials, without returning their contents to the
+model. An environment synchronization failure does not undo a successful checkout
+replacement. See `cloud-environment.md` for the resource boundaries and temporary
+local-access tool available after `/cloud`.
 
 The receiver rejects a checkout owned by any locally-owned cloud migration
 lease, including a different session, or used by an active session. Return moved

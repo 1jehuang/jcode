@@ -1,4 +1,5 @@
-//! Repository-only replacement deliberately bypasses all session/auth transfer paths.
+//! Repository replacement bypasses session/provider-auth migration. Explicit
+//! saved environment requirements are replayed separately after the swap.
 use super::*;
 
 pub(super) fn run(target: &Target, yes: bool, dry_run: bool, json: bool) -> Result<()> {
@@ -16,7 +17,8 @@ pub(super) fn run(target: &Target, yes: bool, dry_run: bool, json: bool) -> Resu
     let id = format!("replace-{}", uuid::Uuid::new_v4());
     let mut repo = prepare_repo_snapshot(&std::env::current_dir()?, &id, stage.path())?
         .context("cloud replace requires a Git repository with an initial commit")?;
-    // No ignored-file archive, origin credentials, account files or session state.
+    // The repository archive never includes ignored files, origin credentials,
+    // account files or session state. Explicit environment replay is separate.
     repo.ignored_files.clear();
     repo.origin_url = None;
     create_repo_bundle(&repo, &id, stage.path(), None)?;
@@ -30,9 +32,26 @@ pub(super) fn run(target: &Target, yes: bool, dry_run: bool, json: bool) -> Resu
         args.push("--dry-run");
     }
     let output = target.run_remote(&host, &args, Some(&archive))?;
-    let report: serde_json::Value = serde_json::from_slice(&output).context(
+    let mut report: serde_json::Value = serde_json::from_slice(&output).context(
         "replacement response lost or invalid; inspect cloud checkout and backups before retrying",
     )?;
+    if !report.is_object()
+        || report["dry_run"].as_bool() != Some(dry_run)
+        || report["repo_root"].as_str() != Some(repo.root.as_str())
+    {
+        bail!("invalid replacement response; inspect cloud checkout and backups before retrying");
+    }
+    report["host"] = serde_json::Value::String(host.clone());
+    if !dry_run {
+        let synced = environment::sync_saved(Path::new(&repo.root), target).is_ok();
+        report["environment_synced"] = serde_json::Value::Bool(synced);
+        if !synced {
+            step(
+                "environment",
+                "repository replaced, but saved environment requirements need attention; use cloud env push to retry",
+            );
+        }
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else if dry_run {
@@ -42,7 +61,7 @@ pub(super) fn run(target: &Target, yes: bool, dry_run: bool, json: bool) -> Resu
         );
     } else {
         println!(
-            "Replaced {} on `{host}`. Backup: {}. No session or credentials moved.",
+            "Replaced {} on `{host}`. Backup: {}. No session or provider login moved. Explicit saved environment requirements were synchronized where available.",
             repo.root,
             report["backup_path"]
                 .as_str()

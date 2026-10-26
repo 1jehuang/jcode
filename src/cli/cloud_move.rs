@@ -23,7 +23,8 @@
 //! commands, invoked over `ssh <host>` (or `--transport` for tests).
 //! Jcode-owned OpenAI/Claude OAuth accounts travel separately over
 //! SSH, never in the repository/session tarball. Moving is consent to copy those
-//! accounts to the chosen host. External logins and API keys stay local.
+//! accounts to the chosen host. External logins and API keys stay local unless
+//! explicitly requested through the restricted cloud environment transfer.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,9 @@ mod repo_tests;
 
 #[path = "cloud_replace.rs"]
 mod replace;
+
+#[path = "cloud_env.rs"]
+pub(super) mod environment;
 
 #[cfg(all(test, unix))]
 #[path = "cloud_move_latency_tests.rs"]
@@ -1170,6 +1174,16 @@ pub(crate) fn run_move(
     {
         mark_memory_sent(&host, &memory, &bytes);
     }
+    if let Some(repo) = &repo {
+        // Ownership has moved. Environment hydration must not turn a successful
+        // migration into an apparent failure that invites a second migration.
+        if environment::sync_saved(Path::new(&repo.root), target).is_err() {
+            step(
+                "environment",
+                "saved environment requirements need attention on the cloud host; the agent can retry through cloud_environment",
+            );
+        }
+    }
     step("done", &format!("session now lives on `{host}`"));
     Ok(report)
 }
@@ -2278,6 +2292,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             json,
         } => replace::run(&target_of(target), yes, dry_run, json),
         C::ReplaceReceive { dry_run } => replace::receive(dry_run),
+        C::Env { action } => environment::run_cli(action),
         C::Ephemeral { action } => super::cloud_ephemeral::run_cli(action),
         C::Sessions { .. } => unreachable!("handled by the cloud sessions dispatcher"),
         C::Prepare { target, json } => {
@@ -2445,14 +2460,15 @@ fn exec_attach(
     let exe = std::env::current_exe()?;
     let mut command = Command::new(exe);
     command.arg("--ssh").arg(host);
-    if let Some(binary) = &target.remote_binary {
-        command.arg("--ssh-binary").arg(binary);
-    }
+    command.arg("--ssh-binary").arg(target.remote_binary());
     if let Some(root) = repo_root {
         command.arg("--remote-working-dir").arg(root);
         command.env("JCODE_SSH_LOCAL_WORKING_DIR", root);
     }
     command.arg("--resume").arg(session_id);
+    // The bridge still validates the original local lease and expiry. Attaching
+    // does not create a new grant or extend the time granted by the migration.
+    command.env("JCODE_CLOUD_ENV_SESSION", session_id);
     let error = crate::platform::replace_process(&mut command);
     bail!("failed to attach to `{host}`: {error}")
 }
@@ -2613,6 +2629,9 @@ fn arrival_notice(manifest: &MoveManifest) -> String {
         ));
     }
     lines.push("There is no local display, desktop, browser or ssh-agent on this host. Keep working on the task exactly where you left off. The user can bring the session back with /local (`jcode cloud return`). Git will merge your work with any local edits.".to_string());
+    lines.push(crate::cloud_environment::migration_guidance(
+        &manifest.session_id,
+    ));
     lines.join("\n")
 }
 
@@ -2813,6 +2832,7 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
         "JCODE_SSH_CONFIG",
         "JCODE_SOCKET",
         "JCODE_CLOUD_HANDOFF_PREVIEW_SESSION",
+        "JCODE_CLOUD_ENV_SESSION",
     ] {
         command.env_remove(var);
     }
@@ -2833,6 +2853,7 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
             command.arg("--resume").arg(&session_id);
             // Only an explicit handoff may preview the matching local transcript.
             command.env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", &session_id);
+            command.env("JCODE_CLOUD_ENV_SESSION", &session_id);
             command.env(
                 "JCODE_CLOUD_CONTINUE_MESSAGE",
                 "[jcode cloud] This session just moved to the cloud host. Read the migration notice above, verify the environment you need is here, then continue the task exactly where you left off.",

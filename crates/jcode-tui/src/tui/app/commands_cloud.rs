@@ -822,6 +822,16 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
                 )
             };
             app.push_display_message(DisplayMessage::system(text));
+            if !dry_run {
+                let host = report["host"].as_str().or_else(|| match &job.command {
+                    CloudCommand::Replace { host, .. } => host.as_deref(),
+                    _ => None,
+                });
+                app.cloud_recovery_context = Some((
+                    job.session_id.clone(),
+                    crate::cloud_environment::replacement_guidance(host),
+                ));
+            }
         } else {
             show_cloud_failure(
                 app,
@@ -1043,6 +1053,12 @@ mod tests {
             assert!(app.poll_cloud_job());
             assert!(!app.should_quit);
             assert!(app.cloud_handoff_requested.is_none());
+            assert_eq!(app.cloud_recovery_context.is_some(), !dry_run);
+            if let Some((session, reminder)) = &app.cloud_recovery_context {
+                assert_eq!(session, "original-session");
+                assert!(reminder.contains("box"));
+                assert!(reminder.contains("environment"));
+            }
             let text = &app.display_messages.last().unwrap().content;
             assert!(
                 text.contains(if dry_run {
@@ -1053,6 +1069,42 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn replacement_notice_reaches_next_local_turn_once() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let session = super::super::commands::active_session_id(&app);
+        let tx = fake_job(
+            &mut app,
+            CloudCommand::Replace {
+                host: Some("box".into()),
+                yes: true,
+                dry_run: false,
+            },
+        );
+        app.cloud_job.as_mut().unwrap().session_id = session;
+        tx.send(CloudEvent::Done(Ok(output(
+            true,
+            r#"{"repo_root":"/project","backup_path":null,"dry_run":false,"host":"box"}"#,
+        ))))
+        .unwrap();
+        app.poll_cloud_job();
+        let reminder = app.cloud_recovery_reminder().unwrap();
+        assert!(
+            !app.is_processing,
+            "replacement does not start an unsolicited turn"
+        );
+        app.input = "continue configuring cloud".into();
+        app.submit_input();
+        assert!(app.cloud_recovery_context.is_none());
+        assert!(app.session.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, crate::message::ContentBlock::Text { text, .. } if text.contains(&reminder))
+            })
+        }));
+        assert!(app.take_cloud_recovery_reminder().is_none());
     }
 
     #[test]
