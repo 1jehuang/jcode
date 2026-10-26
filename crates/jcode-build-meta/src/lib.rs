@@ -9,7 +9,6 @@
 
 use std::sync::OnceLock;
 
-#[cfg(test)]
 #[path = "../build_inputs.rs"]
 mod build_inputs;
 
@@ -39,15 +38,7 @@ static RUNTIME_GIT_DATE: OnceLock<Option<String>> = OnceLock::new();
 static RUNTIME_GIT_TAG: OnceLock<Option<String>> = OnceLock::new();
 
 fn parse_release_semver(value: &str) -> Option<String> {
-    let value = value.trim().trim_start_matches('v');
-    let mut parts = value.split('.');
-    let major = parts.next()?.parse::<u32>().ok()?;
-    let minor = parts.next()?.parse::<u32>().ok()?;
-    let patch = parts.next()?.parse::<u32>().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(format!("{major}.{minor}.{patch}"))
+    build_inputs::release_semver(value)
 }
 
 /// Optional release semver supplied by the fast-release wrapper at process start.
