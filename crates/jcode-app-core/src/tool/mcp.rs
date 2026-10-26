@@ -69,15 +69,24 @@ fn match_rank(
     server: &str,
     tool: &str,
     description: &str,
+    any_word: bool,
 ) -> Option<MatchRank> {
     if query_terms.is_empty() {
         return Some(MatchRank::Name);
     }
     let names = format!("{name} {server} {tool}").to_ascii_lowercase();
+    let all = format!("{names} {}", description.to_ascii_lowercase());
+    // Fallback mode: any single word may match. Agents often list several tool
+    // names in one query, which no single tool can satisfy with all-words matching.
+    if any_word {
+        return query_terms
+            .iter()
+            .any(|term| all.contains(term.as_str()))
+            .then_some(MatchRank::Description);
+    }
     if query_terms.iter().all(|term| names.contains(term.as_str())) {
         return Some(MatchRank::Name);
     }
-    let all = format!("{names} {}", description.to_ascii_lowercase());
     query_terms
         .iter()
         .all(|term| all.contains(term.as_str()))
@@ -221,9 +230,11 @@ impl Tool for McpSearchTool {
         drop(manager);
 
         let names = crate::mcp::dispatch_names(&catalog);
-        let ranked: Vec<(MatchRank, McpSearchResult)> = catalog
+        let rank_pass = |any_word: bool| -> Vec<(MatchRank, McpSearchResult)> {
+        catalog
+            .clone()
             .into_iter()
-            .zip(names)
+            .zip(names.clone())
             .filter_map(|((server, tool), name)| {
                 if server_filter.is_some_and(|wanted| wanted != server) {
                     return None;
@@ -256,7 +267,14 @@ impl Tool for McpSearchTool {
                     return None;
                 }
                 let description = tool.description.as_deref().unwrap_or_default();
-                let rank = match_rank(&query_terms, &name, &server, &tool.name, description)?;
+                let rank = match_rank(
+                    &query_terms,
+                    &name,
+                    &server,
+                    &tool.name,
+                    description,
+                    any_word,
+                )?;
                 Some((
                     rank,
                     McpSearchResult {
@@ -272,7 +290,17 @@ impl Tool for McpSearchTool {
                     },
                 ))
             })
-            .collect();
+            .collect()
+        };
+
+        // Fallback: when no tool matches every word, retry matching any single
+        // word. Agents often list several tool names in one query, which no
+        // single tool can satisfy. Both passes use the same server and session
+        // gating, so the fallback never widens what a session may see.
+        let mut ranked = rank_pass(false);
+        if ranked.is_empty() && !query_terms.is_empty() {
+            ranked = rank_pass(true);
+        }
 
         // Name matches win. Description-only matches are noise once any tool
         // matches by name, so they are dropped rather than ranked below.

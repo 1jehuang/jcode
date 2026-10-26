@@ -309,7 +309,8 @@ fn search_name_matches_beat_description_matches() {
             "mcp__g__calendar_events",
             "g",
             "calendar_events",
-            ""
+            "",
+            false
         ),
         Some(MatchRank::Name)
     );
@@ -319,23 +320,67 @@ fn search_name_matches_beat_description_matches() {
             "mcp__rho__get_card",
             "rho",
             "get_card",
-            "resets on calendar boundaries"
+            "resets on calendar boundaries",
+            false
         ),
         Some(MatchRank::Description)
     );
-    assert_eq!(match_rank(&terms, "mcp__x__y", "x", "y", "nothing"), None);
+    assert_eq!(
+        match_rank(&terms, "mcp__x__y", "x", "y", "nothing", false),
+        None
+    );
     // Every term must match, in any field.
     let terms = vec!["gmail".to_string(), "send".to_string()];
     assert_eq!(
-        match_rank(&terms, "mcp__g__gmail_send", "g", "gmail_send", ""),
+        match_rank(&terms, "mcp__g__gmail_send", "g", "gmail_send", "", false),
         Some(MatchRank::Name)
     );
     assert_eq!(
-        match_rank(&terms, "mcp__g__gmail_read", "g", "gmail_read", ""),
+        match_rank(&terms, "mcp__g__gmail_read", "g", "gmail_read", "", false),
         None
     );
     // An empty query lists everything.
-    assert_eq!(match_rank(&[], "a", "b", "c", ""), Some(MatchRank::Name));
+    assert_eq!(
+        match_rank(&[], "a", "b", "c", "", false),
+        Some(MatchRank::Name)
+    );
+}
+
+#[test]
+fn search_any_word_fallback_matches_multi_name_queries() {
+    // A query naming two tools cannot match either one with all-words matching.
+    let terms = vec![
+        "conversations_search_messages".to_string(),
+        "list_meetings".to_string(),
+    ];
+    assert_eq!(
+        match_rank(
+            &terms,
+            "mcp__granola__list_meetings",
+            "granola",
+            "list_meetings",
+            "",
+            false
+        ),
+        None
+    );
+    // The any-word fallback accepts a tool that matches one of the names.
+    assert_eq!(
+        match_rank(
+            &terms,
+            "mcp__granola__list_meetings",
+            "granola",
+            "list_meetings",
+            "",
+            true
+        ),
+        Some(MatchRank::Description)
+    );
+    // Fallback still rejects tools that match none of the words.
+    assert_eq!(
+        match_rank(&terms, "mcp__x__y", "x", "y", "nothing", true),
+        None
+    );
 }
 
 #[test]
