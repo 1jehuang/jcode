@@ -6,9 +6,11 @@
 //! MCP server processes instead of spawning duplicates.
 
 pub mod budget;
-pub mod broker;
+mod broker;
 mod client;
 mod manager;
+mod pending;
+pub mod oauth;
 mod pending;
 pub mod oauth;
 pub mod pool;
