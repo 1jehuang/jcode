@@ -423,6 +423,7 @@ mod tests {
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),
+            external_blocker: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,

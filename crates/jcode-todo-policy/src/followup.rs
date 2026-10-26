@@ -92,6 +92,20 @@ pub fn todo_waits_on_running_task(
     todo.waiting_on.iter().any(|task_id| is_running(task_id))
 }
 
+/// Explicit external waits remain incomplete. Their review time only restores
+/// actionability so the agent can reassess, never marks them done.
+pub fn todo_has_external_blocker_at(todo: &TodoItem, now: chrono::DateTime<chrono::Utc>) -> bool {
+    is_incomplete_todo(todo)
+        && todo
+            .external_blocker
+            .as_ref()
+            .is_some_and(|blocker| !blocker.reason.trim().is_empty() && blocker.review_at > now)
+}
+
+pub fn todo_has_external_blocker(todo: &TodoItem) -> bool {
+    todo_has_external_blocker_at(todo, chrono::Utc::now())
+}
+
 /// Persistent side effects a decision requires. Apply them whether or not a
 /// follow-up was produced: an empty digest still consumes the observation log.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,12 +280,13 @@ impl FollowUpPolicy {
             .iter()
             .copied()
             .filter(|todo| {
-                !todo_waits_on_running_task(todo, |id| {
-                    snapshot
-                        .running_background_tasks
-                        .iter()
-                        .any(|running| running == id)
-                })
+                !todo_has_external_blocker(todo)
+                    && !todo_waits_on_running_task(todo, |id| {
+                        snapshot
+                            .running_background_tasks
+                            .iter()
+                            .any(|running| running == id)
+                    })
             })
             .collect();
         if !incomplete.is_empty() && actionable.is_empty() {

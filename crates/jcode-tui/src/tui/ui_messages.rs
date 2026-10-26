@@ -2510,7 +2510,8 @@ fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> 
 /// Spans for one todo row: two-cell gutter, status glyph, content, and
 /// (optionally) the confidence suffix. Callers own indent and truncation.
 fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> Vec<Span<'static>> {
-    let blocked = !todo.blocked_by.is_empty() && todo.status != "completed";
+    let external_blocked = crate::todo::todo_has_external_blocker(todo);
+    let blocked = external_blocked || (!todo.blocked_by.is_empty() && todo.status != "completed");
     let (glyph, glyph_color) = if blocked {
         ("⊳", rgb(225, 165, 90))
     } else {
@@ -2532,6 +2533,23 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
         Span::styled(format!("{} ", glyph), Style::default().fg(glyph_color)),
         Span::styled(todo.content.clone(), Style::default().fg(text_color)),
     ];
+    if crate::todo::is_incomplete_todo(todo)
+        && let Some(blocker) = &todo.external_blocker
+    {
+        spans.push(Span::styled(
+            format!(
+                " · {}: {} · review {}",
+                if external_blocked {
+                    "blocked"
+                } else {
+                    "review due"
+                },
+                blocker.reason,
+                blocker.review_at.format("%Y-%m-%d %H:%M UTC")
+            ),
+            Style::default().fg(todo_warning_color()),
+        ));
+    }
     if with_confidence && let Some(label) = todo_card_confidence_label(todo) {
         spans.push(Span::styled(
             format!(" · {}", label),

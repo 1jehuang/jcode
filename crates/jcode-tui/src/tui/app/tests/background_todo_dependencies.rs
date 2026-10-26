@@ -7,6 +7,40 @@ fn waiting_dependency_test_app() -> App {
 }
 
 #[test]
+fn external_blocker_pauses_pokes_survives_reload_and_expires_without_completion() {
+    with_temp_jcode_home(|| {
+        let mut app = waiting_dependency_test_app();
+        let mut todo = dependency_todo("acceptance", "unused");
+        todo.waiting_on.clear();
+        todo.external_blocker = Some(crate::todo::TodoExternalBlocker {
+            reason: "Coordinator acceptance of frozen source".into(),
+            review_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+        });
+        crate::todo::save_todos(&app.session.id, &[todo.clone()]).unwrap();
+        app.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
+        assert!(!app.schedule_turn_end_followups());
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(app.auto_poke_attempts, 0);
+        assert!(app.queued_messages.is_empty());
+        let mut reloaded = waiting_dependency_test_app();
+        reloaded.remote_session_id = Some(app.session.id.clone());
+        assert!(reloaded.todo_waits_on_background_task(&todo));
+        let mut independent = dependency_todo("independent", "unused");
+        independent.waiting_on.clear();
+        crate::todo::save_todos(&app.session.id, &[todo.clone(), independent]).unwrap();
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.queued_messages[0].contains("- independent:"));
+        assert!(!app.queued_messages[0].contains("- acceptance:"));
+        todo.external_blocker.as_mut().unwrap().review_at =
+            chrono::Utc::now() - chrono::Duration::seconds(1);
+        assert!(!reloaded.todo_waits_on_background_task(&todo));
+        assert_eq!(todo.status, "pending");
+        todo.external_blocker = None;
+        assert!(!reloaded.todo_waits_on_background_task(&todo));
+    });
+}
+
+#[test]
 fn await_dependency_suppresses_pokes_and_survives_reload_until_terminal_or_timeout() {
     with_temp_jcode_home(|| {
         for timeout in [false, true] {
@@ -75,6 +109,7 @@ fn dependency_todo(id: &str, task_id: &str) -> crate::todo::TodoItem {
         content: format!("Finish {id}"),
         status: "pending".into(),
         priority: "high".into(),
+        external_blocker: None,
         waiting_on: vec![task_id.into()],
         ..Default::default()
     }

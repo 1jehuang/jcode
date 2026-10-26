@@ -1268,6 +1268,46 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
 }
 
 #[test]
+fn external_blocker_todo_row_shows_reason_deadline_and_never_wraps() {
+    let mut todo = crate::todo::TodoItem {
+        content: "Acceptance".into(),
+        status: "pending".into(),
+        external_blocker: Some(crate::todo::TodoExternalBlocker {
+            reason: "Frozen source awaiting coordinator".into(),
+            review_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        }),
+        ..Default::default()
+    };
+    let wide = extract_line_text(&render_todo_item_line_with_background(
+        &todo,
+        &[],
+        &[],
+        "",
+        160,
+    ));
+    assert!(
+        wide.contains("blocked: Frozen source awaiting coordinator"),
+        "{wide}"
+    );
+    assert!(wide.contains("review ") && wide.contains("UTC"));
+    for width in 0..160 {
+        let line = render_todo_item_line_with_background(&todo, &[], &[], "", width);
+        assert!(extract_line_text(&line).width() <= width);
+    }
+    todo.external_blocker.as_mut().unwrap().review_at =
+        chrono::Utc::now() - chrono::Duration::seconds(1);
+    let expired = extract_line_text(&render_todo_item_line_with_background(
+        &todo,
+        &[],
+        &[],
+        "",
+        160,
+    ));
+    assert!(expired.contains("review due"));
+    assert_eq!(todo.status, "pending");
+}
+
+#[test]
 fn background_dependency_indeterminate_progress_is_not_fabricated() {
     let todo = crate::todo::TodoItem {
         waiting_on: vec!["task".into()],
@@ -1342,6 +1382,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
             completion_confidence: (status == "completed")
                 .then_some(crate::todo::ConfidenceState::from_legacy_score(95)),
             confidence_history: Vec::new(),
+            external_blocker: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
@@ -1423,6 +1464,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
+        external_blocker: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(80),
@@ -1483,6 +1525,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         confidence: None,
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1567,6 +1610,7 @@ fn render_todos_message_uses_readable_semantic_colors() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1754,6 +1798,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         confidence: None,
         completion_confidence: Some(crate::todo::ConfidenceState::Validated),
         confidence_history: Vec::new(),
+        external_blocker: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1807,6 +1852,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1849,6 +1895,7 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1918,6 +1965,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(92)),
         completion_confidence: None,
+        external_blocker: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(85),

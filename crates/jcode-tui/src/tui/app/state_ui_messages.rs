@@ -227,10 +227,11 @@ impl App {
     /// Disk state survives a TUI reload and also overrides a retained running
     /// row when completion arrived before the UI consumed its notification.
     pub(super) fn todo_waits_on_background_task(&self, todo: &crate::todo::TodoItem) -> bool {
-        crate::todo::todo_waits_on_running_task(todo, |task_id| {
-            self.running_todo_await_dependency(task_id)
-                || self.running_todo_background_dependency(task_id).is_some()
-        })
+        crate::todo::todo_has_external_blocker(todo)
+            || crate::todo::todo_waits_on_running_task(todo, |task_id| {
+                self.running_todo_await_dependency(task_id)
+                    || self.running_todo_background_dependency(task_id).is_some()
+            })
     }
 
     pub(super) fn running_todo_await_dependency(&self, task_id: &str) -> bool {

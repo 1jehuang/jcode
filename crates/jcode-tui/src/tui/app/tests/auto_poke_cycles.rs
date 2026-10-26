@@ -109,6 +109,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
             priority: "high".to_string(),
             confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
             completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+            external_blocker: None,
             waiting_on: Vec::new(),
             confidence_history: vec![
                 crate::todo::ConfidenceState::Validated,

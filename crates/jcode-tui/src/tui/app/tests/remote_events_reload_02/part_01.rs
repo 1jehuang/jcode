@@ -21,6 +21,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -67,6 +68,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    external_blocker: None,
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
@@ -82,6 +84,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    external_blocker: None,
                     waiting_on: Vec::new(),
                 },
             ],
@@ -175,6 +178,7 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
                 waiting_on: Vec::new(),
             }],
         )

@@ -92,6 +92,9 @@ impl AmbientManager {
         };
 
         self.queue.push(item);
+        // Scheduling is a durable promise. Propagate persistence failures to
+        // callers, including todo blocker reviews, rather than claiming success.
+        self.queue.save()?;
         Ok(id)
     }
 

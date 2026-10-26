@@ -424,6 +424,7 @@ mod tests {
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),
+            external_blocker: None,
             waiting_on: Vec::new(),
             blocked_by: blocked_by.iter().map(|s| s.to_string()).collect(),
             assigned_to: None,

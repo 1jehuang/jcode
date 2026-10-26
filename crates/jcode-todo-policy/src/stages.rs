@@ -180,6 +180,7 @@ pub fn lane_todos_for_worker(coordinator_todos: &[TodoItem], lane: &str) -> Vec<
         .map(|todo| TodoItem {
             assigned_to: None,
             blocked_by: Vec::new(),
+            external_blocker: None,
             waiting_on: Vec::new(),
             ..todo.clone()
         })

@@ -609,6 +609,36 @@ fn dependency_todo(id: &str, dependencies: &[&str]) -> crate::todo::TodoItem {
 }
 
 #[tokio::test]
+async fn external_blocker_cli_suppresses_only_blocked_work_and_reports_durable_review() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+    let mut blocked = dependency_todo("acceptance", &[]);
+    blocked.external_blocker = Some(crate::todo::TodoExternalBlocker {
+        reason: "Coordinator acceptance".into(),
+        review_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+    });
+    let (actionable, resumed) =
+        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
+    assert!(actionable.is_empty());
+    assert!(resumed.is_none(), "durable scheduler owns the review wake");
+    let notice = run_external_blocker_notice(&[blocked.clone()]).unwrap();
+    assert!(notice.contains("Coordinator acceptance") && notice.contains("review"));
+    let mixed = vec![blocked.clone(), dependency_todo("independent", &[])];
+    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &mixed, true).await;
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(actionable[0].id, "independent");
+    blocked.external_blocker.as_mut().unwrap().review_at =
+        chrono::Utc::now() - chrono::Duration::seconds(1);
+    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &[blocked], true).await;
+    assert_eq!(
+        actionable.len(),
+        1,
+        "deadline restores reassessment, never completes"
+    );
+    assert_eq!(actionable[0].status, "pending");
+}
+
+#[tokio::test]
 async fn run_await_dependency_waits_without_poking_and_resumes_on_terminal_or_timeout() {
     let _guard = crate::storage::lock_test_env();
     for timed_out in [false, true] {

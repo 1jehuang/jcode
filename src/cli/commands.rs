@@ -2877,15 +2877,16 @@ fn run_actionable_todos(
         .iter()
         .filter(|todo| {
             !crate::todo::is_incomplete_todo(todo)
-                || !crate::todo::todo_waits_on_running_task(todo, |id| {
-                    crate::todo::await_dependency::running(
-                        &crate::storage::runtime_dir(),
-                        id,
-                        session_id,
-                    ) || tasks
-                        .iter()
-                        .any(|task| task.task_id == id && run_task_is_waitable(task, session_id))
-                })
+                || (!crate::todo::todo_has_external_blocker(todo)
+                    && !crate::todo::todo_waits_on_running_task(todo, |id| {
+                        crate::todo::await_dependency::running(
+                            &crate::storage::runtime_dir(),
+                            id,
+                            session_id,
+                        ) || tasks.iter().any(|task| {
+                            task.task_id == id && run_task_is_waitable(task, session_id)
+                        })
+                    }))
         })
         .cloned()
         .collect()
@@ -2896,7 +2897,10 @@ fn run_actionable_poke_message(
     todos: &[crate::todo::TodoItem],
     actionable: &[crate::todo::TodoItem],
 ) -> String {
-    if todos.iter().any(|todo| !todo.waiting_on.is_empty()) {
+    if todos
+        .iter()
+        .any(|todo| !todo.waiting_on.is_empty() || todo.external_blocker.is_some())
+    {
         let incomplete: Vec<_> = actionable
             .iter()
             .filter(|todo| crate::todo::is_incomplete_todo(todo))
@@ -2905,6 +2909,23 @@ fn run_actionable_poke_message(
         return crate::todo::build_actionable_poke_message(&incomplete);
     }
     message
+}
+
+fn run_external_blocker_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
+    let blocked: Vec<_> = todos
+        .iter()
+        .filter(|todo| crate::todo::todo_has_external_blocker(todo))
+        .map(|todo| {
+            let blocker = todo.external_blocker.as_ref().expect("checked blocker");
+            format!(
+                "{}: {} (review {})",
+                todo.id,
+                blocker.reason,
+                blocker.review_at.to_rfc3339()
+            )
+        })
+        .collect();
+    (!blocked.is_empty()).then(|| format!("Unfinished todos are externally blocked. The durable scheduler will request reassessment at their review deadlines, not mark them complete.\n{}", blocked.join("\n")))
 }
 
 /// CLI owns continuation while waiting. Unlike a daemon wake, this resumes the
@@ -3204,9 +3225,9 @@ async fn run_single_message_command_plain_with_auto_poke(
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!(
-                "Stopped at the turn limit with unfinished todos waiting on background dependencies."
-            );
+            eprintln!("{}", run_external_blocker_notice(&todos).unwrap_or_else(||
+                "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
+            ));
             break;
         }
         if !incomplete_budget.allow_follow_up(&actionable_todos) {
@@ -3321,9 +3342,9 @@ async fn run_single_message_command_capture_with_auto_poke(
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!(
-                "Stopped at the turn limit with unfinished todos waiting on background dependencies."
-            );
+            eprintln!("{}", run_external_blocker_notice(&todos).unwrap_or_else(||
+                "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
+            ));
             break;
         }
         if !incomplete_budget.allow_follow_up(&actionable_todos) {
@@ -3507,8 +3528,10 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "auto_poke_stopped",
                     "session_id": session_id,
-                    "reason": "turn_limit",
-                    "waiting_on_background": true,
+                    "reason": if run_external_blocker_notice(&todos).is_some() { "external_blocker" } else { "turn_limit" },
+                    "message": run_external_blocker_notice(&todos),
+                    "waiting_on_background": todos.iter().any(|todo| !todo.waiting_on.is_empty()),
+                    "waiting_on_external": todos.iter().any(crate::todo::todo_has_external_blocker),
                     "max_turns": max_turns,
                 }),
             )?;

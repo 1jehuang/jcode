@@ -1200,6 +1200,7 @@ fn test_context_command_reports_session_context_snapshot() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(77)),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
                 waiting_on: Vec::new(),
             }],
         )

@@ -16,6 +16,34 @@ use std::collections::HashMap;
 
 pub struct TodoTool;
 
+#[cfg(test)]
+#[path = "todo_external_blocker_tests.rs"]
+mod external_blocker_tests;
+
+fn validate_external_blockers(previous: &[TodoItem], todos: &[TodoItem]) -> Result<()> {
+    let now = chrono::Utc::now();
+    for todo in todos {
+        if let Some(blocker) = &todo.external_blocker {
+            if blocker.reason.trim().is_empty() {
+                bail!(
+                    "external_blocker.reason must explain the external condition for todo {}",
+                    todo.id
+                );
+            }
+            let unchanged = previous
+                .iter()
+                .any(|old| old.id == todo.id && old.external_blocker == todo.external_blocker);
+            if !unchanged && blocker.review_at <= now {
+                bail!(
+                    "external_blocker.review_at must be a future RFC3339 deadline for todo {}",
+                    todo.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate the entire replacement before touching either todo storage or
 /// background delivery. A terminal dependency remains valid but needs no wake.
 async fn prepare_background_dependencies(
@@ -1139,7 +1167,13 @@ impl Tool for TodoTool {
          longer context in details. Organize parallel lanes within sequential phases. \
          Set waiting_on to existing background task IDs or swarm await_members dependency IDs from this session when work \
          must wait. They block only while running, never after completion. Saving \
-         enables completion notify/wake. Use [] or null to clear waiting_on."
+         enables completion notify/wake. Use [] or null to clear waiting_on. \
+         For an external blocker without a dependency ID, set external_blocker to \
+         {reason, review_at}, with a concrete reason and future RFC3339 deadline. \
+         Keep the todo pending/in_progress. Pokes pause until review_at and a durable \
+         scheduler wakes this session to reassess, not assume resolution or completion. \
+         Clear external_blocker with null when unblocked. Use this instead of a separate \
+         schedule call for todo blocker reviews."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1190,6 +1224,16 @@ impl Tool for TodoTool {
                                 "type": ["array", "null"],
                                 "items": {"type": "string"},
                                 "description": "Existing background task IDs or swarm await_members dependency IDs in this session. Block only while pending, never after completion or timeout. Enables completion notify/wake. [] or null clears."
+                            },
+                            "external_blocker": {
+                                "type": ["object", "null"],
+                                "required": ["reason", "review_at"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "reason": {"type": "string", "minLength": 1, "description": "Concrete external condition preventing useful work, not a completion claim."},
+                                    "review_at": {"type": "string", "format": "date-time", "description": "Future finite RFC3339 reassessment deadline. Does not mean the blocker resolves then."}
+                                },
+                                "description": "Pause this incomplete todo on an external condition with no dependency ID. Schedules a durable session review. null clears and cancels the review."
                             },
                             "status": {
                                 "type": "string",
@@ -1317,6 +1361,8 @@ impl Tool for TodoTool {
         schema["properties"]["add"]["items"]["properties"] = add_properties;
         schema["properties"]["update"]["items"]["properties"]["waiting_on"] =
             schema["properties"]["todos"]["items"]["properties"]["waiting_on"].clone();
+        schema["properties"]["update"]["items"]["properties"]["external_blocker"] =
+            schema["properties"]["todos"]["items"]["properties"]["external_blocker"].clone();
         let mut item = schema["properties"]
             .as_object_mut()
             .unwrap()
@@ -1355,6 +1401,12 @@ impl Tool for TodoTool {
             // Goals/plan-only writes keep the stored todo list.
             let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
+            for todo in &mut todos {
+                if !crate::todo::is_incomplete_todo(todo) {
+                    todo.external_blocker = None;
+                }
+            }
+            validate_external_blockers(&previous, &todos)?;
             prepare_background_dependencies(
                 crate::background::global(),
                 &ctx.session_id,
@@ -1409,6 +1461,14 @@ impl Tool for TodoTool {
                     .then(|| plan_change(&stored_plan, &plan))
                     .flatten();
                 save_todos(&ctx.session_id, &todos)?;
+                if previous
+                    .iter()
+                    .chain(&todos)
+                    .any(|todo| todo.external_blocker.is_some())
+                {
+                    crate::ambient::reconcile_todo_reviews(&ctx.session_id, &todos)?;
+                    super::ambient::nudge_schedule_runner();
+                }
                 save_goals(&ctx.session_id, &goals)?;
                 save_plan(&ctx.session_id, &plan)?;
                 if let Err(err) = update_todo_review_cycle(&ctx.session_id, &previous, &todos) {
@@ -2401,6 +2461,7 @@ mod tests {
             })
             .await;
         let item = TodoItem {
+            external_blocker: None,
             waiting_on: vec![task.task_id.clone()],
             ..Default::default()
         };
@@ -2415,6 +2476,7 @@ mod tests {
             .is_err()
         );
         let unknown = TodoItem {
+            external_blocker: None,
             waiting_on: vec!["missing-task".into()],
             ..Default::default()
         };
@@ -2486,6 +2548,7 @@ mod tests {
         crate::storage::write_json_fast(&path, &state).unwrap();
         let manager = crate::background::BackgroundTaskManager::new();
         let item = TodoItem {
+            external_blocker: None,
             waiting_on: vec![id.clone()],
             ..Default::default()
         };
@@ -2495,6 +2558,7 @@ mod tests {
                 .is_err()
         );
         let invalid = TodoItem {
+            external_blocker: None,
             waiting_on: vec!["await-unknown-1".into()],
             ..Default::default()
         };
@@ -2600,6 +2664,7 @@ mod tests {
                 content: "old".into(),
                 status: "completed".into(),
                 priority: "high".into(),
+                external_blocker: None,
                 waiting_on: vec!["removed-bg-task".into()],
                 ..Default::default()
             },

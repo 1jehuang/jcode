@@ -783,6 +783,7 @@ mod tests {
             completion_confidence: completion_confidence
                 .map(crate::todo::ConfidenceState::from_legacy_score),
             confidence_history: Vec::new(),
+            external_blocker: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,

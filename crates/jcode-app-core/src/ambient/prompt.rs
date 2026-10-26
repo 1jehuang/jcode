@@ -341,6 +341,15 @@ pub fn build_ambient_system_prompt(
                 ScheduleTarget::Session { session_id } => {
                     prompt.push_str(&format!("  Target session: {}\n", session_id));
                 }
+                ScheduleTarget::TodoReview {
+                    session_id,
+                    todo_id,
+                    ..
+                } => {
+                    prompt.push_str(&format!(
+                        "  Review todo {todo_id} in session: {session_id}\n"
+                    ));
+                }
                 ScheduleTarget::Spawn { parent_session_id } => {
                     prompt.push_str(&format!("  Spawn from session: {}\n", parent_session_id));
                 }
@@ -521,6 +530,9 @@ pub fn build_ambient_system_prompt(
 }
 
 pub fn format_scheduled_session_message(item: &ScheduledItem) -> String {
+    if matches!(item.target, ScheduleTarget::TodoReview { .. }) {
+        return item.context.clone();
+    }
     let mut lines = vec![
         "[Scheduled task]".to_string(),
         "A scheduled task for this session is now due.".to_string(),

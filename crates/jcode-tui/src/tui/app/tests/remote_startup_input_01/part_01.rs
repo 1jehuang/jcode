@@ -28,6 +28,7 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
                 waiting_on: Vec::new(),
             }],
         )

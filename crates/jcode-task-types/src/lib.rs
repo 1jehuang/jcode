@@ -430,6 +430,14 @@ semantic_state! {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoExternalBlocker {
+    /// Concrete external condition preventing useful work. Not a completion.
+    pub reason: String,
+    /// Finite deadline to reassess the blocker, not permission to assume it resolved.
+    pub review_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub content: String,
     pub status: String,
@@ -468,6 +476,8 @@ pub struct TodoItem {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub waiting_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_blocker: Option<TodoExternalBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
     /// Optional execution stage. Stages run in order: stage 2 starts only
