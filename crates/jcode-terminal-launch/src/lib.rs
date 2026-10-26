@@ -769,10 +769,16 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
                 .arg(&command.program)
                 .args(&command.args);
         }
-        // ponytail: a PATH probe, not an app-bundle lookup; launchd's PATH
-        // rarely includes kitty, so app installs take the `open` route.
+        // launchd's PATH rarely includes kitty, so app installs take the `open`
+        // route. Spawning `open` succeeds even when kitty.app is gone (only the
+        // spawn is checked, not its exit), so a stale kitty preference skips to
+        // the next candidate instead. Installs outside the standard Applications
+        // folders are not detected.
         #[cfg(target_os = "macos")]
         "kitty" if !program_on_path("kitty") => {
+            if !macos_should_try_app_terminal("kitty") {
+                return None;
+            }
             cmd = macos_kitty_open_command(command, cwd);
         }
         "kitty" => {
@@ -1667,6 +1673,20 @@ mod tests {
                 "cd '/work tree' && exec env JCODE_FRESH_SPAWN=1 '/opt/jcode' '--resume'",
             ]
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn missing_kitty_is_skipped_instead_of_opened() {
+        // Without the app, the kitty arm must return None so the spawn loop moves
+        // on; spawning `open -na kitty` would count as success. Only asserts on a
+        // Mac without kitty installed or running.
+        let _guard = ENV_LOCK.lock().unwrap();
+        if program_on_path("kitty") || macos_should_try_app_terminal("kitty") {
+            return;
+        }
+        let command = TerminalCommand::new("/opt/jcode", vec![]);
+        assert!(build_spawn_command("kitty", &command, Path::new("/work")).is_none());
     }
 
     // Reproduction for issue #203 part 3: when no terminal emulator can be
