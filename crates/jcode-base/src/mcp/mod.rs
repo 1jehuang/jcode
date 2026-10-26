@@ -11,6 +11,7 @@ pub mod broker;
 pub mod budget;
 mod client;
 mod manager;
+mod pending;
 pub mod oauth;
 mod pending;
 pub mod pool;
