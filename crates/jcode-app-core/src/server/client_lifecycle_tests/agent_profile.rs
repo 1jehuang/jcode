@@ -371,6 +371,122 @@ async fn agent_profile_socket_runtime_select_reload_off() {
 }
 
 #[tokio::test]
+async fn agent_profile_socket_yaml_frontmatter_body_snapshot_reload_and_errors() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::TempDir::new().unwrap();
+    const BODY_V1: &str = "  SOCKET_YAML_BODY_V1_59271\n\nKeep this trailing space. \n";
+    const BODY_V2: &str = "\nSOCKET_YAML_BODY_V2_83164\n  Preserve indentation.\n";
+    let header_v1 = "---\ndescription: SOCKET_YAML_DESCRIPTION_V1_73418\nmode: subagent\nname: SOCKET_YAML_NOT_FILENAME_62893\nmodel: socket-yaml-model-v1-47382\npermission:\n  edit: deny\nx_socket_header_v1_95231: ignored\n---\n";
+    let header_v2 = "---\ndescription: SOCKET_YAML_DESCRIPTION_V2_37285\nmode: primary\nname: SOCKET_YAML_NOT_FILENAME_V2_54718\nmodel: socket-yaml-model-v2-93841\npermission:\n  edit: allow\nx_socket_header_v2_82649: ignored\n---\n";
+    let profile_path = write_profile(
+        &project.path().join(".jcode/agents"),
+        "socket-profile",
+        &format!("{header_v1}{BODY_V1}"),
+    );
+    let fixture = SystemPromptSocketFixture::new();
+    let mut client = ProfileClient::connect(&fixture);
+    client
+        .send(json!({"type":"subscribe", "id":601, "working_dir":project.path()}))
+        .await;
+    client.done(601).await;
+    let session_id = client.session_id(602).await;
+    let baseline = client.message_prompt(&fixture, 603).await;
+    assert!(baseline.contains("You are Jcode."));
+    assert!(!baseline.contains(BODY_V1));
+
+    client
+        .send(json!({"type":"runtime_command", "id":604, "command":"agent", "args":["socket-profile"]}))
+        .await;
+    let ServerEvent::RuntimeCommandResult { data: selected, message, .. } = client
+        .until(|event| matches!(event, ServerEvent::RuntimeCommandResult { id: 604, .. }))
+        .await
+    else {
+        unreachable!()
+    };
+    assert!(message.contains("model, tools and permissions remain unchanged"));
+    assert_eq!(selected["current"], "socket-profile");
+    assert_eq!(selected["changed"], true);
+    assert_eq!(selected["effective"], "next_turn");
+    assert_saved_profile(&session_id, BODY_V1);
+    let selected_prompt = client.message_prompt(&fixture, 605).await;
+    assert!(selected_prompt.contains("You are Jcode."));
+    assert!(selected_prompt.contains(BODY_V1));
+    for metadata in [
+        "SOCKET_YAML_DESCRIPTION_V1_73418",
+        "SOCKET_YAML_NOT_FILENAME_62893",
+        "socket-yaml-model-v1-47382",
+        "x_socket_header_v1_95231",
+    ] {
+        assert!(
+            !selected_prompt.contains(metadata),
+            "leaked metadata: {metadata}"
+        );
+    }
+
+    std::fs::write(&profile_path, format!("{header_v2}{BODY_V2}")).unwrap();
+    let frozen = client.message_prompt(&fixture, 606).await;
+    assert!(frozen.contains(BODY_V1));
+    assert!(!frozen.contains(BODY_V2));
+    assert_saved_profile(&session_id, BODY_V1);
+
+    client
+        .send(json!({"type":"runtime_command", "id":607, "command":"agent", "args":["reload"]}))
+        .await;
+    let ServerEvent::RuntimeCommandResult { data: reloaded, message, .. } = client
+        .until(|event| matches!(event, ServerEvent::RuntimeCommandResult { id: 607, .. }))
+        .await
+    else {
+        unreachable!()
+    };
+    assert!(message.contains("model, tools and permissions remain unchanged"));
+    assert_eq!(reloaded["current"], "socket-profile");
+    assert_eq!(reloaded["changed"], true);
+    assert_saved_profile(&session_id, BODY_V2);
+    let reloaded_prompt = client.message_prompt(&fixture, 608).await;
+    assert!(reloaded_prompt.contains("You are Jcode."));
+    assert!(reloaded_prompt.contains(BODY_V2));
+    assert!(!reloaded_prompt.contains(BODY_V1));
+    for metadata in [
+        "SOCKET_YAML_DESCRIPTION_V2_37285",
+        "SOCKET_YAML_NOT_FILENAME_V2_54718",
+        "socket-yaml-model-v2-93841",
+        "x_socket_header_v2_82649",
+    ] {
+        assert!(
+            !reloaded_prompt.contains(metadata),
+            "leaked metadata: {metadata}"
+        );
+    }
+
+    for (id, invalid) in [
+        (
+            609,
+            "---\ndescription: [unterminated\n---\nSOCKET_YAML_INVALID_BODY_41973",
+        ),
+        (
+            611,
+            "---\ndescription: SOCKET_YAML_EMPTY_BODY_63824\n---\n \n\t",
+        ),
+    ] {
+        std::fs::write(&profile_path, invalid).unwrap();
+        let before = fixture.captured.lock().unwrap().len();
+        client
+            .send(json!({"type":"runtime_command", "id":id, "command":"agent", "args":["reload"]}))
+            .await;
+        client.error(id).await;
+        assert_eq!(fixture.captured.lock().unwrap().len(), before);
+        assert_saved_profile(&session_id, BODY_V2);
+        let unchanged = client.message_prompt(&fixture, id + 1).await;
+        assert!(unchanged.contains("You are Jcode."));
+        assert!(unchanged.contains(BODY_V2));
+        assert!(!unchanged.contains("SOCKET_YAML_INVALID_BODY_41973"));
+        assert!(!unchanged.contains("SOCKET_YAML_EMPTY_BODY_63824"));
+    }
+    client.close().await;
+}
+
+#[tokio::test]
 async fn agent_profile_socket_rejects_invalid_selection_and_existing_session_replacement() {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -398,7 +514,7 @@ async fn agent_profile_socket_rejects_invalid_selection_and_existing_session_rep
     write_profile(
         &project_agents,
         "yaml-profile",
-        "---\nname: forbidden\n---\nSOCKET_FORBIDDEN_YAML_47831",
+        "---\nname: [unterminated\n---\nSOCKET_FORBIDDEN_YAML_47831",
     );
     let fixture = SystemPromptSocketFixture::new();
 

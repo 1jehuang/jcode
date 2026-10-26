@@ -165,6 +165,13 @@ pub async fn run_tui_client(
         apply_startup_hints(&mut app, hints);
     }
 
+    if let Some(name) = agent_profile_name.as_deref() {
+        app.set_pending_startup_notice(
+            "Session instruction profile",
+            format!("Requested profile: {name}. Only its Markdown instruction body is applied. YAML frontmatter settings are not applied; model, tools and permissions remain unchanged."),
+        );
+    }
+
     startup_profile::mark("pre_run_remote");
     startup_profile::report_to_log();
 

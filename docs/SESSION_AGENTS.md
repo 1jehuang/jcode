@@ -4,7 +4,7 @@ Agent profiles are named Markdown instructions selected for one Jcode session. T
 
 ## Create a profile
 
-Put a plain Markdown file in either location:
+Put a Markdown file, optionally with YAML frontmatter, in either location:
 
 - `~/.jcode/agents/<name>.md` for a reusable personal profile.
 - `<project>/.jcode/agents/<name>.md` for a project profile.
@@ -21,7 +21,21 @@ Explain concrete findings with file locations before suggesting broad refactors.
 Preserve unrelated changes.
 ```
 
-Use nonempty plain Markdown. YAML frontmatter is rejected, rather than interpreted as model settings or permissions.
+Plain Markdown and OpenCode-style YAML frontmatter are supported. For example, the same `reviewer.md` can contain:
+
+````markdown
+---
+description: Review correctness and regressions
+mode: all
+---
+# Review approach
+
+Focus on correctness, security, and missing tests.
+````
+
+The filename defines the profile name, even if the header contains `name`. YAML must be a valid mapping; an unclosed/malformed header or an empty instruction body is rejected. The exact Markdown body after the closing `---` (or `...`) is snapshotted, without the YAML header. Plain Markdown is kept unchanged. Standalone `.yaml`/`.yml` definitions are not discovered.
+
+**This is instruction-file compatibility, not OpenCode runtime-policy compatibility.** Frontmatter metadata, including `mode`, `model`, `tools`, `permission`, and `permissions`, is not applied as Jcode settings. Your existing Jcode model, tools, and permissions remain unchanged. In particular, a frontmatter permission restriction does not enforce that restriction in Jcode; configure Jcode permissions separately. Selection reports this boundary explicitly.
 
 ## Select a profile
 
