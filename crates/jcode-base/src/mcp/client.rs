@@ -178,6 +178,11 @@ pub struct McpClient {
 enum Backend {
     /// Local child process speaking newline-delimited JSON over stdio.
     Stdio(Child),
+    /// Shared machine-wide stdio server managed by the MCP broker.
+    #[cfg(unix)]
+    Broker {
+        _transport: Arc<super::broker::BrokerTransport>,
+    },
     /// Remote server over Streamable HTTP or legacy SSE.
     Remote(super::remote::RemoteConnection),
 }
@@ -186,6 +191,112 @@ impl McpClient {
     /// Connect to an MCP server, inheriting the current process working directory
     pub async fn connect(name: String, config: &McpServerConfig) -> Result<Self> {
         Self::connect_in_dir(name, config, None).await
+    }
+
+    /// Connect through the pool's shared-client path. On Unix, shared stdio
+    /// servers use the machine-wide broker when available, allowing separate
+    /// Jcode daemons to reuse one server process. If the broker is unavailable,
+    /// fall back to the regular in-process connection.
+    pub async fn connect_shared(name: String, config: &McpServerConfig) -> Result<Self> {
+        #[cfg(unix)]
+        if config.is_stdio() && super::broker::broker_available() {
+            match super::broker::socket_path() {
+                Ok(socket) => {
+                    match Self::connect_via_broker(name.clone(), config, socket, true).await {
+                        Ok(client) => return Ok(client),
+                        Err(super::broker::BrokerConnectError::Upstream(error)) => {
+                            return Err(error)
+                                .with_context(|| format!("MCP server '{name}' failed to start"));
+                        }
+                        Err(error) => crate::logging::warn(&format!(
+                            "MCP: {error}; spawning '{name}' directly"
+                        )),
+                    }
+                }
+                Err(error) => crate::logging::warn(&format!(
+                    "MCP: no broker socket path ({error:#}); spawning '{name}' directly"
+                )),
+            }
+        }
+        Self::connect(name, config).await
+    }
+
+    /// Attach to a shared stdio server through the machine-wide broker.
+    #[cfg(unix)]
+    pub async fn connect_via_broker(
+        name: String,
+        config: &McpServerConfig,
+        socket: std::path::PathBuf,
+        autostart: bool,
+    ) -> std::result::Result<Self, super::broker::BrokerConnectError> {
+        use super::broker::{BrokerConnectError, BrokerTransport};
+
+        let transport =
+            Arc::new(BrokerTransport::connect(name.clone(), config, socket, autostart).await?);
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let (writer_tx, mut writer_rx) = mpsc::channel::<String>(32);
+        let writer_transport = Arc::clone(&transport);
+        let writer_pending = Arc::clone(&pending);
+        let writer_closed = Arc::clone(&closed);
+        let timeout = request_timeout_for(config);
+        tokio::spawn(async move {
+            while let Some(message) = writer_rx.recv().await {
+                let result: Result<()> = async {
+                    let value: Value = serde_json::from_str(message.trim())?;
+                    if let Some(id) = value.get("id").and_then(Value::as_u64) {
+                        let response = tokio::time::timeout(
+                            timeout,
+                            writer_transport.send(message.trim(), id, true),
+                        )
+                        .await
+                        .context("MCP broker request timed out")??;
+                        if let Some(response) = response
+                            && let Some(id) = response.id
+                        {
+                            let mut pending = writer_pending.lock().await;
+                            if let Some(tx) = pending.remove(&id) {
+                                let _ = tx.send(response);
+                            }
+                        }
+                    } else {
+                        writer_transport.notify(message.trim()).await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                if result.is_err() {
+                    writer_closed.store(true, Ordering::SeqCst);
+                    writer_pending.lock().await.clear();
+                    break;
+                }
+            }
+        });
+
+        let handle = Self::new_handle(&name, config, pending, closed, writer_tx);
+        let mut client = Self {
+            handle,
+            backend: Backend::Broker {
+                _transport: transport,
+            },
+        };
+        client
+            .initialize()
+            .await
+            .with_context(|| format!("MCP server '{name}' failed to initialize"))
+            .map_err(BrokerConnectError::Upstream)?;
+        client
+            .handle
+            .refresh_tools()
+            .await
+            .with_context(|| format!("MCP server '{name}' failed to list tools"))
+            .map_err(BrokerConnectError::Upstream)?;
+        crate::logging::info(&format!(
+            "MCP: Connected to '{name}' via broker with {} tools",
+            client.handle.tools().len()
+        ));
+        Ok(client)
     }
 
     /// Connect to an MCP server, optionally running it in `working_dir`.
@@ -482,6 +593,8 @@ impl McpClient {
         // only uses methods common to every revision.
         let protocol_version = match &self.backend {
             Backend::Stdio(_) => "2024-11-05",
+            #[cfg(unix)]
+            Backend::Broker { .. } => "2024-11-05",
             Backend::Remote(connection) if connection.is_legacy() => "2024-11-05",
             Backend::Remote(_) => "2025-06-18",
         };
@@ -540,6 +653,8 @@ impl McpClient {
     pub fn is_running(&mut self) -> bool {
         match &mut self.backend {
             Backend::Stdio(child) => matches!(child.try_wait(), Ok(None)),
+            #[cfg(unix)]
+            Backend::Broker { .. } => !self.handle.is_closed(),
             Backend::Remote(connection) => connection.is_running(),
         }
     }
@@ -564,6 +679,8 @@ impl McpClient {
                 let _ = child.kill().await;
             }
             Backend::Remote(connection) => connection.shutdown().await,
+            #[cfg(unix)]
+            Backend::Broker { .. } => {}
         }
     }
 
@@ -609,7 +726,7 @@ fn is_sensitive_inherited_env_key(key: &str) -> bool {
         )
 }
 
-fn mcp_child_env(
+pub(super) fn mcp_child_env(
     mut inherited: HashMap<String, String>,
     explicit: &HashMap<String, String>,
 ) -> HashMap<String, String> {

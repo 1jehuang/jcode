@@ -412,7 +412,7 @@ impl SharedMcpPool {
                 }
             }
             ConnectAttempt::Leader(notify) => {
-                let result = McpClient::connect(name.clone(), &config).await;
+                let result = McpClient::connect_shared(name.clone(), &config).await;
                 let outcome = match &result {
                     Ok(_) => Ok(true),
                     Err(error) => Err(format!("{:#}", error)),
