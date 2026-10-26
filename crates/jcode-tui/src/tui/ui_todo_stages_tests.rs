@@ -235,6 +235,74 @@ fn inline_columns_stay_fixed_across_activity_and_name_changes() {
 }
 
 #[test]
+fn simultaneous_live_lanes_keep_columns_during_animation() {
+    let mut items = Vec::new();
+    let mut workers = Vec::new();
+    for (owner, name, phase, count) in [
+        ("fox", "Short", "thinking", 1),
+        ("wolf", "界界界 long Unicode lane name", "running_tool", 30),
+        ("sheep", "Waiting", "waiting", 2),
+    ] {
+        let mut item = laned("Task title remains in its column", "in_progress", 1, name);
+        item.assigned_to = Some(owner.into());
+        items.push(item);
+        let mut worker = agent(owner, "running", None, Some(1));
+        worker.todo_statuses = vec!["in_progress".into(); count];
+        worker.wait_reason = (phase == "waiting").then(|| "Waiting for build".into());
+        worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+            phase: phase.into(),
+            tool_name: Some("bash".into()),
+            tool_intent: Some("Long 界 intent ".repeat(40)),
+            elapsed_ms: 9_999_000,
+            input_tokens: Some(999_999),
+            output_tokens: Some(999_999),
+            ..Default::default()
+        });
+        workers.push(worker);
+    }
+    let refs: Vec<_> = items.iter().collect();
+    for width in 0..260 {
+        let mut lines = Vec::new();
+        push_stage_lines(&mut lines, &refs, &workers, &[], "", width);
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.width() <= width));
+        if width >= 80 {
+            let positions: Vec<_> = lines
+                .iter()
+                .map(|line| {
+                    let text = line.to_string();
+                    let status = text.find(" · ").expect("status column");
+                    let task = text.find(" │ ").expect("task column");
+                    (text[..status].width(), text[..task].width())
+                })
+                .collect();
+            assert!(
+                positions.iter().all(|p| *p == positions[0]),
+                "{width}: {positions:?}"
+            );
+            let before: Vec<_> = lines.iter().map(|line| line.to_string()).collect();
+            animate_lane_spinners(&mut lines);
+            for (old, line) in before.iter().zip(&lines) {
+                let new = line.to_string();
+                assert!(!new.contains(LIVE_DOT_SENTINEL));
+                assert_eq!(old.width(), new.width());
+                let old_status = old.find(" · ").unwrap();
+                let new_status = new.find(" · ").unwrap();
+                assert_eq!(
+                    &old[..old_status],
+                    &new[..new_status],
+                    "progress pips must not animate"
+                );
+                assert_eq!(
+                    old[..old.find(" │ ").unwrap()].width(),
+                    new[..new.find(" │ ").unwrap()].width()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn inline_worker_states_have_only_one_activity_indicator() {
     let mut item = laned("Verify output", "in_progress", 1, "Validation");
     item.assigned_to = Some("fox".into());
