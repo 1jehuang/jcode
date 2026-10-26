@@ -2,6 +2,54 @@ use super::*;
 use crate::todo::TodoItem;
 
 #[test]
+fn lane_live_status_matches_opened_status_and_preserves_stop_precedence() {
+    let mut item = assigned(todo("1", "Verify result", "in_progress", Some(1)), "fox");
+    let mut worker = agent("fox", "running", Some("Verify result"), Some(1));
+    worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+        phase: "running_tool".into(),
+        elapsed_ms: 12_300,
+        input_tokens: Some(12_345),
+        output_tokens: Some(456),
+        connection_type: Some("https/sse".into()),
+        tool_name: Some("bash".into()),
+        tool_intent: Some("Run 界 tests".into()),
+        ..Default::default()
+    });
+    let expected = super::super::super::input_ui::live_processing_status_line(
+        worker.live_status.as_ref().unwrap(),
+        Some(1.0),
+        LIVE_DOT_SENTINEL,
+    );
+    let mut rows = Vec::new();
+    push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", 160);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].to_string().contains(&expected.to_string()));
+    assert!(
+        rows[0]
+            .spans
+            .iter()
+            .any(|span| span.content == LIVE_DOT_SENTINEL && span.style.fg == Some(ai_color()))
+    );
+    for width in 0..100 {
+        let mut rows = Vec::new();
+        push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", width);
+        assert!(rows.iter().all(|row| row.width() <= width));
+    }
+    worker.wait_reason = Some("Waiting for hosted build".into());
+    let mut rows = Vec::new();
+    push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", 160);
+    assert!(rows[0].to_string().contains("Waiting for hosted build"));
+    assert!(!rows[0].to_string().contains(LIVE_DOT_SENTINEL));
+    item.requires_user_action = Some(crate::todo::TodoUserAction {
+        action: "Approve".into(),
+        reason: "Owner only".into(),
+    });
+    rows.clear();
+    push_lane_status_lines(&mut rows, &[&item], &[worker], "", 160);
+    assert!(rows.is_empty(), "User action suppresses live telemetry");
+}
+
+#[test]
 fn user_action_overrides_live_workers_and_has_two_cell_phase_and_lane_pips() {
     let mut item = assigned(
         todo("action", "Authorize 界", "in_progress", Some(1)),
@@ -205,6 +253,7 @@ fn assigned(mut item: TodoItem, who: &str) -> TodoItem {
 fn agent(name: &str, status: &str, activity: Option<&str>, age: Option<u64>) -> TodoCardAgent {
     TodoCardAgent {
         session_id: format!("session_{name}_1700000000"),
+        live_status: None,
         name: Some(name.to_string()),
         status: status.to_string(),
         activity: activity.map(str::to_string),

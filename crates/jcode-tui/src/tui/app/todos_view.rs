@@ -198,6 +198,11 @@ impl App {
             .map(|member| {
                 let mut agent = crate::tui::ui::TodoCardAgent::from_member(member);
                 agent.shortcut = self.swarm_agent_shortcut_digit(&member.session_id);
+                if jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+                    && let Some(received_at) = self.remote_swarm_members_received_at
+                {
+                    advance_todo_agent_elapsed(&mut agent, received_at.elapsed());
+                }
                 agent
             })
             .filter(|agent| {
@@ -543,6 +548,26 @@ fn todo_card_payload_json_with_agents(
     serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"todos":[],"goals":[]}"#.to_string())
 }
 
+fn advance_todo_agent_elapsed(
+    agent: &mut crate::tui::ui::TodoCardAgent,
+    elapsed: std::time::Duration,
+) {
+    if let Some(live) = &mut agent.live_status {
+        live.elapsed_ms = live
+            .elapsed_ms
+            .saturating_add(elapsed.as_millis().min(u64::MAX as u128) as u64);
+    }
+    for age in [
+        &mut agent.age_secs,
+        &mut agent.activity_age_secs,
+        &mut agent.wait_age_secs,
+    ] {
+        if let Some(age) = age {
+            *age = age.saturating_add(elapsed.as_secs());
+        }
+    }
+}
+
 fn hash_todo_card_agents(agents: &[crate::tui::ui::TodoCardAgent]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for agent in agents {
@@ -552,6 +577,10 @@ fn hash_todo_card_agents(agents: &[crate::tui::ui::TodoCardAgent]) -> u64 {
         agent.activity.hash(&mut hasher);
         agent.todo_statuses.hash(&mut hasher);
         agent.wait_reason.hash(&mut hasher);
+        // The wire snapshot is small and includes every visible status field.
+        serde_json::to_string(&agent.live_status)
+            .unwrap_or_default()
+            .hash(&mut hasher);
         // Hash every displayed age, including quiet activity and scoped waits.
         for age in [agent.age_secs, agent.activity_age_secs, agent.wait_age_secs] {
             age.map(|age| if age < 60 { age } else { age / 60 * 60 })
@@ -756,6 +785,28 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_status_elapsed_and_tokens_invalidate_pinned_payload() {
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            live_status: Some(crate::protocol::SwarmLiveStatus {
+                phase: "running_tool".into(),
+                elapsed_ms: 12_000,
+                input_tokens: Some(123),
+                ..Default::default()
+            }),
+            activity_age_secs: Some(1),
+            ..Default::default()
+        };
+        let before = hash_todo_card_agents(&[agent.clone()]);
+        advance_todo_agent_elapsed(&mut agent, std::time::Duration::from_secs(5));
+        assert_eq!(agent.live_status.as_ref().unwrap().elapsed_ms, 17_000);
+        assert_eq!(agent.activity_age_secs, Some(6));
+        let later = hash_todo_card_agents(&[agent.clone()]);
+        assert_ne!(before, later);
+        agent.live_status.as_mut().unwrap().output_tokens = Some(456);
+        assert_ne!(later, hash_todo_card_agents(&[agent]));
+    }
 
     #[test]
     fn shortcut_changes_invalidate_pinned_payload() {

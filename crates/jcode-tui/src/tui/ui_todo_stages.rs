@@ -20,6 +20,8 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TodoCardAgent {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_status: Option<crate::protocol::SwarmLiveStatus>,
     /// Global swarm navigation digit, assigned by session id in display order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcut: Option<u8>,
@@ -71,6 +73,7 @@ impl TodoCardAgent {
             .filter(|text| !text.is_empty());
         Self {
             session_id: member.session_id.clone(),
+            live_status: member.runtime.live_status.clone(),
             shortcut: None,
             name: member.friendly_name.clone(),
             status: if member.runtime.wait_reason.is_some() && is_live_status(&member.status) {
@@ -318,19 +321,11 @@ const QUIET_AFTER_SECS: u64 = 120;
 /// Replace live-dot placeholders with the wall-clock spinner frame. Cheap:
 /// only lines that contain the placeholder are touched.
 pub(crate) fn animate_lane_spinners(lines: &mut [Line<'static>]) {
-    let frame = std::time::SystemTime::now()
+    let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| {
-            (d.as_millis() / jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAME_MS as u128)
-                as usize
-        })
-        .unwrap_or(0);
-    let frames = jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAMES;
-    let glyph = if crate::perf::tui_policy().enable_decorative_animations {
-        frames[frame % frames.len()]
-    } else {
-        "●"
-    };
+        .map(|d| (d.as_millis() % 10_000) as f32 / 1000.0)
+        .unwrap_or(0.0);
+    let glyph = super::super::activity_indicator(elapsed, 12.5);
     for line in lines {
         for span in &mut line.spans {
             if span.content.contains(LIVE_DOT_SENTINEL) {
@@ -618,6 +613,9 @@ fn lane_note_spans(
         .filter_map(|todo| todo.assigned_to.as_deref())
         .filter_map(|assigned| agents.iter().find(|agent| agent.matches(assigned)))
         .collect();
+    if assigned.iter().any(|agent| agent.live_status.is_some()) {
+        return Vec::new(); // The shared processing line below owns live status.
+    }
     if let Some(agent) = assigned
         .iter()
         .find(|agent| matches!(agent.status.as_str(), "failed" | "crashed"))
@@ -878,6 +876,7 @@ pub(crate) fn push_stage_lines(
                     inner_width,
                 ));
             }
+            push_lane_status_lines(lines, &items, agents, base_indent, inner_width);
             continue;
         }
         let statuses = lane_item_statuses(&items, agents);
@@ -921,6 +920,62 @@ pub(crate) fn push_stage_lines(
             row = row.into_iter().map(dim_span).collect();
         }
         lines.push(todo_card_line(row, base_indent, inner_width));
+        push_lane_status_lines(lines, &items, agents, base_indent, inner_width);
+    }
+}
+
+/// Keep telemetry on its own bounded logical row instead of squeezing it into
+/// the task title or duplicating a passive worker gallery beside the todo band.
+pub(super) fn push_lane_status_lines(
+    lines: &mut Vec<Line<'static>>,
+    todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
+    indent: &str,
+    width: usize,
+) {
+    if todos
+        .iter()
+        .any(|todo| crate::todo::todo_requires_user_action(todo))
+    {
+        return; // The hand and the full action/reason replace liveness, never a spinner.
+    }
+    let mut seen = std::collections::HashSet::new();
+    for todo in todos {
+        let Some(agent) = todo
+            .assigned_to
+            .as_deref()
+            .and_then(|owner| agents.iter().find(|agent| agent.matches(owner)))
+        else {
+            continue;
+        };
+        if !seen.insert(agent.session_id.as_str()) {
+            continue;
+        }
+        let Some(mut live) = agent.live_status.clone() else {
+            continue;
+        };
+        if is_done(todo) && todos.iter().all(|todo| is_done(todo)) {
+            live.phase = "completed".into();
+            live.stop_reason = Some("lane completed".into());
+        } else if let Some(reason) = &agent.wait_reason {
+            live.phase = "waiting".into();
+            live.stop_reason = Some(reason.clone());
+        } else if !is_live_status(&agent.status) {
+            live.phase = agent.status.clone();
+            if live.stop_reason.is_none() {
+                live.stop_reason = agent.activity.clone();
+            }
+        }
+        let mut row = vec![Span::raw(format!("  {} ", agent.icon()))];
+        row.extend(
+            super::super::input_ui::live_processing_status_line(
+                &live,
+                agent.activity_age_secs.map(|age| age as f32),
+                LIVE_DOT_SENTINEL,
+            )
+            .spans,
+        );
+        lines.push(todo_card_line(row, indent, width));
     }
 }
 
@@ -969,7 +1024,7 @@ pub(crate) fn render_todo_item_line(
         if let Some((mark, color)) = agent_state_mark(&agent.status) {
             chip.push(Span::styled(mark, Style::default().fg(color)));
         }
-        if todo.status != "completed" {
+        if todo.status != "completed" && agent.live_status.is_none() {
             note = agent_note(agent, &[todo]);
         }
     }

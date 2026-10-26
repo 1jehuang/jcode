@@ -1927,6 +1927,7 @@ fn push_todo_item_lines(
             inner_width,
         ));
     }
+    todo_stages::push_lane_status_lines(lines, todos, agents, base_indent, inner_width);
 }
 
 fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
