@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use super::provider_init::ProviderChoice;
 
+mod cloud_env;
+pub(crate) use cloud_env::CloudEnvCommand;
 mod cloud_ephemeral;
 mod google;
 mod mcp;
@@ -721,6 +723,11 @@ pub(crate) enum ServerCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CloudCommand {
+    /// Transfer explicit project environment requirements without exposing values.
+    Env {
+        #[command(subcommand)]
+        action: CloudEnvCommand,
+    },
     /// Manage disposable remote machines with mandatory automatic expiry.
     Ephemeral {
         #[command(subcommand)]
