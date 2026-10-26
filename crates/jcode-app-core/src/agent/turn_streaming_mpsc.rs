@@ -1029,6 +1029,17 @@ impl Agent {
                         if cache_creation_input_tokens.is_some() {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
+                        // Publish observed counters immediately, not only when
+                        // the response finishes. Do not manufacture a missing
+                        // input or output count from context/session totals.
+                        if let (Some(input), Some(output)) = (usage_input, usage_output) {
+                            let _ = event_tx.send(ServerEvent::TokenUsage {
+                                input,
+                                output,
+                                cache_read_input: usage_cache_read,
+                                cache_creation_input: usage_cache_creation,
+                            });
+                        }
                         usage_recorder.observe(
                             provider.name(),
                             &provider.model(),

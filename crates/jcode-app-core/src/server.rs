@@ -50,6 +50,7 @@ pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, Persisted
 mod idle_hibernation;
 mod jade_relay;
 mod lifecycle;
+mod live_status;
 mod live_turn;
 mod provider_control;
 mod reload;

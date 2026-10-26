@@ -801,6 +801,7 @@ async fn broadcast_swarm_status_now(
                         todo_progress: m.todo_progress,
                         todo_items: m.todo_items.clone(),
                         runtime: crate::protocol::SwarmMemberRuntime {
+                            live_status: super::live_status::snapshot(&m.session_id),
                             wait_reason: wait.as_ref().map(|(reason, _)| reason.clone()),
                             wait_age_secs: wait.map(|(_, age)| age),
                             todo_statuses: m.runtime.todo_statuses.clone(),
@@ -844,12 +845,14 @@ pub(super) async fn monitor_wait_status(
     swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
 ) {
     let mut changes = crate::wait_registry::subscribe_changes();
+    let mut live_changes = super::live_status::subscribe_changes();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut previous = HashSet::<String>::new();
     loop {
         tokio::select! {
             result = changes.changed() => if result.is_err() { return; },
+            result = live_changes.changed() => if result.is_err() { return; },
             _ = interval.tick() => {},
         }
         let current: HashSet<_> = crate::wait_registry::session_ids().into_iter().collect();
@@ -858,6 +861,14 @@ pub(super) async fn monitor_wait_status(
             previous
                 .union(&current)
                 .filter_map(|sid| members.get(sid).and_then(|member| member.swarm_id.clone()))
+                .chain(
+                    members
+                        .values()
+                        .filter(|member| {
+                            matches!(member.status.as_str(), "running" | "streaming" | "thinking")
+                        })
+                        .filter_map(|member| member.swarm_id.clone()),
+                )
                 .collect()
         };
         previous = current;
@@ -1182,6 +1193,7 @@ pub(super) async fn remove_session_from_swarm(
     )
     .await;
     remove_plan_participant(swarm_id, session_id, swarm_plans).await;
+    super::live_status::forget(session_id);
 
     {
         let mut swarms = swarms_by_id.write().await;
@@ -1672,6 +1684,19 @@ pub(super) async fn update_member_status_with_report_tldr(
             }
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
+            if status_changed || super::live_status::snapshot(session_id).is_none() {
+                if matches!(status, "running" | "streaming" | "thinking") {
+                    if !matches!(
+                        previous_status.as_str(),
+                        "running" | "streaming" | "thinking"
+                    ) || super::live_status::snapshot(session_id).is_none()
+                    {
+                        super::live_status::begin(session_id);
+                    }
+                } else {
+                    super::live_status::finish(session_id, status, detail.as_deref());
+                }
+            }
             let detail_changed = member.detail != detail;
             let report_changed =
                 completion_report.is_some() && member.latest_completion_report != completion_report;
@@ -2116,6 +2141,128 @@ mod tests {
             },
             event_rx,
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_status_fanout_projects_worker_events_into_broadcast() {
+        let sid = "live-status-projection-worker";
+        let (worker, mut rx) = swarm_member(sid, "agent", true);
+        let members = Arc::new(RwLock::new(HashMap::from([(sid.to_string(), worker)])));
+        let swarms = Arc::new(RwLock::new(HashMap::from([(
+            "swarm-1".into(),
+            HashSet::from([sid.to_string()]),
+        )])));
+        update_member_status(sid, "running", None, &members, &swarms, None, None, None).await;
+        for event in [
+            ServerEvent::ConnectionType {
+                connection: "sse".into(),
+            },
+            ServerEvent::ConnectionPhase {
+                phase: "streaming".into(),
+            },
+            ServerEvent::TokenUsage {
+                input: 123,
+                output: 45,
+                cache_read_input: Some(999),
+                cache_creation_input: None,
+            },
+            ServerEvent::ToolStart {
+                id: "call".into(),
+                name: "bash".into(),
+            },
+            ServerEvent::ToolInput {
+                id: Some("call".into()),
+                delta: r#"{"intent":"Check telemetry"}"#.into(),
+            },
+            ServerEvent::ToolExec {
+                id: "call".into(),
+                name: "bash".into(),
+            },
+        ] {
+            super::super::fanout_session_event(&members, sid, event).await;
+        }
+        super::broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let mut projected = None;
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::SwarmStatus { members } = event {
+                projected = members[0].runtime.live_status.clone();
+            }
+        }
+        let live = projected.expect("live status included in actual wire event");
+        assert_eq!(live.phase, "running_tool");
+        assert_eq!(live.input_tokens, Some(123));
+        assert_eq!(live.output_tokens, Some(45));
+        assert_eq!(live.connection_type.as_deref(), Some("sse"));
+        assert_eq!(live.tool_intent.as_deref(), Some("Check telemetry"));
+        let monitor = tokio::spawn(super::monitor_wait_status(members.clone(), swarms.clone()));
+        // Consume the initial timer snapshot, then require a usage transition
+        // to publish before the next one-second refresh.
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        super::super::fanout_session_event(
+            &members,
+            sid,
+            ServerEvent::TokenUsage {
+                input: 124,
+                output: 46,
+                cache_read_input: None,
+                cache_creation_input: None,
+            },
+        )
+        .await;
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if let Some(ServerEvent::SwarmStatus { members }) = rx.recv().await {
+                    if members[0]
+                        .runtime
+                        .live_status
+                        .as_ref()
+                        .and_then(|s| s.input_tokens)
+                        == Some(124)
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("usage change broadcasts immediately rather than waiting for heartbeat");
+        monitor.abort();
+        update_member_status(
+            sid,
+            "stopped",
+            Some("User requested stop".into()),
+            &members,
+            &swarms,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let stopped = super::super::live_status::snapshot(sid).unwrap();
+        assert_eq!(stopped.phase, "stopped");
+        assert_eq!(stopped.stop_reason.as_deref(), Some("User requested stop"));
+        assert!(stopped.tool_name.is_none());
+        // Late queued events cannot revive the finished turn.
+        super::super::fanout_session_event(
+            &members,
+            sid,
+            ServerEvent::TextDelta {
+                text: "late".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            super::super::live_status::snapshot(sid).unwrap().phase,
+            "stopped"
+        );
+        super::super::live_status::begin(sid);
+        let restarted = super::super::live_status::snapshot(sid).unwrap();
+        assert!(restarted.connection_type.is_none());
+        assert!(restarted.input_tokens.is_none());
+        super::super::live_status::forget(sid);
     }
 
     fn member_with_parent(session_id: &str, parent: Option<&str>) -> SwarmMember {

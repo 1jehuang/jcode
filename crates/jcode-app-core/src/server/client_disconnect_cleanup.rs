@@ -338,6 +338,7 @@ pub(super) async fn cleanup_client_connection(
             }
         };
         crate::session_metrics::forget(client_session_id);
+        super::live_status::forget(client_session_id);
         crate::session_effort::forget_session_effort(client_session_id);
 
         if let Some(ref swarm_id) = swarm_id {
