@@ -404,7 +404,7 @@ async fn agent_profile_socket_yaml_frontmatter_body_snapshot_reload_and_errors()
     else {
         unreachable!()
     };
-    assert!(message.contains("model, tools and permissions remain unchanged"));
+    assert!(message.starts_with("Instructions only; model, tools and permissions remain unchanged."));
     assert_eq!(selected["current"], "socket-profile");
     assert_eq!(selected["changed"], true);
     assert_eq!(selected["effective"], "next_turn");
@@ -439,7 +439,7 @@ async fn agent_profile_socket_yaml_frontmatter_body_snapshot_reload_and_errors()
     else {
         unreachable!()
     };
-    assert!(message.contains("model, tools and permissions remain unchanged"));
+    assert!(message.starts_with("Instructions only; model, tools and permissions remain unchanged."));
     assert_eq!(reloaded["current"], "socket-profile");
     assert_eq!(reloaded["changed"], true);
     assert_saved_profile(&session_id, BODY_V2);

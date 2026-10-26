@@ -373,7 +373,7 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
         .map(|profile| profile.name.clone());
     let message = if changed {
         match current.as_deref() {
-            Some(name) => format!("Agent profile: {name}. Instructions apply on the next turn. YAML frontmatter settings are not applied; model, tools and permissions remain unchanged. Saved snapshot persists until /agent reload or /agent off."),
+            Some(name) => format!("Instructions only; model, tools and permissions remain unchanged. Agent profile: {name}. YAML frontmatter settings are not applied. Instructions apply on the next turn. Saved snapshot persists until /agent reload or /agent off."),
             None => "Agent profile off. Base instructions remain unchanged; applies on the next turn.".into(),
         }
     } else {
