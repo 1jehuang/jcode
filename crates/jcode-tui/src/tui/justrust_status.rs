@@ -234,7 +234,11 @@ impl Snapshot {
 }
 
 async fn query(program: &std::ffi::OsStr) -> Option<Snapshot> {
-    tokio::time::timeout(QUERY_TIMEOUT, async {
+    query_with_timeout(program, QUERY_TIMEOUT).await
+}
+
+async fn query_with_timeout(program: &std::ffi::OsStr, timeout: Duration) -> Option<Snapshot> {
+    tokio::time::timeout(timeout, async {
         let mut child = tokio::process::Command::new(program)
             .args(["status", "--json"])
             .stdin(std::process::Stdio::null())
@@ -538,8 +542,17 @@ mod tests {
         write("exec head -c 524289 /dev/zero");
         assert!(query(program.as_os_str()).await.is_none());
         write("exec sleep 10");
+        // Exercise the real subprocess cancellation path without making every
+        // filtered test run wait for the production two-second deadline.
+        assert_eq!(QUERY_TIMEOUT, Duration::from_secs(2));
+        let timeout = Duration::from_millis(50);
         let start = Instant::now();
-        assert!(query(program.as_os_str()).await.is_none());
+        assert!(
+            query_with_timeout(program.as_os_str(), timeout)
+                .await
+                .is_none()
+        );
+        assert!(start.elapsed() >= timeout);
         assert!(start.elapsed() < Duration::from_secs(5));
     }
 }
