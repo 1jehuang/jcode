@@ -444,28 +444,28 @@ pub(super) fn draw_messages(
     } else {
         0u16
     };
-    let pinned_todo_lines = pinned_todo_band.len() as u16;
-    set_pinned_todo_more_area(pinned_todo_more_line.map(|line| {
-        Rect {
-            x: text_render_area.x,
-            y: render_area
-                .y
-                .saturating_add(prompt_preview_lines)
-                .saturating_add(line as u16),
-            width: text_render_area.width,
-            height: 1,
-        }
-    }));
-    let pinned_todo_card_height = (pinned_todo_lines as u16).min(render_area.height);
-    set_pinned_todo_card_area((pinned_todo_card_height > 0).then_some(Rect {
+    let pinned_todo_area = Rect {
         x: text_render_area.x,
         y: render_area.y.saturating_add(prompt_preview_lines),
         width: text_render_area.width,
-        height: pinned_todo_card_height,
-    }));
+        height: pinned_todo_band.len().min(u16::MAX as usize) as u16,
+    }
+    .intersection(text_render_area);
+    set_pinned_todo_more_area(
+        pinned_todo_more_line
+            .filter(|&line| line < pinned_todo_area.height as usize)
+            .map(|line| Rect {
+                y: pinned_todo_area.y.saturating_add(line as u16),
+                height: 1,
+                ..pinned_todo_area
+            }),
+    );
+    set_pinned_todo_card_area((!pinned_todo_area.is_empty()).then_some(pinned_todo_area));
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
     // preview first, then the todo band, then transcript content).
-    let top_band_lines = pinned_todo_lines + prompt_preview_lines;
+    let top_band_lines = prompt_preview_lines
+        .saturating_add(pinned_todo_area.height)
+        .min(render_area.height);
 
     let content_area = Rect {
         x: text_render_area.x,
@@ -1265,15 +1265,9 @@ pub(super) fn draw_messages(
         );
     }
 
-    if pinned_todo_lines > 0 {
-        let band_area = Rect {
-            x: content_area.x,
-            y: render_area.y.saturating_add(prompt_preview_lines),
-            width: content_area.width,
-            height: pinned_todo_lines.min(render_area.height),
-        };
-        clear_area(frame, band_area);
-        frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
+    if !pinned_todo_area.is_empty() {
+        clear_area(frame, pinned_todo_area);
+        frame.render_widget(Paragraph::new(pinned_todo_band), pinned_todo_area);
     }
 
     if crate::config::config().display.prompt_preview && scroll > 0 && prompt_history_expanded() {
