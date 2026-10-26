@@ -1081,17 +1081,28 @@ impl Registry {
         .await;
 
         // User-configured pre_tool gate: external policy hook that can block
-        // this call (exit 2). Skipped entirely when not configured.
+        // this call (exit 2 or JSON deny), rewrite its input, or attach
+        // context for the model. Skipped entirely when not configured.
+        let mut input = input;
+        let mut gate_context: Vec<String> = Vec::new();
         if crate::hooks::hook_configured("pre_tool") {
             let input_json = input.to_string();
-            let decision = crate::hooks::run_pre_tool_gate(
+            let outcome = crate::hooks::run_pre_tool_gate(
                 &ctx.session_id,
                 working_dir.as_deref(),
                 resolved_name,
                 &input_json,
             )
             .await;
-            if let crate::hooks::GateDecision::Block { reason } = decision {
+            gate_context = outcome.additional_context;
+            if let Some(updated) = outcome.updated_input {
+                input = updated;
+            }
+            if let crate::hooks::GateDecision::Block { mut reason } = outcome.decision {
+                for context in &gate_context {
+                    reason.push_str("\n\n[pre_tool context]\n");
+                    reason.push_str(context);
+                }
                 let mut fields =
                     Self::tool_lifecycle_fields("blocked", name, resolved_name, &input, &ctx);
                 fields.push(("block_reason".to_string(), reason.clone()));
@@ -1122,10 +1133,23 @@ impl Registry {
                 fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
                 fields.push(("error".to_string(), crate::util::format_error_chain(&error)));
                 crate::logging::event_warn("TOOL_LIFECYCLE", fields);
-                return Err(error);
+                if gate_context.is_empty() {
+                    return Err(error);
+                }
+                return Err(anyhow::anyhow!(
+                    "{error:#}\n\n[pre_tool context]\n{}",
+                    gate_context.join("\n")
+                ));
             }
         };
 
+        for context in &gate_context {
+            if !output.output.is_empty() && !output.output.ends_with('\n') {
+                output.output.push('\n');
+            }
+            output.output.push_str("\n[pre_tool context]\n");
+            output.output.push_str(context);
+        }
         Self::apply_post_tool_feedback(resolved_name, &input, &ctx, latency_ms, &mut output).await;
 
         // Context overflow guard: check if this output would push us over the limit
