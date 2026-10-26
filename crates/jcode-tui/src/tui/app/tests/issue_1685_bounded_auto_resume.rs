@@ -168,6 +168,40 @@ fn issue_1685_offline_probes_do_not_consume_retry_budget() {
 }
 
 #[test]
+fn accepted_stream_timeouts_do_not_restart_provider_retry_budget() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for error in [
+        "Stream read timeout: no data received for 180 seconds",
+        "Failed after 3 retries: WebSocket stream timed out waiting for next websocket activity (1s; response_id=resp_test elapsed_ms=181701 since_last_activity_ms=180043)",
+        "timed out waiting for next websocket activity on persistent WS (180s)",
+    ] {
+        for auto_retry in [false, true] {
+            let mut app = create_test_app();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            app.auto_poke_incomplete_todos = true;
+            app.auto_poke_default_on = true;
+            app.last_submitted_input = Some("keep going".to_string());
+            app.rate_limit_pending_message =
+                Some(issue_1685_user_turn("keep going", auto_retry, 0));
+            app.is_processing = true;
+
+            app.handle_server_event(issue_1685_error(42, error, None), &mut remote);
+
+            assert!(!app.is_processing, "{error}");
+            assert!(app.rate_limit_pending_message.is_none(), "{error}");
+            assert!(app.rate_limit_reset.is_none(), "{error}");
+            assert!(!app.auto_poke_incomplete_todos, "{error}");
+            assert!(!app.auto_poke_default_on, "{error}");
+            assert_eq!(app.input, "keep going", "{error}");
+            assert!(app.display_messages().iter().any(|message| {
+                message.content.contains("provider stream stalled")
+            }), "{error}");
+        }
+    }
+}
+
+#[test]
 fn issue_1685_huge_server_retry_hint_is_clamped() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

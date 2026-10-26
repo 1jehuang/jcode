@@ -1602,12 +1602,24 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
-            // Connectivity failures (DNS, connection reset, no route, transient
-            // TLS, timeouts) are always transient: the request never reached the
-            // provider. Hold the turn and resume when the network recovers,
-            // regardless of the pending message's auto_retry flag. This must run
-            // before the non-retryable auto-poke check so a transient disconnect
-            // is never misclassified as a permanent failure that stops auto-poke.
+            // Stream-idle failures follow an accepted request. The provider
+            // owns transport retries and fallback already. A network probe
+            // cannot fix these and must not restart that entire retry budget.
+            let lower_message = message.to_ascii_lowercase();
+            let is_stream_idle_timeout = lower_message
+                .contains("stream read timeout: no data received")
+                || lower_message.contains("timed out waiting for next websocket activity")
+                || lower_message.contains("did not complete within");
+            if is_stream_idle_timeout {
+                app.pause_exhausted_auto_resume(
+                    "Stopped automatic retries: the provider stream stalled after the request was accepted. Your message is back in the input box. Retry manually, reduce the conversation with /compact, or choose another route with /model.".to_string(),
+                    "Paused: provider stream stopped responding",
+                );
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                return false;
+            }
+            // Connection-establishment failures can recover when the network
+            // returns. Keep these separate from accepted but stalled streams.
             let is_connectivity_error =
                 crate::tui::app::commands::is_auto_poke_connectivity_error(&message)
                     || crate::network_retry::classify_message(&message).is_some();
