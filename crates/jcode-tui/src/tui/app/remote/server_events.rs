@@ -1715,6 +1715,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.remote_available_service_tiers = None;
             }
             remote.set_session_id(session_id.clone());
+            app.cloud_environment_session_changed(&session_id);
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
@@ -1993,6 +1994,7 @@ pub(in crate::tui::app) fn handle_server_event(
             }
 
             remote.set_session_id(session_id.clone());
+            app.cloud_environment_session_changed(&session_id);
             app.remote_session_id = Some(session_id.clone());
             history_laps.push(("pre_set_session", history_lap.elapsed().as_millis()));
             history_lap = Instant::now();

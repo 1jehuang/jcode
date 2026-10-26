@@ -62,6 +62,7 @@ mod catchup;
 mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;
+mod cloud_environment;
 mod commands_cloud;
 mod commands_colors;
 mod commands_desktop;
@@ -1430,6 +1431,7 @@ pub struct App {
     tool_output_scan_index: usize,
     // Current session ID (from server in remote mode)
     remote_session_id: Option<String>,
+    cloud_environment: cloud_environment::CloudEnvironment,
     // All sessions on the server (remote mode only)
     remote_sessions: Vec<String>,
     remote_side_pane_images: Vec<crate::session::RenderedImage>,

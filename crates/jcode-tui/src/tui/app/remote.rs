@@ -980,7 +980,17 @@ pub(super) async fn handle_remote_event<B: Backend>(
     event: RemoteRead,
 ) -> Result<(RemoteEventOutcome, bool)> {
     match event {
+        RemoteRead::Event(ServerEvent::ToolCall {
+            session_id,
+            call_id,
+            name,
+            input,
+        }) => {
+            app.cloud_environment_call(remote, session_id, call_id, name, input);
+            Ok((RemoteEventOutcome::Continue, false))
+        }
         RemoteRead::Disconnected(reason) => {
+            app.revoke_cloud_environment();
             if let RemoteDisconnectReason::Protocol(error) = &reason {
                 let detail = format_disconnect_reason(&reason);
                 crate::logging::error(&format!(
@@ -1075,6 +1085,7 @@ pub(super) fn handle_disconnect(
     state: &mut RemoteRunState,
     reason: Option<RemoteDisconnectReason>,
 ) {
+    app.revoke_cloud_environment();
     let detail = if state.server_reload_in_progress {
         "server reload in progress".to_string()
     } else if let Some(reason) = reason.as_ref() {
@@ -1356,6 +1367,10 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 }
 
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
+    if app.prepare_cloud_environment(remote).await.is_err() {
+        app.revoke_cloud_environment();
+        return;
+    }
     if app.cloud_handoff_blocks_work() {
         return;
     }

@@ -1,6 +1,77 @@
 use super::*;
 use std::time::Duration;
 
+#[tokio::test]
+async fn cloud_session_switch_revokes_and_aborts_before_request() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    remote.session_id = Some("old".into());
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    remote.bind_cloud_authority(&live);
+    let callback = tokio::spawn(std::future::pending::<()>());
+    remote.track_cloud_callback(&callback);
+    remote.resume_session("new").await.unwrap();
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(callback.await.unwrap_err().is_cancelled());
+    for kind in ["configure_tools", "resume_session"] {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], kind);
+    }
+}
+
+#[tokio::test]
+async fn cloud_clear_revokes_before_new_conversation() {
+    let mut remote = RemoteConnection::dummy();
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    remote.bind_cloud_authority(&live);
+    remote.clear().await.unwrap();
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn cloud_configuration_is_written_before_message() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    remote
+        .configure_cloud_tools(crate::protocol::SessionToolConfig::default())
+        .await
+        .unwrap();
+    remote.send_message("continue".into()).await.unwrap();
+    for kind in ["configure_tools", "message"] {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], kind);
+    }
+}
+
+#[tokio::test]
+async fn cloud_expiry_clears_overlay_and_revokes_callbacks() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    remote
+        .cloud_expiry_clear(live.clone(), tokio::time::Instant::now())
+        .await
+        .unwrap();
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["type"], "configure_tools");
+    assert_eq!(value["tools"]["custom"], serde_json::json!([]));
+    assert_eq!(value["tools"]["disabled"], serde_json::json!([]));
+    assert!(value["tools"]["enabled"].is_null());
+}
+
 #[test]
 fn account_usage_poll_is_immediate_then_throttled() {
     let now = Instant::now();
