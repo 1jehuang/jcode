@@ -156,7 +156,7 @@ impl Agent {
             .as_ref()
             .map(std::path::PathBuf::from);
 
-        let (split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
+        let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
             skill_prompt.as_deref(),
             available_skills,
             self.session.is_canary,
@@ -164,6 +164,14 @@ impl Agent {
             working_dir.as_deref(),
             self.agents_md_snapshot.clone(),
         );
+
+        // The tool list is locked for cache stability, so this inventory is
+        // constant for the session. It goes in the static part: the dynamic
+        // part is sent after the latest user prompt, so putting it there would
+        // move an earlier input item on every turn and reset the OpenAI
+        // websocket prefix chain.
+        let available_tools = self.locked_tools.as_deref().unwrap_or(&[]);
+        append_tool_capability_reminder(&mut split, available_tools);
 
         split
     }
@@ -176,5 +184,90 @@ impl Agent {
         _memory_event_tx: Option<crate::memory::MemoryEventSink>,
     ) -> Option<crate::memory::PendingMemory> {
         self.build_memory_prompt_nonblocking_shared(messages.to_vec().into(), _memory_event_tx)
+    }
+}
+
+/// Compact inventory of active tools so the model does not forget capabilities
+/// that are easy to miss when MCP definitions sit behind `mcp_search`/`mcp_call`.
+fn append_tool_capability_reminder(
+    split: &mut crate::prompt::SplitSystemPrompt,
+    tools: &[crate::message::ToolDefinition],
+) {
+    if tools.is_empty() {
+        return;
+    }
+
+    let mut mcp = Vec::new();
+    let mut orchestration = Vec::new();
+    let mut other = Vec::new();
+
+    for tool in tools {
+        let name = tool.name.as_str();
+        if name.starts_with("mcp__") || matches!(name, "mcp_search" | "mcp_call") {
+            mcp.push(name);
+        } else if matches!(name, "swarm" | "communicate" | "spawn") {
+            orchestration.push(name);
+        } else {
+            other.push(name);
+        }
+    }
+
+    let mut lines = vec![
+        "# Available capabilities".to_string(),
+        "The following capabilities are active in this session. Use the exact tool names in the tool definitions; this list is a compact reminder and updates with the current tool surface.".to_string(),
+    ];
+    append_capability_line(&mut lines, "MCP", &mcp);
+    if mcp.contains(&"mcp_search") {
+        lines.push("- An empty MCP search does not mean the service is unavailable: use `mcp` list to find configured but disconnected servers, then connect by server name before considering browser fallback.".to_string());
+    }
+    append_capability_line(&mut lines, "Subagents and orchestration", &orchestration);
+    if orchestration.contains(&"swarm") {
+        lines.push(
+            "- Provider routes: use `swarm` with `list_models` to see authenticated models and alternate-provider routes before spawning; do not assume the coordinator route is the only one available.".to_string(),
+        );
+    }
+    if !other.is_empty() {
+        lines.push(format!("- Other tools available: {}", other.join(", ")));
+    }
+    let installed = installed_cli_names(std::env::var_os("PATH").as_deref());
+    if !installed.is_empty() {
+        lines.push(format!("- Installed CLIs on PATH: {}. Use `gws` for Google Workspace; `playwright` is available for local testing, not as a substitute for a connected service's native integration.", installed.join(", ")));
+    }
+
+    if !split.static_part.is_empty() {
+        split.static_part.push_str("\n\n");
+    }
+    split.static_part.push_str(&lines.join("\n"));
+}
+
+fn installed_cli_names(path: Option<&std::ffi::OsStr>) -> Vec<&'static str> {
+    let Some(path) = path else { return Vec::new() };
+    ["gws", "playwright"]
+        .into_iter()
+        .filter(|name| {
+            std::env::split_paths(path).any(|dir| {
+                let candidate = dir.join(name);
+                std::fs::metadata(candidate).is_ok_and(|metadata| {
+                    if !metadata.is_file() {
+                        return false;
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        metadata.permissions().mode() & 0o111 != 0
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        true
+                    }
+                })
+            })
+        })
+        .collect()
+}
+
+fn append_capability_line(lines: &mut Vec<String>, label: &str, names: &[&str]) {
+    if !names.is_empty() {
+        lines.push(format!("- {} tools available: {}", label, names.join(", ")));
     }
 }
