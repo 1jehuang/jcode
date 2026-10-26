@@ -447,6 +447,17 @@ impl App {
                 self.debug_force_inline_gallery = false;
                 self.remote_swarm_members.clear();
                 "OK: inline swarm gallery cleared".to_string()
+            } else if raw.starts_with('[') {
+                match serde_json::from_str::<Vec<crate::protocol::SwarmMemberStatus>>(raw) {
+                    Ok(members) => {
+                        let n = members.len();
+                        self.remote_swarm_members = members;
+                        self.debug_force_inline_gallery = true;
+                        self.refresh_pinned_todos_now();
+                        format!("OK: injected {n} explicit swarm members; gallery forced active")
+                    }
+                    Err(error) => format!("Invalid swarm member fixture: {error}"),
+                }
             } else {
                 let n: usize = raw.parse().unwrap_or(3);
                 let statuses = ["running", "thinking", "ready", "completed", "blocked"];

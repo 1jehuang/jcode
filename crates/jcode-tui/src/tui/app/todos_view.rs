@@ -551,12 +551,12 @@ fn hash_todo_card_agents(agents: &[crate::tui::ui::TodoCardAgent]) -> u64 {
         agent.status.hash(&mut hasher);
         agent.activity.hash(&mut hasher);
         agent.todo_statuses.hash(&mut hasher);
-        // Minute granularity: the band shows "3m", so finer ages would only
-        // force redraws with no visible change.
-        agent
-            .age_secs
-            .map(|age| if age < 60 { age } else { age / 60 * 60 })
-            .hash(&mut hasher);
+        agent.wait_reason.hash(&mut hasher);
+        // Hash every displayed age, including quiet activity and scoped waits.
+        for age in [agent.age_secs, agent.activity_age_secs, agent.wait_age_secs] {
+            age.map(|age| if age < 60 { age } else { age / 60 * 60 })
+                .hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -754,6 +754,24 @@ mod tests {
         let before = hash_todo_card_agents(&[agent.clone()]);
         agent.todo_statuses.swap(0, 1);
         assert_ne!(before, hash_todo_card_agents(&[agent]));
+    }
+
+    #[test]
+    fn wait_and_activity_changes_invalidate_pinned_payload() {
+        let mut agent = crate::tui::ui::TodoCardAgent::default();
+        let before = hash_todo_card_agents(&[agent.clone()]);
+        agent.wait_reason = Some("Waiting for build".into());
+        let waiting = hash_todo_card_agents(&[agent.clone()]);
+        assert_ne!(before, waiting);
+        agent.wait_age_secs = Some(120);
+        let aged = hash_todo_card_agents(&[agent.clone()]);
+        assert_ne!(waiting, aged);
+        agent.wait_age_secs = Some(125);
+        assert_eq!(aged, hash_todo_card_agents(&[agent.clone()]));
+        agent.activity_age_secs = Some(180);
+        assert_ne!(aged, hash_todo_card_agents(&[agent.clone()]));
+        agent.wait_reason = None;
+        assert_ne!(waiting, hash_todo_card_agents(&[agent]));
     }
 
     /// Plan-level intent used by the view tests.

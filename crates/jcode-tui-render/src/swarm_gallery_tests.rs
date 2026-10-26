@@ -23,6 +23,17 @@ fn member(id: &str, status: &str, role: Option<&str>, body: &[&str]) -> GalleryM
 }
 
 #[test]
+fn waiting_worker_has_stable_clock_and_is_not_idle_or_actively_spinning() {
+    for frame in 0..STRIP_SPINNER_FRAMES.len() {
+        assert_eq!(status_glyph("waiting", frame), "◷");
+    }
+    assert_eq!(card_status_glyph("waiting"), "◷");
+    assert_eq!(card_status_label("waiting"), "Waiting");
+    assert!(!is_active_status("waiting"));
+    assert!(status_rank("waiting") < status_rank("ready"));
+}
+
+#[test]
 fn coordinator_sorts_first() {
     let members = vec![
         member("zeta", "running", None, &[]),

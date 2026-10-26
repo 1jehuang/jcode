@@ -84,7 +84,61 @@ fn agent(name: &str, status: &str, activity: Option<&str>, age: Option<u64>) -> 
         activity_age_secs: age,
         todo_statuses: Vec::new(),
         shortcut: None,
+        wait_reason: None,
+        wait_age_secs: None,
     }
+}
+
+#[test]
+fn explicit_waits_show_clock_reason_and_age_without_busy_or_quiet_indicators() {
+    let member: crate::protocol::SwarmMemberStatus = serde_json::from_value(serde_json::json!({
+        "session_id": "session_fox_1700000000", "friendly_name": "fox", "status": "running",
+        "runtime": {"wait_reason": "Waiting for build task", "wait_age_secs": 185,
+                    "activity_age_secs": 300, "todo_statuses": ["in_progress", "pending"]}
+    }))
+    .unwrap();
+    let worker = TodoCardAgent::from_member(&member);
+    assert_eq!(worker.status, "waiting");
+    for (stage, group) in [
+        (None, None),
+        (None, Some("Build")),
+        (Some(1), Some("Build")),
+    ] {
+        let mut item = assigned(todo("1", "Build project", "in_progress", stage), "fox");
+        item.group = group.map(str::to_string);
+        let text = render(&[item.clone()], &[worker.clone()], 160).join("\n");
+        assert!(text.contains("◷"), "{text}");
+        assert!(text.contains("Waiting for build task · 3m"), "{text}");
+        assert!(!text.contains("quiet"), "{text}");
+        assert!(!text.contains(LIVE_DOT_SENTINEL), "{text}");
+        for width in 1..80 {
+            for row in render(&[item.clone()], &[worker.clone()], width) {
+                assert!(row.width() <= usize::from(width), "width {width}: {row:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn wait_snapshot_clears_and_does_not_override_terminal_or_blocked_status() {
+    let mut member: crate::protocol::SwarmMemberStatus =
+        serde_json::from_value(serde_json::json!({
+            "session_id": "worker", "status": "running",
+            "runtime": {"wait_reason": "Waiting for task", "wait_age_secs": 5}
+        }))
+        .unwrap();
+    assert_eq!(TodoCardAgent::from_member(&member).status, "waiting");
+    for status in ["failed", "completed", "stopped", "blocked"] {
+        member.status = status.into();
+        assert_eq!(TodoCardAgent::from_member(&member).status, status);
+    }
+    member.status = "running".into();
+    member.runtime.wait_reason = None;
+    member.runtime.wait_age_secs = None;
+    let worker = TodoCardAgent::from_member(&member);
+    assert_eq!(worker.status, "running");
+    assert!(worker.wait_reason.is_none());
+    assert!(worker.wait_age_secs.is_none());
 }
 
 #[test]

@@ -34,6 +34,11 @@ pub(crate) struct TodoCardAgent {
     /// Seconds since the worker's last tool event or token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_age_secs: Option<u64>,
+    /// Explicit scoped wait metadata, independent of todo intent history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_age_secs: Option<u64>,
     /// Ordered statuses of the worker's own todos, not the coordinator's lane tasks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todo_statuses: Vec<String>,
@@ -68,7 +73,13 @@ impl TodoCardAgent {
             session_id: member.session_id.clone(),
             shortcut: None,
             name: member.friendly_name.clone(),
-            status: member.status.clone(),
+            status: if member.runtime.wait_reason.is_some() && is_live_status(&member.status) {
+                "waiting".to_string()
+            } else {
+                member.status.clone()
+            },
+            wait_reason: member.runtime.wait_reason.clone(),
+            wait_age_secs: member.runtime.wait_age_secs,
             activity,
             age_secs: member.status_age_secs,
             activity_age_secs: member.runtime.activity_age_secs,
@@ -210,6 +221,7 @@ pub(crate) fn agent_roster_spans(
 
 fn agent_state_mark(status: &str) -> Option<(&'static str, Color)> {
     match status {
+        "waiting" => Some(("◷", rgb(225, 165, 90))),
         "failed" | "crashed" => Some(("✗", todo_failure_color())),
         "blocked" | "waiting_network" | "running_stale" => Some(("⏸", rgb(225, 165, 90))),
         "stopped" => Some(("◼", todo_meta_color())),
@@ -430,12 +442,25 @@ fn activity_matches_title(activity: &str, todos: &[&crate::todo::TodoItem]) -> b
 }
 
 fn agent_note(agent: &TodoCardAgent, todos: &[&crate::todo::TodoItem]) -> String {
-    let mut note = agent
-        .activity
-        .clone()
-        .filter(|activity| !activity_matches_title(activity, todos))
-        .unwrap_or_default();
-    if let Some(age) = agent.age_secs.filter(|age| *age >= 2) {
+    let waiting = agent.status == "waiting";
+    let mut note = if waiting {
+        agent
+            .wait_reason
+            .clone()
+            .unwrap_or_else(|| "waiting".into())
+    } else {
+        agent
+            .activity
+            .clone()
+            .filter(|activity| !activity_matches_title(activity, todos))
+            .unwrap_or_default()
+    };
+    let age = if waiting {
+        agent.wait_age_secs
+    } else {
+        agent.age_secs
+    };
+    if let Some(age) = age.filter(|age| *age >= 2) {
         if !note.is_empty() {
             note.push_str(" · ");
         }
@@ -589,6 +614,22 @@ fn lane_note_spans(
             format!("⏸ {reason}"),
             Style::default().fg(rgb(225, 165, 90)),
         )];
+    }
+    if let Some(agent) = assigned.iter().find(|agent| agent.status == "waiting") {
+        let reason = agent.wait_reason.as_deref().unwrap_or("waiting");
+        let mut note = reason
+            .lines()
+            .next()
+            .unwrap_or("waiting")
+            .trim()
+            .to_string();
+        if let Some(age) = agent.wait_age_secs.filter(|age| *age >= 2) {
+            note.push_str(&format!(
+                " · {}",
+                jcode_tui_render::swarm_gallery::humanize_age(age)
+            ));
+        }
+        return vec![Span::styled(note, Style::default().fg(rgb(225, 165, 90)))];
     }
     let Some(agent) = lane_live_agent(lane_todos, agents) else {
         return Vec::new();
