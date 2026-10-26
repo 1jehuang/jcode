@@ -161,6 +161,17 @@ fn test_rewind_lists_visible_messages_when_initial_session_context_is_hidden() {
 
     let last = app.display_messages().last().expect("history message");
     assert!(last.content.contains("Conversation history:"));
+    assert_eq!(last.title.as_deref(), Some("Rewind"));
+    let rendered = crate::tui::ui::render_system_message(
+        last,
+        100,
+        crate::config::DiffDisplayMode::default(),
+    );
+    assert!(
+        rendered.len() >= 4,
+        "rewind list must render one row per entry, got {} rows",
+        rendered.len()
+    );
     assert!(last.content.contains("1 👤 User - msg-1"));
     assert!(last.content.contains("2 👤 User - msg-2"));
     assert!(!last.content.contains("Session Context"));

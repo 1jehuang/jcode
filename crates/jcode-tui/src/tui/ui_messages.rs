@@ -75,7 +75,9 @@ fn render_single_line_system_notice(
     // readable. Markdown or a newline alone is not a reason to expand a notice.
     if matches!(
         msg.title.as_deref(),
-        Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion")
+        Some(
+            "Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion" | "Rewind"
+        )
     ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
