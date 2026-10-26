@@ -37,6 +37,10 @@ use crate::auth::router_transfer;
 use crate::auth::transfer::{self, CloudCredentialTransfer, TransferProvider};
 use crate::{session, storage};
 
+#[path = "cloud_group.rs"]
+mod group;
+pub(crate) use group::run_migrate;
+
 #[cfg(test)]
 #[path = "cloud_move_repo_tests.rs"]
 mod repo_tests;
@@ -744,6 +748,9 @@ impl Target {
 #[derive(Debug, Serialize)]
 pub(crate) struct MoveReport {
     pub session_id: String,
+    /// Empty for legacy single-session transfers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
     pub host: String,
     pub epoch: u64,
     pub repo_root: Option<String>,
@@ -842,6 +849,8 @@ pub(crate) fn run_move(
 ) -> Result<MoveReport> {
     let host = target.resolve_host()?;
     let session_id = resolve_session_id(session_ref)?;
+    group::reject_member_return(&session_id)?;
+    let _migration_lock = group::lock_sessions(std::slice::from_ref(&session_id))?;
     if let Some(lease) = storage::read_session_lease(&session_id)
         && let Some(away) = lease.away_host
     {
@@ -1101,6 +1110,7 @@ pub(crate) fn run_move(
 
     let report = MoveReport {
         session_id: session_id.clone(),
+        members: Vec::new(),
         host: host.clone(),
         epoch,
         repo_root: repo.as_ref().map(|r| r.root.clone()),
@@ -1222,6 +1232,8 @@ pub(crate) fn run_return(
     refs_only: bool,
 ) -> Result<ReturnReport> {
     let session_id = resolve_session_id(session_ref)?;
+    group::reject_member_return(&session_id)?;
+    let _migration_lock = group::lock_sessions(std::slice::from_ref(&session_id))?;
     let lease = storage::read_session_lease(&session_id)
         .with_context(|| format!("session {session_id} was never moved"))?;
     let host = match (&lease.away_host, &target.host) {
@@ -1404,7 +1416,12 @@ pub(crate) fn run_receive() -> Result<()> {
     std::io::stdin().read_to_end(&mut data)?;
     std::fs::write(&tarball, &data)?;
     untar(&tarball, stage)?;
+    if stage.join("group.json").exists() {
+        return group::receive(staging);
+    }
     let manifest: MoveManifest = read_json(&stage.join("manifest.json"))?;
+    let _migration_lock = group::lock_sessions(std::slice::from_ref(&manifest.session_id))?;
+    group::reject_member_return(&manifest.session_id)?;
     if manifest.format_version != FORMAT_VERSION {
         bail!(
             "move format {} not supported by this jcode (expects {FORMAT_VERSION}); update jcode on the cloud host",
@@ -1452,6 +1469,11 @@ pub(crate) fn run_receive() -> Result<()> {
 /// Take ownership of a staged move: install transcript, todos and memory.
 pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
     let dir = inbox_dir()?.join(format!("{session_id}.{epoch}"));
+    if dir.join("group.json").exists() || group::is_group_root(session_id, epoch)? {
+        return group::activate(session_id, epoch);
+    }
+    let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
+    group::reject_member_return(session_id)?;
     if !dir.is_dir() {
         // A retried activation whose first attempt succeeded but lost its
         // SSH connection finds the move already installed. Report success.
@@ -1496,6 +1518,8 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
 
 /// Hand the session back: stop owning it here, snapshot repo, stream tarball.
 pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
+    group::reject_member_return(session_id)?;
+    let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
     let lease = storage::read_session_lease(session_id)
         .with_context(|| format!("session {session_id} is not a migrated session on this host"))?;
     // A retried export after a dropped connection finds this host already
@@ -2285,6 +2309,10 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             .filter(|s| !s.trim().is_empty()),
     };
     match command {
+        C::GroupProtocol => {
+            println!("{}", serde_json::json!({ "version": 1 }));
+            Ok(())
+        }
         C::Replace {
             target,
             yes,
@@ -2306,6 +2334,8 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         }
         C::Move {
             session,
+            include_sessions,
+            session_only,
             target,
             allow_active,
             dry_run,
@@ -2313,7 +2343,17 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             json,
         } => {
             let target = target_of(target);
-            let report = run_move(session.as_deref(), &target, allow_active, dry_run)?;
+            let report = if session_only {
+                run_move(session.as_deref(), &target, allow_active, dry_run)?
+            } else {
+                run_migrate(
+                    session.as_deref(),
+                    &target,
+                    allow_active,
+                    dry_run,
+                    &include_sessions,
+                )?
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else if report.dry_run {
@@ -2433,6 +2473,8 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::Activate { session, epoch } => run_activate(&session, epoch),
         C::Export { session, epoch } => run_export(&session, epoch),
         C::CancelReturn { session, epoch } => {
+            group::reject_member_return(&session)?;
+            let _migration_lock = group::lock_sessions(std::slice::from_ref(&session))?;
             let lease =
                 storage::read_session_lease(&session).context("missing cloud session lease")?;
             if lease.epoch != epoch || lease.away_host.as_deref() != Some("returned") {
