@@ -698,6 +698,7 @@ impl SessionPicker {
         // data swap + item rebuild.
         let selected_id = self.selected_session().map(|session| session.id.clone());
         let preview_scroll = self.scroll_offset;
+        let auto_scroll_preview = self.auto_scroll_preview;
         let list_offset = self.list_state.offset();
 
         let hidden_test_count: usize = server_groups
@@ -768,7 +769,10 @@ impl SessionPicker {
             .unwrap_or(false);
         if still_selected {
             self.scroll_offset = preview_scroll;
-            self.auto_scroll_preview = false;
+            // A refresh can land before the initial transcript has loaded.
+            // Preserve the pending jump to its latest messages, not just the
+            // placeholder's zero offset.
+            self.auto_scroll_preview = auto_scroll_preview;
             *self.list_state.offset_mut() = list_offset;
         }
     }

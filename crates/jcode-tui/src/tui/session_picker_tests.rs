@@ -2070,6 +2070,14 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
         "auto-scroll should stay armed while the preview is still loading"
     );
 
+    // The initial session-list refresh can arrive while the transcript is
+    // loading. It must preserve the pending bottom scroll for this selection.
+    picker.reseed_grouped(Vec::new(), vec![session]);
+    assert!(
+        picker.auto_scroll_preview,
+        "refresh must preserve the pending jump to the transcript bottom"
+    );
+
     // The background load completes: deliver the real transcript exactly the way
     // `poll_preview_load` would (drop the channel + populate the preview).
     drop(tx);
