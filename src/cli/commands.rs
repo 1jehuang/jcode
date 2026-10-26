@@ -1540,6 +1540,46 @@ pub fn run_session_rename_command(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct SessionForkOutput {
+    session_id: String,
+    display_name: String,
+    parent_session_id: String,
+}
+
+/// Clone a saved session into a new, independent session and persist it.
+/// The source session is left untouched.
+pub fn fork_saved_session(session_ref: &str) -> Result<session::Session> {
+    let resolved_id = session::find_session_by_name_or_id(session_ref)?;
+    let parent = session::Session::load(&resolved_id)?;
+    let mut child = session::Session::fork_from(&parent);
+    child.save()?;
+    crate::tui::session_picker::invalidate_session_list_cache();
+    Ok(child)
+}
+
+pub fn run_session_fork_command(session_ref: &str, json: bool) -> Result<()> {
+    let child = fork_saved_session(session_ref)?;
+    let parent_id = child.parent_id.clone().unwrap_or_default();
+
+    let output = SessionForkOutput {
+        session_id: child.id.clone(),
+        display_name: child.display_name().to_string(),
+        parent_session_id: parent_id,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!(
+            "Forked session {} into {} ({}). Open it with: jcode --resume {}",
+            output.parent_session_id, output.display_name, output.session_id, output.session_id
+        );
+    }
+
+    Ok(())
+}
+
 async fn run_ambient_visible() -> Result<()> {
     use crate::ambient::VisibleCycleContext;
 

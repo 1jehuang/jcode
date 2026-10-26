@@ -79,6 +79,10 @@ pub(crate) struct Args {
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     pub(crate) resume: Option<String>,
 
+    /// Fork a saved session (clone its transcript into a new session) and open the fork
+    #[arg(long, global = true, conflicts_with = "resume")]
+    pub(crate) fork: Option<String>,
+
     /// Internal: launched as a freshly spawned window, so skip heavy local resume bootstrap.
     #[arg(long, global = true, hide = true)]
     pub(crate) fresh_spawn: bool,
@@ -987,6 +991,16 @@ pub(crate) enum SessionCommand {
         /// Clear the custom session name/title
         #[arg(long, conflicts_with = "name")]
         clear: bool,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Fork a saved session (clone its transcript into a new, independent session)
+    Fork {
+        /// Session ID or memorable short name, e.g. fox
+        session: String,
 
         /// Emit JSON instead of human-readable output
         #[arg(long)]

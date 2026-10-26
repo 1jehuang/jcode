@@ -1165,3 +1165,21 @@ fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
         );
     }
 }
+
+#[test]
+fn fork_cli_parses_global_flag_and_session_subcommand() {
+    let args = Args::try_parse_from(["jcode", "--fork", "fox", "-C", "/repo", "-m", "gpt-6-sol"]).unwrap();
+    assert_eq!(args.fork.as_deref(), Some("fox"));
+    assert!(args.resume.is_none());
+
+    assert!(Args::try_parse_from(["jcode", "--fork", "fox", "--resume", "otter"]).is_err());
+
+    let args = Args::try_parse_from(["jcode", "session", "fork", "fox", "--json"]).unwrap();
+    match args.command {
+        Some(Command::Session(SessionCommand::Fork { session, json })) => {
+            assert_eq!(session, "fox");
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
