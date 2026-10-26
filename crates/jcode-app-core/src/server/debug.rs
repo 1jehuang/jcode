@@ -297,7 +297,15 @@ pub(super) async fn handle_debug_client(
             }
         };
 
-        let _request_activity = match crate::runtime_activity::global().try_enter() {
+        // Transfer control acquires the exclusive idle gate itself. Keeping a
+        // shared request reservation here would make it reject its own request.
+        let transfer_control = matches!(&request, Request::DebugCommand { command, .. }
+            if command.trim().starts_with("group_transfer:") || command.trim().starts_with("server:group_transfer:"));
+        let _request_activity = match if transfer_control {
+            Ok(None)
+        } else {
+            crate::runtime_activity::global().try_enter().map(Some)
+        } {
             Ok(activity) => activity,
             Err(error) => {
                 writer
@@ -446,7 +454,22 @@ pub(super) async fn handle_debug_client(
                     }
                     _ => {
                         // Server commands (default)
-                        if let Some(output) = maybe_handle_job_command(cmd, &debug_jobs).await? {
+                        if let Some(output) = super::group_transfer::handle(
+                            cmd,
+                            &sessions,
+                            &super::SwarmState {
+                                members: Arc::clone(&swarm_members),
+                                swarms_by_id: Arc::clone(&swarms_by_id),
+                                plans: Arc::clone(&swarm_plans),
+                                coordinators: Arc::clone(&swarm_coordinators),
+                            },
+                        )
+                        .await?
+                        {
+                            Ok(output)
+                        } else if let Some(output) =
+                            maybe_handle_job_command(cmd, &debug_jobs).await?
+                        {
                             Ok(output)
                         } else if let Some(output) = maybe_handle_session_admin_command(
                             cmd,
