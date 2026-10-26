@@ -210,7 +210,9 @@ pub fn build_responses_input_with_logger(
     }
 
     let mut items = Vec::new();
-    let mut open_calls: HashSet<String> = HashSet::new();
+    // Insertion-ordered: the final flush below iterates open calls, and that
+    // order feeds the request prefix, so it must be deterministic across builds.
+    let mut open_calls: Vec<String> = Vec::new();
     let mut pending_outputs: HashMap<String, String> = HashMap::new();
     let mut used_outputs: HashSet<String> = HashSet::new();
     let mut skipped_results = 0usize;
@@ -288,13 +290,15 @@ pub fn build_responses_input_with_logger(
                             } else {
                                 content.clone()
                             };
-                            if open_calls.contains(tool_use_id.as_str()) {
+                            if let Some(open_pos) =
+                                open_calls.iter().position(|id| id == tool_use_id)
+                            {
                                 items.push(serde_json::json!({
                                     "type": "function_call_output",
                                     "call_id": sanitize_tool_id(tool_use_id),
                                     "output": output
                                 }));
-                                open_calls.remove(tool_use_id.as_str());
+                                open_calls.remove(open_pos);
                                 used_outputs.insert(tool_use_id.clone());
                             } else if pending_outputs.contains_key(tool_use_id.as_str()) {
                                 skipped_results += 1;
@@ -392,7 +396,9 @@ pub fn build_responses_input_with_logger(
                                     .map(|pos| *pos > idx)
                                     .unwrap_or(false);
                                 if has_future_output {
-                                    open_calls.insert(id.clone());
+                                    if !open_calls.contains(id) {
+                                        open_calls.push(id.clone());
+                                    }
                                 } else {
                                     injected_missing += 1;
                                     items.push(serde_json::json!({
