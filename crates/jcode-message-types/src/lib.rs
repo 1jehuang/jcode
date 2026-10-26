@@ -548,6 +548,34 @@ fn is_fresh_user_text_message(message: &Message) -> bool {
     saw_user_text
 }
 
+/// A user message that opens a turn in the transmitted history: text or a
+/// provider compaction block, and no tool results. Unlike
+/// [`is_fresh_user_text_message`] this also accepts internal
+/// `<system-reminder>` prompts (background-task wakes, mission reminders) and
+/// the native-compaction placeholder, because once the operator prompt has
+/// been compacted away those are the only stable items left to anchor on.
+fn is_user_turn_boundary_message(message: &Message) -> bool {
+    if message.role != Role::User {
+        return false;
+    }
+
+    let mut saw_content = false;
+    for block in &message.content {
+        match block {
+            ContentBlock::Text { text, .. } => {
+                if !text.trim().is_empty() {
+                    saw_content = true;
+                }
+            }
+            ContentBlock::OpenAICompaction { .. } => saw_content = true,
+            ContentBlock::Image { .. } => {}
+            _ => return false,
+        }
+    }
+
+    saw_content
+}
+
 fn dynamic_system_context_message(system_dynamic: &str) -> Option<Message> {
     let trimmed = system_dynamic.trim();
     if trimmed.is_empty() {
@@ -561,6 +589,22 @@ fn dynamic_system_context_message(system_dynamic: &str) -> Option<Message> {
 
 /// Insert dynamic system context after the latest fresh user prompt without
 /// disturbing the stable cached history prefix.
+///
+/// When no fresh user prompt is left in `messages`, fall back to the latest
+/// turn boundary (an internal `<system-reminder>` prompt or the native
+/// compaction block) instead of appending at the end. Appending is the one
+/// position that moves on every request: each tool round pushes the reminder
+/// one item further, so the previous request's trailing item is replaced and
+/// the provider's prefix cache misses on the whole tail. Measured 2026-10-26
+/// on a gpt-6-astra swarm session whose turns were all background-task wakes
+/// (`<system-reminder>` prompts): after OpenAI native compaction the tail was
+/// `[compaction, function_call, function_call_output, ...]` with no fresh
+/// prompt, and 86 of 1639 requests logged `prefix_matches=false` with
+/// `common_prefix_items == previous_item_count - 1` and the same trailing
+/// item hash (the reminder). Those 86 requests cost 7.66M uncached input
+/// tokens (89k each) against 3.3k per request when the prefix extended, 40%
+/// of the session's uncached input. Anchoring after the compaction block
+/// keeps every later tool round an append.
 pub fn messages_with_dynamic_system_context(
     messages: &[Message],
     system_dynamic: &str,
@@ -573,6 +617,7 @@ pub fn messages_with_dynamic_system_context(
     let insert_at = out
         .iter()
         .rposition(is_fresh_user_text_message)
+        .or_else(|| out.iter().rposition(is_user_turn_boundary_message))
         .map(|idx| idx + 1)
         .unwrap_or(out.len());
     out.insert(insert_at, dynamic_message);
@@ -949,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_context_appends_when_no_fresh_user_prompt_exists() {
+    fn dynamic_context_follows_internal_reminder_when_no_fresh_user_prompt_exists() {
         let messages = vec![
             Message::assistant_text("assistant"),
             Message::user("<system-reminder>\ninternal\n</system-reminder>"),
@@ -965,6 +1010,109 @@ mod tests {
             "<system-reminder>\ninternal\n</system-reminder>",
         );
         assert!(text_of(&out[2]).contains("Time: 10:00:00 UTC"));
+    }
+
+    fn tool_call(id: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "true"}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }
+    }
+
+    fn compaction_block() -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::OpenAICompaction {
+                encrypted_content: "opaque".to_string(),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }
+    }
+
+    /// The production shape behind the 2026-10-26 measurement: a
+    /// background-task wake (`<system-reminder>` prompt, not a fresh user
+    /// text) followed by tool rounds, with the operator prompt already folded
+    /// into the compaction block. Every request in the turn must transmit the
+    /// previous request's items as an unchanged prefix.
+    #[test]
+    fn dynamic_context_keeps_tool_rounds_append_only_after_compaction() {
+        let wake =
+            Message::user("<system-reminder>\nA background task finished.\n</system-reminder>");
+        let mut history = vec![compaction_block(), wake];
+        let mut previous: Option<Vec<u64>> = None;
+
+        for round in 0..4 {
+            let out = messages_with_dynamic_system_context(&history, "Time: 10:00:00 UTC");
+            let hashes = cache_relevant_message_hashes(&out);
+
+            assert!(
+                text_of(&out[2]).contains("Time: 10:00:00 UTC"),
+                "round {round}: dynamic context must sit right after the turn boundary, got {:?}",
+                out.iter().map(|m| m.content.len()).collect::<Vec<_>>()
+            );
+            if let Some(previous) = &previous {
+                assert_eq!(
+                    &hashes[..previous.len()],
+                    &previous[..],
+                    "round {round}: previous request is no longer a prefix of this one"
+                );
+            }
+            previous = Some(hashes);
+
+            let id = format!("call_{round}");
+            history.push(tool_call(&id));
+            history.push(Message::tool_result(&id, "ok", false));
+        }
+    }
+
+    /// Same tail with no reminder prompt at all (compaction happened mid-turn
+    /// and the tail is tool rounds only): anchor on the compaction block.
+    #[test]
+    fn dynamic_context_anchors_on_compaction_block_when_tail_is_tool_rounds() {
+        let history = vec![
+            compaction_block(),
+            tool_call("call_0"),
+            Message::tool_result("call_0", "ok", false),
+            tool_call("call_1"),
+            Message::tool_result("call_1", "ok", false),
+        ];
+
+        let out = messages_with_dynamic_system_context(&history, "Time: 10:00:00 UTC");
+
+        assert_eq!(out.len(), 6);
+        assert!(matches!(
+            out[0].content[0],
+            ContentBlock::OpenAICompaction { .. }
+        ));
+        assert!(text_of(&out[1]).contains("Time: 10:00:00 UTC"));
+        assert_eq!(out[5].role, Role::User);
+        assert!(matches!(
+            out[5].content[0],
+            ContentBlock::ToolResult { ref tool_use_id, .. } if tool_use_id == "call_1"
+        ));
+    }
+
+    /// With no turn boundary at all the only option left is appending.
+    #[test]
+    fn dynamic_context_appends_when_no_turn_boundary_exists() {
+        let history = vec![
+            Message::assistant_text("assistant"),
+            tool_call("call_0"),
+            Message::tool_result("call_0", "ok", false),
+        ];
+
+        let out = messages_with_dynamic_system_context(&history, "Time: 10:00:00 UTC");
+
+        assert_eq!(out.len(), 4);
+        assert!(text_of(&out[3]).contains("Time: 10:00:00 UTC"));
     }
 
     #[test]
