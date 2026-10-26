@@ -242,6 +242,7 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 external_blocker: None,
+                requires_user_action: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
@@ -299,6 +300,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
                 external_blocker: None,
+                requires_user_action: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(50)],
                 ..Default::default()
@@ -364,6 +366,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 external_blocker: None,
+                requires_user_action: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(100)],
                 ..Default::default()
@@ -418,6 +421,7 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
                 confidence: Some(crate::todo::ConfidenceState::Verified),
                 completion_confidence: Some(crate::todo::ConfidenceState::Verified),
                 external_blocker: None,
+                requires_user_action: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![crate::todo::ConfidenceState::Verified],
                 ..Default::default()
@@ -460,6 +464,7 @@ fn save_unfinished_ownership_fixture(session_id: &str) {
             confidence: Some(crate::todo::ConfidenceState::Verified),
             completion_confidence: Some(crate::todo::ConfidenceState::Verified),
             external_blocker: None,
+            requires_user_action: None,
             waiting_on: Vec::new(),
             confidence_history: vec![crate::todo::ConfidenceState::Verified],
             ..Default::default()
@@ -893,6 +898,7 @@ fn test_gate_digest_is_disabled_at_turn_end() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 external_blocker: None,
+                requires_user_action: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::from_legacy_score(97),

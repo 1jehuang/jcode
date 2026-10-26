@@ -110,6 +110,7 @@ fn dependency_todo(id: &str, task_id: &str) -> crate::todo::TodoItem {
         status: "pending".into(),
         priority: "high".into(),
         external_blocker: None,
+        requires_user_action: None,
         waiting_on: vec![task_id.into()],
         ..Default::default()
     }

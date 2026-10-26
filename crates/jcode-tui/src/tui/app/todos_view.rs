@@ -648,11 +648,26 @@ fn format_todo_compact_markdown(todo: &TodoItem) -> String {
         .filter(|group| !group.is_empty())
         .map(|group| format!(" _({group})_"))
         .unwrap_or_default();
+    let action = if crate::todo::todo_requires_user_action(todo) {
+        let action = todo
+            .requires_user_action
+            .as_ref()
+            .expect("validated user action");
+        format!(
+            "\n  ✋ **Absolutely requires user action**: {}\n\n  {}\n",
+            action.action, action.reason
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "- {} {}{}\n",
-        status_badge(&todo.status, !todo.blocked_by.is_empty()),
-        todo.content,
-        group
+        "- {} {}{group}{action}\n",
+        if crate::todo::todo_requires_user_action(todo) {
+            "✋"
+        } else {
+            status_badge(&todo.status, !todo.blocked_by.is_empty())
+        },
+        todo.content
     )
 }
 
@@ -668,7 +683,7 @@ fn sorted_todos_for_status<'a>(todos: &'a [TodoItem], status: &str) -> Vec<&'a T
 }
 
 fn status_badge(status: &str, blocked: bool) -> &'static str {
-    if blocked && status != "completed" {
+    if blocked && !matches!(status, "completed" | "cancelled") {
         return "[blocked]";
     }
     match status {
@@ -704,6 +719,10 @@ fn hash_todos_payload(
         todo.confidence.hash(&mut hasher);
         todo.completion_confidence.hash(&mut hasher);
         todo.blocked_by.hash(&mut hasher);
+        if let Some(action) = &todo.requires_user_action {
+            action.action.hash(&mut hasher);
+            action.reason.hash(&mut hasher);
+        }
         todo.assigned_to.hash(&mut hasher);
         todo.stage.hash(&mut hasher);
     }
@@ -802,11 +821,39 @@ mod tests {
                 .map(crate::todo::ConfidenceState::from_legacy_score),
             confidence_history: Vec::new(),
             external_blocker: None,
+            requires_user_action: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
             stage: None,
             details: None,
+        }
+    }
+
+    #[test]
+    fn user_action_panel_preserves_action_reason_and_invalidates_cache() {
+        let mut item = todo("1", "Connect", "pending", "high", None, None);
+        let before = hash_todos_payload(None, &[item.clone()], &plan(), &[]);
+        item.requires_user_action = Some(crate::todo::TodoUserAction {
+            action: "Approve access".into(),
+            reason: "Only the account owner can grant access.\nKeep this entire explanation."
+                .into(),
+        });
+        let after = hash_todos_payload(None, &[item.clone()], &plan(), &[]);
+        assert_ne!(before, after);
+        let markdown = format_todo_compact_markdown(&item);
+        assert!(markdown.contains("✋"));
+        assert!(markdown.contains("Absolutely requires user action"));
+        assert!(markdown.contains("Approve access"));
+        assert!(markdown.contains("Keep this entire explanation."));
+        item.requires_user_action.as_mut().unwrap().reason.push('!');
+        assert_ne!(
+            after,
+            hash_todos_payload(None, &[item.clone()], &plan(), &[])
+        );
+        for status in ["completed", "cancelled"] {
+            item.status = status.into();
+            assert!(!format_todo_compact_markdown(&item).contains("✋"));
         }
     }
 

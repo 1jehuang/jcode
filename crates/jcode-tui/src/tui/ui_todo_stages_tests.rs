@@ -2,6 +2,77 @@ use super::*;
 use crate::todo::TodoItem;
 
 #[test]
+fn user_action_overrides_live_workers_and_has_two_cell_phase_and_lane_pips() {
+    let mut item = assigned(
+        todo("action", "Authorize 界", "in_progress", Some(1)),
+        "fox",
+    );
+    item.group = Some("Setup".into());
+    item.blocked_by = vec!["dependency".into()];
+    item.requires_user_action = Some(crate::todo::TodoUserAction {
+        action: "Approve access ✋".into(),
+        reason: "Only the account owner can approve access".into(),
+    });
+    let mut worker = agent("fox", "running", Some("Working"), Some(1));
+    worker.todo_statuses = vec!["in_progress".into(), "pending".into()];
+    let workers = [worker];
+    assert_eq!(pip_span(&item).content, "✋");
+    assert_eq!(pip_span(&item).width(), 2);
+    let statuses = lane_item_statuses(&[&item], &workers);
+    assert_eq!(statuses, vec![("requires_user_action", false)]);
+    let strip = lane_strip_spans(&statuses, 2);
+    assert_eq!(strip[0].content, "✋");
+    assert_eq!(width_of(&strip), 4);
+    let label = Line::from(blocked_phase_spans(&[&item], &workers)).to_string();
+    assert!(label.contains("phase 1: Absolutely requires user action"));
+    let note = Line::from(lane_note_spans(&[&item], &workers)).to_string();
+    assert!(note.contains("Absolutely requires user action: Approve access ✋"));
+    for width in 0..120 {
+        let mut pips = Vec::new();
+        push_stage_pips(&mut pips, &[&item], width);
+        assert!(width_of(&pips) <= width);
+        for row in render(&[item.clone()], &workers, width as u16) {
+            assert!(row.width() <= width, "{width}: {row:?}");
+            assert!(!row.contains(LIVE_DOT_SENTINEL));
+        }
+    }
+    item.requires_user_action = None;
+    assert_eq!(todo_pip_status(&item), "blocked");
+    item.blocked_by.clear();
+    assert_eq!(lane_item_statuses(&[&item], &workers).len(), 2);
+}
+
+#[test]
+fn user_action_requires_both_fields_and_never_marks_terminal_todos() {
+    let mut item = todo("1", "Activation", "pending", Some(1));
+    for (action, reason, marked) in [
+        ("Approve", "Owner only", true),
+        (" ", "Owner only", false),
+        ("Approve", "\n", false),
+    ] {
+        item.requires_user_action = Some(crate::todo::TodoUserAction {
+            action: action.into(),
+            reason: reason.into(),
+        });
+        assert_eq!(pip_span(&item).content == "✋", marked);
+    }
+    item.requires_user_action = Some(crate::todo::TodoUserAction {
+        action: "Approve".into(),
+        reason: "Owner only".into(),
+    });
+    for status in ["completed", "cancelled"] {
+        item.status = status.into();
+        assert_ne!(pip_span(&item).content, "✋");
+        assert!(blocked_phase_spans(&[&item], &[]).is_empty());
+        assert!(
+            !Line::from(lane_note_spans(&[&item], &[]))
+                .to_string()
+                .contains("Absolutely requires")
+        );
+    }
+}
+
+#[test]
 fn blocked_todos_have_distinct_phase_and_lane_pips() {
     for external in [false, true] {
         let mut item = todo("1", "Activation", "pending", Some(2));
@@ -14,13 +85,13 @@ fn blocked_todos_have_distinct_phase_and_lane_pips() {
         } else {
             item.blocked_by = vec!["dependency".into()];
         }
-        assert_eq!(pip_span(&item).content, "⊳");
+        assert_eq!(pip_span(&item).content, "⊘");
         let statuses = lane_item_statuses(&[&item], &[]);
         assert_eq!(statuses, vec![("blocked", false)]);
-        assert_eq!(lane_strip_spans(&statuses, 1)[0].content, "⊳");
+        assert_eq!(lane_strip_spans(&statuses, 1)[0].content, "⊘");
         let mut header = Vec::new();
         push_stage_pips(&mut header, &[&item], 80);
-        assert!(Line::from(header).to_string().contains('⊳'));
+        assert!(Line::from(header).to_string().contains('⊘'));
         for width in 1..80 {
             for row in render(&[item.clone()], &[], width) {
                 assert!(row.width() <= usize::from(width), "{width}: {row:?}");
@@ -28,7 +99,7 @@ fn blocked_todos_have_distinct_phase_and_lane_pips() {
         }
         for status in ["completed", "cancelled"] {
             item.status = status.into();
-            assert_ne!(pip_span(&item).content, "⊳");
+            assert_ne!(pip_span(&item).content, "⊘");
             assert_ne!(lane_item_statuses(&[&item], &[])[0].0, "blocked");
         }
     }
@@ -47,7 +118,7 @@ fn blocked_marker_overrides_live_worker_and_clears_when_review_is_due() {
     let statuses = lane_item_statuses(&[&item], &workers);
     assert_eq!(statuses, vec![("blocked", false)]);
     let strip = lane_strip_spans(&statuses, 2);
-    assert_eq!(strip[0].content, "⊳");
+    assert_eq!(strip[0].content, "⊘");
     assert_eq!(strip[0].style.fg, Some(rgb(225, 165, 90)));
     assert!(!Line::from(strip).to_string().contains(LIVE_DOT_SENTINEL));
 
@@ -55,7 +126,7 @@ fn blocked_marker_overrides_live_worker_and_clears_when_review_is_due() {
         chrono::Utc::now() - chrono::Duration::seconds(1);
     assert_eq!(todo_pip_status(&item), "in_progress");
     assert_eq!(lane_item_statuses(&[&item], &workers).len(), 2);
-    assert_ne!(pip_span(&item).content, "⊳");
+    assert_ne!(pip_span(&item).content, "⊘");
 }
 
 #[test]

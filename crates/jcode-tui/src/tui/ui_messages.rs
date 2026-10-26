@@ -1613,6 +1613,24 @@ fn render_todos_message_with_cap(
         }
     }
 
+    for todo in todos
+        .iter()
+        .filter(|todo| crate::todo::todo_requires_user_action(todo))
+    {
+        for chunk in wrap_todo_detail(
+            &format!("✋ {}: {}", todo.content, todo_user_action_detail(todo)),
+            inner_width.max(1),
+        ) {
+            lines.push(todo_card_line(
+                vec![Span::styled(
+                    chunk,
+                    Style::default().fg(todo_warning_color()),
+                )],
+                base_indent,
+                inner_width,
+            ));
+        }
+    }
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
@@ -1807,16 +1825,32 @@ fn push_todo_status_pips<'a>(
     todos: impl IntoIterator<Item = &'a crate::todo::TodoItem>,
     max_pips: usize,
 ) {
-    let (completed, in_progress, total) =
-        todos
-            .into_iter()
-            .fold((0usize, 0usize, 0usize), |counts, todo| {
-                (
-                    counts.0 + usize::from(todo.status == "completed"),
-                    counts.1 + usize::from(todo.status == "in_progress"),
-                    counts.2 + 1,
-                )
-            });
+    let todos: Vec<_> = todos.into_iter().collect();
+    let mut max_pips = max_pips;
+    // The two-cell hand takes priority over ordinary progress at narrow widths.
+    for _ in todos
+        .iter()
+        .filter(|todo| crate::todo::todo_requires_user_action(todo))
+    {
+        if max_pips < 2 {
+            break;
+        }
+        spans.push(Span::styled(
+            "✋",
+            Style::default().fg(todo_warning_color()),
+        ));
+        max_pips -= 2;
+    }
+    let (completed, in_progress, total) = todos
+        .into_iter()
+        .filter(|todo| !crate::todo::todo_requires_user_action(todo))
+        .fold((0usize, 0usize, 0usize), |counts, todo| {
+            (
+                counts.0 + usize::from(todo.status == "completed"),
+                counts.1 + usize::from(todo.status == "in_progress"),
+                counts.2 + 1,
+            )
+        });
     if total == 0 || max_pips == 0 {
         return;
     }
@@ -2445,7 +2479,7 @@ fn render_todo_item_line_with_background(
     inner_width: usize,
 ) -> Line<'static> {
     let dependencies = todo_running_dependencies(todo, tasks);
-    if dependencies.is_empty() {
+    if dependencies.is_empty() || crate::todo::todo_requires_user_action(todo) {
         return render_todo_item_line(todo, agents, base_indent, inner_width);
     }
     let mut spans = todo_card_item_spans(todo, false);
@@ -2530,9 +2564,13 @@ fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> 
 /// (optionally) the confidence suffix. Callers own indent and truncation.
 fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> Vec<Span<'static>> {
     let external_blocked = crate::todo::todo_has_external_blocker(todo);
-    let blocked = external_blocked || (!todo.blocked_by.is_empty() && todo.status != "completed");
-    let (glyph, glyph_color) = if blocked {
-        ("⊳", rgb(225, 165, 90))
+    let blocked =
+        crate::todo::is_incomplete_todo(todo) && (external_blocked || !todo.blocked_by.is_empty());
+    let requires_action = crate::todo::todo_requires_user_action(todo);
+    let (glyph, glyph_color) = if requires_action {
+        ("✋", rgb(225, 165, 90))
+    } else if blocked {
+        ("⊘", rgb(225, 165, 90))
     } else {
         match todo.status.as_str() {
             "completed" => ("✓", rgb(105, 190, 125)),
@@ -2552,6 +2590,12 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
         Span::styled(format!("{} ", glyph), Style::default().fg(glyph_color)),
         Span::styled(todo.content.clone(), Style::default().fg(text_color)),
     ];
+    if requires_action {
+        spans.push(Span::styled(
+            format!(" · {}", todo_user_action_detail(todo)),
+            Style::default().fg(todo_warning_color()),
+        ));
+    }
     if crate::todo::is_incomplete_todo(todo)
         && let Some(blocker) = &todo.external_blocker
     {
@@ -2576,6 +2620,23 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
         ));
     }
     spans
+}
+
+/// Single-line chrome is normalized before width fitting. Full reasons are
+/// rendered as wrapped detail text in the card, not squeezed into its gutter.
+pub(super) fn todo_user_action_detail(todo: &crate::todo::TodoItem) -> String {
+    todo.requires_user_action
+        .as_ref()
+        .map(|action| {
+            format!(
+                "Absolutely requires user action: {} · {}",
+                action.action, action.reason
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+        })
+        .unwrap_or_default()
 }
 
 fn compact_run_id(run_id: &str) -> String {

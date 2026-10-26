@@ -1268,6 +1268,60 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
 }
 
 #[test]
+fn user_action_row_precedes_background_clock_and_preserves_reason() {
+    let mut todo = crate::todo::TodoItem {
+        id: "user".into(),
+        content: "Connect account".into(),
+        status: "in_progress".into(),
+        waiting_on: vec!["build".into()],
+        requires_user_action: Some(crate::todo::TodoUserAction {
+            action: "Approve 界 access".into(),
+            reason: "Only you can authorize\nthis account ✋".into(),
+        }),
+        ..Default::default()
+    };
+    let tasks = [TodoCardBackgroundTask {
+        task_id: "build".into(),
+        label: "Build".into(),
+        percent: Some(50.0),
+    }];
+    let wide = render_todo_item_line_with_background(&todo, &[], &tasks, "", 240).to_string();
+    assert!(wide.contains("✋"));
+    assert!(wide.contains("Absolutely requires user action: Approve 界 access"));
+    assert!(wide.contains("Only you can authorize this account ✋"));
+    assert!(!wide.contains('◷'));
+    assert!(!wide.contains('\n'));
+    for width in 0..140 {
+        let row = render_todo_item_line_with_background(&todo, &[], &tasks, "", width);
+        assert!(row.width() <= width, "{width}: {row:?}");
+    }
+    todo.requires_user_action = None;
+    assert!(
+        render_todo_item_line_with_background(&todo, &[], &tasks, "", 240)
+            .to_string()
+            .contains('◷')
+    );
+    todo.waiting_on.clear();
+    assert!(
+        !render_todo_card_item_line(&todo, "", 240)
+            .to_string()
+            .contains("Absolutely requires")
+    );
+    for status in ["completed", "cancelled"] {
+        todo.status = status.into();
+        todo.requires_user_action = Some(crate::todo::TodoUserAction {
+            action: "Approve".into(),
+            reason: "Only you".into(),
+        });
+        assert!(
+            !render_todo_card_item_line(&todo, "", 240)
+                .to_string()
+                .contains("✋")
+        );
+    }
+}
+
+#[test]
 fn external_blocker_todo_row_shows_reason_deadline_and_never_wraps() {
     let mut todo = crate::todo::TodoItem {
         content: "Acceptance".into(),
@@ -1383,6 +1437,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
                 .then_some(crate::todo::ConfidenceState::from_legacy_score(95)),
             confidence_history: Vec::new(),
             external_blocker: None,
+            requires_user_action: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
@@ -1465,6 +1520,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         external_blocker: None,
+        requires_user_action: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(80),
@@ -1526,6 +1582,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        requires_user_action: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1611,6 +1668,7 @@ fn render_todos_message_uses_readable_semantic_colors() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        requires_user_action: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1799,6 +1857,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         completion_confidence: Some(crate::todo::ConfidenceState::Validated),
         confidence_history: Vec::new(),
         external_blocker: None,
+        requires_user_action: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1853,6 +1912,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        requires_user_action: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1896,6 +1956,7 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        requires_user_action: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1966,6 +2027,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(92)),
         completion_confidence: None,
         external_blocker: None,
+        requires_user_action: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(85),
