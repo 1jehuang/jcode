@@ -2093,6 +2093,22 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
         picker.scroll_offset
     );
 
+    assert!(picker.preview_max_scroll > 0);
+    assert_eq!(
+        picker.scroll_offset, picker.preview_max_scroll,
+        "loaded transcript must open at the exact bottom"
+    );
+    assert!(!picker.auto_scroll_preview);
+
+    // Subsequent refreshes must not pull a user who scrolled back to the bottom.
+    assert!(picker.scroll_preview_up(3));
+    let user_offset = picker.scroll_offset;
+    let loaded_session = picker.selected_session().unwrap().clone();
+    picker.reseed_grouped(Vec::new(), vec![loaded_session]);
+    let _ = render(&mut picker);
+    assert_eq!(picker.scroll_offset, user_offset);
+    assert!(!picker.auto_scroll_preview);
+
     let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
     let header_row: String = (preview_inner_x..w.saturating_sub(1))
         .map(|x| buffer[(x, 1)].symbol())
