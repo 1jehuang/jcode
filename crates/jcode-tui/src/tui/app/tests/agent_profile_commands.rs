@@ -91,10 +91,21 @@ fn prepared_agent_profile_input_uses_runtime_not_a_prompt() {
 }
 
 fn profile_reply(id: u64, current: Option<&str>, names: &[&str]) -> crate::protocol::ServerEvent {
+    profile_reply_with_sources(id, current, names, vec![
+        serde_json::json!({"id":"file:/workspace/AGENTS.md", "kind":"agents_md", "label":"Project AGENTS.md", "path":"/workspace/AGENTS.md", "available":true, "included":false}),
+        serde_json::json!({"id":"file:/home/test/AGENTS.md", "kind":"agents_md", "label":"Home AGENTS.md", "path":"/home/test/AGENTS.md", "available":true, "included":false}),
+    ])
+}
+
+fn profile_reply_with_sources(id: u64, current: Option<&str>, names: &[&str], sources: Vec<serde_json::Value>) -> crate::protocol::ServerEvent {
+    let included: Vec<_> = sources.iter().filter(|source| source["included"] == true)
+        .map(|source| source["id"].clone()).collect();
     crate::protocol::ServerEvent::RuntimeCommandResult {
         id,
         command: "agent".into(),
-        data: serde_json::json!({"current": current, "available": names, "changed": false}),
+        data: serde_json::json!({"current": current, "available": names, "changed": false,
+            "included_sources":included, "instruction_sources":sources,
+            "instruction_source_notice":"Provider-native instructions may still apply outside Jcode control."}),
         message: "Profiles listed".into(),
     }
 }
@@ -121,10 +132,14 @@ async fn read_profile_wire(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) 
 }
 
 fn render_profiles(app: &App) -> String {
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    render_profiles_at(app, 120, 40)
+}
+
+fn render_profiles_at(app: &App, width: u16, height: u16) -> String {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| crate::tui::ui::draw(frame, app as &dyn crate::tui::TuiState)).unwrap();
     let buffer = terminal.backend().buffer();
-    (0..40).map(|y| (0..120).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
 }
 
 #[test]
@@ -154,7 +169,18 @@ fn agents_profiles_render_none_and_apply_only_explicit_runtime_choice() {
         assert!(rendered.contains("research"), "{rendered}");
         app.handle_remote_key(KeyCode::Down, KeyModifiers::empty(), &mut remote).await.unwrap();
         app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
-        assert_eq!(read_profile_wire(&mut reader).await["args"], serde_json::json!(["research"]));
+        assert!(app.agent_profile_request_ids.is_empty(), "choosing a profile only opens a draft");
+        assert!(app.showing_agent_profile_sources());
+        let rendered = render_profiles(&app);
+        for text in ["Instruction sources: research", "Profile alone by default", "Jcode-loaded Markdown", "Base instructions, tool protocol", "Provider-native", "[ ] Project AGENTS.md", "[ ] Home AGENTS.md", "Apply", "Cancel"] {
+            assert!(rendered.contains(text), "missing {text}: {rendered}");
+        }
+        assert_eq!(app.inline_interactive_state.as_ref().unwrap().selected_entry().unwrap().name, "Apply");
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
+        let request = read_profile_wire(&mut reader).await;
+        assert_eq!(request["args"], serde_json::json!(["--select", "research", "[]"]));
+        assert!(app.showing_agent_profile_sources(), "wait for authoritative success");
+        app.handle_server_event(profile_reply(request["id"].as_u64().unwrap(), Some("research"), &["research"]), &mut remote);
         assert!(app.inline_interactive_state.is_none());
         assert!(!app.pending_turn);
         assert!(!app.is_processing);
@@ -184,9 +210,12 @@ fn agents_profiles_saved_current_is_session_only_and_none_sends_off_while_busy()
         app.handle_remote_key(KeyCode::Char('g'), KeyModifiers::CONTROL, &mut remote).await.unwrap();
         assert!(app.agent_models_global_scope);
         assert!(app.showing_agent_profiles());
-        // Selecting current does not implicitly reload a deleted snapshot.
+        // Selecting current edits its sources without implicitly reloading a deleted snapshot.
         app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
         assert!(app.agent_profile_request_ids.is_empty());
+        assert!(app.showing_agent_profile_sources());
+        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote).await.unwrap();
+        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote).await.unwrap();
         assert!(app.inline_interactive_state.is_none());
 
         let id = open_profiles_from_agents(&mut app, &mut remote).await;
@@ -279,5 +308,223 @@ fn agents_profiles_old_server_error_stays_visible_without_ending_turn() {
         assert!(app.is_processing);
         assert_eq!(app.current_message_id, Some(999));
         assert!(!app.pending_turn);
+    });
+}
+
+async fn profile_key(app: &mut App, remote: &mut crate::tui::backend::RemoteConnection, code: KeyCode) {
+    app.handle_remote_key(code, KeyModifiers::empty(), remote).await.unwrap();
+}
+
+async fn assert_no_profile_wire(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) {
+    use tokio::io::AsyncBufReadExt;
+    let mut line = String::new();
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(25), reader.read_line(&mut line)).await.is_err(), "unexpected wire request: {line}");
+}
+
+#[test]
+fn agent_profile_sources_cancel_current_saved_options_and_switch_defaults_are_drafts() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = create_test_app();
+    rt.block_on(async {
+        app.onboarding_flow = None;
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let mut reader = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+        let id = open_profiles_from_agents(&mut app, &mut remote).await;
+        read_profile_wire(&mut reader).await;
+        app.handle_server_event(profile_reply_with_sources(id, Some("research"), &["research", "reviewer"], vec![
+            serde_json::json!({"id":"file:/workspace/AGENTS.md", "kind":"agents_md", "label":"Project AGENTS.md", "path":"/workspace/AGENTS.md", "available":true, "included":true}),
+        ]), &mut remote);
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        assert!(render_profiles(&app).contains("[x] Project AGENTS.md"));
+        profile_key(&mut app, &mut remote, KeyCode::Home).await;
+        profile_key(&mut app, &mut remote, KeyCode::Char(' ')).await;
+        assert!(render_profiles(&app).contains("[ ] Project AGENTS.md"));
+        profile_key(&mut app, &mut remote, KeyCode::Esc).await;
+        assert!(app.showing_agent_profiles());
+        assert_eq!(app.inline_interactive_state.as_ref().unwrap().selected_entry().unwrap().name, "research");
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        assert!(render_profiles(&app).contains("[x] Project AGENTS.md"), "cancel must discard edits");
+        profile_key(&mut app, &mut remote, KeyCode::End).await;
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        assert!(app.showing_agent_profiles(), "Cancel returns to the unchanged list");
+        profile_key(&mut app, &mut remote, KeyCode::Down).await;
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        let rendered = render_profiles(&app);
+        assert!(rendered.contains("Instruction sources: reviewer"), "{rendered}");
+        assert!(rendered.contains("[ ] Project AGENTS.md"));
+        assert!(!rendered.contains("[x] Project AGENTS.md"));
+        assert!(app.agent_profile_request_ids.is_empty());
+        assert!(app.session.agent_profile.is_none());
+        assert_no_profile_wire(&mut reader).await;
+    });
+}
+
+#[test]
+fn agent_profile_sources_apply_error_retry_and_session_stale_reply_preserve_state() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = create_test_app();
+    rt.block_on(async {
+        app.onboarding_flow = None;
+        app.is_remote = true;
+        app.is_processing = true;
+        app.current_message_id = Some(999);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let mut reader = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+        let id = open_profiles_from_agents(&mut app, &mut remote).await;
+        read_profile_wire(&mut reader).await;
+        app.handle_server_event(profile_reply(id, None, &["research"]), &mut remote);
+        profile_key(&mut app, &mut remote, KeyCode::Down).await;
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        profile_key(&mut app, &mut remote, KeyCode::Home).await;
+        profile_key(&mut app, &mut remote, KeyCode::Char(' ')).await;
+        profile_key(&mut app, &mut remote, KeyCode::End).await;
+        profile_key(&mut app, &mut remote, KeyCode::Up).await;
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        let first = read_profile_wire(&mut reader).await;
+        assert_eq!(first["args"], serde_json::json!(["--select", "research", "[\"file:/workspace/AGENTS.md\"]"]));
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        assert_no_profile_wire(&mut reader).await;
+        let first_id = first["id"].as_u64().unwrap();
+        app.handle_server_event(crate::protocol::ServerEvent::Error {
+            id: first_id, message: "Session is busy; try again".into(), retry_after_secs: None, server_resumes: false,
+        }, &mut remote);
+        let rendered = render_profiles(&app);
+        assert!(rendered.contains("Session is busy; try again"), "{rendered}");
+        assert!(rendered.contains("[x] Project AGENTS.md"));
+        assert!(app.is_processing);
+        assert_eq!(app.current_message_id, Some(999));
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        let second = read_profile_wire(&mut reader).await;
+        let second_id = second["id"].as_u64().unwrap();
+        assert_eq!(second["args"], first["args"]);
+        app.handle_server_event(profile_reply(first_id, Some("old"), &["old"]), &mut remote);
+        assert!(app.showing_agent_profile_sources(), "a stale success cannot close a newer Apply");
+        app.handle_server_event(crate::protocol::ServerEvent::SessionId { session_id: "other-session".into() }, &mut remote);
+        assert!(app.inline_interactive_state.is_none());
+        let next = open_profiles_from_agents(&mut app, &mut remote).await;
+        read_profile_wire(&mut reader).await;
+        app.handle_server_event(profile_reply(next, None, &["reviewer"]), &mut remote);
+        profile_key(&mut app, &mut remote, KeyCode::Down).await;
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        app.handle_server_event(profile_reply(second_id, Some("research"), &["research"]), &mut remote);
+        let rendered = render_profiles(&app);
+        assert!(rendered.contains("Instruction sources: reviewer"), "{rendered}");
+        assert!(app.showing_agent_profile_sources());
+        assert!(app.agent_profile_request_ids.is_empty());
+        assert!(app.is_processing);
+        assert_eq!(app.current_message_id, Some(999));
+        assert!(app.session.agent_profile.is_none());
+        profile_key(&mut app, &mut remote, KeyCode::Esc).await;
+        assert_no_profile_wire(&mut reader).await;
+    });
+}
+
+#[test]
+fn agent_profile_sources_current_apply_preserves_snapshot_and_rejects_stale_profile() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = create_test_app();
+    rt.block_on(async {
+        app.onboarding_flow = None;
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let mut reader = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+        let id = open_profiles_from_agents(&mut app, &mut remote).await;
+        read_profile_wire(&mut reader).await;
+        app.handle_server_event(profile_reply_with_sources(id, Some("deleted-profile"), &[], vec![
+            serde_json::json!({"id":"file:/gone/AGENTS.md", "kind":"agents_md", "label":"Saved AGENTS.md", "path":"/gone/AGENTS.md", "available":false, "included":true}),
+            serde_json::json!({"id":"file:/missing/overlay.md", "kind":"prompt_overlay", "label":"Missing overlay", "path":"/missing/overlay.md", "available":false, "included":false}),
+        ]), &mut remote);
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        let rendered = render_profiles(&app);
+        assert!(rendered.contains("[x] Saved AGENTS.md"));
+        assert!(rendered.contains("saved snapshot, file unavailable"));
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        let request = read_profile_wire(&mut reader).await;
+        assert_eq!(request["args"], serde_json::json!(["--sources", "deleted-profile", "[\"file:/gone/AGENTS.md\"]"]));
+        app.handle_server_event(crate::protocol::ServerEvent::Error {
+            id: request["id"].as_u64().unwrap(), message: "Current profile changed; reopen /agents before editing sources".into(), retry_after_secs: None, server_resumes: false,
+        }, &mut remote);
+        let rendered = render_profiles(&app);
+        assert!(rendered.contains("Current profile changed"), "{rendered}");
+        assert!(rendered.contains("[x] Saved AGENTS.md"), "stale-profile rejection keeps the draft");
+        assert!(app.session.agent_profile.is_none(), "no optimistic mutation of the other client's profile");
+        profile_key(&mut app, &mut remote, KeyCode::Home).await;
+        profile_key(&mut app, &mut remote, KeyCode::Char(' ')).await;
+        profile_key(&mut app, &mut remote, KeyCode::Down).await;
+        profile_key(&mut app, &mut remote, KeyCode::Char(' ')).await;
+        assert!(render_profiles(&app).contains("[ ] Missing overlay"), "unavailable extras cannot be enabled");
+        profile_key(&mut app, &mut remote, KeyCode::End).await;
+        profile_key(&mut app, &mut remote, KeyCode::Up).await;
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        assert_eq!(read_profile_wire(&mut reader).await["args"], serde_json::json!(["--sources", "deleted-profile", "[]"]));
+    });
+}
+
+#[test]
+fn agent_profile_sources_old_additive_daemon_metadata_fails_closed() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = create_test_app();
+    rt.block_on(async {
+        app.onboarding_flow = None;
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let mut reader = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+        let id = open_profiles_from_agents(&mut app, &mut remote).await;
+        read_profile_wire(&mut reader).await;
+        app.handle_server_event(crate::protocol::ServerEvent::RuntimeCommandResult {
+            id, command: "agent".into(), data: serde_json::json!({"current":null,"available":["research"]}), message:"legacy list".into(),
+        }, &mut remote);
+        let rendered = render_profiles(&app);
+        assert!(rendered.contains("Server upgrade required"), "{rendered}");
+        assert!(rendered.contains("Instruction profiles unavailable"));
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        assert!(app.agent_profile_request_ids.is_empty());
+        assert!(app.session.agent_profile.is_none());
+        assert_no_profile_wire(&mut reader).await;
+    });
+}
+
+#[test]
+fn agent_profile_sources_eighty_columns_wrap_scope_and_keep_controls_visible() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = create_test_app();
+    rt.block_on(async {
+        app.onboarding_flow = None;
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let mut reader = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+        let id = open_profiles_from_agents(&mut app, &mut remote).await;
+        read_profile_wire(&mut reader).await;
+        let mut reply = profile_reply_with_sources(id, None, &["research"], (0..30).map(|index|
+            serde_json::json!({"id":format!("file:/workspace/{index}/AGENTS.md"), "kind":"agents_md",
+                "label":format!("Project {index} AGENTS.md"), "path":format!("/workspace/{index}/AGENTS.md"),
+                "available":true,"included":false})).collect());
+        if let crate::protocol::ServerEvent::RuntimeCommandResult { data, .. } = &mut reply {
+            data["instruction_source_notice"] = serde_json::json!("This controls Jcode-loaded instructions only. The provider still loads and manages its own native instruction files.");
+        }
+        app.handle_server_event(reply, &mut remote);
+        profile_key(&mut app, &mut remote, KeyCode::Down).await;
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        let rendered = render_profiles_at(&app, 80, 24);
+        for text in ["Instruction sources: research", "Profile alone by default", "Jcode-loaded Markdown", "Base instructions, tool protocol", "provider still loads", "native instruction files", "[ ] Project", "▸ Apply", "Cancel"] {
+            assert!(rendered.contains(text), "missing {text}: {rendered}");
+        }
+        assert!(!rendered.contains("[x]"), "new profile extras must all be OFF");
+        profile_key(&mut app, &mut remote, KeyCode::Home).await;
+        assert!(render_profiles_at(&app, 80, 24).contains("▸ [ ] Project 0 AGENTS.md"));
+        let global = app.agent_models_global_scope;
+        app.handle_remote_key(KeyCode::Char('g'), KeyModifiers::CONTROL, &mut remote).await.unwrap();
+        assert_eq!(app.agent_models_global_scope, global);
+        profile_key(&mut app, &mut remote, KeyCode::End).await;
+        assert!(render_profiles_at(&app, 80, 24).contains("▸ Cancel"));
+        profile_key(&mut app, &mut remote, KeyCode::Enter).await;
+        assert!(app.showing_agent_profiles());
+        assert_no_profile_wire(&mut reader).await;
     });
 }

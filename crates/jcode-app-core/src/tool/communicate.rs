@@ -1829,17 +1829,23 @@ impl CommunicateTool {
     }
 
     fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
+        Self {
+            description: Self::description_with_prompt(&crate::prompt::load_swarm_prompt(
+                working_dir,
+            )),
+        }
+    }
+
+    pub(crate) fn description_with_prompt(swarm_prompt: &str) -> String {
         const BASE_DESCRIPTION: &str =
             "Coordinate agents: spawn workers with a prompt, message them, and manage swarm plans.";
-        let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
-        let description = if swarm_prompt.is_empty() {
+        if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
         } else {
             format!(
                 "{BASE_DESCRIPTION}\n\nSwarm prompt (user-tunable via ~/.jcode/swarm-prompt.md):\n{swarm_prompt}"
             )
-        };
-        Self { description }
+        }
     }
 }
 

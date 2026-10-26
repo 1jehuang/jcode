@@ -2957,6 +2957,14 @@ fn agent_profile_persists_empty_session_journal_and_partial_loads() -> Result<()
     let profile = crate::agent_profile::AgentProfile {
         name: "writer".into(),
         instructions: "  Frozen profile instructions.\n".into(),
+        instruction_sources: vec![crate::instruction_sources::InstructionSourceSnapshot {
+            id: "file:/snapshot/preferred-tools.md".into(),
+            kind: crate::instruction_sources::InstructionSourceKind::PreferredTools,
+            label: "Global Preferred Tools (~/.jcode/preferred-tools.md)".into(),
+            path: Some("/snapshot/preferred-tools.md".into()),
+            content: "Frozen preferred-tool guidance".into(),
+            priority: 1,
+        }],
     };
     let mut session = Session::create(None, None);
     session.agent_profile = Some(profile.clone());

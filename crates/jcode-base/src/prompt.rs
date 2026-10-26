@@ -584,6 +584,45 @@ pub fn build_system_prompt_split_with_agents_md(
     )
 }
 
+/// Build the normal harness prompt using only explicitly selected instruction
+/// snapshots. An empty slice keeps the built-in base and no user file guidance.
+pub fn build_system_prompt_split_with_instruction_sources(
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    sources: &[crate::instruction_sources::InstructionSourceSnapshot],
+) -> (SplitSystemPrompt, ContextInfo) {
+    use crate::instruction_sources::{InstructionSourceKind, formatted_content};
+    let mut info = ContextInfo::default();
+    for source in sources
+        .iter()
+        .filter(|source| source.kind == InstructionSourceKind::AgentsMd)
+    {
+        if source.priority == 0 {
+            info.has_project_agents_md = true;
+            info.project_agents_md_chars += source.content.len();
+        } else {
+            info.has_global_agents_md = true;
+            info.global_agents_md_chars += source.content.len();
+        }
+    }
+    let agents_md = (
+        formatted_content(sources, InstructionSourceKind::AgentsMd).0,
+        info,
+    );
+    build_system_prompt_split_from_sources(
+        None,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        PromptCapabilities::current(),
+        agents_md,
+        Some(sources),
+    )
+}
+
 fn build_system_prompt_split_with_capabilities_and_agents_md(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
@@ -593,7 +632,43 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     capabilities: PromptCapabilities,
     agents_md: (Option<String>, ContextInfo),
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
+    build_system_prompt_split_from_sources(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        capabilities,
+        agents_md,
+        None,
+    )
+}
+
+fn build_system_prompt_split_from_sources(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    capabilities: PromptCapabilities,
+    agents_md: (Option<String>, ContextInfo),
+    sources: Option<&[crate::instruction_sources::InstructionSourceSnapshot]>,
+) -> (SplitSystemPrompt, ContextInfo) {
+    use crate::instruction_sources::{InstructionSourceKind, first_content, formatted_content};
+    let mut static_parts = match sources {
+        None => base_system_prompt_parts(capabilities, working_dir),
+        Some(sources) => {
+            let base = first_content(sources, InstructionSourceKind::SystemPrompt)
+                .unwrap_or(DEFAULT_SYSTEM_PROMPT)
+                .trim()
+                .to_owned();
+            let mut parts = vec![base];
+            if capabilities.mermaid {
+                parts.push(MERMAID_PROMPT.to_string());
+            }
+            parts
+        }
+    };
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
         system_prompt_chars: static_parts.join("\n\n").len(),
@@ -623,15 +698,20 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     info.global_agents_md_chars = md_info.global_agents_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
+    let (overlay_content, overlay_chars) = match sources {
+        Some(sources) => formatted_content(sources, InstructionSourceKind::PromptOverlay),
+        None => load_prompt_overlay_files_from_dir(working_dir),
+    };
     if let Some(content) = overlay_content {
         info.prompt_overlay_chars = overlay_chars;
         static_parts.push(content);
     }
 
     // Add optional preferred-tool guidance (static per project/user)
-    let (preferred_tools_content, preferred_tools_chars) =
-        load_preferred_tools_files_from_dir(working_dir);
+    let (preferred_tools_content, preferred_tools_chars) = match sources {
+        Some(sources) => formatted_content(sources, InstructionSourceKind::PreferredTools),
+        None => load_preferred_tools_files_from_dir(working_dir),
+    };
     if let Some(content) = preferred_tools_content {
         info.preferred_tools_chars = preferred_tools_chars;
         static_parts.push(content);

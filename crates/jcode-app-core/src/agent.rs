@@ -282,6 +282,11 @@ pub struct Agent {
     mcp_tools_mode: crate::config::McpToolsMode,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
+    /// Pending history reset, applied only after the foreground stream stops.
+    provider_conversation_reset_pending: bool,
+    /// Instruction-only changes retire upstream prompt snapshots without
+    /// discarding the active compacted conversation. History rewinds win.
+    preserve_compaction_on_provider_reset: bool,
     /// Last upstream provider (OpenRouter) observed for this session
     last_upstream_provider: Option<String>,
     /// Last observed transport/connection type for this session
@@ -431,10 +436,16 @@ impl Agent {
     fn build_base(
         provider: Arc<dyn Provider>,
         registry: Registry,
-        session: Session,
+        mut session: Session,
         allowed_tools: Option<HashSet<String>>,
         disabled_tools: HashSet<String>,
     ) -> Self {
+        // A selected profile may come from an older additive-prompt release.
+        // Never resume an upstream session that may still contain those files.
+        let profile_reset_pending = session.agent_profile.is_some();
+        if profile_reset_pending {
+            session.provider_session_id = None;
+        }
         let skills = SkillRegistry::shared_snapshot();
         let tool_config = &crate::config::config().tools;
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
@@ -456,6 +467,8 @@ impl Agent {
             _tool_policy_registration: tool_policy_registration,
             mcp_tools_mode: tool_config.mcp_tools,
             provider_session_id: None,
+            provider_conversation_reset_pending: profile_reset_pending,
+            preserve_compaction_on_provider_reset: profile_reset_pending,
             last_upstream_provider: None,
             last_connection_type: None,
             last_status_detail: None,
@@ -775,6 +788,7 @@ impl Agent {
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
         self.rewind_undo_snapshot = None;
+        self.preserve_compaction_on_provider_reset = false;
     }
 
     /// Synchronize the remote client's selected skill, accepting only names

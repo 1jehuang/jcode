@@ -337,24 +337,73 @@ pub(super) async fn execute(
 /// Load and validate before replacing the persisted instruction snapshot.
 fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> {
     let working_dir = agent.working_dir().map(std::path::PathBuf::from);
-    let profile_dir = || working_dir.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("This session has no working directory; cannot resolve agent profiles.")
-    });
+    let profile_dir = || {
+        working_dir.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("This session has no working directory; cannot resolve agent profiles.")
+        })
+    };
     let current = agent
         .session_for_split()
         .agent_profile
         .as_ref()
         .map(|profile| profile.name.clone());
     let changed = !args.is_empty();
+    let current_profile = agent.session_for_split().agent_profile.clone();
+    let system_prompt = agent.session_for_split().system_prompt.as_deref();
     let profile = match args {
         [] => None,
         [action] if action == "off" => Some(None),
         [action] if action == "reload" => {
-            let name = current.as_deref().ok_or_else(|| anyhow::anyhow!("No agent profile is selected. Use /agent NAME first."))?;
-            Some(Some(crate::agent_profile::load(name, profile_dir()?)?))
+            let name = current.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("No agent profile is selected. Use /agent NAME first.")
+            })?;
+            let mut profile = crate::agent_profile::load(name, profile_dir()?)?;
+            profile.instruction_sources = current_profile
+                .as_ref()
+                .unwrap()
+                .instruction_sources
+                .clone();
+            Some(Some(profile))
+        }
+        [action, name, encoded] if action == "--select" => {
+            let mut profile = crate::agent_profile::load(name, profile_dir()?)?;
+            profile.instruction_sources = crate::instruction_sources::select(
+                working_dir.as_deref(),
+                system_prompt,
+                &[],
+                encoded,
+            )?;
+            Some(Some(profile))
+        }
+        [action, rest @ ..] if action == "--sources" => {
+            let (expected, encoded) = match rest {
+                [encoded] => (None, encoded),
+                [expected, encoded] => (Some(expected), encoded),
+                _ => bail!("Usage: /agent --sources [EXPECTED_PROFILE_NAME] JSON_SOURCE_IDS"),
+            };
+            let mut profile = current_profile.clone().ok_or_else(|| {
+                anyhow::anyhow!("No agent profile is selected. Use /agent NAME first.")
+            })?;
+            if let Some(expected) = expected
+                && expected != &profile.name
+            {
+                bail!(
+                    "Agent profile changed from {expected:?} to {:?}. Reopen profile options before applying this draft.",
+                    profile.name
+                );
+            }
+            profile.instruction_sources = crate::instruction_sources::select(
+                working_dir.as_deref(),
+                system_prompt,
+                &profile.instruction_sources,
+                encoded,
+            )?;
+            Some(Some(profile))
         }
         [name] => Some(Some(crate::agent_profile::load(name, profile_dir()?)?)),
-        _ => bail!("Usage: /agent [NAME|off|reload]"),
+        _ => bail!(
+            "Usage: /agent [NAME|off|reload], --select NAME JSON_SOURCE_IDS, or --sources JSON_SOURCE_IDS"
+        ),
     };
     if let Some(profile) = profile {
         agent.set_agent_profile(profile)?;
@@ -362,7 +411,10 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
     // Discovery failures must not prevent clearing a selected snapshot or turn
     // a successfully persisted selection into a reported failure.
     let available = if changed {
-        working_dir.as_deref().and_then(|dir| crate::agent_profile::list(dir).ok()).unwrap_or_default()
+        working_dir
+            .as_deref()
+            .and_then(|dir| crate::agent_profile::list(dir).ok())
+            .unwrap_or_default()
     } else {
         crate::agent_profile::list(profile_dir()?)?
     };
@@ -373,8 +425,13 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
         .map(|profile| profile.name.clone());
     let message = if changed {
         match current.as_deref() {
-            Some(name) => format!("Instructions only; model, tools and permissions remain unchanged. Agent profile: {name}. YAML frontmatter settings are not applied. Instructions apply on the next turn. Saved snapshot persists until /agent reload or /agent off."),
-            None => "Agent profile off. Base instructions remain unchanged; applies on the next turn.".into(),
+            Some(name) => format!(
+                "Instructions only; model, tools and permissions remain unchanged. Agent profile: {name}. Other Jcode-loaded instruction files are excluded unless selected in profile options. YAML frontmatter settings are not applied. Applies on the next turn. /agent reload refreshes the profile body and keeps extra source snapshots; reapply source options to refresh those. Stored session instructions are additive only when selected."
+            ),
+            None => {
+                "Agent profile off. Base instructions remain unchanged; applies on the next turn."
+                    .into()
+            }
         }
     } else {
         let names = if available.is_empty() {
@@ -382,9 +439,37 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
         } else {
             available.join(", ")
         };
-        format!("Current agent profile: {}\nAvailable profiles: {names}\nUse /agent NAME, /agent reload, or /agent off. Project .jcode/agents/NAME.md overrides ~/.jcode/agents/NAME.md.", current.as_deref().unwrap_or("off"))
+        format!(
+            "Current agent profile: {}\nAvailable profiles: {names}\nUse /agent NAME, /agent reload, or /agent off. Project .jcode/agents/NAME.md overrides ~/.jcode/agents/NAME.md.",
+            current.as_deref().unwrap_or("off")
+        )
     };
-    Ok((json!({"current": current, "available": available, "changed": changed, "effective": "next_turn"}), message))
+    let sources = agent
+        .session_for_split()
+        .agent_profile
+        .as_ref()
+        .map(|profile| profile.instruction_sources.as_slice())
+        .unwrap_or_default();
+    let instruction_sources = crate::instruction_sources::choices(
+        working_dir.as_deref(),
+        agent.session_for_split().system_prompt.as_deref(),
+        sources,
+    );
+    let included_sources: Vec<_> = sources.iter().map(|source| source.id.as_str()).collect();
+    let native_instruction_files_managed_by_provider =
+        agent.provider_handle().uses_own_system_prompt();
+    let notice = if native_instruction_files_managed_by_provider {
+        "This controls Jcode-loaded instructions only. The provider still loads and manages its own native instruction files."
+    } else {
+        "This controls Jcode-loaded instructions. Selected extras are snapshots; reapply source options to refresh them."
+    };
+    Ok((
+        json!({"current": current, "available": available, "changed": changed, "effective": "next_turn",
+        "included_sources": included_sources, "instruction_sources": instruction_sources,
+        "instruction_scope": "jcode", "native_instruction_files_managed_by_provider": native_instruction_files_managed_by_provider,
+        "instruction_source_notice": notice}),
+        format!("{message}\n{notice}"),
+    ))
 }
 
 fn role_args(args: &[String], default_label: &str) -> Result<(Option<String>, String, String)> {

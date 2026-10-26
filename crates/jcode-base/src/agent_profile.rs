@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 pub struct AgentProfile {
     pub name: String,
     pub instructions: String,
+    /// Empty or missing means selected-profile isolation. Only explicit file
+    /// snapshots join these instructions; normal auto-loading resumes on off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instruction_sources: Vec<crate::instruction_sources::InstructionSourceSnapshot>,
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -146,6 +150,7 @@ pub fn load(name: &str, working_dir: &Path) -> Result<AgentProfile> {
         return Ok(AgentProfile {
             name: name.to_owned(),
             instructions,
+            instruction_sources: Vec::new(),
         });
     }
     bail!(

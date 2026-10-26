@@ -5,6 +5,9 @@ use super::*;
 use serde_json::{Value, json};
 use std::path::Path;
 
+#[path = "agent_profile_sources.rs"]
+mod sources;
+
 struct ProfileClient {
     reader: BufReader<crate::transport::ReadHalf>,
     writer: crate::transport::WriteHalf,
@@ -228,7 +231,7 @@ async fn agent_profile_socket_creation_snapshot_resume_fork_and_isolation() {
             first.contains("You are Jcode."),
             "normal base prompt must survive profile selection"
         );
-        assert!(first.contains("SOCKET_NORMAL_OVERLAY_34189"));
+        assert!(!first.contains("SOCKET_NORMAL_OVERLAY_34189"));
         assert!(
             first.contains(expected),
             "selected file's literal instructions must reach the provider"
@@ -240,6 +243,7 @@ async fn agent_profile_socket_creation_snapshot_resume_fork_and_isolation() {
         std::fs::write(&selected_path, "SOCKET_MUTATED_PROFILE_V2_47291").unwrap();
         let unchanged = owner.message_prompt(&fixture, 7).await;
         assert!(unchanged.contains(expected));
+        assert!(!unchanged.contains("SOCKET_NORMAL_OVERLAY_34189"));
         assert!(!unchanged.contains("SOCKET_MUTATED_PROFILE_V2_47291"));
         assert_saved_profile(&parent_id, expected);
 
@@ -253,6 +257,7 @@ async fn agent_profile_socket_creation_snapshot_resume_fork_and_isolation() {
         assert_eq!(reconnected.session_id(9).await, parent_id);
         let restored = reconnected.message_prompt(&fixture, 10).await;
         assert!(restored.contains(expected));
+        assert!(!restored.contains("SOCKET_NORMAL_OVERLAY_34189"));
         assert!(restored.contains("You are Jcode."));
         assert!(!restored.contains("SOCKET_MUTATED_PROFILE_V2_47291"));
 
@@ -261,6 +266,7 @@ async fn agent_profile_socket_creation_snapshot_resume_fork_and_isolation() {
         reconnected.done(11).await;
         let cleared = reconnected.message_prompt(&fixture, 12).await;
         assert!(!cleared.contains(expected));
+        assert!(cleared.contains("SOCKET_NORMAL_OVERLAY_34189"));
         assert!(!cleared.contains("SOCKET_MUTATED_PROFILE_V2_47291"));
         fixture.sessions.write().await.remove(&parent_id);
         reconnected
@@ -269,6 +275,7 @@ async fn agent_profile_socket_creation_snapshot_resume_fork_and_isolation() {
         reconnected.done(13).await;
         let resumed = reconnected.message_prompt(&fixture, 14).await;
         assert!(resumed.contains(expected));
+        assert!(!resumed.contains("SOCKET_NORMAL_OVERLAY_34189"));
         assert!(!resumed.contains("SOCKET_MUTATED_PROFILE_V2_47291"));
         assert_saved_profile(&parent_id, expected);
 
@@ -289,10 +296,12 @@ async fn agent_profile_socket_creation_snapshot_resume_fork_and_isolation() {
         fork.done(16).await;
         let fork_prompt = fork.message_prompt(&fixture, 17).await;
         assert!(fork_prompt.contains(expected));
+        assert!(!fork_prompt.contains("SOCKET_NORMAL_OVERLAY_34189"));
         assert!(fork_prompt.contains("You are Jcode."));
         assert!(!fork_prompt.contains("SOCKET_MUTATED_PROFILE_V2_47291"));
         let still_plain = independent.message_prompt(&fixture, 18).await;
         assert!(!still_plain.contains(expected));
+        assert!(still_plain.contains("SOCKET_NORMAL_OVERLAY_34189"));
         assert!(!still_plain.contains("SOCKET_MUTATED_PROFILE_V2_47291"));
 
         fork.close().await;
@@ -398,13 +407,19 @@ async fn agent_profile_socket_yaml_frontmatter_body_snapshot_reload_and_errors()
     client
         .send(json!({"type":"runtime_command", "id":604, "command":"agent", "args":["socket-profile"]}))
         .await;
-    let ServerEvent::RuntimeCommandResult { data: selected, message, .. } = client
+    let ServerEvent::RuntimeCommandResult {
+        data: selected,
+        message,
+        ..
+    } = client
         .until(|event| matches!(event, ServerEvent::RuntimeCommandResult { id: 604, .. }))
         .await
     else {
         unreachable!()
     };
-    assert!(message.starts_with("Instructions only; model, tools and permissions remain unchanged."));
+    assert!(
+        message.starts_with("Instructions only; model, tools and permissions remain unchanged.")
+    );
     assert_eq!(selected["current"], "socket-profile");
     assert_eq!(selected["changed"], true);
     assert_eq!(selected["effective"], "next_turn");
@@ -433,13 +448,19 @@ async fn agent_profile_socket_yaml_frontmatter_body_snapshot_reload_and_errors()
     client
         .send(json!({"type":"runtime_command", "id":607, "command":"agent", "args":["reload"]}))
         .await;
-    let ServerEvent::RuntimeCommandResult { data: reloaded, message, .. } = client
+    let ServerEvent::RuntimeCommandResult {
+        data: reloaded,
+        message,
+        ..
+    } = client
         .until(|event| matches!(event, ServerEvent::RuntimeCommandResult { id: 607, .. }))
         .await
     else {
         unreachable!()
     };
-    assert!(message.starts_with("Instructions only; model, tools and permissions remain unchanged."));
+    assert!(
+        message.starts_with("Instructions only; model, tools and permissions remain unchanged.")
+    );
     assert_eq!(reloaded["current"], "socket-profile");
     assert_eq!(reloaded["changed"], true);
     assert_saved_profile(&session_id, BODY_V2);
@@ -617,13 +638,19 @@ async fn agent_profile_socket_registered_active_turn_rejects_mutations_with_unlo
         .clone();
     let active_turn =
         crate::turn_cancel_registry::register_active_turn(&session_id, InterruptSignal::new());
-    for (id, args) in [(403, "replacement"), (404, "off"), (405, "reload")] {
+    for (id, args) in [
+        (403, vec!["replacement"]),
+        (404, vec!["off"]),
+        (405, vec!["reload"]),
+        (407, vec!["--select", "replacement", "[]"]),
+        (408, vec!["--sources", "[]"]),
+    ] {
         assert!(
             agent.try_lock().is_ok(),
             "regression requires an unlocked Agent"
         );
         client
-            .send(json!({"type":"runtime_command", "id":id, "command":"agent", "args":[args]}))
+            .send(json!({"type":"runtime_command", "id":id, "command":"agent", "args":args}))
             .await;
         let error = client.error(id).await;
         assert!(

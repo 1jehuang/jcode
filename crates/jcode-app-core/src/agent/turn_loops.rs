@@ -60,6 +60,7 @@ impl Agent {
     }
 
     async fn run_turn_inner(&mut self, print_output: bool) -> Result<String> {
+        self.ensure_provider_conversation_reset().await?;
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();

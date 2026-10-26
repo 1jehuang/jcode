@@ -126,6 +126,14 @@ fn clone_split_session_uses_persisted_session_state() {
     parent.agent_profile = Some(crate::agent_profile::AgentProfile {
         name: "writer".into(),
         instructions: "saved profile".into(),
+        instruction_sources: vec![crate::instruction_sources::InstructionSourceSnapshot {
+            id: "file:/snapshot/AGENTS.md".into(),
+            kind: crate::instruction_sources::InstructionSourceKind::AgentsMd,
+            label: "Project Instructions (AGENTS.md)".into(),
+            path: Some("/snapshot/AGENTS.md".into()),
+            content: "fork extra snapshot".into(),
+            priority: 0,
+        }],
     });
     parent.add_message(
         Role::User,
@@ -382,6 +390,14 @@ fn transfer_preserves_system_prompt_including_empty_override() {
         parent.agent_profile = Some(crate::agent_profile::AgentProfile {
             name: "writer".into(),
             instructions: "transfer profile snapshot".into(),
+            instruction_sources: vec![crate::instruction_sources::InstructionSourceSnapshot {
+                id: "session:system_prompt".into(),
+                kind: crate::instruction_sources::InstructionSourceKind::SessionSystemPrompt,
+                label: "Stored session instructions (additive)".into(),
+                path: None,
+                content: "transfer extra snapshot".into(),
+                priority: 2,
+            }],
         });
         let (child_id, _) = create_transfer_child_session(&parent.id, &parent, None)
             .expect("create transfer session");

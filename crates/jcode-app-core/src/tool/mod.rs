@@ -9,7 +9,7 @@ pub(crate) mod bridge_reload;
 mod browser;
 mod calendar;
 mod codemode;
-mod communicate;
+pub(crate) mod communicate;
 mod compile_remote;
 #[cfg(target_os = "macos")]
 mod computer;

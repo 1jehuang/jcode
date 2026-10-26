@@ -4424,7 +4424,9 @@ impl App {
                 }
 
                 match entry.action {
-                    PickerAction::AgentProfiles | PickerAction::AgentProfileChoice(_) => {
+                    PickerAction::AgentProfiles | PickerAction::AgentProfileChoice(_)
+                    | PickerAction::AgentProfileSource(_) | PickerAction::AgentProfileApply(_)
+                    | PickerAction::AgentProfileCancel => {
                         // Remote key handling owns discovery and application. Never
                         // apply instructions from the local session snapshot.
                         self.inline_interactive_state = None;

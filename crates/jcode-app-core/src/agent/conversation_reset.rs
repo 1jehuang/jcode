@@ -1,6 +1,24 @@
 use super::*;
 
 impl Agent {
+    pub(super) async fn ensure_provider_conversation_reset(&mut self) -> Result<()> {
+        if self.provider_conversation_reset_pending {
+            // This is part of the retry gate: cancellation while waiting for a
+            // compaction reader must not expose a summary of discarded history.
+            if !self.preserve_compaction_on_provider_reset {
+                let compaction = self.registry.compaction();
+                let mut manager = compaction.write().await;
+                manager.reset();
+                manager.set_budget(self.provider.input_token_limit());
+                manager.seed_restored_stored_messages_with(&self.session.messages);
+            }
+            self.provider.reset_conversation_state().await?;
+            self.provider_conversation_reset_pending = false;
+            self.preserve_compaction_on_provider_reset = false;
+        }
+        Ok(())
+    }
+
     pub(super) fn checkpoint_user_input(
         &mut self,
         prompt: &str,
