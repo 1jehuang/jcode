@@ -659,6 +659,12 @@ pub struct SwarmMemberStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberRuntime {
+    /// Ephemeral foreground blocking operation, never a durable dependency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
+    /// Monotonic seconds spent in the current blocking operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_age_secs: Option<u64>,
     /// Full ordered todo statuses, independent of the capped detail snapshot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todo_statuses: Vec<String>,
@@ -690,7 +696,9 @@ pub struct SwarmMemberRuntime {
 
 impl SwarmMemberRuntime {
     fn is_empty(&self) -> bool {
-        self.todo_statuses.is_empty()
+        self.wait_reason.is_none()
+            && self.wait_age_secs.is_none()
+            && self.todo_statuses.is_empty()
             && self.model.is_none()
             && self.provider.is_none()
             && self.auth_method.is_none()

@@ -366,6 +366,9 @@ async fn await_swarm_progress(
         tokio::time::interval_at(tokio::time::Instant::now() + refresh_period, refresh_period);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Detached plan drivers must not label the foreground agent as waiting.
+    let _wait_guard = (!reporter.is_background())
+        .then(|| crate::wait_registry::register(&ctx.session_id, "Waiting for swarm members"));
     let response = loop {
         tokio::select! {
             result = &mut await_members => break result,

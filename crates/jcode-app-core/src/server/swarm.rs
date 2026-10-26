@@ -776,16 +776,17 @@ async fn broadcast_swarm_status_now(
                 .filter(|m| member_in_status_broadcast(m, broadcast_terminal_retention))
                 .map(|m| {
                     let tokens = crate::session_metrics::token_totals(&m.session_id);
+                    let wait = crate::wait_registry::current(&m.session_id);
                     let context_limit = m
                         .runtime
                         .model
                         .as_deref()
                         .and_then(crate::provider::models::context_limit_for_model)
                         .map(|limit| limit as u64);
-                    (m, tokens, context_limit)
+                    (m, tokens, context_limit, wait)
                 })
                 .map(
-                    |(m, tokens, context_limit)| crate::protocol::SwarmMemberStatus {
+                    |(m, tokens, context_limit, wait)| crate::protocol::SwarmMemberStatus {
                         session_id: m.session_id.clone(),
                         friendly_name: m.friendly_name.clone(),
                         status: m.status.clone(),
@@ -800,6 +801,8 @@ async fn broadcast_swarm_status_now(
                         todo_progress: m.todo_progress,
                         todo_items: m.todo_items.clone(),
                         runtime: crate::protocol::SwarmMemberRuntime {
+                            wait_reason: wait.as_ref().map(|(reason, _)| reason.clone()),
+                            wait_age_secs: wait.map(|(_, age)| age),
                             todo_statuses: m.runtime.todo_statuses.clone(),
                             model: m.runtime.model.clone(),
                             provider: m.runtime.provider.clone(),
@@ -831,6 +834,36 @@ async fn broadcast_swarm_status_now(
     };
     for sid in session_ids {
         let _ = fanout_session_event(swarm_members, &sid, event.clone()).await;
+    }
+}
+
+/// Publish wait transitions immediately and refresh elapsed wait ages while a
+/// session is parked, even when it emits no tokens or tool progress events.
+pub(super) async fn monitor_wait_status(
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) {
+    let mut changes = crate::wait_registry::subscribe_changes();
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut previous = HashSet::<String>::new();
+    loop {
+        tokio::select! {
+            result = changes.changed() => if result.is_err() { return; },
+            _ = interval.tick() => {},
+        }
+        let current: HashSet<_> = crate::wait_registry::session_ids().into_iter().collect();
+        let affected: HashSet<_> = {
+            let members = swarm_members.read().await;
+            previous
+                .union(&current)
+                .filter_map(|sid| members.get(sid).and_then(|member| member.swarm_id.clone()))
+                .collect()
+        };
+        previous = current;
+        for swarm_id in affected {
+            broadcast_swarm_status(&swarm_id, &swarm_members, &swarms_by_id).await;
+        }
     }
 }
 
@@ -1993,11 +2026,11 @@ fn parse_swarm_tasks(text: &str) -> Vec<SwarmTaskSpec> {
 mod tests {
     use super::{
         broadcast_swarm_plan, broadcast_swarm_plan_with_previous, broadcast_swarm_status,
-        member_in_status_broadcast, member_status_is_dead, now_unix_ms, parse_swarm_tasks,
-        refresh_swarm_task_staleness, remove_session_from_swarm,
-        salvage_assignments_of_dead_member, swarm_ancestors, swarm_is_self_or_ancestor,
-        swarm_spawn_depth, touch_swarm_task_progress, update_member_status,
-        update_member_status_with_report,
+        broadcast_swarm_status_now, member_in_status_broadcast, member_status_is_dead,
+        monitor_wait_status, now_unix_ms, parse_swarm_tasks, refresh_swarm_task_staleness,
+        remove_session_from_swarm, salvage_assignments_of_dead_member, swarm_ancestors,
+        swarm_is_self_or_ancestor, swarm_spawn_depth, touch_swarm_task_progress,
+        update_member_status, update_member_status_with_report,
     };
     use crate::plan::PlanItem;
     use crate::protocol::{NotificationType, ServerEvent};
@@ -2987,6 +3020,92 @@ mod tests {
                 .and_then(|member| member.runtime.elapsed_secs),
             Some(frozen)
         );
+    }
+
+    #[tokio::test]
+    async fn wait_monitor_publishes_entry_age_and_cleanup_without_tool_events() {
+        let sid = "wait_monitor_worker";
+        let swarm_id = "wait_monitor_swarm";
+        let (mut worker, mut rx) = swarm_member(sid, "agent", true);
+        worker.swarm_id = Some(swarm_id.into());
+        worker.status = "running".into();
+        let members = Arc::new(RwLock::new(HashMap::from([(sid.into(), worker)])));
+        let swarms = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.into(),
+            HashSet::from([sid.into()]),
+        )])));
+        let monitor = tokio::spawn(monitor_wait_status(members, swarms));
+        let guard = crate::wait_registry::register(sid, "Waiting for build");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ServerEvent::SwarmStatus { members }) = rx.recv().await {
+                    if members.iter().any(|member| {
+                        member.runtime.wait_reason.as_deref() == Some("Waiting for build")
+                    }) {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ServerEvent::SwarmStatus { members }) = rx.recv().await {
+                    if members
+                        .iter()
+                        .any(|member| member.runtime.wait_age_secs.is_some_and(|age| age >= 1))
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ServerEvent::SwarmStatus { members }) = rx.recv().await {
+                    if members.iter().all(|member| {
+                        member.runtime.wait_reason.is_none()
+                            && member.runtime.wait_age_secs.is_none()
+                    }) {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        monitor.abort();
+        let _ = monitor.await;
+    }
+
+    #[tokio::test]
+    async fn wait_metadata_snapshots_are_live_and_clear_after_completion() {
+        let sid = "snapshot_wait_metadata";
+        let (mut worker, mut rx) = swarm_member(sid, "agent", true);
+        worker.runtime.wait_reason = Some("stale persisted wait".into());
+        worker.runtime.wait_age_secs = Some(999);
+        let members = Arc::new(RwLock::new(HashMap::from([(sid.to_string(), worker)])));
+        let guard = crate::wait_registry::register(sid, "Waiting for background task");
+        broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let ServerEvent::SwarmStatus { members: snapshot } = rx.try_recv().unwrap() else {
+            panic!("expected swarm status");
+        };
+        assert_eq!(
+            snapshot[0].runtime.wait_reason.as_deref(),
+            Some("Waiting for background task")
+        );
+        assert_eq!(snapshot[0].runtime.wait_age_secs, Some(0));
+        drop(guard);
+        broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let ServerEvent::SwarmStatus { members: snapshot } = rx.try_recv().unwrap() else {
+            panic!("expected swarm status");
+        };
+        assert_eq!(snapshot[0].runtime.wait_reason, None);
+        assert_eq!(snapshot[0].runtime.wait_age_secs, None);
     }
 
     #[tokio::test]
