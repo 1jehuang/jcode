@@ -370,8 +370,55 @@ pub fn load_manifest(root: &Path) -> Result<Manifest> {
     }
     Ok(manifest)
 }
+/// An advisory cross-process lock serializes read-modify-write of our private
+/// maps. The lock inode is never replaced, unlike the atomically published data.
+fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let (dir, name) = open_parent(base, relative, true)?;
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        ensure!(fd >= 0, "cannot lock private state");
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        ensure!(file.metadata()?.is_file(), "invalid private lock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            ensure!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ),
+                "cannot lock private state"
+            );
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "private state lock timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (base, relative);
+        bail!("private state lock unsupported")
+    }
+}
+
 pub fn save_requirement(root: &Path, resource: &Resource) -> Result<()> {
     validate_resource(resource)?;
+    let _lock = lock_private(root, Path::new(".jcode/cloud-environment.lock"))?;
     let mut manifest = load_manifest(root)?;
     if manifest.requirements.contains(resource) {
         return Ok(());
@@ -438,7 +485,13 @@ fn replace_private(base: &Path, relative: &Path, bytes: &[u8]) -> Result<()> {
 
 fn environment_relative(root: &Path) -> Result<PathBuf> {
     use sha2::{Digest, Sha256};
-    let root = root.canonicalize()?;
+    let canonical = root.canonicalize()?;
+    // Shell tools execute in nested working directories. Key all of them to
+    // the nearest repository root (including Git worktrees with a .git file).
+    let root = canonical
+        .ancestors()
+        .find(|path| path.join(".git").exists())
+        .unwrap_or(&canonical);
     Ok(PathBuf::from("cloud-environment").join(format!(
         "{:x}.json",
         Sha256::digest(root.as_os_str().as_encoded_bytes())
@@ -451,19 +504,28 @@ pub fn load_environment(root: &Path) -> Result<BTreeMap<String, String>> {
         return Ok(BTreeMap::new());
     }
     let vars: BTreeMap<String, String> = serde_json::from_slice(&read_private(&home, &relative)?)?;
-    for name in vars.keys() {
+    for (name, value) in &vars {
         validate_resource(&Resource::EnvVar { name: name.clone() })?;
+        validate_environment_value(value)?;
     }
     Ok(vars)
 }
-pub fn save_environment(root: &Path, name: &str, value: &str) -> Result<bool> {
-    validate_resource(&Resource::EnvVar {
-        name: name.to_owned(),
-    })?;
+fn validate_environment_value(value: &str) -> Result<()> {
     ensure!(
         !value.contains('\0') && value.len() <= MAX_PAYLOAD_BYTES / 2,
         "invalid environment value"
     );
+    Ok(())
+}
+
+pub fn save_environment(root: &Path, name: &str, value: &str) -> Result<bool> {
+    validate_resource(&Resource::EnvVar {
+        name: name.to_owned(),
+    })?;
+    validate_environment_value(value)?;
+    let home = crate::storage::jcode_dir()?;
+    let relative = environment_relative(root)?;
+    let _lock = lock_private(&home, &relative.with_extension("lock"))?;
     let mut vars = load_environment(root)?;
     if vars.contains_key(name) {
         return Ok(false);
@@ -506,15 +568,21 @@ pub fn validate_lease(
     Ok(root)
 }
 
+fn parity_guidance() -> &'static str {
+    "Check the actual tools, runtimes, files, credentials and environment before work: this is not an identical machine. Record runtime and package dependencies in project setup documentation, and record only typed resource requirements in .jcode/cloud-environment.json. Never print, quote, summarize, or put secret values in messages or command arguments. Allowed transfers are explicit relative project files, named environment variables and fixed credentials (github, aws, npm), never SSH private keys, keychains or arbitrary home paths. The cloud_environment tool and a local callback are conditional capabilities, not guaranteed. When a callback is available, first call status and then sync saved requirements. Fetch only specific missing resources. If executing locally, run jcode cloud env push --host <cloud-host> --request '<request JSON>' yourself using local tools, with metadata-only request JSON; ask the user only when local execution is unavailable. If executing remotely without a callback, ask for that command to run on the local source machine."
+}
+
 pub fn migration_guidance(session_id: &str) -> String {
     format!(
-        "You are continuing session {session_id} on another machine, not an identical environment. Check tools, runtimes, files, credentials and environment before work. Record dependencies and nonsecret requirements in .jcode/cloud-environment.json; never print secrets. If the cloud environment tool and its local callback are available, first call status and then sync to restore saved requirements before work. Use fetch for explicit project files, named environment variables, or fixed credentials (github, aws, npm). Local callback access is temporary (15 minutes after handoff) and may be unavailable. Otherwise ask the user to run locally: jcode cloud env push --host <cloud-host> --request '<request JSON>'. Never request SSH private keys, keychains, arbitrary home paths or secret values in messages."
+        "You are continuing session {session_id} after a machine handoff. {} Local callback access expires 15 minutes after handoff and may already be unavailable.",
+        parity_guidance()
     )
 }
 pub fn replacement_guidance(host: Option<&str>) -> String {
     let target = host.filter(|s| !s.is_empty()).unwrap_or("<cloud-host>");
     format!(
-        "This is a repository replacement, not an identical machine or a moved session. Check tools, runtimes, files, credentials and environment. Record dependencies and nonsecret requirements in .jcode/cloud-environment.json and never print secrets. There is no guaranteed local callback. If the cloud environment tool is available, use only its supported operations. For missing local resources ask the user to run locally: jcode cloud env push --host {target} --request '<request JSON>'. Allowed fetch resources are relative project files, named environment variables and fixed credentials (github, aws, npm). Never request SSH private keys, keychains, arbitrary home paths or secret values in messages."
+        "You are still the LOCAL agent after a repository-only replacement, not a moved session or a remote agent. {} Use the actual target {target} in the local push command. Run the local push yourself when resources are missing; do not require the user to do work that your local tools can perform. Replacement does not establish a callback or change where you execute.",
+        parity_guidance()
     )
 }
 
@@ -525,6 +593,94 @@ mod tests {
         let p = std::env::temp_dir().join(format!("jcode-env-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&p).unwrap();
         p.canonicalize().unwrap()
+    }
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl HomeGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", path);
+            Self(previous)
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.0 {
+                crate::env::set_var("JCODE_HOME", previous);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+    #[test]
+    fn environment_root_subdirectory_and_invalid_values() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let subdirectory = project.path().join("src/nested");
+        std::fs::create_dir_all(&subdirectory).unwrap();
+        assert!(save_environment(project.path(), "TEST_TOKEN", "opaque-test-value").unwrap());
+        assert_eq!(
+            load_environment(project.path()).unwrap(),
+            load_environment(&subdirectory).unwrap()
+        );
+        assert_eq!(
+            load_environment(&subdirectory)
+                .unwrap()
+                .get("TEST_TOKEN")
+                .map(String::as_str),
+            Some("opaque-test-value")
+        );
+        let relative = environment_relative(project.path()).unwrap();
+        replace_private(
+            home.path(),
+            &relative,
+            br#"{"TEST_TOKEN":"bad\u0000value"}"#,
+        )
+        .unwrap();
+        assert!(load_environment(&subdirectory).is_err());
+    }
+    #[test]
+    fn concurrent_manifest_and_environment_updates_are_not_lost() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let barrier = std::sync::Barrier::new(12);
+        std::thread::scope(|scope| {
+            for i in 0..12 {
+                let barrier = &barrier;
+                let root = project.path();
+                scope.spawn(move || {
+                    barrier.wait();
+                    let name = format!("TEST_VAR_{i}");
+                    save_requirement(root, &Resource::EnvVar { name: name.clone() }).unwrap();
+                    assert!(save_environment(root, &name, "test-value").unwrap());
+                });
+            }
+        });
+        assert_eq!(
+            load_manifest(project.path()).unwrap().requirements.len(),
+            12
+        );
+        assert_eq!(load_environment(project.path()).unwrap().len(), 12);
+        assert!(!save_environment(project.path(), "TEST_VAR_0", "replacement").unwrap());
+        assert_eq!(
+            load_environment(project.path()).unwrap()["TEST_VAR_0"],
+            "test-value"
+        );
+    }
+    #[test]
+    fn shared_guidance_preserves_local_replacement_role() {
+        let migration = migration_guidance("session-test");
+        let replacement = replacement_guidance(Some("test-host"));
+        assert!(migration.contains(parity_guidance()));
+        assert!(replacement.contains(parity_guidance()));
+        assert!(replacement.contains("still the LOCAL agent"));
+        assert!(replacement.contains("Run the local push yourself"));
+        assert!(replacement.contains("test-host"));
     }
     #[test]
     fn traversal_and_secret_requests_rejected() {

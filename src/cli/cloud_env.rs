@@ -133,52 +133,130 @@ fn collect(root: &Path, request: &Request, source: Source) -> Result<Payload> {
     Ok(payload)
 }
 
+fn exchange_bounded(
+    mut command: Command,
+    bytes: Vec<u8>,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (command, bytes, timeout);
+        bail!("private transport unsupported");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::{fd::AsRawFd, unix::process::CommandExt};
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let own_process_group = std::env::var_os("JCODE_CLOUD_ENV_SESSION").is_none();
+        // Keep fulfillment inside the TUI-owned disconnect cancellation group.
+        if own_process_group {
+            command.process_group(0);
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|_| anyhow::anyhow!("environment transport unavailable"))?;
+        let result = (|| -> Result<Vec<u8>> {
+            let mut stdin = child.stdin.take();
+            let mut stdout = child.stdout.take().context("stdout")?;
+            for fd in [
+                stdin.as_ref().context("stdin")?.as_raw_fd(),
+                stdout.as_raw_fd(),
+            ] {
+                let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+                anyhow::ensure!(
+                    flags >= 0
+                        && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0,
+                    "cannot configure private pipe"
+                );
+            }
+            let deadline = std::time::Instant::now() + timeout;
+            let mut sent = 0;
+            let mut response = Vec::new();
+            let mut eof = false;
+            let mut status = None;
+            loop {
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "environment transport timed out"
+                );
+                if let Some(input) = stdin.as_mut() {
+                    if sent < bytes.len() {
+                        match input.write(&bytes[sent..]) {
+                            Ok(0) => bail!("private pipe closed"),
+                            Ok(count) => sent += count,
+                            Err(e)
+                                if matches!(
+                                    e.kind(),
+                                    std::io::ErrorKind::WouldBlock
+                                        | std::io::ErrorKind::Interrupted
+                                ) => {}
+                            Err(_) => bail!("private pipe write failed"),
+                        }
+                    }
+                    if sent == bytes.len() {
+                        stdin.take();
+                    }
+                }
+                if !eof {
+                    let mut buffer = [0; 1024];
+                    match stdout.read(&mut buffer) {
+                        Ok(0) => eof = true,
+                        Ok(count) => {
+                            response.extend_from_slice(&buffer[..count]);
+                            anyhow::ensure!(response.len() <= 4096, "invalid status");
+                        }
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(_) => bail!("private pipe read failed"),
+                    }
+                }
+                if status.is_none() {
+                    status = child.try_wait()?;
+                }
+                if let Some(status) = status {
+                    anyhow::ensure!(status.success(), "transport failed");
+                    if eof {
+                        anyhow::ensure!(sent == bytes.len(), "incomplete transfer");
+                        return Ok(response);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        })();
+        if result.is_err() {
+            if own_process_group {
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+            }
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+        result
+    }
+}
+
 fn transmit(target: &Target, host: &str, payload: &Payload) -> Result<Status> {
     let bytes = serde_json::to_vec(payload)?;
     anyhow::ensure!(bytes.len() <= env::MAX_PAYLOAD_BYTES, "payload too large");
-    let mut command = target.remote_command(host, &["cloud", "env", "receive"])?;
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = command
-        .spawn()
-        .map_err(|_| anyhow::anyhow!("environment transport unavailable"))?;
-    let result = std::thread::scope(|scope| -> Result<Status> {
-        let mut stdin = child.stdin.take().context("stdin")?;
-        let writer = scope.spawn(move || stdin.write_all(&bytes));
-        let mut response = Vec::new();
-        child
-            .stdout
-            .take()
-            .context("stdout")?
-            .take(4097)
-            .read_to_end(&mut response)?;
-        if response.len() > 4096 {
-            let _ = child.kill();
-            bail!("invalid status");
-        }
-        writer
-            .join()
-            .map_err(|_| anyhow::anyhow!("writer failed"))??;
-        anyhow::ensure!(child.wait()?.success(), "transport failed");
-        let status: Status = serde_json::from_slice(&response)?;
-        // Treat arbitrary remote strings as untrusted, even on authenticated SSH.
-        anyhow::ensure!(
-            matches!(status.code.as_str(), "received" | "unavailable"),
-            "invalid status"
-        );
-        anyhow::ensure!(
-            status.applied <= 256 && status.skipped <= 256,
-            "invalid status"
-        );
-        Ok(status)
-    });
-    if result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    result
+    let command = target.remote_command(host, &["cloud", "env", "receive"])?;
+    let response = exchange_bounded(command, bytes, std::time::Duration::from_secs(30))?;
+    let status: Status = serde_json::from_slice(&response)?;
+    anyhow::ensure!(
+        matches!(status.code.as_str(), "received" | "unavailable"),
+        "invalid status"
+    );
+    anyhow::ensure!(
+        status.applied <= 256 && status.skipped <= 256,
+        "invalid status"
+    );
+    Ok(status)
 }
 
 fn send(root: &Path, target: &Target, request: &Request, source: Source) -> Result<Status> {
@@ -199,6 +277,16 @@ fn send(root: &Path, target: &Target, request: &Request, source: Source) -> Resu
     transmit(target, &host, &payload)
 }
 
+fn callback_target(host: String) -> Target {
+    Target {
+        host: Some(host),
+        remote_binary: std::env::var("JCODE_SSH_BINARY")
+            .ok()
+            .filter(|binary| !binary.trim().is_empty()),
+        transport: None,
+    }
+}
+
 fn fulfill(session: &str, request: Request) -> Result<Status> {
     anyhow::ensure!(
         std::env::var("JCODE_CLOUD_ENV_SESSION").ok().as_deref() == Some(session),
@@ -216,11 +304,7 @@ fn fulfill(session: &str, request: Request) -> Result<Status> {
     // superseded sessions cannot reuse an old authorization snapshot.
     let current = storage::read_session_lease(session).context("no lease")?;
     anyhow::ensure!(current == lease, "lease changed");
-    let target = Target {
-        host: Some(host),
-        remote_binary: None,
-        transport: None,
-    };
+    let target = callback_target(host);
     send(
         &root,
         &target,
@@ -437,6 +521,95 @@ mod tests {
         assert!(receive(payload).is_err());
         assert!(!root.join("good").exists());
         assert!(!root.join(".jcode").exists());
+    }
+    #[test]
+    #[cfg(unix)]
+    fn bounded_transport_times_out_blocked_pipes_and_descendants() {
+        let _lock = storage::lock_test_env();
+        for (script, input) in [
+            ("sleep 10", vec![0; 1024 * 1024]),
+            ("sleep 10 & exit 0", Vec::new()),
+        ] {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            let start = std::time::Instant::now();
+            assert!(
+                exchange_bounded(command, input, std::time::Duration::from_millis(100)).is_err()
+            );
+            assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        }
+    }
+    #[test]
+    #[cfg(unix)]
+    fn bounded_transport_success() {
+        let _lock = storage::lock_test_env();
+        let mut command = Command::new("sh");
+        command.args(["-c", "cat >/dev/null; printf 'safe-status'"]);
+        assert_eq!(
+            exchange_bounded(
+                command,
+                b"opaque-input".to_vec(),
+                std::time::Duration::from_secs(3)
+            )
+            .unwrap(),
+            b"safe-status"
+        );
+    }
+    #[test]
+    #[cfg(unix)]
+    fn fulfillment_transport_stays_in_caller_process_group() {
+        let _lock = storage::lock_test_env();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 {
+                    crate::env::set_var("JCODE_CLOUD_ENV_SESSION", value);
+                } else {
+                    crate::env::remove_var("JCODE_CLOUD_ENV_SESSION");
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCODE_CLOUD_ENV_SESSION"));
+        crate::env::set_var("JCODE_CLOUD_ENV_SESSION", "test-session");
+        let mut command = Command::new("sh");
+        command.args(["-c", "ps -o pgid= -p $$"]);
+        let output =
+            exchange_bounded(command, Vec::new(), std::time::Duration::from_secs(3)).unwrap();
+        let group: i32 = std::str::from_utf8(&output)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(group, unsafe { libc::getpgrp() });
+    }
+    #[test]
+    fn callback_honors_remote_binary() {
+        let _lock = storage::lock_test_env();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 {
+                    crate::env::set_var("JCODE_SSH_BINARY", value);
+                } else {
+                    crate::env::remove_var("JCODE_SSH_BINARY");
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCODE_SSH_BINARY"));
+        crate::env::set_var("JCODE_SSH_BINARY", "/custom/remote-jcode");
+        let target = callback_target("test-host".into());
+        assert_eq!(
+            target.remote_binary.as_deref(),
+            Some("/custom/remote-jcode")
+        );
+        let command = target
+            .remote_command("test-host", &["cloud", "env", "receive"])
+            .unwrap();
+        assert!(
+            command
+                .get_args()
+                .any(|arg| arg.to_string_lossy().contains("/custom/remote-jcode"))
+        );
     }
     #[test]
     fn source_and_request_are_strict() {

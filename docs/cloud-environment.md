@@ -2,7 +2,8 @@
 
 Moving a session or replacing a checkout does **not** make two machines identical.
 Check the runtime, tools, files and credentials before continuing work. Install
-missing dependencies deliberately and record nonsecret requirements. Do not put
+missing dependencies deliberately and document runtime/package setup in project
+setup documentation. Keep only typed resource requirements in the JSON manifest. Do not put
 secret values in messages, shell arguments, tool results, or this document.
 
 ## Request protocol
@@ -76,7 +77,9 @@ eligible and counts saved requirements, not remote service health.
 ## Explicit local push
 
 When no callback is available, including repository-only replacement, run this
-on the **local source machine**, from the repository:
+on the **local source machine**, from the repository. A replacement agent remains
+local and should run this command itself with its local tools when available,
+not ask the user to perform work it can do:
 
 ```sh
 jcode cloud env push --host my-cloud --request '{"action":"fetch","resource":{"kind":"credential","name":"github"}}'
@@ -86,7 +89,9 @@ jcode cloud env push --host my-cloud --request '{"action":"sync"}'
 The checkout uses the same absolute repository path on both machines. SSH uses
 the existing cloud target configuration. Values travel only over private SSH
 stdin into hidden `cloud env receive`, never in argv, session archives, temporary
-payload files, logs, or stdout. Remote stderr is discarded. The private payload
+payload files, logs, or stdout. Remote stderr is discarded. Transport I/O has a
+30-second deadline. Fulfillment honors the TUI's `JCODE_SSH_BINARY` and remains
+inside its disconnect-cancellation process group. The private payload
 is versioned, bounded to 4 MiB including encoding, and validates every source,
 resource, decoded value and destination before beginning writes.
 
@@ -117,7 +122,10 @@ reasons are never stored in this manifest. Names and paths are metadata and may
 still be sensitive in your organization, so review them before committing.
 
 Environment values are stored privately outside the repository under the Jcode
-state directory, keyed by canonical repository path. The base API
+state directory, keyed by canonical repository root, so loads from nested working
+directories see the same values. Stored values are checked again for NUL bytes
+and size limits. Manifest and environment read-modify-write operations use
+cross-process file locks and atomic replacement. The base API
 `cloud_environment::load_environment(root)` returns that repository's named
 values for shell integration. It does not expose them in status output. Do not
 print or serialize its result into transcripts. Missing local resources cause
