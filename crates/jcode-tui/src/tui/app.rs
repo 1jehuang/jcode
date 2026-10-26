@@ -122,6 +122,7 @@ mod state_ui_messages;
 mod state_ui_runtime;
 mod state_ui_storage;
 mod subscribe_nudge;
+pub mod suggested_replies;
 mod support;
 mod swarm_hint;
 mod terminal_liveness;
@@ -1861,14 +1862,13 @@ pub struct App {
     productivity_refreshing: bool,
     /// Last time the passive overnight progress card polled its run files.
     last_overnight_card_refresh: Option<Instant>,
-    /// Per-client Niri-style workspace navigation state. Previously a process
-    /// global; now owned per App instance.
+    /// Per-client Niri-style workspace navigation state.
     workspace_client: super::workspace_client::WorkspaceClientState,
     /// Reverse prompt-history search overlay state (Ctrl+R). None = closed.
     prompt_history_search: Option<prompt_history::PromptHistorySearchState>,
-    /// Lazily-loaded persisted cross-session prompt history (oldest first,
-    /// deduped). None until first use; see `prompt_history.rs`.
+    /// Lazily-loaded persisted cross-session prompt history (oldest first, deduped).
     persisted_prompt_history: Option<Vec<String>>,
+    pub(crate) suggested_replies: suggested_replies::SuggestedRepliesRuntime,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.

@@ -5,7 +5,7 @@ use crate::message::{ContentBlock, Role, ToolCall};
 use crate::session::{Session, StoredMessage};
 use std::time::Instant;
 
-fn review_session_read_only_guardrails() -> &'static str {
+pub(super) fn review_session_read_only_guardrails() -> &'static str {
     "Important constraints for this session:\n\
 - This session is analysis-only. Do not do the work yourself.\n\
 - Do not modify files or repo state. Do not call `edit`, `write`, `multiedit`, `patch`, `apply_patch`, or destructive `bash`/`git` commands.\n\
@@ -28,7 +28,10 @@ fn is_judge_session_title(title: Option<&str>) -> bool {
 }
 
 fn is_analysis_feedback_session_title(title: Option<&str>) -> bool {
-    matches!(title, Some("review" | "autoreview" | "judge" | "autojudge"))
+    matches!(
+        title,
+        Some("review" | "autoreview" | "judge" | "autojudge" | "review-6lenses")
+    )
 }
 
 fn resolve_feedback_target_session_id(session_id: &str) -> String {
@@ -796,7 +799,7 @@ pub(super) fn launch_forked_session_local(
     Ok(opened)
 }
 
-fn launch_review_window_local(
+pub(super) fn launch_review_window_local(
     app: &mut App,
     session_title: &str,
     label: &str,
@@ -932,7 +935,17 @@ pub(super) fn queue_autojudge_remote(app: &mut App) {
 }
 
 pub(super) fn maybe_trigger_autoreview_local(app: &mut App) {
-    if !app.autoreview_enabled || app.is_remote || app.is_replay {
+    if app.is_replay {
+        return;
+    }
+    if app.is_remote {
+        app.maybe_trigger_six_lens_autoreview_remote();
+        return;
+    }
+    if app.maybe_trigger_six_lens_autoreview_local() {
+        return;
+    }
+    if !app.autoreview_enabled {
         return;
     }
     if let Err(error) = launch_autoreview_window_local(app) {
@@ -975,7 +988,13 @@ pub(super) fn handle_review_command_local(app: &mut App, trimmed: &str) -> bool 
         return true;
     }
 
-    app.push_display_message(DisplayMessage::error("Usage: /review".to_string()));
+    if matches!(rest, "6" | "6lenses" | "lenses" | "six") {
+        return app.run_six_lens_review_command_local("6-Lens Review");
+    }
+
+    app.push_display_message(DisplayMessage::error(
+        "Usage: /review [6|lenses]".to_string(),
+    ));
     true
 }
 
@@ -1023,9 +1042,12 @@ pub(super) fn handle_autoreview_command_local(app: &mut App, trimmed: &str) -> b
             }
             true
         }
+        "6" | "6lenses" | "lenses" | "six" => {
+            app.run_six_lens_review_command_local("6-Lens Autoreview")
+        }
         _ => {
             app.push_display_message(DisplayMessage::error(
-                "Usage: /autoreview [on|off|status|now]".to_string(),
+                "Usage: /autoreview [on|off|status|now|6]".to_string(),
             ));
             true
         }

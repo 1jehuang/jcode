@@ -1564,6 +1564,9 @@ impl App {
             self.set_diff_pane_focus(false);
         }
 
+        if let Some(tag) = self.handle_suggested_reply_mouse_click(mouse) {
+            finish_mouse_event!(false, tag);
+        }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && crate::tui::ui::viewport::pinned_todo_more_area().is_some_and(|area| {
                 super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
@@ -1572,11 +1575,7 @@ impl App {
             self.pinned_todos_expanded = !self.pinned_todos_expanded;
             finish_mouse_event!(false, "pinned_todos_toggle");
         }
-
-        // A left press in the composer moves the caret first (native text-field
-        // behavior), then falls through so the shared copy-selection machinery
-        // can arm a drag anchor: click repositions the cursor, drag selects the
-        // text being typed (issue #430).
+        // Left press moves the caret first, then falls through to arm drag selection (#430).
         let clicked_input_cursor = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             input_area.and_then(|area| {

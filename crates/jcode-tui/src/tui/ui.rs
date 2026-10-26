@@ -64,7 +64,7 @@ pub(crate) mod inline_image_ui;
 #[path = "ui_inline_interactive.rs"]
 mod inline_interactive_ui;
 #[path = "ui_inline.rs"]
-mod inline_ui;
+pub(crate) mod inline_ui;
 #[path = "ui_input.rs"]
 pub(crate) mod input_ui;
 #[path = "ui_memory_estimates.rs"]
@@ -129,7 +129,7 @@ use file_diff_ui::{
     FileDiffCacheKey, FileDiffViewCacheEntry, file_content_signature, file_diff_cache,
 };
 pub(crate) use header::capitalize;
-use inline_ui::{draw_inline_ui, inline_ui_height};
+use inline_ui::{budgeted_inline_ui_height, draw_inline_ui};
 pub(crate) use layout_support::{draw_side_panel_markdown, side_panel_dismiss_area};
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
 use memory_estimates::{estimate_prepared_chat_frame_bytes, estimate_prepared_messages_bytes};
@@ -2647,6 +2647,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     panel_image_preview::clear_regions();
+    inline_ui::clear_suggested_reply_hit_regions();
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
         return;
@@ -2655,7 +2656,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let total_start = Instant::now();
     reset_frame_perf_stats();
     begin_frame_resource_sample();
-
     clear_copy_viewport_snapshot();
 
     // Clear full frame to prevent stale cells from prior layouts.
@@ -2998,8 +2998,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
-    let inline_block_height: u16 = inline_ui_height(app);
-    let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
     let input_height = base_input_height + hint_line_height;
 
     if let Some(ref mut capture) = debug_capture {
@@ -3065,15 +3063,17 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Session status line (dir, branch, context, provider, model), always
     // pinned directly below the input line.
     let overscroll_height: u16 = 1;
-    let fixed_height = 1
+    let non_inline_fixed_height = 1
         + queued_height
         + swarm_strip_height
         + notification_height
-        + inline_block_height
-        + inline_ui_gap_height
         + input_height
         + overscroll_height
-        + donut_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut
+        + donut_height;
+    let inline_block_height: u16 =
+        budgeted_inline_ui_height(app, chat_area.height, non_inline_fixed_height);
+    let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
+    let fixed_height = non_inline_fixed_height + inline_block_height + inline_ui_gap_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut
     let available_height = chat_area.height;
     let stable_fixed_height = fixed_height;
     let overflows = |prepared: &PreparedChatFrame| {

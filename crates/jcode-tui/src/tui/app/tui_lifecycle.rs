@@ -757,6 +757,7 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            suggested_replies: Default::default(),
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -1248,6 +1249,7 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            suggested_replies: Default::default(),
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -1258,10 +1260,8 @@ impl App {
     }
 
     pub fn new_for_test_harness(provider: Arc<dyn Provider>, registry: Registry) -> Self {
-        // Pin the perf tier before anything touches `perf::profile()`: on a
-        // loaded host the auto-detected Reduced/Minimal tier changes rendered
-        // output (perf badge in the header, animation gating), which makes
-        // frame-snapshot tests flake under parallel cargo builds.
+        // Pin the perf tier before `perf::profile()` so frame-snapshot tests do
+        // not flake when auto-detected Reduced/Minimal tiers alter header/animation output.
         crate::perf::pin_full_profile_for_tests();
         let mut app = Self::new(provider, registry);
         app.runtime_mode = AppRuntimeMode::TestHarness;

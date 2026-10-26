@@ -10,11 +10,15 @@ use serde_json::{Map, Value, json};
 use std::time::Duration;
 
 mod laya;
-use laya::{configured_laya_base, laya_endpoint, resolve_laya_with, should_bypass_proxy};
+use laya::{
+    configured_laya_base, laya_endpoint, resolve_laya_with, resolve_suggestions_with,
+    should_bypass_proxy, validate_choice_answer,
+};
 
 const PROVIDER_ENV: &str = "JCODE_MEMORY_JEV_PROVIDER";
 const BROWSER_PROVIDER_ENV: &str = "JCODE_BROWSER_JEV_PROVIDER";
 const VOICE_PROVIDER_ENV: &str = "JCODE_VOICE_JEV_PROVIDER";
+const SUGGESTIONS_PROVIDER_ENV: &str = "JCODE_SUGGESTIONS_JEV_PROVIDER";
 const LAYA_BASE_URL_ENV: &str = "JCODE_LAYA_BASE_URL";
 const LAYA_DEFAULT_BASE: &str = "http://127.0.0.1:8080";
 pub const DEFAULT_MEMORY_JEV_MODEL: &str = "typesafe/jev-1.13";
@@ -48,6 +52,7 @@ enum JevPurpose {
     Memory,
     Browser,
     Voice,
+    Suggestions,
 }
 
 impl JevPurpose {
@@ -56,6 +61,7 @@ impl JevPurpose {
             Self::Memory => "memory",
             Self::Browser => "browser",
             Self::Voice => "voice",
+            Self::Suggestions => "suggestions",
         }
     }
 
@@ -63,28 +69,44 @@ impl JevPurpose {
         match self {
             Self::Memory => "memory_jev",
             Self::Browser => "browser_jev",
-            // Voice uses the gateway's existing typed noul contract.
-            Self::Voice => "memory_jev",
+            // Voice and Suggestions use the gateway's existing typed noul contract.
+            Self::Voice | Self::Suggestions => "memory_jev",
         }
     }
 
     fn selector_with(
         self,
         env: impl FnOnce(&str) -> Result<String, std::env::VarError>,
-        memory_default: impl FnOnce() -> String,
+        default_provider: impl FnOnce() -> String,
     ) -> Result<String> {
         let key = match self {
             Self::Memory => PROVIDER_ENV,
             Self::Browser => BROWSER_PROVIDER_ENV,
             Self::Voice => VOICE_PROVIDER_ENV,
+            Self::Suggestions => SUGGESTIONS_PROVIDER_ENV,
+        };
+        let fallback = || match self {
+            Self::Memory => default_provider(),
+            Self::Suggestions => {
+                let d = default_provider();
+                let trimmed = d.trim();
+                if trimmed.is_empty() {
+                    "auto".into()
+                } else {
+                    trimmed.to_owned()
+                }
+            }
+            Self::Browser | Self::Voice => "auto".into(),
         };
         match env(key) {
-            Ok(value) => Ok(value),
-            Err(std::env::VarError::NotPresent) => Ok(match self {
-                Self::Memory => memory_default(),
-                Self::Browser => "auto".into(),
-                Self::Voice => "auto".into(),
-            }),
+            Ok(value) => {
+                if self == Self::Suggestions && value.trim().is_empty() {
+                    Ok(fallback())
+                } else {
+                    Ok(value)
+                }
+            }
+            Err(std::env::VarError::NotPresent) => Ok(fallback()),
             Err(_) => bail!("{key} must contain a valid provider name"),
         }
     }
@@ -94,6 +116,7 @@ impl JevPurpose {
 enum JevProvider {
     OpenRouter,
     TypeSafe,
+    OpenJev,
     Laya,
     Aimlapi,
     Jcode,
@@ -104,6 +127,7 @@ impl JevProvider {
         match self {
             Self::OpenRouter => "openrouter",
             Self::TypeSafe => "typesafe",
+            Self::OpenJev => "openjev",
             Self::Laya => "laya",
             Self::Aimlapi => "aimlapi",
             Self::Jcode => "jcode",
@@ -114,6 +138,7 @@ impl JevProvider {
         match self {
             Self::OpenRouter => ("OPENROUTER_API_KEY", "openrouter.env"),
             Self::TypeSafe => ("TYPESAFE_API_KEY", "typesafe.env"),
+            Self::OpenJev => ("OPENJEV_API_KEY", "openjev.env"),
             Self::Laya => ("LAYA_API_KEY", "laya.env"),
             Self::Aimlapi => ("AIMLAPI_API_KEY", "aimlapi.env"),
             Self::Jcode => (
@@ -125,7 +150,7 @@ impl JevProvider {
 
     fn max_questions(self) -> usize {
         match self {
-            Self::TypeSafe | Self::Laya => TYPESAFE_MAX_QUESTIONS,
+            Self::TypeSafe | Self::OpenJev | Self::Laya => TYPESAFE_MAX_QUESTIONS,
             _ => MAX_QUESTIONS,
         }
     }
@@ -134,6 +159,7 @@ impl JevProvider {
         match self {
             Self::OpenRouter | Self::Jcode => DEFAULT_MEMORY_JEV_MODEL,
             Self::TypeSafe => "jev-latest",
+            Self::OpenJev => "openjev",
             Self::Laya => "laya-latest",
             Self::Aimlapi => "typesafe/jev",
         }
@@ -143,6 +169,7 @@ impl JevProvider {
         Ok(match self {
             Self::OpenRouter => "https://openrouter.ai/api/alpha/decisions".into(),
             Self::TypeSafe => "https://api.typesafe.ai/v1/systemone".into(),
+            Self::OpenJev => "https://api.openjev.sh/v1/systemone".into(),
             Self::Laya => laya_endpoint(gateway_base)?,
             Self::Aimlapi => "https://api.aimlapi.com/v1/decisions".into(),
             Self::Jcode => format!("{}/decisions", trusted_gateway_base(gateway_base)?),
@@ -164,6 +191,7 @@ fn configured_model_override(purpose: JevPurpose) -> Option<String> {
             "JCODE_VOICE_JEV_MODEL",
             crate::config::config().agents.voice_jev_model.clone(),
         ),
+        JevPurpose::Suggestions => return None,
     };
     resolve_model_override(std::env::var(env).ok(), configured)
 }
@@ -207,6 +235,10 @@ impl JevClient {
     /// probe. In particular, Jcode entitlement is checked live by `evaluate`.
     pub fn available() -> bool {
         Self::resolve(JevPurpose::Memory).is_ok()
+    }
+
+    pub fn suggestions_available() -> bool {
+        Self::resolve(JevPurpose::Suggestions).is_ok()
     }
 
     pub fn new() -> Result<Self> {
@@ -257,19 +289,39 @@ impl JevClient {
     }
 
     fn resolve(purpose: JevPurpose) -> Result<(JevProvider, String, String, Option<String>)> {
+        if purpose == JevPurpose::Suggestions {
+            return Self::resolve_with_suggestions_default(
+                &crate::config::config().suggested_replies.jev_provider,
+            );
+        }
         let selector = purpose.selector_with(
             |key| std::env::var(key),
             || crate::config::config().agents.memory_jev_provider.clone(),
         )?;
+        Self::resolve_for_selector(purpose, &selector)
+    }
+
+    fn resolve_with_suggestions_default(
+        config_default: &str,
+    ) -> Result<(JevProvider, String, String, Option<String>)> {
+        let selector = JevPurpose::Suggestions
+            .selector_with(|key| std::env::var(key), || config_default.to_owned())?;
+        Self::resolve_for_selector(JevPurpose::Suggestions, &selector)
+    }
+
+    fn resolve_for_selector(
+        purpose: JevPurpose,
+        selector: &str,
+    ) -> Result<(JevProvider, String, String, Option<String>)> {
         // Unlike the API-key helper, this does not consult registered
         // cross-provider fallback resolvers or the shared compatible slot.
         let load = |env: &str, file: &str| {
             crate::provider_catalog::load_env_value_from_env_or_config(env, file)
         };
-        let (provider, api_key) = if purpose == JevPurpose::Voice {
-            resolve_voice_with(&selector, load)?
-        } else {
-            resolve_with(&selector, load)?
+        let (provider, api_key) = match purpose {
+            JevPurpose::Voice => resolve_voice_with(selector, load)?,
+            JevPurpose::Suggestions => resolve_suggestions_with(selector, load)?,
+            _ => resolve_with(selector, load)?,
         };
         let base = match provider {
             JevProvider::Jcode => crate::subscription_api::configured_api_base(),
@@ -454,6 +506,7 @@ impl JevClient {
                     JevPurpose::Memory => "Jcode Memory",
                     JevPurpose::Browser => "Jcode Browser",
                     JevPurpose::Voice => "Jcode Voice",
+                    JevPurpose::Suggestions => "Jcode Suggestions",
                 },
             );
         }
@@ -541,11 +594,12 @@ fn resolve_with(
         ],
         "openrouter" => &[JevProvider::OpenRouter],
         "typesafe" => &[JevProvider::TypeSafe],
+        "openjev" => &[JevProvider::OpenJev],
         "laya" => return resolve_laya_with(&mut load),
         "aimlapi" => &[JevProvider::Aimlapi],
         "jcode" | "subscription" | "jcode-subscription" => &[JevProvider::Jcode],
         _ => bail!(
-            "Invalid Jev provider. Choose auto, laya, openrouter, typesafe, aimlapi, or jcode"
+            "Invalid Jev provider. Choose auto, laya, openjev, openrouter, typesafe, aimlapi, or jcode"
         ),
     };
     resolve_providers(providers, load)
@@ -824,6 +878,8 @@ fn validate_answers(value: &Value, questions: &Map<String, Value>) -> Result<()>
                     .is_some_and(|v| v.is_finite() && (0.0..=1.0).contains(&v)),
                 "Jev returned an invalid noul probability"
             );
+        } else if question["type"] == "choice" {
+            validate_choice_answer(question, answer)?;
         }
     }
     Ok(())
@@ -972,7 +1028,11 @@ mod tests {
                 .unwrap(),
             "aimlapi"
         );
-        for purpose in [JevPurpose::Memory, JevPurpose::Browser] {
+        for purpose in [
+            JevPurpose::Memory,
+            JevPurpose::Browser,
+            JevPurpose::Suggestions,
+        ] {
             assert!(
                 purpose
                     .selector_with(
@@ -982,6 +1042,24 @@ mod tests {
                     .is_err()
             );
         }
+        assert_eq!(
+            JevPurpose::Suggestions
+                .selector_with(
+                    |key| {
+                        assert_eq!(key, SUGGESTIONS_PROVIDER_ENV);
+                        Ok("   ".into())
+                    },
+                    || "laya".into(),
+                )
+                .unwrap(),
+            "laya"
+        );
+        assert_eq!(
+            JevPurpose::Suggestions
+                .selector_with(|_| Err(std::env::VarError::NotPresent), || "  ".into(),)
+                .unwrap(),
+            "auto"
+        );
     }
 
     #[test]
@@ -1054,6 +1132,14 @@ mod tests {
                 "typesafe.env",
                 "https://api.typesafe.ai/v1/systemone",
                 "jev-latest",
+            ),
+            (
+                "openjev",
+                JevProvider::OpenJev,
+                "OPENJEV_API_KEY",
+                "openjev.env",
+                "https://api.openjev.sh/v1/systemone",
+                "openjev",
             ),
             (
                 "laya",

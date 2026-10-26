@@ -107,6 +107,8 @@ audit_ignores=(
   --ignore RUSTSEC-2026-0187 # lopdf via pdf-extract 0.8.2 (pins lopdf 0.34); PDF text extraction only, awaiting pdf-extract upgrade to lopdf >=0.42
   --ignore RUSTSEC-2026-0194 # quick-xml via wayland-scanner (proc-macro); parses trusted Wayland protocol XML at build time only, never untrusted input at runtime
   --ignore RUSTSEC-2026-0195 # quick-xml via wayland-scanner (proc-macro); same build-time-only exposure as RUSTSEC-2026-0194
+  --ignore RUSTSEC-2026-0385 # ctutils 0.4.2 transitive via p256/elliptic-curve; awaiting upstream RustCrypto dependency bump
+  --ignore RUSTSEC-2026-0387 # crypto-bigint 0.5.5 transitive via p256/elliptic-curve; awaiting upstream RustCrypto dependency bump
 )
 if command -v cargo-audit >/dev/null 2>&1; then
   cargo audit "${audit_ignores[@]}"

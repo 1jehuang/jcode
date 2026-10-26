@@ -35,6 +35,127 @@ where
     Ok(T::deserialize(value).ok())
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum LenientBoolInput {
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    Other(serde::de::IgnoredAny),
+}
+
+pub(crate) fn parse_lenient_bool(default: bool, input: LenientBoolInput) -> bool {
+    match input {
+        LenientBoolInput::Bool(b) => b,
+        LenientBoolInput::Int(i) => i != 0,
+        LenientBoolInput::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        LenientBoolInput::Other(_) => default,
+    }
+}
+
+pub(crate) fn lenient_bool_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(LenientBoolInput::deserialize(deserializer)
+        .map(|input| parse_lenient_bool(false, input))
+        .unwrap_or(false))
+}
+
+pub(crate) fn lenient_bool_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(LenientBoolInput::deserialize(deserializer)
+        .map(|input| parse_lenient_bool(true, input))
+        .unwrap_or(true))
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LenientNumberInput {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Other(serde::de::IgnoredAny),
+}
+
+#[allow(clippy::manual_ok_err)]
+pub(crate) fn lenient_max_secondary_suggestions<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let parsed = match LenientNumberInput::deserialize(deserializer) {
+        Ok(LenientNumberInput::Int(v)) => Some(v),
+        Ok(LenientNumberInput::Float(v)) if v.is_finite() => Some(v.round() as i64),
+        Ok(LenientNumberInput::Str(s)) => match s.trim().parse::<i64>() {
+            Ok(v) => Some(v),
+            Err(_) => None,
+        },
+        _ => None,
+    };
+    Ok(match parsed {
+        Some(v) => v.clamp(1, 20) as usize,
+        None => 3,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LenientStringListInput {
+    List(Vec<String>),
+    Single(String),
+    Other(serde::de::IgnoredAny),
+}
+
+pub(crate) fn lenient_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw_items = match LenientStringListInput::deserialize(deserializer) {
+        Ok(LenientStringListInput::List(items)) => items,
+        Ok(LenientStringListInput::Single(s)) => {
+            s.split(['|', ';', '\n']).map(ToString::to_string).collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for item in raw_items {
+        let trimmed = item.trim();
+        if !trimmed.is_empty()
+            && !out
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(trimmed))
+        {
+            out.push(trimmed.to_string());
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn lenient_confidence_threshold<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let parsed = match LenientNumberInput::deserialize(deserializer) {
+        Ok(LenientNumberInput::Float(v)) if v.is_finite() => Some(v as f32),
+        Ok(LenientNumberInput::Int(v)) => Some(v as f32),
+        Ok(LenientNumberInput::Str(s)) => match s.trim().parse::<f32>() {
+            Ok(v) if v.is_finite() => Some(v),
+            _ => None,
+        },
+        _ => None,
+    };
+    Ok(match parsed {
+        Some(v) => v.clamp(0.0, 1.0),
+        None => 0.55,
+    })
+}
+
 /// Regression tests for issue #689: an unrecognized value in one `[display]`
 /// enum field must not discard the rest of the user's configuration.
 #[cfg(test)]
@@ -111,5 +232,47 @@ mod tests {
         let display = parse(r#"{"diagram_mode": "pinned", "diff_mode": "full-inline"}"#);
         assert_eq!(display.diagram_mode, DiagramDisplayMode::Pinned);
         assert_eq!(display.diff_mode, DiffDisplayMode::FullInline);
+    }
+
+    #[test]
+    fn suggested_replies_config_lenient_clamping_and_defaults() {
+        let default_cfg = crate::SuggestedRepliesConfig::default();
+        assert_eq!(default_cfg.max_secondary_suggestions, 3);
+        assert!(default_cfg.show_confidence);
+        assert!(default_cfg.custom_prompts.is_empty());
+
+        let cfg: crate::SuggestedRepliesConfig = serde_json::from_str(
+            r#"{
+                "useOpenGf": "yes",
+                "maxSecondarySuggestions": 99,
+                "confidenceThreshold": 1.8,
+                "showConfidence": "no",
+                "custom_questions": ["Проверь тесты", "Запусти clippy", ""],
+                "enableFullAutoExplorer": 1,
+                "sixLensAutoReview": "on"
+            }"#,
+        )
+        .expect("must parse leniently");
+        assert!(cfg.enabled);
+        assert!(cfg.use_open_gf);
+        assert_eq!(cfg.max_secondary_suggestions, 20);
+        assert_eq!(cfg.confidence_threshold, 1.0);
+        assert!(!cfg.show_confidence);
+        assert_eq!(cfg.custom_prompts, vec!["Проверь тесты", "Запусти clippy"]);
+        assert!(cfg.enable_full_auto_explorer);
+        assert!(cfg.six_lens_auto_review);
+
+        let low_cfg: crate::SuggestedRepliesConfig = serde_json::from_str(
+            r#"{
+                "max_secondary_suggestions": -3,
+                "confidence_threshold": -0.5,
+                "use_open_gf": "invalid-bool"
+            }"#,
+        )
+        .expect("must parse out-of-range values leniently");
+        assert_eq!(low_cfg.max_secondary_suggestions, 1);
+        assert_eq!(low_cfg.confidence_threshold, 0.0);
+        assert!(!low_cfg.use_open_gf);
+        assert!(low_cfg.show_confidence);
     }
 }

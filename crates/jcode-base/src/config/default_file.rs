@@ -780,6 +780,28 @@ port = 7643
 # Bind address (0.0.0.0 for LAN/Tailscale reachability)
 bind_addr = "0.0.0.0"
 
+[suggested_replies]
+# Enable two-stage cascading Suggested Replies with Default Action Focus (default: true)
+enabled = true
+# Jev SystemOne provider for Suggested Replies: "auto", "laya", "openjev", "typesafe", "openrouter", "aimlapi", or "jcode"
+jev_provider = "auto"
+# Switch between Jev-native fixed macro/micro pool (false) and OpenGF Sidecar generation (true)
+use_open_gf = false
+# Maximum number of secondary suggestion badges displayed (1..=20, default: 3)
+max_secondary_suggestions = 3
+# Confidence threshold (0.0..=1.0, default: 0.55) to promote the top action to Default Action
+confidence_threshold = 0.55
+# Show model confidence percentage on every suggestion row (default: true)
+show_confidence = true
+# User-defined constant questions/prompts scored alongside dynamic candidates
+custom_prompts = []
+# Full-auto Explorer mode (default: false): auto-submits Default Action after 500ms delay
+enable_full_auto_explorer = false
+# Automatic 6-lens subagent self-review at turn completion (default: false)
+six_lens_auto_review = false
+# Enable optional "finish" ([финал] / [finish]) feature-completion category and candidates (default: true)
+enable_finish_category = true
+
 [session]
 # Release reloadable session memory after 30 minutes idle. Active work is never
 # interrupted. Type in the terminal to wake. Set to 0 to disable hibernation.

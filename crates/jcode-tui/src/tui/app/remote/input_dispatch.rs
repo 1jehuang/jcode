@@ -36,6 +36,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
     }
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
+    app.clear_suggested_replies_for_new_turn();
     app.is_processing = true;
     app.status = ProcessingStatus::Sending;
     app.status_detail = None;

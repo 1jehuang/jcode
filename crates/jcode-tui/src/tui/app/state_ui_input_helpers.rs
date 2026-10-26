@@ -231,6 +231,8 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/accounts", "Alias for /account"),
     RegisteredCommand::public("/cache", "Show cache stats; extend/5m saves Anthropic TTL"),
     RegisteredCommand::public("/debug-visual", "Toggle visual debug overlay"),
+    RegisteredCommand::public("/suggestions", "Inspect or test Suggested Replies cascade"),
+    RegisteredCommand::hidden("/suggested-replies", "Alias for /suggestions"),
     RegisteredCommand::public("/screenshot-mode", "Toggle screenshot capture mode"),
     RegisteredCommand::public("/screenshot", "Capture a screenshot debug state"),
     RegisteredCommand::public("/record", "Record a demo capture"),
@@ -248,10 +250,8 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/zstatus", "Secret premium-mode status command"),
 ];
 
-/// Every non-hidden slash command with its one-line description, in
-/// registration order. The `/help` overlay uses this to list commands its
-/// hand-written sections have not covered, so a newly registered command can
-/// never be invisible to users.
+/// Every non-hidden slash command with its one-line description, in registration order,
+/// used by `/help` to list commands not covered by hand-written sections.
 pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
     REGISTERED_COMMANDS
         .iter()
