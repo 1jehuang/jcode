@@ -25,7 +25,7 @@ fn browser_tool_description_text() -> &'static str {
     if browser_handoff_disabled() {
         return "Control the browser using direct actions. Check action='status' first; run setup only if not ready. Browser handoff is disabled for this process. Complete browser tasks with direct actions in the requested tab.";
     }
-    "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks with goal, tab_id, and optional trusted context. Jev handles the entire task until complete or genuinely blocked; navigation alone is not completion. Direct actions are for setup, tab discovery/creation, or blocked handoffs. list_tabs includes signed-in tabs across windows. On requested_help=script/text, supply exact executable script candidates or exact text_values and resume. On requested_help=user_login, ask the user to complete the CAPTCHA in that tab, wait, then resume the handoff."
+    "Check action='status' first; setup only if not ready. Use action='handoff' by default for browser tasks with goal and tab_id, or url+new_tab=true to create and bind a fresh tab. Untargeted open creates a new tab; reuse its returned tab_id. Jev handles the entire task until complete or genuinely blocked; navigation alone is not completion. Direct actions: setup, tabs, blocked handoffs. list_tabs includes signed-in tabs. On requested_help=script/text, provide exact executable script candidates or exact text_values and resume. On requested_help=user_login, ask user to complete CAPTCHA in that tab, wait, then resume the handoff."
 }
 
 /// Opt-in process-local control for direct-only benchmark arms. Normal sessions
@@ -316,7 +316,10 @@ impl Tool for BrowserTool {
             ("x", json!({"type": "number"})),
             ("y", json!({"type": "number"})),
             ("wait", json!({"type": "boolean"})),
-            ("new_tab", json!({"type": "boolean"})),
+            (
+                "new_tab",
+                json!({"type": "boolean", "description": "For handoff, create a fresh tab and bind the task to its returned ID (use with url). For open, defaults to true when tab_id is omitted. Explicit false reuses the current tab."}),
+            ),
             ("focus", json!({"type": "boolean"})),
             ("clear", json!({"type": "boolean"})),
             ("submit", json!({"type": "boolean"})),
@@ -390,7 +393,7 @@ impl Tool for BrowserTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: BrowserInput = serde_json::from_value(input)?;
+        let mut params: BrowserInput = serde_json::from_value(input)?;
         if params.action == "handoff" && browser_handoff_disabled() {
             anyhow::bail!(
                 "Browser handoff is disabled by JCODE_BROWSER_HANDOFF_DISABLED=1. Use direct browser actions instead."
@@ -401,7 +404,10 @@ impl Tool for BrowserTool {
         match params.action.as_str() {
             "status" => provider.status_for(params.browser.as_deref(), &ctx).await,
             "setup" => provider.setup_for(params.browser.as_deref()).await,
-            "handoff" => browser_fast::handoff(provider, &params, &ctx).await,
+            "handoff" => {
+                prepare_handoff_tab(provider, &mut params, &ctx).await?;
+                browser_fast::handoff(provider, &params, &ctx).await
+            }
             other => {
                 let setup_message = provider.ensure_ready_for(params.browser.as_deref()).await?;
                 let output = provider.execute(other, &params, &ctx).await?;
@@ -412,6 +418,52 @@ impl Tool for BrowserTool {
             }
         }
     }
+}
+
+/// Create and bind the task tab before Jev observes anything. Never carry an
+/// old tab/frame target into a newly created tab, even if the caller supplied it.
+async fn prepare_handoff_tab(
+    provider: &dyn BrowserProvider,
+    input: &mut BrowserInput,
+    ctx: &ToolContext,
+) -> Result<()> {
+    let create = input.new_tab == Some(true)
+        || (input.tab_id.is_none() && input.url.is_some() && input.new_tab != Some(false));
+    if !create {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        input
+            .goal
+            .as_deref()
+            .is_some_and(|goal| !goal.trim().is_empty()),
+        "handoff requires a non-empty goal before opening a task tab"
+    );
+    provider.ensure_ready_for(input.browser.as_deref()).await?;
+    let creation = BrowserInput {
+        action: "new_tab".into(),
+        browser: input.browser.clone(),
+        url: input.url.clone(),
+        window_id: input.window_id,
+        timeout_ms: input.timeout_ms,
+        ..Default::default()
+    };
+    let output = provider.execute("new_tab", &creation, ctx).await?;
+    bind_created_handoff_tab(input, output.metadata.as_ref())
+}
+
+fn bind_created_handoff_tab(input: &mut BrowserInput, result: Option<&Value>) -> Result<()> {
+    let result =
+        result.context("New browser tab returned no metadata; refusing to use an old tab")?;
+    let tab_id = result["tabId"]
+        .as_i64()
+        .context("New browser tab returned no tabId; refusing to use an old tab")?;
+    input.tab_id = Some(tab_id);
+    input.window_id = result["windowId"].as_i64();
+    input.frame_id = Some(0);
+    input.all_frames = Some(false);
+    input.new_tab = Some(false);
+    Ok(())
 }
 
 fn prepend_setup_message(mut output: ToolOutput, message: &str) -> ToolOutput {
@@ -747,6 +799,11 @@ async fn recover_slow_navigation(
     browser: Option<&str>,
     ctx: &ToolContext,
 ) -> Option<Value> {
+    // A timed-out new-tab navigation never returned its new tab ID. The
+    // session can still point at the previous tab, even on the same host.
+    if params["newTab"] == true {
+        return None;
+    }
     let mut read = Map::new();
     read.insert("format".into(), json!("annotated"));
     if let Some(tab) = params.get("tabId") {

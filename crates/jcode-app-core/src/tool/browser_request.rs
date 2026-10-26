@@ -59,9 +59,10 @@ pub(super) fn bridge_request(
                 .ok_or_else(|| anyhow::anyhow!("url is required for open"))?;
             params.insert("url".into(), json!(url));
             params.insert("wait".into(), json!(input.wait.unwrap_or(true)));
-            if let Some(new_tab) = input.new_tab {
-                params.insert("newTab".into(), json!(new_tab));
-            }
+            params.insert(
+                "newTab".into(),
+                json!(input.new_tab.unwrap_or(input.tab_id.is_none())),
+            );
             if let Some(timeout_ms) = input.timeout_ms {
                 params.insert("timeoutMs".into(), json!(timeout_ms));
             }
