@@ -46,6 +46,17 @@ impl MacTerminalKind {
         }
     }
 
+    /// The `jcode-terminal-launch` candidate for this terminal, or `None` to
+    /// let it detect one. Unknown must not force Terminal.app ahead of
+    /// installed terminals.
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn spawn_candidate(self) -> Option<&'static str> {
+        match self {
+            Self::Unknown => None,
+            other => Some(other.cli_value()),
+        }
+    }
+
     fn from_cli_value(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "ghostty" => Some(Self::Ghostty),
@@ -425,6 +436,20 @@ mod tests {
             MacTerminalKind::Alacritty
         );
         assert_eq!(detect(&[]), MacTerminalKind::Unknown);
+    }
+
+    #[test]
+    fn spawn_candidate_maps_selected_terminal_for_hotkey_listener() {
+        // The Cmd+; listener hands this to jcode-terminal-launch, so the names
+        // must match its candidates; Unknown defers to detection (#1125).
+        assert_eq!(MacTerminalKind::Kitty.spawn_candidate(), Some("kitty"));
+        assert_eq!(MacTerminalKind::Ghostty.spawn_candidate(), Some("ghostty"));
+        assert_eq!(MacTerminalKind::Iterm2.spawn_candidate(), Some("iterm2"));
+        assert_eq!(
+            MacTerminalKind::AppleTerminal.spawn_candidate(),
+            Some("terminal")
+        );
+        assert_eq!(MacTerminalKind::Unknown.spawn_candidate(), None);
     }
 
     #[test]

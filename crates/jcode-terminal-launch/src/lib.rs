@@ -24,6 +24,9 @@ pub struct TerminalCommand {
     /// and are also exported under a `JCODE_CLIENT_*` prefix so spawn/focus
     /// hooks can target the terminal the user is actually attached to (#405).
     pub client_terminal_env: Vec<(String, String)>,
+    /// The user's selected terminal (e.g. the macOS Cmd+; listener's saved
+    /// preference). Tried first, after an explicit `JCODE_TERMINAL`.
+    pub preferred_terminal: Option<String>,
 }
 
 impl TerminalCommand {
@@ -37,6 +40,7 @@ impl TerminalCommand {
             session_id: None,
             extra_env: Vec::new(),
             client_terminal_env: Vec::new(),
+            preferred_terminal: None,
         }
     }
 
@@ -70,6 +74,11 @@ impl TerminalCommand {
     /// requesting client is attached to instead of the server's stale env.
     pub fn client_terminal_env(mut self, env: Vec<(String, String)>) -> Self {
         self.client_terminal_env = env;
+        self
+    }
+
+    pub fn preferred_terminal(mut self, term: impl Into<String>) -> Self {
+        self.preferred_terminal = Some(term.into());
         self
     }
 }
@@ -449,7 +458,9 @@ pub fn spawn_command_in_new_terminal_with(
 
     #[cfg(unix)]
     let candidates = {
-        let configured_terminal = std::env::var("JCODE_TERMINAL").ok();
+        let configured_terminal = std::env::var("JCODE_TERMINAL")
+            .ok()
+            .or_else(|| command.preferred_terminal.clone());
         resume_terminal_candidates_with_client_env(
             &command.client_terminal_env,
             configured_terminal.as_deref(),
@@ -758,6 +769,12 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
                 .arg(&command.program)
                 .args(&command.args);
         }
+        // ponytail: a PATH probe, not an app-bundle lookup; launchd's PATH
+        // rarely includes kitty, so app installs take the `open` route.
+        #[cfg(target_os = "macos")]
+        "kitty" if !program_on_path("kitty") => {
+            cmd = macos_kitty_open_command(command, cwd);
+        }
         "kitty" => {
             cmd.args(["--title", title, "-e"])
                 .arg(&command.program)
@@ -878,6 +895,36 @@ fn macos_terminal_inner_script(command: &TerminalCommand, cwd: &Path) -> String 
         },
         shell
     )
+}
+
+#[cfg(target_os = "macos")]
+fn program_on_path(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+}
+
+/// Launch kitty's app bundle through LaunchServices, matching the setup
+/// scripts' `open -na kitty --args ...` (kitty takes the program positionally).
+/// `open` does not pass our env or cwd, so the inner script carries both.
+#[cfg(any(target_os = "macos", test))]
+fn macos_kitty_open_command(command: &TerminalCommand, cwd: &Path) -> Command {
+    let title = command.title.as_deref().unwrap_or("jcode");
+    let mut cmd = Command::new("open");
+    cmd.current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .args([
+            "-na",
+            "kitty",
+            "--args",
+            "--title",
+            title,
+            "/bin/bash",
+            "-lc",
+        ])
+        .arg(macos_terminal_inner_script(command, cwd));
+    cmd
 }
 
 /// Build the AppleScript used to create a Ghostty tab on macOS.
@@ -1563,6 +1610,63 @@ mod tests {
             "-na\nGhostty\n--args\n-e\n/bin/bash\n-lc\ncd '/work tree' && exec '/opt/jcode' '--resume' 'ses ghost'\n"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn preferred_terminal_is_tried_before_detected_emulators() {
+        // The macOS Cmd+; listener passes the user's saved terminal; it must be
+        // tried before whatever the environment or installed apps suggest (#1125).
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous_terminal = std::env::var_os("JCODE_TERMINAL");
+        unsafe {
+            std::env::remove_var("JCODE_TERMINAL");
+        }
+        let command = TerminalCommand::new("/usr/local/bin/jcode", vec![])
+            .client_terminal_env(vec![("KITTY_PID".to_string(), "1234".to_string())])
+            .preferred_terminal("wezterm");
+        let mut attempts = Vec::new();
+
+        let result =
+            spawn_command_in_new_terminal_with(&command, Path::new("/work/dir"), |candidate| {
+                attempts.push(candidate.get_program().to_string_lossy().into_owned());
+                Ok(())
+            });
+
+        match previous_terminal {
+            Some(value) => unsafe { std::env::set_var("JCODE_TERMINAL", value) },
+            None => unsafe { std::env::remove_var("JCODE_TERMINAL") },
+        }
+        assert!(matches!(result, Ok(true)));
+        assert_eq!(attempts, vec!["wezterm"]);
+    }
+
+    #[test]
+    fn macos_kitty_open_command_launches_app_bundle() {
+        // kitty installed as an app is usually not on the LaunchAgent's PATH,
+        // so it is opened through LaunchServices like the setup scripts do.
+        let command = TerminalCommand::new("/opt/jcode", vec!["--resume".to_string()])
+            .title("jc")
+            .fresh_spawn();
+        let cmd = macos_kitty_open_command(&command, Path::new("/work tree"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(cmd.get_program(), "open");
+        assert_eq!(
+            args,
+            vec![
+                "-na",
+                "kitty",
+                "--args",
+                "--title",
+                "jc",
+                "/bin/bash",
+                "-lc",
+                "cd '/work tree' && exec env JCODE_FRESH_SPAWN=1 '/opt/jcode' '--resume'",
+            ]
+        );
     }
 
     // Reproduction for issue #203 part 3: when no terminal emulator can be
