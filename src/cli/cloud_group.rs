@@ -24,6 +24,10 @@ struct Member {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Group {
     version: u32,
+    #[serde(default)]
+    preview: bool,
+    #[serde(default)]
+    excluded_session_ids: Vec<String>,
     coordinator: String,
     members: Vec<Member>,
     // Portable swarm persistence, not live process IDs or sockets.
@@ -273,4 +277,92 @@ fn restore_preparing(journal: &Journal) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn verify_preview_repo(group: &Group, stage: &Path) -> Result<()> {
+    let repo = root(group)?
+        .manifest
+        .repo
+        .as_ref()
+        .context("preview repository missing")?;
+    let temporary = tempfile::tempdir()?;
+    let directory = if Path::new(&repo.root).join(".git").exists() {
+        Path::new(&repo.root)
+    } else {
+        git(temporary.path(), &["init", "--quiet"])?;
+        temporary.path()
+    };
+    let bundle = stage.join("repo.bundle");
+    let bundle = bundle.to_str().context("non-UTF8 bundle path")?;
+    git(directory, &["bundle", "verify", bundle])?;
+    let heads = git(directory, &["bundle", "list-heads", bundle])?;
+    if !heads
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(repo.snapshot.as_str()))
+    {
+        bail!("preview repository bundle does not advertise the group snapshot");
+    }
+    Ok(())
+}
+
+fn group_arrival_notice(manifest: &MoveManifest, coordinator: &str, members: &[String]) -> String {
+    let mut lines = arrival_context(manifest);
+    lines.push(format!("Coordinated migration members: {}. Swarm ownership, task assignments and todos came along. Group return is not implemented; do not return individual members.", members.join(", ")));
+    lines.push(crate::cloud_environment::group_migration_guidance(
+        &manifest.session_id,
+        coordinator,
+    ));
+    if manifest.session_id == coordinator {
+        lines.push("Workers are paused after migration. First verify and complete shared repository/runtime/environment setup once. Then explicitly resume the migrated workers with the swarm tool, preserving their existing session IDs and task assignments. Do not respawn duplicate workers or resume them before setup is ready. Report any blocker honestly.".into());
+    } else {
+        lines.push(format!("Remain paused until coordinator {coordinator} confirms shared setup is ready and explicitly resumes your existing session. Do not start duplicate workspace setup or request an independent local resource bridge."));
+    }
+    lines.join("\n")
+}
+
+fn excluded_local_sessions(root: &Path, included: &[String]) -> Result<Vec<String>> {
+    excluded_local_sessions_at(&storage::jcode_dir()?.join("sessions"), root, included)
+}
+
+fn excluded_local_sessions_at(
+    directory: &Path,
+    root: &Path,
+    included: &[String],
+) -> Result<Vec<String>> {
+    let mut excluded = BTreeSet::new();
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    for entry in std::fs::read_dir(directory)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(value) = read_json::<serde_json::Value>(&path) else {
+            continue;
+        };
+        let (Some(id), Some(working_dir)) = (value["id"].as_str(), value["working_dir"].as_str())
+        else {
+            continue;
+        };
+        if included.iter().any(|included| included == id)
+            || checked_id(id).is_err()
+            || storage::read_session_lease(id).is_some_and(|lease| !lease.is_here())
+        {
+            continue;
+        }
+        let Ok(canonical) = Path::new(working_dir).canonicalize() else {
+            continue;
+        };
+        if !canonical.starts_with(root) {
+            continue;
+        }
+        let Ok(candidate) = git(&canonical, &["rev-parse", "--show-toplevel"]) else {
+            continue;
+        };
+        if Path::new(&candidate).canonicalize().ok().as_deref() == Some(root) {
+            excluded.insert(id.to_owned());
+        }
+    }
+    Ok(excluded.into_iter().collect())
 }

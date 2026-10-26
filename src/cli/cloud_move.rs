@@ -751,6 +751,8 @@ pub(crate) struct MoveReport {
     /// Empty for legacy single-session transfers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_session_ids: Vec<String>,
     pub host: String,
     pub epoch: u64,
     pub repo_root: Option<String>,
@@ -1111,6 +1113,7 @@ pub(crate) fn run_move(
     let report = MoveReport {
         session_id: session_id.clone(),
         members: Vec::new(),
+        excluded_session_ids: Vec::new(),
         host: host.clone(),
         epoch,
         repo_root: repo.as_ref().map(|r| r.root.clone()),
@@ -2627,7 +2630,7 @@ fn append_arrival(sess: &mut session::Session, dangling: &[String], host: &str, 
     sess.add_message_with_display_role(crate::message::Role::User, blocks, role);
 }
 
-fn arrival_notice(manifest: &MoveManifest) -> String {
+fn arrival_context(manifest: &MoveManifest) -> Vec<String> {
     let mut lines = vec![format!(
         "This session was moved from `{}` to cloud host `{}` at {} (migration epoch {}). You are now running on the cloud host. The conversation, todos and project memory came along.",
         manifest.source_host, manifest.target_host, manifest.created_at, manifest.epoch
@@ -2670,6 +2673,11 @@ fn arrival_notice(manifest: &MoveManifest) -> String {
             manifest.mcp_servers.join(", ")
         ));
     }
+    lines
+}
+
+fn arrival_notice(manifest: &MoveManifest) -> String {
+    let mut lines = arrival_context(manifest);
     lines.push("There is no local display, desktop, browser or ssh-agent on this host. Keep working on the task exactly where you left off. The user can bring the session back with /local (`jcode cloud return`). Git will merge your work with any local edits.".to_string());
     lines.push(crate::cloud_environment::migration_guidance(
         &manifest.session_id,

@@ -2,6 +2,11 @@
 pub(super) fn receive(staging: tempfile::TempDir) -> Result<()> {
     let group: Group = read_json(&staging.path().join("group.json"))?;
     validate(&group, staging.path())?;
+    if group.preview {
+        verify_preview_repo(&group, staging.path())?;
+        println!("{}", serde_json::to_string(&receipt(&group)?)?);
+        return Ok(());
+    }
     let ids = group
         .members
         .iter()
@@ -58,6 +63,9 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
     let directory = inbox_dir()?.join(format!("{coordinator}.{epoch}"));
     let group: Group = read_json(&directory.join("group.json"))
         .context("group staging is missing; source ownership remains fenced, restore the staged archive before retrying")?;
+    if group.preview {
+        bail!("a preview cannot be activated");
+    }
     if group.coordinator != coordinator || root(&group)?.manifest.epoch != epoch {
         bail!("group activation coordinator/epoch mismatch");
     }

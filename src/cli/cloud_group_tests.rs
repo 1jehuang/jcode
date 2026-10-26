@@ -56,6 +56,8 @@ fn fixture() -> (tempfile::TempDir, Group) {
         stage,
         Group {
             version: GROUP_VERSION,
+            preview: false,
+            excluded_session_ids: vec![],
             coordinator: "coordinator".into(),
             members,
             swarm,
@@ -159,5 +161,87 @@ fn durable_journal_survives_replace_and_preserves_member_epochs() {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp"))
             .count(),
         0
+    );
+}
+
+#[test]
+fn group_guidance_defers_worker_resume_until_shared_setup() {
+    let (_, group) = fixture();
+    let ids = group
+        .members
+        .iter()
+        .map(|m| m.manifest.session_id.clone())
+        .collect::<Vec<_>>();
+    let coordinator = group_arrival_notice(&group.members[0].manifest, &group.coordinator, &ids);
+    assert!(coordinator.contains("group machine handoff"));
+    assert!(coordinator.contains("Then explicitly resume"));
+    assert!(coordinator.contains("Group return is not implemented"));
+    assert!(!coordinator.contains("jcode cloud return"));
+    let worker = group_arrival_notice(&group.members[1].manifest, &group.coordinator, &ids);
+    assert!(worker.contains("do not independently repeat workspace setup"));
+    assert!(worker.contains("Remain paused"));
+    assert!(!worker.contains("after a machine handoff."));
+}
+
+#[test]
+fn preview_receive_drops_staging_and_does_not_modify_repository() {
+    let (repository, bundle_stage, repo) = super::super::repo_tests::repository();
+    let (stage, mut group) = fixture();
+    group.preview = true;
+    for member in &mut group.members {
+        member.manifest.repo = Some(repo.clone());
+    }
+    std::fs::copy(
+        bundle_stage.path().join("repo.bundle"),
+        stage.path().join("repo.bundle"),
+    )
+    .unwrap();
+    storage::write_json(&stage.path().join("group.json"), &group).unwrap();
+    let stage_path = stage.path().to_path_buf();
+    let before = git(repository.path(), &["status", "--porcelain"]).unwrap();
+    receive(stage).unwrap();
+    assert!(
+        !stage_path.exists(),
+        "preview must not keep its inbox staging"
+    );
+    assert_eq!(
+        git(repository.path(), &["status", "--porcelain"]).unwrap(),
+        before
+    );
+    // A real follow-up is a different transaction at the same epoch, not an
+    // identity collision with a persisted preview.
+    group.preview = false;
+    assert_ne!(receipt(&group).unwrap().manifest_sha256, {
+        group.preview = true;
+        receipt(&group).unwrap().manifest_sha256
+    });
+}
+
+#[test]
+fn inventory_reports_only_omitted_sessions_in_same_repository() {
+    let (repository, _, _) = super::super::repo_tests::repository();
+    let inventory = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let included = format!("included-{}", uuid::Uuid::new_v4());
+    let excluded = format!("excluded-{}", uuid::Uuid::new_v4());
+    for (id, directory) in [
+        (included.as_str(), repository.path()),
+        (excluded.as_str(), repository.path()),
+        ("other-repo", other.path()),
+    ] {
+        storage::write_json(
+            &inventory.path().join(format!("{id}.json")),
+            &serde_json::json!({"id":id,"working_dir":directory}),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        excluded_local_sessions_at(
+            inventory.path(),
+            &repository.path().canonicalize().unwrap(),
+            &[included]
+        )
+        .unwrap(),
+        vec![excluded]
     );
 }

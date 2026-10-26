@@ -8,6 +8,9 @@ pub(crate) fn run_migrate(
     include_sessions: &[String],
 ) -> Result<MoveReport> {
     let requested = resolve_session_id(session_ref)?;
+    if include_sessions.is_empty() && standalone_without_daemon(&requested)? {
+        return run_move(Some(&requested), target, allow_active, dry_run);
+    }
     let host = target.resolve_host()?;
     let (coordinator, ids, mut swarm) = select_group(&requested, include_sessions)?;
     swarm["destination_host"] = serde_json::Value::String(host.clone());
@@ -100,8 +103,12 @@ pub(crate) fn run_migrate(
         .iter()
         .map(|s| s.previous_lease.clone())
         .collect::<Vec<_>>();
+    let excluded_session_ids =
+        excluded_local_sessions(repo_root.as_deref().context("missing repository")?, &ids)?;
     let mut group = Group {
         version: GROUP_VERSION,
+        preview: dry_run,
+        excluded_session_ids,
         coordinator,
         members: Vec::new(),
         swarm,
@@ -193,7 +200,8 @@ pub(crate) fn run_migrate(
             }
             sess.migration_epoch = member.manifest.epoch;
             let dangling = dangling_tool_use_ids(sess);
-            append_arrival(sess, &dangling, &host, &arrival_notice(&member.manifest));
+            let notice = group_arrival_notice(&member.manifest, &journal.group.coordinator, &ids);
+            append_arrival(sess, &dangling, &host, &notice);
             let member_dir = stage.join("members").join(&sess.id);
             std::fs::create_dir_all(&member_dir)?;
             storage::write_json(&member_dir.join("session.json"), sess)?;
@@ -356,6 +364,7 @@ fn report(group: &Group, dry_run: bool) -> Result<MoveReport> {
             .iter()
             .map(|m| m.manifest.session_id.clone())
             .collect(),
+        excluded_session_ids: group.excluded_session_ids.clone(),
         host: manifest.target_host.clone(),
         epoch: manifest.epoch,
         repo_root: manifest.repo.as_ref().map(|r| r.root.clone()),

@@ -120,3 +120,52 @@ fn prepare_group(group: &mut Group) -> Result<()> {
 fn import_group(bundle: &serde_json::Value) -> Result<()> {
     daemon_command("import", bundle).map(|_| ())
 }
+
+fn standalone_without_daemon(id: &str) -> Result<bool> {
+    if member_marker(id)?.exists() || group_dir(id)?.join("journal.json").exists() {
+        return Ok(false);
+    }
+    let running = std::thread::spawn(|| -> Result<bool> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        Ok(runtime.block_on(crate::server_spawn::is_running()))
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("daemon probe thread panicked"))??;
+    if running {
+        return Ok(false);
+    }
+    for directory in [
+        storage::durable_state_dir().join("swarm"),
+        storage::runtime_dir().join("jcode-swarm-state"),
+    ] {
+        if !directory.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(value) = read_json::<serde_json::Value>(&path) else {
+                // Unknown/corrupt persisted topology must not silently turn a
+                // group into a single-session handoff.
+                return Ok(false);
+            };
+            if json_mentions_session(&value, id) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn json_mentions_session(value: &serde_json::Value, id: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value == id,
+        serde_json::Value::Array(values) => values.iter().any(|v| json_mentions_session(v, id)),
+        serde_json::Value::Object(values) => values.values().any(|v| json_mentions_session(v, id)),
+        _ => false,
+    }
+}
