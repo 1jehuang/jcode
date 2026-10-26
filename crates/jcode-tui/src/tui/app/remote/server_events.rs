@@ -2134,8 +2134,19 @@ pub(in crate::tui::app) fn handle_server_event(
             history_laps.push(("pre_header_hint", history_lap.elapsed().as_millis()));
             history_lap = Instant::now();
             app.persist_remote_header_hint();
-            app.set_side_panel_snapshot(side_panel);
-            if history_images_match_retained(&images, &app.remote_side_pane_images) {
+            // Catalog-only History carries no server identity. Classify it before
+            // applying optional snapshots so its empty defaults cannot erase
+            // restored panels or their retained images. Session switches and
+            // full same-session History remain authoritative, including empties.
+            let carries_server_identity =
+                server_name.is_some() || server_version.is_some() || is_canary.is_some();
+            let authoritative = session_changed || carries_server_identity;
+            if authoritative || !side_panel.pages.is_empty() {
+                app.set_side_panel_snapshot(side_panel);
+            }
+            if !authoritative && images.is_empty() {
+                // A catalog refresh does not carry an image snapshot.
+            } else if history_images_match_retained(&images, &app.remote_side_pane_images) {
                 // The already-retained image set is identical (count + per-image
                 // byte length + metadata). Drop the incoming copy immediately so
                 // two full base64 payloads are never alive side by side.
@@ -2166,9 +2177,6 @@ pub(in crate::tui::app) fn handle_server_event(
             // header and the Overview session row flickered (`peak hare` ->
             // `hare`). Only overwrite what the event actually carries; a real
             // session switch still resets everything.
-            let carries_server_identity =
-                server_name.is_some() || server_version.is_some() || is_canary.is_some();
-            let authoritative = session_changed || carries_server_identity;
             if authoritative || !skills.is_empty() {
                 app.remote_skills = skills;
                 app.invalidate_command_candidates_cache();
