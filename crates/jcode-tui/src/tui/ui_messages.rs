@@ -2430,7 +2430,7 @@ fn render_todo_item_line_with_background(
         return render_todo_item_line(todo, agents, base_indent, inner_width);
     }
     let mut spans = todo_card_item_spans(todo, false);
-    spans[1] = Span::styled("🕒 ", Style::default().fg(todo_warning_color()));
+    spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
     let progress = todo_dependency_progress(
         &dependencies,
         inner_width.saturating_sub(12).min(inner_width / 2),

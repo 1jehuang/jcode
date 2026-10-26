@@ -1234,7 +1234,7 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
     ];
     let wide = render_todo_item_line_with_background(&todo, &[], &tasks, "", 160);
     let text = extract_line_text(&wide);
-    assert!(text.contains("🕒"), "{text}");
+    assert!(text.contains("◷"), "{text}");
     assert!(!text.contains('○'), "{text}");
     assert!(text.contains("构建 🦀") && text.contains("tests"), "{text}");
     assert!(text.contains('▰') && text.contains('▱'), "{text}");
@@ -1251,7 +1251,7 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
         "",
         80,
     ));
-    assert!(!resolved.contains("🕒") && !resolved.contains('%'));
+    assert!(!resolved.contains("◷") && !resolved.contains('%'));
     assert!(resolved.contains('○'));
     for status in ["completed", "cancelled"] {
         let mut done = todo.clone();
@@ -1263,7 +1263,7 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
             "",
             80,
         ));
-        assert!(!text.contains("🕒") && !text.contains('%'));
+        assert!(!text.contains("◷") && !text.contains('%'));
     }
 }
 
@@ -1327,7 +1327,7 @@ fn background_dependency_indeterminate_progress_is_not_fabricated() {
         "",
         80,
     ));
-    assert!(text.contains("🕒") && text.contains("running"));
+    assert!(text.contains("◷") && text.contains("running"));
     assert!(!text.contains('%'));
 }
 
@@ -1354,7 +1354,7 @@ fn background_dependency_clock_and_progress_render_in_flat_and_stage_cards() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            text.contains("🕒") && text.contains("build") && text.contains('%'),
+            text.contains("◷") && text.contains("build") && text.contains('%'),
             "{text}"
         );
         for width in 20..100 {
