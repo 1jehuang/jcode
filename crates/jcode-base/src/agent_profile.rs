@@ -1,5 +1,5 @@
-//! Session agent profiles are plain Markdown, not skills or system-prompt overrides.
-//! YAML frontmatter is rejected. Selection snapshots the exact UTF-8 file contents.
+//! Session profiles accept Markdown with optional OpenCode-style YAML frontmatter.
+//! Only the instruction body is snapshotted; metadata never changes runtime policy.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,67 @@ fn validate_name(name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn parse_instructions(source: &str, path: &Path) -> Result<String> {
+    let candidate = source.trim_start_matches('\u{feff}');
+    let mut lines = candidate.split_inclusive('\n');
+    let mut offset = 0;
+    let mut opening = None;
+    for line in lines.by_ref() {
+        offset += line.len();
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.trim_end() == "---" {
+            opening = Some(offset);
+        }
+        break;
+    }
+    let body = if let Some(header_start) = opening {
+        let mut closing = None;
+        for line in lines {
+            let start = offset;
+            offset += line.len();
+            // Leading indentation belongs to YAML block scalars, not delimiters.
+            if matches!(line.trim_end(), "---" | "...") {
+                closing = Some((start, offset));
+                break;
+            }
+        }
+        let (header_end, body_start) = closing.with_context(|| {
+            format!(
+                "Agent profile {} has unclosed YAML frontmatter",
+                path.display()
+            )
+        })?;
+        let metadata: serde_yaml::Value =
+            serde_yaml::from_str(&candidate[header_start..header_end]).with_context(|| {
+                format!(
+                    "Invalid YAML frontmatter in agent profile {}",
+                    path.display()
+                )
+            })?;
+        if !matches!(
+            metadata,
+            serde_yaml::Value::Mapping(_) | serde_yaml::Value::Null
+        ) {
+            bail!(
+                "Agent profile {} YAML frontmatter must be a mapping",
+                path.display()
+            );
+        }
+        &candidate[body_start..]
+    } else {
+        source
+    };
+    if body.trim_start_matches('\u{feff}').trim().is_empty() {
+        bail!(
+            "Agent profile {} has an empty instruction body; add Markdown instructions",
+            path.display()
+        );
+    }
+    Ok(body.to_owned())
 }
 
 fn directories(working_dir: &Path) -> Result<[PathBuf; 2]> {
@@ -81,24 +142,7 @@ pub fn load(name: &str, working_dir: &Path) -> Result<AgentProfile> {
                     .with_context(|| format!("Read agent profile {}", path.display()));
             }
         };
-        if instructions.trim().is_empty() {
-            bail!(
-                "Agent profile {} is empty; add Markdown instructions before selecting it",
-                path.display()
-            );
-        }
-        if instructions
-            .trim_start_matches('\u{feff}')
-            .trim_start()
-            .lines()
-            .next()
-            .is_some_and(|line| line.trim() == "---")
-        {
-            bail!(
-                "Agent profile {} uses YAML frontmatter, which is unsupported; use plain Markdown instructions only",
-                path.display()
-            );
-        }
+        let instructions = parse_instructions(&instructions, &path)?;
         return Ok(AgentProfile {
             name: name.to_owned(),
             instructions,
@@ -114,6 +158,51 @@ pub fn load(name: &str, working_dir: &Path) -> Result<AgentProfile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yaml_frontmatter_preserves_body_and_ignores_runtime_metadata() -> Result<()> {
+        let body = "\n  Review carefully.\n\n---\nKeep this body rule.\n";
+        let source = format!(
+            "---\ndescription: Reviewer\nmode: all\nname: other-name\nmodel: vendor/model\npermission:\n  edit: deny\ntools:\n  bash: false\n---\n{body}"
+        );
+        assert_eq!(parse_instructions(&source, Path::new("reviewer.md"))?, body);
+        assert_eq!(
+            parse_instructions("plain\n---\nbody", Path::new("plain.md"))?,
+            "plain\n---\nbody"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn yaml_frontmatter_handles_crlf_bom_and_indented_block_delimiters() -> Result<()> {
+        let source =
+            "\u{feff}\r\n---\r\ndescription: |\r\n  ---\r\n  explanation\r\n...\r\n\r\nBody é\r\n";
+        assert_eq!(
+            parse_instructions(source, Path::new("agent.md"))?,
+            "\r\nBody é\r\n"
+        );
+        assert_eq!(
+            parse_instructions("---\n---\nBody", Path::new("agent.md"))?,
+            "Body"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn yaml_frontmatter_rejects_invalid_metadata_and_empty_body() {
+        for source in [
+            "---\nname: [broken\n---\nBody",
+            "\u{feff}\r\n \t",
+            "---\ndescription: valid\n---",
+            "---\nname: value\nBody",
+            "---\n- list\n---\nBody",
+            "---\nscalar\n---\nBody",
+            "---\nname: value\n---\n \n",
+        ] {
+            let error = parse_instructions(source, Path::new("broken.md")).unwrap_err();
+            assert!(format!("{error:#}").contains("broken.md"));
+        }
+    }
 
     #[test]
     fn names_reject_paths_and_reserved_commands() {
@@ -177,7 +266,7 @@ mod tests {
         assert_eq!(selected.instructions, "  project\n");
         std::fs::write(project.join("writer.md"), "changed")?;
         assert_eq!(selected.instructions, "  project\n");
-        for body in [" \n", "---\nname: injected\n---\nbody"] {
+        for body in [" \n", "---\nname: [unterminated\n---\nbody"] {
             std::fs::write(project.join("writer.md"), body)?;
             assert!(load("writer", cwd.path()).is_err());
         }

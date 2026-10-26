@@ -76,7 +76,7 @@ pub(crate) struct Args {
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     pub(crate) resume: Option<String>,
 
-    /// Named agent profile to load on the server when creating a session
+    /// Named session instruction profile (Markdown/YAML frontmatter; model, tools and permissions unchanged)
     #[arg(long = "agent", global = true, value_name = "NAME", conflicts_with = "resume")]
     pub(crate) agent_profile_name: Option<String>,
 

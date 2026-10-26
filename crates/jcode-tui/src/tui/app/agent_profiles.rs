@@ -155,7 +155,7 @@ impl App {
                 PickerAction::AgentProfileChoice(Some(name)),
                 is_current,
                 true,
-                "Apply Markdown instructions on next turn · current session only",
+                "Instruction body only · model, tools and permissions unchanged · this session only",
             ));
         }
         self.set_agent_profile_entries(entries);
