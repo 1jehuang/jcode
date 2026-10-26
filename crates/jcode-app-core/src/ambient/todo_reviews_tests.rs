@@ -175,3 +175,48 @@ fn external_blocker_due_review_rechecks_live_todo_and_never_changes_status() {
     crate::todo::save_todos("owner", &[]).unwrap();
     assert!(!scheduled_todo_review_is_current(&item));
 }
+
+#[test]
+fn external_blocker_concurrent_reconcilers_dedupe_and_keep_latest_generation() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
+    let dir = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let todo = blocked("review");
+    crate::todo::save_todos("owner", std::slice::from_ref(&todo)).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut stale = AmbientManager::new().unwrap();
+                barrier.wait();
+                stale
+                    .transact_queue(|items| {
+                        let current = crate::todo::load_todos("owner")?;
+                        reconcile_items(items, "owner", &current);
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let manager = AmbientManager::new().unwrap();
+    assert_eq!(manager.queue().len(), 1);
+    let old_id = manager.queue().items()[0].id.clone();
+    let mut changed = todo.clone();
+    changed.external_blocker.as_mut().unwrap().reason = "new generation".into();
+    crate::todo::save_todos("owner", &[changed.clone()]).unwrap();
+    reconcile_stored_todo_reviews("owner").unwrap();
+    let manager = AmbientManager::new().unwrap();
+    assert_eq!(manager.queue().len(), 1);
+    assert_ne!(manager.queue().items()[0].id, old_id);
+    assert!(matches!(&manager.queue().items()[0].target,
+        ScheduleTarget::TodoReview { blocker, .. } if Some(blocker) == changed.external_blocker.as_ref()));
+    crate::todo::save_todos("owner", &[]).unwrap();
+    reconcile_stored_todo_reviews("owner").unwrap();
+    assert!(AmbientManager::new().unwrap().queue().is_empty());
+}

@@ -23,6 +23,39 @@ fn context() -> ToolContext {
 }
 
 #[tokio::test]
+async fn external_blocker_schedule_failure_clears_suppression() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
+    let dir = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let manager = crate::ambient::AmbientManager::new().unwrap();
+    drop(manager);
+    // A directory at the lock path deterministically denies queue mutation
+    // while ordinary todo persistence remains available.
+    let queue_path = dir.path().join("ambient/queue.json");
+    std::fs::create_dir_all(queue_path.with_extension("json.lock")).unwrap();
+    let review = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let error = TodoTool::new()
+        .execute(
+            json!({"todos":[{
+                "id":"a", "content":"await acceptance", "status":"pending", "priority":"high",
+                "external_blocker":{"reason":"Coordinator acceptance", "review_at":review}
+            }]}),
+            context(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("blockers were cleared"),
+        "{error:#}"
+    );
+    let stored = load_todos("external-blocker-tool").unwrap();
+    assert_eq!(stored[0].status, "pending");
+    assert!(stored[0].external_blocker.is_none());
+    assert!(!crate::todo::todo_has_external_blocker(&stored[0]));
+}
+
+#[tokio::test]
 async fn external_blocker_tool_validates_schedules_updates_clears_and_completes() {
     let _lock = crate::storage::lock_test_env();
     let _home = HomeGuard(std::env::var_os("JCODE_HOME"));

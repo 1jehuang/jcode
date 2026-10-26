@@ -71,12 +71,26 @@ impl AmbientManager {
 
     /// Add a schedule request to the queue. Returns the item ID.
     pub fn schedule(&mut self, request: ScheduleRequest) -> Result<String> {
-        let id = format!("sched_{:08x}", rand::random::<u32>());
+        let item = Self::scheduled_item(request);
+        let id = item.id.clone();
+        self.queue.try_push(item)?;
+        Ok(id)
+    }
+
+    pub(super) fn transact_queue<T>(
+        &mut self,
+        update: impl FnOnce(&mut Vec<ScheduledItem>) -> Result<T>,
+    ) -> Result<T> {
+        self.queue.transact(update)
+    }
+
+    pub(super) fn scheduled_item(request: ScheduleRequest) -> ScheduledItem {
+        let id = format!("sched_{:032x}", rand::random::<u128>());
         let scheduled_for = request.wake_at.unwrap_or_else(|| {
             Utc::now() + chrono::Duration::minutes(request.wake_in_minutes.unwrap_or(30) as i64)
         });
 
-        let item = ScheduledItem {
+        ScheduledItem {
             id: id.clone(),
             scheduled_for,
             context: request.context,
@@ -89,13 +103,7 @@ impl AmbientManager {
             relevant_files: request.relevant_files,
             git_branch: request.git_branch,
             additional_context: request.additional_context,
-        };
-
-        self.queue.push(item);
-        // Scheduling is a durable promise. Propagate persistence failures to
-        // callers, including todo blocker reviews, rather than claiming success.
-        self.queue.save()?;
-        Ok(id)
+        }
     }
 
     /// Cancel a queued scheduled item by ID.

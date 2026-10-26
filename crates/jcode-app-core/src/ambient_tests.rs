@@ -15,8 +15,8 @@ fn test_priority_ordering() {
 
 #[test]
 fn test_scheduled_queue_push_and_pop() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
 
     let mut queue = ScheduledQueue::load(path);
     assert!(queue.is_empty());
@@ -67,8 +67,8 @@ fn test_scheduled_queue_push_and_pop() {
 
 #[test]
 fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
 
     let mut queue = ScheduledQueue::load(path.clone());
     let future = Utc::now() + Duration::hours(1);
@@ -113,8 +113,8 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
 
 #[test]
 fn test_pop_ready_sorts_by_priority_then_time() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
 
     let mut queue = ScheduledQueue::load(path);
     let past1 = Utc::now() - Duration::minutes(10);
@@ -159,8 +159,8 @@ fn test_pop_ready_sorts_by_priority_then_time() {
 
 #[test]
 fn test_take_ready_direct_items_only_removes_direct_targets() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
 
     let mut queue = ScheduledQueue::load(path);
     let past = Utc::now() - Duration::minutes(5);
@@ -432,8 +432,8 @@ fn test_build_ambient_system_prompt_with_data() {
 
 #[test]
 fn test_scheduled_queue_items_accessor() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
     let mut queue = ScheduledQueue::load(path);
 
     queue.push(ScheduledItem {

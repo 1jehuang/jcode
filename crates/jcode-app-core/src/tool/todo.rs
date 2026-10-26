@@ -1466,7 +1466,28 @@ impl Tool for TodoTool {
                     .chain(&todos)
                     .any(|todo| todo.external_blocker.is_some())
                 {
-                    crate::ambient::reconcile_todo_reviews(&ctx.session_id, &todos)?;
+                    if let Err(error) =
+                        crate::ambient::reconcile_stored_todo_reviews(&ctx.session_id)
+                    {
+                        // A failed durable wake must not leave silent suppression.
+                        // Keep unrelated/newer todo fields, clearing only the exact
+                        // blocker generations this write attempted to schedule.
+                        let mut current = load_todos(&ctx.session_id)?;
+                        for todo in &mut current {
+                            if todo.external_blocker.is_some()
+                                && todos.iter().any(|attempted| {
+                                    attempted.id == todo.id
+                                        && attempted.external_blocker == todo.external_blocker
+                                })
+                            {
+                                todo.external_blocker = None;
+                            }
+                        }
+                        save_todos(&ctx.session_id, &current)?;
+                        bail!(
+                            "Could not persist durable todo reviews; matching external blockers were cleared so work remains actionable: {error:#}"
+                        );
+                    }
                     super::ambient::nudge_schedule_runner();
                 }
                 save_goals(&ctx.session_id, &goals)?;

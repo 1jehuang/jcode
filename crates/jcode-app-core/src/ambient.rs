@@ -24,7 +24,9 @@ pub use prompt::{
     format_minutes_human, format_scheduled_session_message, gather_feedback_memories,
     gather_memory_graph_health, gather_recent_sessions,
 };
-pub use todo_reviews::{reconcile_todo_reviews, scheduled_todo_review_is_current};
+pub use todo_reviews::{
+    reconcile_stored_todo_reviews, reconcile_todo_reviews, scheduled_todo_review_is_current,
+};
 
 use crate::storage;
 
@@ -121,7 +123,7 @@ impl ScheduleTarget {
 }
 
 /// A scheduled ambient task
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScheduledItem {
     pub id: String,
     pub scheduled_for: DateTime<Utc>,
