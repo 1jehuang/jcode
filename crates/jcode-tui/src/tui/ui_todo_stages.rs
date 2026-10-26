@@ -274,12 +274,23 @@ fn current_stage(
         .position(|stage| stage.item_indices().any(|i| !is_done(todos[i])))
 }
 
+fn todo_pip_status(todo: &crate::todo::TodoItem) -> &str {
+    if crate::todo::is_incomplete_todo(todo)
+        && (crate::todo::todo_has_external_blocker(todo) || !todo.blocked_by.is_empty())
+    {
+        "blocked"
+    } else {
+        &todo.status
+    }
+}
+
 fn pip_span(todo: &crate::todo::TodoItem) -> Span<'static> {
-    status_pip_span(&todo.status)
+    status_pip_span(todo_pip_status(todo))
 }
 
 fn status_pip_span(status: &str) -> Span<'static> {
     let (glyph, color) = match status {
+        "blocked" => ("⊳", rgb(225, 165, 90)),
         "completed" => ("●", rgb(100, 180, 100)),
         "in_progress" => ("●", asap_color()),
         _ => ("○", rgb(90, 90, 105)),
@@ -512,6 +523,10 @@ fn lane_item_statuses<'a>(
     let mut seen = std::collections::HashSet::new();
     let mut statuses = Vec::new();
     for todo in lane_todos {
+        if todo_pip_status(todo) == "blocked" {
+            statuses.push(("blocked", false));
+            continue;
+        }
         let agent = todo
             .assigned_to
             .as_deref()

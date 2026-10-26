@@ -2,6 +2,39 @@ use super::*;
 use crate::todo::TodoItem;
 
 #[test]
+fn blocked_todos_have_distinct_phase_and_lane_pips() {
+    for external in [false, true] {
+        let mut item = todo("1", "Activation", "pending", Some(2));
+        item.group = Some("activation".into());
+        if external {
+            item.external_blocker = Some(crate::todo::TodoExternalBlocker {
+                reason: "Need user authorization".into(),
+                review_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            });
+        } else {
+            item.blocked_by = vec!["dependency".into()];
+        }
+        assert_eq!(pip_span(&item).content, "⊳");
+        let statuses = lane_item_statuses(&[&item], &[]);
+        assert_eq!(statuses, vec![("blocked", false)]);
+        assert_eq!(lane_strip_spans(&statuses, 1)[0].content, "⊳");
+        let mut header = Vec::new();
+        push_stage_pips(&mut header, &[&item], 80);
+        assert!(Line::from(header).to_string().contains('⊳'));
+        for width in 1..80 {
+            for row in render(&[item.clone()], &[], width) {
+                assert!(row.width() <= usize::from(width), "{width}: {row:?}");
+            }
+        }
+        for status in ["completed", "cancelled"] {
+            item.status = status.into();
+            assert_ne!(pip_span(&item).content, "⊳");
+            assert_ne!(lane_item_statuses(&[&item], &[])[0].0, "blocked");
+        }
+    }
+}
+
+#[test]
 fn shortcut_badges_are_hidden_and_respect_lane_width() {
     let mut item = assigned(todo("1", "Read types", "in_progress", Some(1)), "fox");
     item.group = Some("Parser".into());
