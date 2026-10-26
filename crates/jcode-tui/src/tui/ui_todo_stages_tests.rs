@@ -135,6 +135,57 @@ fn pinned_worker_status_hides_duplicate_intent_but_keeps_connection_progress() {
 }
 
 #[test]
+fn live_telemetry_and_tasks_share_one_compact_lane_row() {
+    let mut item = laned(
+        "Measure and optimize stock tests",
+        "in_progress",
+        1,
+        "Rewrite slow tests",
+    );
+    item.assigned_to = Some("fox".into());
+    let mut worker = agent("fox", "running", None, Some(12));
+    worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+        phase: "running_tool".into(),
+        elapsed_ms: 481_000,
+        tool_name: Some("bash".into()),
+        tool_intent: Some("Long intent belongs in the worker view".into()),
+        input_tokens: Some(61_000),
+        output_tokens: Some(159),
+        output_tps_milli: Some(26_900),
+        connection_type: Some("websocket".into()),
+        ..Default::default()
+    });
+    let rows = render(&[item.clone()], &[worker.clone()], 180);
+    assert_eq!(rows.len(), 2, "header plus one lane: {rows:?}");
+    let lane = &rows[1];
+    for label in [
+        "Rewrite slow tests",
+        LIVE_DOT_SENTINEL,
+        "bash",
+        "8m",
+        "26.9 tps",
+        "↑61k",
+        "↓159",
+        " │ ",
+        "Measure and optimize stock tests",
+    ] {
+        assert!(lane.contains(label), "missing {label}: {rows:?}");
+    }
+    assert_eq!(lane.matches('🦊').count(), 1, "{lane}");
+    assert!(!lane.contains("websocket") && !lane.contains("Long intent"));
+    assert!(
+        !lane.trim_start().contains("  "),
+        "no column padding: {lane}"
+    );
+    assert!(lane.find("bash").unwrap() < lane.find(" │ ").unwrap());
+    for width in 1..160 {
+        let rows = render(&[item.clone()], &[worker.clone()], width);
+        assert_eq!(rows.len(), 2, "one lane at width {width}: {rows:?}");
+        assert_fits(&rows, width);
+    }
+}
+
+#[test]
 fn user_action_overrides_live_workers_and_has_two_cell_phase_and_lane_pips() {
     let mut item = assigned(
         todo("action", "Authorize 界", "in_progress", Some(1)),

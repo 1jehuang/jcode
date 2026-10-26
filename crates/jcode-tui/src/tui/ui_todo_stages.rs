@@ -894,6 +894,80 @@ pub(crate) fn push_stage_lines(
             continue;
         }
         let statuses = lane_item_statuses(&items, agents);
+        let mut inline_agents = agents.to_vec();
+        for agent in &mut inline_agents {
+            if let Some(live) = &mut agent.live_status {
+                // Task titles are already on this row. Keep the compact tool
+                // name, not another potentially long intent before the titles.
+                live.tool_intent = None;
+            }
+        }
+        let mut telemetry = Vec::new();
+        if items.iter().any(|todo| {
+            todo.assigned_to.as_deref().is_some_and(|owner| {
+                agents
+                    .iter()
+                    .any(|agent| agent.matches(owner) && agent.live_status.is_some())
+            })
+        }) {
+            push_lane_status_lines(&mut telemetry, &items, &inline_agents, "", inner_width);
+        }
+        if !telemetry.is_empty() {
+            let pip_width = statuses
+                .iter()
+                .map(|(status, _)| status_pip_span(status).content.width())
+                .sum::<usize>();
+            let mut row = lane_strip_spans(&statuses, pip_width.min(inner_width / 3));
+            if let Some(padding) = row.last_mut() {
+                padding.content = " ".into();
+            }
+            let name = lane_name_spans(
+                lane.group.as_deref(),
+                phase_style(phase, current),
+                &items,
+                agents,
+            );
+            row.extend(
+                super::truncate_line_with_ellipsis_to_width(&Line::from(name), inner_width / 3)
+                    .spans,
+            );
+            row.push(Span::raw(" · "));
+            let room = inner_width.saturating_sub(width_of(&row));
+            let mut status = Vec::new();
+            for (index, line) in telemetry.into_iter().enumerate() {
+                if index > 0 {
+                    status.push(Span::raw(" · "));
+                }
+                // Strip only the legacy continuation-row indent.
+                status.extend(line.spans.into_iter().skip(2));
+            }
+            if let Some(live) =
+                lane_live_agent(&items, agents).and_then(|agent| agent.live_status.as_ref())
+            {
+                if live.phase != "streaming" {
+                    if let Some(tps) = live.output_tps_milli {
+                        status.push(Span::styled(
+                            format!(" · {:.1} tps", tps as f64 / 1000.0),
+                            Style::default().fg(todo_meta_color()),
+                        ));
+                    }
+                }
+            }
+            let status_budget = room.saturating_sub((MIN_TITLE_CELLS + 3).min(room / 3));
+            let status =
+                super::truncate_line_with_ellipsis_to_width(&Line::from(status), status_budget);
+            row.extend(status.spans);
+            let room = inner_width.saturating_sub(width_of(&row));
+            if room > 3 {
+                row.push(Span::styled(" │ ", Style::default().fg(todo_meta_color())));
+                row.extend(lane_titles_spans(&items, room - 3));
+            }
+            if later {
+                row = row.into_iter().map(dim_span).collect();
+            }
+            lines.push(todo_card_line(row, base_indent, inner_width));
+            continue;
+        }
         let mut row = lane_strip_spans(&statuses, strip_width);
         if name_width > 0 {
             let name = lane_name_spans(
@@ -934,7 +1008,6 @@ pub(crate) fn push_stage_lines(
             row = row.into_iter().map(dim_span).collect();
         }
         lines.push(todo_card_line(row, base_indent, inner_width));
-        push_lane_status_lines(lines, &items, agents, base_indent, inner_width);
     }
 }
 
