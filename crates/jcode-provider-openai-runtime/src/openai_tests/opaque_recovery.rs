@@ -1,6 +1,5 @@
 // Public Provider::complete tests use only a loopback WS/HTTP server.
-const OPAQUE_REJECTION: &str =
-    r#"{"type":"error","error":{"type":"invalid_request_error","message":"Invalid request"}}"#;
+const OPAQUE_REJECTION: &str = r#"{"type":"error","sequence_number":0,"response":null,"error":{"type":"invalid_request_error","message":"Invalid request"}}"#;
 
 async fn opaque_recovery_public_case(
     persistent: bool,
@@ -84,6 +83,7 @@ async fn opaque_recovery_public_case(
             assert!(http.get("previous_response_id").is_none());
             assert_eq!(http["instructions"], wire["instructions"]);
             assert_eq!(http["tools"], wire["tools"]);
+            assert!(!http["tools"].as_array().unwrap().is_empty());
             assert_eq!(http["reasoning"], wire["reasoning"]);
             let serialized = http["input"].to_string();
             assert!(serialized.contains("encrypted-history"));
@@ -104,8 +104,8 @@ async fn opaque_recovery_public_case(
                     "cancelled HTTP socket remained open"
                 );
             } else {
-                let body = if http_failure {
-                    format!("data: {OPAQUE_REJECTION}\n\n")
+                let body: String = if http_failure {
+                    "data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Distinct HTTPS rejection\"}}\n\n".into()
                 } else {
                     "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_recovered\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_recovered\",\"status\":\"completed\",\"output\":[]}}\n\n".into()
                 };
@@ -176,8 +176,14 @@ async fn opaque_recovery_public_case(
         });
     }
     tokio::time::timeout(Duration::from_secs(5), async {
+        let tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "Read the fixture".into(),
+            input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}),
+            defer_loading: false,
+        }];
         let mut stream = provider
-            .complete(&messages, &[], "fixture", None)
+            .complete(&messages, &tools, "fixture", None)
             .await
             .unwrap();
         if cancel {
@@ -213,6 +219,10 @@ async fn opaque_recovery_public_case(
             } else {
                 assert_eq!(errors.len(), 1, "{errors:?}");
                 assert!(errors[0].contains("Invalid request"));
+                if http_failure {
+                    assert!(errors[0].contains("HTTPS recovery failed:"), "{:?}", errors);
+                    assert!(errors[0].contains("Distinct HTTPS rejection"), "{:?}", errors);
+                }
             }
         }
         assert!(provider.persistent_ws.lock().await.is_none());

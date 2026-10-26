@@ -8,7 +8,8 @@ use super::*;
 mod openai_ws_cancel_recovery;
 use openai_ws_cancel_recovery::{RecoverableAttempt, RecoveryPhase, has_unanswered_tool_calls};
 
-// Deliberately recognize the raw wire shape, not the parser's lossy message.
+// Inspect the wire error, not the parser's lossy message. Envelope metadata
+// must not hide an otherwise opaque rejection, but substantive details do.
 fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return false;
@@ -20,11 +21,30 @@ fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
     {
         *response_started = true;
     }
+    let Some(envelope) = value.as_object() else {
+        return false;
+    };
+    let Some(error) = value.get("error").and_then(Value::as_object) else {
+        return false;
+    };
     !*response_started
-        && value
-            == serde_json::json!({
-                "type": "error", "error": {"type": "invalid_request_error", "message": "Invalid request"}
-            })
+        && value["type"] == "error"
+        && value.get("response").is_none_or(Value::is_null)
+        && envelope.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "type" | "error" | "response" | "sequence_number" | "event_id" | "request_id"
+            )
+        })
+        && error.get("type").and_then(Value::as_str) == Some("invalid_request_error")
+        && error.get("message").and_then(Value::as_str) == Some("Invalid request")
+        && error.iter().all(|(key, value)| match key.as_str() {
+            "type" | "message" => true,
+            "code" | "param" | "detail" | "details" => {
+                value.is_null() || value.as_str() == Some("")
+            }
+            _ => false,
+        })
 }
 
 #[test]
@@ -33,9 +53,21 @@ fn opaque_rejection_requires_exact_shape_and_no_response_activity() {
     assert!(opaque_ws_rejection(&generic.to_string(), &mut false));
     for key in ["code", "param", "detail"] {
         let mut detailed = generic.clone();
-        detailed["error"][key] = Value::Null;
+        detailed["error"][key] = Value::String("specific validation failure".into());
         assert!(!opaque_ws_rejection(&detailed.to_string(), &mut false));
     }
+    let mut metadata = generic.clone();
+    metadata["sequence_number"] = serde_json::json!(0);
+    metadata["event_id"] = serde_json::json!("event_fixture");
+    metadata["request_id"] = serde_json::json!("request_fixture");
+    metadata["response"] = Value::Null;
+    metadata["error"]["code"] = Value::Null;
+    assert!(opaque_ws_rejection(&metadata.to_string(), &mut false));
+    metadata["response"] = serde_json::json!({"id":"resp_started"});
+    assert!(!opaque_ws_rejection(&metadata.to_string(), &mut false));
+    metadata["response"] = Value::Null;
+    metadata["detail"] = serde_json::json!("specific validation failure");
+    assert!(!opaque_ws_rejection(&metadata.to_string(), &mut false));
     for kind in [
         "response.created",
         "response.output_text.delta",
@@ -75,6 +107,7 @@ pub(super) async fn recover_opaque_ws_rejection(
     tokio::pin!(recovery);
     let mut failed = false;
     let mut failure_detail = None;
+    let mut retry_after_secs = None;
     let mut finished = false;
     loop {
         tokio::select! {
@@ -82,14 +115,18 @@ pub(super) async fn recover_opaque_ws_rejection(
             result = &mut recovery, if !finished => {
                 if let Err(error) = result {
                     failed = true;
-                    failure_detail = Some(format!("{error:?}"));
+                    failure_detail = Some(match error {
+                        OpenAIStreamFailure::Other(error) | OpenAIStreamFailure::FallbackToHttps(error) => format!("{error:#}"),
+                        OpenAIStreamFailure::OpaqueWsRejection => "invalid_request_error: Invalid request".into(),
+                    });
                 }
                 finished = true;
             }
             event = recovery_rx.recv() => match event {
-                Some(Ok(StreamEvent::Error { message, .. })) => {
+                Some(Ok(StreamEvent::Error { message, retry_after_secs: retry_after })) => {
                     failed = true;
                     failure_detail = Some(message);
+                    retry_after_secs = retry_after;
                     break;
                 },
                 Some(Err(error)) => {
@@ -111,8 +148,11 @@ pub(super) async fn recover_opaque_ws_rejection(
         emit_status_detail(tx, "opaque websocket rejection: HTTPS recovery failed").await;
         let _ = tx
             .send(Ok(StreamEvent::Error {
-                message: "invalid_request_error: Invalid request".into(),
-                retry_after_secs: None,
+                message: format!(
+                    "invalid_request_error: Invalid request; HTTPS recovery failed: {}",
+                    failure_detail.as_deref().unwrap_or("unknown failure")
+                ),
+                retry_after_secs,
             }))
             .await;
     }
