@@ -116,9 +116,39 @@ struct TurnUsage {
     output_tokens: u64,
     cached_read_tokens: Option<u64>,
     cached_write_tokens: Option<u64>,
+    call_snapshot: (u64, u64, Option<u64>, Option<u64>),
 }
 
 impl TurnUsage {
+    fn begin_call(&mut self) {
+        self.call_snapshot = (0, 0, None, None);
+    }
+
+    fn observe_snapshot(
+        &mut self,
+        input: u64,
+        output: u64,
+        cache_read: Option<u64>,
+        cache_write: Option<u64>,
+    ) {
+        let previous = self.call_snapshot;
+        self.add(
+            input.saturating_sub(previous.0),
+            output.saturating_sub(previous.1),
+            cache_read.map(|value| value.saturating_sub(previous.2.unwrap_or(0))),
+            cache_write.map(|value| value.saturating_sub(previous.3.unwrap_or(0))),
+        );
+        self.call_snapshot = (
+            input.max(previous.0),
+            output.max(previous.1),
+            cache_read
+                .map(|value| value.max(previous.2.unwrap_or(0)))
+                .or(previous.2),
+            cache_write
+                .map(|value| value.max(previous.3.unwrap_or(0)))
+                .or(previous.3),
+        );
+    }
     fn add(
         &mut self,
         input_tokens: u64,
@@ -1075,13 +1105,21 @@ impl AcpRuntime {
                         .await?;
                     return Ok(());
                 }
+                ServerEvent::KvCacheRequest { .. } | ServerEvent::RetryRollback { .. } => {
+                    turn_usage.begin_call();
+                }
                 ServerEvent::TokenUsage {
                     input,
                     output,
                     cache_read_input,
                     cache_creation_input,
                 } => {
-                    turn_usage.add(input, output, cache_read_input, cache_creation_input);
+                    turn_usage.observe_snapshot(
+                        input,
+                        output,
+                        cache_read_input,
+                        cache_creation_input,
+                    );
                     let (provider_name, context_limit) = {
                         let state = session.ui_state.lock().await;
                         (
@@ -1965,6 +2003,27 @@ mod tests {
         assert!(text.contains("Embedded resource: file:///tmp/a.rs"));
         assert!(text.contains("Resource link: b.rs"));
         assert_eq!(images, vec![("image/png".to_string(), "abc".to_string())]);
+    }
+
+    #[test]
+    fn prompt_usage_deduplicates_live_snapshots_and_resets_per_call() {
+        let mut usage = TurnUsage::default();
+        usage.observe_snapshot(10, 2, Some(4), None);
+        usage.observe_snapshot(10, 3, Some(4), Some(5));
+        usage.observe_snapshot(10, 3, Some(4), Some(5));
+        // Stale or partial snapshots must not lower the per-call watermark.
+        usage.observe_snapshot(8, 1, Some(2), None);
+        usage.observe_snapshot(10, 3, Some(4), Some(5));
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.cached_read_tokens, Some(4));
+        assert_eq!(usage.cached_write_tokens, Some(5));
+        usage.begin_call();
+        usage.observe_snapshot(20, 3, Some(6), Some(7));
+        assert_eq!(usage.input_tokens, 30);
+        assert_eq!(usage.output_tokens, 6);
+        assert_eq!(usage.cached_read_tokens, Some(10));
+        assert_eq!(usage.cached_write_tokens, Some(12));
     }
 
     #[test]
