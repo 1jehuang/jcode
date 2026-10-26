@@ -2,15 +2,15 @@ use super::*;
 use crate::todo::TodoItem;
 
 #[test]
-fn shortcut_badges_follow_payload_digits_and_respect_lane_width() {
+fn shortcut_badges_are_hidden_and_respect_lane_width() {
     let mut item = assigned(todo("1", "Read types", "in_progress", Some(1)), "fox");
     item.group = Some("Parser".into());
     let mut worker = agent("fox", "running", Some("Reading types"), Some(12));
-    for digit in [1, 9, 0] {
+    for digit in [1, 9, 0, 10] {
         worker.shortcut = Some(digit);
         let rows = render(&[item.clone()], &[worker.clone()], 120);
         assert!(
-            rows.join("\n").contains(&format!("🦊 [alt+{digit}]")),
+            rows.join("\n").contains('🦊') && !rows.join("\n").contains("[alt+"),
             "{rows:?}"
         );
         for width in 1..60 {
@@ -19,8 +19,6 @@ fn shortcut_badges_follow_payload_digits_and_respect_lane_width() {
             }
         }
     }
-    worker.shortcut = Some(10);
-    assert!(worker.shortcut_span().is_none());
 }
 
 #[test]

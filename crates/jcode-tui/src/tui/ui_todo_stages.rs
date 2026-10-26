@@ -84,15 +84,6 @@ impl TodoCardAgent {
         }
     }
 
-    fn shortcut_span(&self) -> Option<Span<'static>> {
-        self.shortcut.filter(|digit| *digit <= 9).map(|digit| {
-            Span::styled(
-                format!(" [alt+{digit}]"),
-                Style::default().fg(todo_meta_color()),
-            )
-        })
-    }
-
     fn matches(&self, key: &str) -> bool {
         let key = key.trim();
         !key.is_empty()
@@ -419,9 +410,6 @@ fn lane_agent_chip(
                 .unwrap_or_else(|| fallback_icon(assigned)),
         ));
         if let Some(agent) = agent {
-            if let Some(badge) = agent.shortcut_span() {
-                spans.push(badge);
-            }
             if let Some((mark, color)) = agent_state_mark(&agent.status) {
                 spans.push(Span::styled(mark, Style::default().fg(color)));
             }
@@ -897,9 +885,6 @@ pub(crate) fn render_todo_item_line(
     let mut chip = vec![Span::raw("  "), Span::raw(icon)];
     let mut note = String::new();
     if let Some(agent) = agent {
-        if let Some(badge) = agent.shortcut_span() {
-            chip.push(badge);
-        }
         if let Some((mark, color)) = agent_state_mark(&agent.status) {
             chip.push(Span::styled(mark, Style::default().fg(color)));
         }
