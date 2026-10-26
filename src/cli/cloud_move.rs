@@ -40,6 +40,9 @@ use crate::{session, storage};
 #[path = "cloud_move_repo_tests.rs"]
 mod repo_tests;
 
+#[path = "cloud_replace.rs"]
+mod replace;
+
 #[cfg(all(test, unix))]
 #[path = "cloud_move_latency_tests.rs"]
 mod latency_tests;
@@ -2268,6 +2271,8 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             .filter(|s| !s.trim().is_empty()),
     };
     match command {
+        C::Replace { target, json } => replace::run(&target_of(target), json),
+        C::ReplaceReceive => replace::receive(),
         C::Ephemeral { action } => super::cloud_ephemeral::run_cli(action),
         C::Sessions { .. } => unreachable!("handled by the cloud sessions dispatcher"),
         C::Prepare { target, json } => {

@@ -741,6 +741,19 @@ pub(crate) enum CloudCommand {
         json: bool,
     },
 
+    /// Replace the cloud checkout with this local Git repository, keeping a backup.
+    /// Does not move a conversation or copy authentication or ignored files.
+    Replace {
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Internal: receive a repository-only replacement archive.
+    #[command(hide = true)]
+    ReplaceReceive,
+
     /// Move a live session (transcript, repo state, env notes) to a cloud host
     /// and keep working there. Your local files stay editable. Git reconciles
     /// both sides when the session comes back with `jcode cloud return`.
