@@ -36,10 +36,13 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             id: 1,
             session_id: session_id.to_string(),
             messages: vec![],
+            messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("openai".to_string()),
             provider_model: Some("gpt-5.4".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],
@@ -60,9 +63,12 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             connection_type: Some("https".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -106,6 +112,8 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -119,6 +127,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],
@@ -139,9 +148,12 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -389,4 +401,339 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     assert_eq!(last.role, "system");
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
 }
+#[test]
+fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
+    use crate::tui::TuiState;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
+    app.remote_service_tier = Some("ultrafast".to_string());
+    app.remote_service_tier_confirmation_pending = true;
+    let before = app.display_messages().len();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("priority".to_string()),
+            tier: "priority".to_string(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before);
+    for _ in 0..2 {
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ServiceTierReported {
+                requested: Some("ultrafast".to_string()),
+                tier: "default".to_string(),
+            },
+            &mut remote,
+        );
+    }
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
+    let badge = app.info_widget_data().service_tier.unwrap();
+    assert_eq!(
+        badge,
+        "Ultrafast requested, provider reports default (unconfirmed)"
+    );
+    assert!(!badge.contains("applied"));
+    assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Requested ultrafast, but provider reports default")
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("ultrafast".to_string()),
+            tier: "ultrafast".to_string(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert_eq!(
+        app.info_widget_data().service_tier.as_deref(),
+        Some("ultrafast")
+    );
+    assert_eq!(
+        app.remote_reported_service_tier,
+        Some((Some("ultrafast".into()), "ultrafast".into()))
+    );
+}
 
+#[test]
+fn test_service_tier_reported_match_notification_is_only_a_report() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_service_tier = Some("ultrafast".into());
+    app.remote_service_tier_confirmation_pending = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("ultrafast".into()),
+            tier: "ultrafast".into(),
+        },
+        &mut remote,
+    );
+    let messages = app.display_messages();
+    let message = &messages.last().unwrap().content;
+    assert_eq!(message, "Provider reports service tier: ultrafast.");
+    assert!(!message.contains("confirmed"));
+    assert!(!message.contains("applied"));
+}
+
+#[test]
+fn test_service_tier_reported_default_is_quiet_without_explicit_change() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let before = app.display_messages().len();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: None,
+            tier: "default".to_string(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before);
+}
+
+#[test]
+fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
+    use crate::tui::TuiState;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    app.is_remote = true;
+    app.remote_service_tier = Some("fast".into());
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    assert!(app.info_widget_data().service_tier.unwrap().contains("unconfirmed"));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("priority".into()), tier: "default".into(),
+        }, &mut remote,
+    );
+    let badge = app.info_widget_data().service_tier.unwrap();
+    assert_eq!(
+        badge,
+        "Fast requested, provider reports default (unconfirmed)"
+    );
+    assert!(!badge.contains("applied"));
+    assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("priority".into()), tier: "priority".into(),
+        }, &mut remote,
+    );
+    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("fast"));
+    app.remote_service_tier = None;
+    app.remote_reported_service_tier = None;
+    app.remote_service_tier_confirmation_pending = true;
+    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Standard requested (unconfirmed)"));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: None, tier: "default".into(),
+        }, &mut remote,
+    );
+    assert_eq!(app.info_widget_data().service_tier, None);
+}
+
+fn check_history_panel_snapshot(authoritative: bool, session_changed: bool) {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_session_id = Some("ses_panel_catalog".to_string());
+    app.set_side_panel_snapshot(crate::side_panel::SidePanelSnapshot {
+        focus_revision: 7,
+        focused_page_id: Some("second".to_string()),
+        pages: ["first", "second"]
+            .into_iter()
+            .map(|id| crate::side_panel::SidePanelPage {
+                id: id.to_string(),
+                title: id.to_string(),
+                file_path: String::new(),
+                format: crate::side_panel::SidePanelPageFormat::Markdown,
+                pdf_data: None,
+                source: crate::side_panel::SidePanelPageSource::Managed,
+                content: format!("# {id}"),
+                updated_at_ms: 1,
+            })
+            .collect(),
+    });
+    app.remote_side_pane_images = vec![crate::session::RenderedImage {
+        media_type: "image/png".to_string(),
+        data: "restored-image-payload".to_string(),
+        label: Some("restored image".to_string()),
+        source: crate::session::RenderedImageSource::UserInput,
+        anchor: None,
+        history_message_index: None,
+    }];
+    let panels_before = app.side_panel.clone();
+    let images_before = app.remote_side_pane_images.clone();
+    // Exercise the same-session refresh after the initial restore has completed.
+    remote.mark_history_loaded();
+    let session_id = if session_changed {
+        "ses_other"
+    } else {
+        "ses_panel_catalog"
+    };
+    let mut event = delta_history_event(session_id, vec![], None);
+    if let crate::protocol::ServerEvent::History {
+        is_canary,
+        provider_name,
+        provider_model,
+        available_models,
+        ..
+    } = &mut event {
+        // False still counts as a present identity field on full History.
+        *is_canary = authoritative.then_some(false);
+        *provider_name = Some("openai".to_string());
+        *provider_model = Some("gpt-5.4".to_string());
+        *available_models = vec!["gpt-5.4".to_string()];
+    }
+    app.handle_server_event(event, &mut remote);
+    assert_eq!(app.remote_provider_model.as_deref(), Some("gpt-5.4"));
+    if authoritative || session_changed {
+        assert!(app.side_panel.pages.is_empty());
+        assert!(app.side_panel.focused_page_id.is_none());
+        assert!(app.remote_side_pane_images.is_empty());
+    } else {
+        assert_eq!(app.side_panel, panels_before);
+        assert_eq!(app.remote_side_pane_images, images_before);
+    }
+}
+
+#[test]
+fn test_catalog_history_preserves_restored_panels_and_images() {
+    check_history_panel_snapshot(false, false);
+}
+
+#[test]
+fn test_authoritative_same_session_history_clears_panels_and_images() {
+    check_history_panel_snapshot(true, false);
+}
+
+#[test]
+fn test_session_switch_history_clears_panels_and_images() {
+    check_history_panel_snapshot(false, true);
+}
+
+fn delta_history_event(
+    session_id: &str,
+    messages: Vec<crate::protocol::HistoryMessage>,
+    messages_base_count: Option<usize>,
+) -> crate::protocol::ServerEvent {
+    crate::protocol::ServerEvent::History {
+        messages_base_count,
+        images_unchanged: false,
+        id: 1,
+        session_id: session_id.to_string(),
+        messages,
+        images: vec![],
+        provider_name: None,
+        provider_model: None,
+        subagent_model: None,
+        agent_model_overrides: Default::default(),
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        available_models: vec![],
+        available_model_routes: vec![],
+        mcp_servers: vec![],
+        skills: vec![],
+        total_tokens: None,
+        token_usage_totals: None,
+        all_sessions: vec![],
+        client_count: None,
+        is_canary: None,
+        reload_recovery: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        connection_type: None,
+        status_detail: None,
+        upstream_provider: None,
+        provider_oauth_email: None,
+        provider_oauth_account_label: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+        service_tier: None,
+        available_service_tiers: None,
+        compaction_mode: crate::config::CompactionMode::Reactive,
+        activity: None,
+        side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        applets: Default::default(),
+    }
+}
+
+#[test]
+fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let prefix = vec![
+        DisplayMessage::user("hello".to_string()),
+        DisplayMessage::assistant("hi there".to_string()),
+    ];
+    app.advertised_history_base = Some(crate::tui::app::AdvertisedHistoryBase {
+        session_id: "ses_delta".to_string(),
+        base: crate::protocol::HistoryBase {
+            count: 2,
+            fingerprint: 0,
+            images_fingerprint: None,
+        },
+        prefix: Some(prefix),
+        images: Some(vec![crate::session::RenderedImage {
+            media_type: "image/png".to_string(),
+            data: "local-image".to_string(),
+            label: None,
+            source: crate::session::RenderedImageSource::UserInput,
+            anchor: None,
+            history_message_index: None,
+        }]),
+    });
+    let tail = vec![crate::protocol::HistoryMessage {
+        response_stats: None,
+        role: "assistant".to_string(),
+        content: "new since reload".to_string(),
+        tool_calls: None,
+        tool_data: None,
+    }];
+    let mut event = delta_history_event("ses_delta", tail, Some(2));
+    if let crate::protocol::ServerEvent::History {
+        images_unchanged, ..
+    } = &mut event
+    {
+        *images_unchanged = true;
+    }
+    app.handle_server_event(event, &mut remote);
+    assert_eq!(app.remote_side_pane_images.len(), 1);
+    assert_eq!(app.remote_side_pane_images[0].data, "local-image");
+    let contents: Vec<_> = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(contents, vec!["hello", "hi there", "new since reload"]);
+    assert!(app.advertised_history_base.is_none());
+    assert!(remote.has_loaded_history());
+}
+
+#[test]
+fn test_delta_history_without_prefix_requests_full_history() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.handle_server_event(delta_history_event("ses_delta", vec![], Some(5)), &mut remote);
+    assert!(app.idle_hibernation.history_reload_needed);
+    assert!(!remote.has_loaded_history());
+}

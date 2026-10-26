@@ -107,8 +107,15 @@ pub enum ProviderChoice {
         alias = "meta-ai"
     )]
     MetaMuse,
+    /// Native Muse subscription (experimental opt-in device flow). Distinct
+    /// from `MetaMuse`, which is the pay-as-you-go Model API key path; no local
+    /// Muse installation is required.
+    #[value(name = "muse-subscription", alias = "muse-sub")]
+    MuseSubscription,
     #[value(alias = "celeris-ai", alias = "celeris1", alias = "celeris-1")]
     Celeris,
+    #[value(alias = "venice-ai", alias = "veniceai", alias = "venice.ai")]
+    Venice,
     YoloAuto,
     #[value(alias = "lm-studio")]
     Lmstudio,
@@ -186,7 +193,9 @@ impl ProviderChoice {
             Self::NvidiaNim => "nvidia-nim",
             Self::XiaomiMimo => "xiaomi-mimo",
             Self::MetaMuse => "meta-muse",
+            Self::MuseSubscription => "muse-subscription",
             Self::Celeris => "celeris",
+            Self::Venice => "venice",
             Self::YoloAuto => "yolo-auto",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
@@ -362,8 +371,16 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
         crate::provider_catalog::META_MUSE_LOGIN_PROVIDER,
     ),
     (
+        ProviderChoice::MuseSubscription,
+        crate::provider_catalog::MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
+    ),
+    (
         ProviderChoice::Celeris,
         crate::provider_catalog::CELERIS_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Venice,
+        crate::provider_catalog::VENICE_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::YoloAuto,
@@ -768,7 +785,9 @@ fn provider_login_hint_for_api_key_env(env_key: &str) -> String {
         .unwrap_or_else(|| "jcode login".to_string())
 }
 
-fn ensure_external_api_key_auth_allowed_for_explicit_choice(env_key: &str) -> Result<()> {
+pub(super) fn ensure_external_api_key_auth_allowed_for_explicit_choice(
+    env_key: &str,
+) -> Result<()> {
     if direct_api_key_configured_for_env(env_key) {
         return Ok(());
     }
@@ -1301,7 +1320,7 @@ fn explicit_credential_mode(choice: &ProviderChoice) -> Option<provider::Credent
     }
 }
 
-fn disable_subscription_runtime_mode() {
+pub(super) fn disable_subscription_runtime_mode() {
     crate::subscription_catalog::clear_runtime_env();
 }
 
@@ -1670,6 +1689,7 @@ async fn init_provider_with_model_policy(
         | ProviderChoice::XiaomiMimo
         | ProviderChoice::MetaMuse
         | ProviderChoice::Celeris
+        | ProviderChoice::Venice
         | ProviderChoice::YoloAuto
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
@@ -1679,53 +1699,9 @@ async fn init_provider_with_model_policy(
         | ProviderChoice::Orcarouter
         | ProviderChoice::AlibabaCodingPlan
         | ProviderChoice::GeminiApi
+        | ProviderChoice::MuseSubscription
         | ProviderChoice::OpenaiCompatible => {
-            disable_subscription_runtime_mode();
-            let profile = profile_for_choice(choice)
-                .ok_or_else(|| anyhow::anyhow!("missing provider profile for choice"))?;
-            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none() {
-                // An explicit `--provider <compatible>` selection should win over
-                // any stale active-profile marker inherited from a previous
-                // bootstrap/login flow. Named provider profiles still take
-                // precedence when explicitly configured.
-                force_apply_openai_compatible_profile_env(Some(profile));
-            }
-            let mut runtime_model_hint = None;
-            let display_name = if let Ok(named) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
-                if let Some(profile) = crate::config::config().providers.get(&named) {
-                    runtime_model_hint = profile.default_model.clone();
-                }
-                named
-            } else {
-                let resolved = resolve_openai_compatible_profile(profile);
-                if resolved.requires_api_key {
-                    ensure_external_api_key_auth_allowed_for_explicit_choice(
-                        &resolved.api_key_env,
-                    )?;
-                }
-                runtime_model_hint = resolved.default_model.clone();
-                resolved.display_name
-            };
-            init_notice(&format!(
-                "Using {} via OpenAI-compatible API as the initial provider",
-                display_name
-            ));
-            crate::provider::activation::apply_openai_compatible_runtime(runtime_model_hint)?;
-            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
-                let profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")?;
-                let cfg = crate::config::config();
-                let profile = cfg.providers.get(&profile_name).ok_or_else(|| {
-                    anyhow::anyhow!("Unknown provider profile '{}'", profile_name)
-                })?;
-                Arc::new(
-                    jcode_provider_openrouter_runtime::OpenRouterProvider::new_named_openai_compatible(
-                        &profile_name,
-                        profile,
-                    )?,
-                )
-            } else {
-                Arc::new(jcode_provider_openrouter_runtime::OpenRouterProvider::new()?)
-            }
+            super::compatible_runtime::init_compatible_runtime(choice, &init_notice).await?
         }
         ProviderChoice::Antigravity => {
             disable_subscription_runtime_mode();

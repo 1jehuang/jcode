@@ -36,8 +36,9 @@ pub use jcode_compaction_core::{
     compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
     emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
     is_image_rejection_error, is_request_payload_too_large_error, mean_embedding,
-    message_char_count, safe_compaction_cutoff, semantic_cache_key, semantic_goal_text,
-    semantic_message_text, strip_large_images_in_contents, summary_payload_char_count,
+    message_char_count, reusable_cache_tokens_from_usage, safe_compaction_cutoff,
+    semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
+    summary_payload_char_count,
 };
 
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
@@ -490,9 +491,11 @@ impl CompactionManager {
             return true;
         }
 
-        // 2. Context below the proactive floor — too early regardless of trend.
+        // 2. Either the percentage or absolute token floor permits prediction.
         let usage = self.context_usage_with(all_messages);
-        if usage < cfg.proactive_floor {
+        let token_floor_reached = cfg.proactive_floor_tokens > 0
+            && self.effective_token_count_with(all_messages) >= cfg.proactive_floor_tokens;
+        if usage < cfg.proactive_floor && !token_floor_reached {
             return true;
         }
 
@@ -519,11 +522,7 @@ impl CompactionManager {
         }
 
         // 5. Cooldown: too soon after the last compaction.
-        if self.turns_since_last_compact < cfg.min_turns_between_compactions {
-            return true;
-        }
-
-        false
+        self.turns_since_last_compact < cfg.min_turns_between_compactions
     }
 
     // ── Proactive mode trigger ──────────────────────────────────────────────
@@ -866,7 +865,11 @@ impl CompactionManager {
         match self.mode {
             CompactionMode::Reactive => {
                 self.pending_task.is_none()
-                    && self.context_usage_with(all_messages) >= COMPACTION_THRESHOLD
+                    && (self.context_usage_with(all_messages)
+                        >= self.compaction_config.reactive_threshold
+                        || (self.compaction_config.reactive_threshold_tokens > 0
+                            && self.effective_token_count_with(all_messages)
+                                >= self.compaction_config.reactive_threshold_tokens))
                     && active.len() > RECENT_TURNS_TO_KEEP
             }
             CompactionMode::Proactive => {
@@ -925,7 +928,7 @@ impl CompactionManager {
         self.pending_trigger = Some(mode_label.clone());
 
         // Spawn background task that notifies via Bus when done
-        self.pending_task = Some(tokio::spawn(async move {
+        self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
             let result =
                 generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
@@ -943,12 +946,14 @@ impl CompactionManager {
                 result.summarized_messages = msg_count;
                 result
             })
-        }));
+        });
     }
 
     /// Ensure context fits before an API call.
     ///
-    /// Starts background compaction if above 80%. If context is critically full
+    /// Starts background compaction when the configured strategy triggers.
+    /// Reactive defaults to 80% or 400K tokens, whichever comes first.
+    /// If context is critically full
     /// (>=95%), also performs an immediate hard-compact (drops old messages) so
     /// the next API call doesn't fail with "prompt too long".
     pub fn ensure_context_fits(
@@ -1139,7 +1144,7 @@ impl CompactionManager {
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
 
-        self.pending_task = Some(tokio::spawn(async move {
+        self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
             let result =
                 generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
@@ -1156,7 +1161,7 @@ impl CompactionManager {
                 result.summarized_messages = msg_count;
                 result
             })
-        }));
+        });
 
         Ok(())
     }
@@ -1735,6 +1740,15 @@ async fn generate_compaction_artifact(
         )
         .await
     {
+        if let Some(usage) = native.usage {
+            crate::telemetry::record_simple_completion_usage(
+                None,
+                provider.name(),
+                &provider.model(),
+                crate::telemetry::UsageSource::Compaction,
+                usage,
+            );
+        }
         if let Some(encrypted_content) = native.openai_encrypted_content.as_ref()
             && !openai_encrypted_content_is_sendable(encrypted_content)
         {
@@ -1742,7 +1756,7 @@ async fn generate_compaction_artifact(
                 "[compaction] OpenAI native compaction returned oversized encrypted_content ({} chars); falling back to text summary",
                 encrypted_content.len(),
             ));
-        } else {
+        } else if native.openai_encrypted_content.is_some() || native.summary_text.is_some() {
             return Ok(CompactionResult {
                 summary_text: native.summary_text.unwrap_or_default(),
                 openai_encrypted_content: native.openai_encrypted_content,
@@ -1762,7 +1776,14 @@ async fn generate_compaction_artifact(
             &prompt,
             "You are a helpful assistant that summarizes conversations.",
         )
-        .await?;
+        .await
+        .inspect_err(|error| {
+            crate::telemetry::record_simple_completion_failure_usage(
+                None,
+                crate::telemetry::UsageSource::Compaction,
+                error,
+            );
+        })?;
     crate::telemetry::record_simple_completion_usage(
         None,
         provider.name(),

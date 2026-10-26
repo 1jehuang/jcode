@@ -12,8 +12,8 @@ pub use jcode_message_types::{
     CacheControl, ConnectionPhase, ContentBlock, InputShellResult, Message, Role, StreamEvent,
     TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition, cache_relevant_message_hashes,
     cache_relevant_message_value, cache_relevant_messages, ends_with_fresh_user_turn,
-    extend_stable_hash, messages_with_dynamic_system_context, provider_native, sanitize_tool_id,
-    stable_message_hash,
+    extend_stable_hash, messages_with_dynamic_system_context, provider_native, replace_text_suffix,
+    sanitize_tool_id, stable_message_hash,
 };
 
 mod notifications;
@@ -129,6 +129,7 @@ pub fn redact_secrets(text: &str) -> String {
             r"(?m)^\s*(OLLAMA_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CHUTES_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CEREBRAS_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(VENICE_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(BELVEDIR_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENAI_COMPAT_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(ANTHROPIC_API_KEY\s*=\s*)[^\r\n]+",
@@ -169,6 +170,7 @@ pub fn redact_secrets(text: &str) -> String {
         "OLLAMA_API_KEY",
         "CHUTES_API_KEY",
         "CEREBRAS_API_KEY",
+        "VENICE_API_KEY",
         "BELVEDIR_API_KEY",
         "OPENAI_COMPAT_API_KEY",
         "ANTHROPIC_API_KEY",

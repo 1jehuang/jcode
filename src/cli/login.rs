@@ -12,6 +12,7 @@ use crate::provider_catalog::{
 use super::provider_init::{ProviderChoice, login_provider_for_choice};
 use crate::provider_catalog::save_named_api_key;
 
+mod device_login;
 mod existing_key_notice;
 mod google;
 mod jcode_device;
@@ -151,6 +152,12 @@ enum PendingScriptableLogin {
         verification_uri: String,
         interval: u64,
     },
+    MuseSubscription {
+        device_code: String,
+        user_code: String,
+        verification_uri: String,
+        interval: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +175,7 @@ impl PendingScriptableLogin {
             Self::Antigravity { .. } => "antigravity",
             Self::Google { .. } => "google",
             Self::Copilot { .. } => "copilot",
+            Self::MuseSubscription { .. } => "muse-subscription",
         }
     }
 
@@ -363,14 +371,19 @@ pub async fn run_login_provider(
                 login_bedrock_flow().map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::Azure => login_azure_flow().map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::OpenAiCompatible(profile)
+                if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
+            {
+                device_login::login_muse_subscription_flow(options.no_browser)
+                    .await
+                    .map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::OpenAiCompatible(profile) => {
                 login_openai_compatible_flow(&profile, &options)
                     .map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::Cursor => login_cursor_flow().map(|_| LoginFlowOutcome::Completed),
-            LoginProviderTarget::Copilot => {
-                login_copilot_flow(options.no_browser).map(|_| LoginFlowOutcome::Completed)
-            }
+            LoginProviderTarget::Copilot => device_login::login_copilot_flow(options.no_browser),
             LoginProviderTarget::Gemini => login_gemini_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
@@ -1006,16 +1019,11 @@ fn login_openai_compatible_flow(
     Ok(())
 }
 
-pub use crate::secret_input::read_secret_line;
+pub use jcode_terminal_prompt::read_secret_line;
 
-fn read_line_trimmed(prompt: &str) -> Result<String> {
-    print!("{}", prompt);
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
+mod presenter;
+pub use presenter::install_terminal_login_presenter;
+use presenter::read_line_trimmed;
 
 fn save_named_env_vars(env_file: &str, vars: &[(&str, String)]) -> Result<()> {
     if !crate::provider_catalog::is_safe_env_file_name(env_file) {
@@ -1070,56 +1078,6 @@ fn login_cursor_flow() -> Result<()> {
     );
     eprintln!("jcode will use the native Cursor HTTPS transport.");
     crate::telemetry::record_auth_success("cursor", "api_key");
-    Ok(())
-}
-
-fn login_copilot_flow(no_browser: bool) -> Result<()> {
-    eprintln!("Starting GitHub Copilot login...");
-
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(login_copilot_device_flow(no_browser))
-    })
-}
-
-async fn login_copilot_device_flow(no_browser: bool) -> Result<()> {
-    let client = crate::provider::shared_http_client();
-
-    let device_resp = crate::auth::copilot::initiate_device_flow(&client).await?;
-
-    eprintln!();
-    eprintln!("  Open this URL in your browser:");
-    eprintln!("    {}", device_resp.verification_uri);
-    eprintln!();
-    if let Some(qr) = crate::login_qr::indented_section(
-        &device_resp.verification_uri,
-        "  Or scan this QR on another device to open the verification page:",
-        "    ",
-        crate::auth::browser_suppressed(no_browser),
-    ) {
-        eprintln!("{qr}");
-        eprintln!();
-    }
-    eprintln!("  Enter code: {}", device_resp.user_code);
-    eprintln!();
-    eprintln!("  Waiting for authorization...");
-
-    maybe_open_browser(&device_resp.verification_uri, no_browser);
-
-    let token = crate::auth::copilot::poll_for_access_token(
-        &client,
-        &device_resp.device_code,
-        device_resp.interval,
-    )
-    .await?;
-
-    let username = crate::auth::copilot::fetch_github_username(&client, &token)
-        .await
-        .unwrap_or_else(|_| "unknown".to_string());
-
-    crate::auth::copilot::save_github_token(&token, &username)?;
-
-    eprintln!("  ✓ Authenticated as {} via GitHub Copilot", username);
-    crate::telemetry::record_auth_success("copilot", "oauth_device_code");
     Ok(())
 }
 

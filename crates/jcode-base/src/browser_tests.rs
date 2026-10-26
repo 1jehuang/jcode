@@ -137,6 +137,146 @@ fn test_should_attempt_firefox_launch_only_when_firefox_closed_and_bridge_silent
     assert!(!should_attempt_firefox_launch(&ready, false));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn exited_firefox_process_does_not_block_browser_autolaunch() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    // A real Linux process, not a saved /proc fixture: keep it alive until the
+    // parent closes stdin, then leave it unreaped to reproduce the cold start.
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf firefox > /proc/self/comm; printf ready; read line || true",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn Firefox-named test process");
+    let pid = child.id();
+    let mut ready = [0; 5];
+    child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
+    let live_matches = linux_browser_process_matches(BrowserKind::Firefox, pid);
+    let other_browser_matches = linux_browser_process_matches(BrowserKind::Chrome, pid);
+    drop(child.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while platform::is_process_running(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap();
+    let zombie_matches = linux_browser_process_matches(BrowserKind::Firefox, pid);
+    let status = child.wait().expect("reap Firefox-named test process");
+
+    assert!(status.success());
+    assert_eq!(ready, *b"ready");
+    assert!(live_matches, "a live browser must still be detected");
+    assert!(!other_browser_matches);
+    assert_eq!(comm.trim(), "firefox", "zombie still has its browser name");
+    assert!(!zombie_matches, "an exited browser cannot serve the bridge");
+    assert!(should_attempt_firefox_launch(
+        &status_fixture(true, true, false),
+        zombie_matches,
+    ));
+    assert!(!linux_browser_process_matches(BrowserKind::Firefox, pid));
+}
+
+#[cfg(target_os = "linux")]
+struct BrowserLaunchTestEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+#[cfg(target_os = "linux")]
+impl BrowserLaunchTestEnv {
+    fn set(values: &[(&'static str, &std::path::Path)]) -> Self {
+        let previous = values
+            .iter()
+            .map(|(key, value)| {
+                let old = std::env::var_os(key);
+                crate::env::set_var(key, value);
+                (*key, old)
+            })
+            .collect();
+        Self(previous)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for BrowserLaunchTestEnv {
+    fn drop(&mut self) {
+        for (key, value) in &self.0 {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn browser_launch_and_extension_install_use_firefox_not_file_associations() {
+    let _guard = crate::storage::lock_test_env();
+    for executable in ["firefox", "firefox-esr", "flatpak"] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("jcode home");
+        let _env =
+            BrowserLaunchTestEnv::set(&[("JCODE_HOME", home.as_path()), ("PATH", temp.path())]);
+        std::fs::create_dir_all(browser_dir()).unwrap();
+        std::fs::write(xpi_path(), "test extension").unwrap();
+        let calls = temp.path().join("calls");
+        write_executable(
+            &temp.path().join(executable),
+            &format!(
+                "#!/bin/sh\nprintf 'firefox:<%s>:argc=%s\\n' \"$*\" \"$#\" >> '{}'\n",
+                calls.display()
+            ),
+        );
+        write_executable(
+            &temp.path().join("xdg-open"),
+            &format!(
+                "#!/bin/sh\nprintf 'WRONG OPENER\\n' >> '{}'\n",
+                calls.display()
+            ),
+        );
+        assert!(launch_browser_detached(BrowserKind::Firefox, None));
+        let message = install_extension().await.unwrap();
+        let url = url::Url::from_file_path(xpi_path()).unwrap();
+        let (expected_launch, expected_install) = if executable == "flatpak" {
+            (
+                "firefox:<run org.mozilla.firefox>:argc=2\n",
+                format!("firefox:<run org.mozilla.firefox {url}>:argc=3\n"),
+            )
+        } else {
+            ("firefox:<>:argc=0\n", format!("firefox:<{url}>:argc=1\n"))
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let recorded = loop {
+            let recorded = std::fs::read_to_string(&calls).unwrap_or_default();
+            if recorded.lines().count() >= 2 || std::time::Instant::now() >= deadline {
+                break recorded;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        assert!(recorded.contains(expected_launch), "{recorded}");
+        assert!(recorded.contains(&expected_install), "{recorded}");
+        assert!(!recorded.contains("WRONG OPENER"), "{recorded}");
+        assert!(message.contains("Opened Firefox"));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn extension_install_reports_missing_firefox_instead_of_claiming_success() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = BrowserLaunchTestEnv::set(&[("JCODE_HOME", temp.path()), ("PATH", temp.path())]);
+    std::fs::create_dir_all(browser_dir()).unwrap();
+    std::fs::write(xpi_path(), "test extension").unwrap();
+    let error = install_extension().await.unwrap_err();
+    assert!(error.to_string().contains("Could not launch Firefox"));
+}
+
 #[test]
 fn setup_complete_requires_native_host_binary() {
     let _guard = crate::storage::lock_test_env();
@@ -646,4 +786,51 @@ fn update_stops_only_hosts_running_the_replaced_binary() {
         "host running the replaced binary must be stopped"
     );
     assert!(new_running, "host running the new binary must be kept");
+}
+
+// #1743: readiness probes ran in the user's focused tab before every action.
+#[test]
+fn current_extensions_skip_the_per_action_probes() {
+    let ping = |v: &str| serde_json::json!({"pong": true, "extensionVersion": v});
+    assert!(ping_reports_current_extension(&ping("0.10.1")));
+    assert!(ping_reports_current_extension(&ping("1.0.0")));
+    assert!(!ping_reports_current_extension(&ping("0.9.7")));
+    assert!(!ping_reports_current_extension(
+        &serde_json::json!({"pong": true})
+    ));
+}
+
+#[test]
+fn capability_probes_do_not_move_the_users_page() {
+    for (action, params) in REQUIRED_BRIDGE_ACTION_PROBES {
+        let params: serde_json::Value = serde_json::from_str(params).unwrap();
+        if *action == "scroll" {
+            assert!(params.get("position").is_none(), "{params}");
+            assert!(params["selector"].as_str().unwrap().contains("jcode"));
+        }
+    }
+}
+
+#[test]
+fn stale_session_errors_are_recognized() {
+    assert!(is_stale_session_target_error("No tab with id: 1251116074."));
+    assert!(is_stale_session_target_error(
+        "Error: No active tab found in window 1251116073"
+    ));
+    assert!(!is_stale_session_target_error("Element not found: #save"));
+}
+
+// #1743: with Chrome requested, a ping answered by the Firefox host must not
+// count as Chrome being ready.
+#[test]
+fn a_bridge_answered_by_another_browser_is_not_the_requested_one() {
+    let mut status = status_fixture(true, true, true);
+    status.connected_browser = Some("firefox".into());
+    assert!(!status_answered_by(&status, BrowserKind::Chrome));
+    assert!(status_answered_by(&status, BrowserKind::Firefox));
+    status.connected_browser = Some("chrome".into());
+    assert!(
+        status_answered_by(&status, BrowserKind::Brave),
+        "same Chromium family"
+    );
 }

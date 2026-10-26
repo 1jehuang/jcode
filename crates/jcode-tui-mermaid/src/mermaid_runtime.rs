@@ -82,21 +82,17 @@ fn detect_multiplexer_from_env() -> Multiplexer {
 
 /// Adjust a detected protocol for multiplexer limitations.
 ///
-/// ratatui-image renders Kitty graphics exclusively through Unicode
-/// placeholders (`U=1` virtual placements). Zellij implements the Kitty
-/// graphics protocol but rejects `U=1` with `ENOTSUPPORTED`, so the image
-/// never appears and the reserved area renders blank. `KITTY_WINDOW_ID` leaks
-/// into Zellij panes from an outer kitty, and the stdio probe succeeds because
-/// Zellij answers Kitty queries, so both detection paths would pick Kitty.
-/// Fall back to halfblocks (Mermaid then shows its source) unless the user
-/// opts in with `JCODE_ZELLIJ_KITTY_IMAGES=1`, for Zellij builds that add
-/// placeholder support.
+/// Zellij supports classic Kitty placements, not Unicode placeholders. Our
+/// custom renderer handles that distinction, so Kitty need not be downgraded
+/// unless explicitly disabled for an older Zellij build or configuration.
 pub(super) fn adjust_protocol_for_multiplexer(
     protocol: ProtocolType,
     multiplexer: Multiplexer,
-    zellij_kitty_opt_in: bool,
+    zellij_kitty_enabled: bool,
 ) -> ProtocolType {
-    if protocol == ProtocolType::Kitty && multiplexer == Multiplexer::Zellij && !zellij_kitty_opt_in
+    if protocol == ProtocolType::Kitty
+        && multiplexer == Multiplexer::Zellij
+        && !zellij_kitty_enabled
     {
         ProtocolType::Halfblocks
     } else {
@@ -104,21 +100,47 @@ pub(super) fn adjust_protocol_for_multiplexer(
     }
 }
 
-fn zellij_kitty_images_opt_in() -> bool {
+fn zellij_kitty_images_enabled() -> bool {
     std::env::var("JCODE_ZELLIJ_KITTY_IMAGES")
         .ok()
         .as_deref()
         .and_then(parse_env_bool)
-        .unwrap_or(false)
+        .unwrap_or(true)
+}
+
+pub(super) fn use_classic_kitty() -> bool {
+    #[cfg(test)]
+    {
+        TEST_CLASSIC_KITTY.with(|value| value.get())
+    }
+    #[cfg(not(test))]
+    {
+        detect_multiplexer_from_env() == Multiplexer::Zellij
+    }
+}
+
+#[cfg(test)]
+thread_local! { static TEST_CLASSIC_KITTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+#[cfg(test)]
+pub(super) fn with_classic_kitty_for_test<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_CLASSIC_KITTY.with(|value| value.set(self.0));
+        }
+    }
+    let _reset = Reset(TEST_CLASSIC_KITTY.with(|value| value.replace(true)));
+    f()
 }
 
 fn apply_multiplexer_protocol_limits(picker: &mut Picker, multiplexer: Multiplexer) {
     let current = picker.protocol_type();
     let adjusted =
-        adjust_protocol_for_multiplexer(current, multiplexer, zellij_kitty_images_opt_in());
+        adjust_protocol_for_multiplexer(current, multiplexer, zellij_kitty_images_enabled());
     if adjusted != current {
         crate::log_info(&format!(
-            "Image protocol {:?} unusable inside {} (no Kitty unicode placeholder support); using {:?}. Set JCODE_ZELLIJ_KITTY_IMAGES=1 to override",
+            "Image protocol {:?} disabled inside {}; using {:?}. Unset JCODE_ZELLIJ_KITTY_IMAGES to use classic Kitty placements",
             current,
             multiplexer.label(),
             adjusted
@@ -942,9 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn zellij_downgrades_kitty_placeholders_unless_opted_in() {
-        // Zellij rejects U=1 virtual placements, the only Kitty mode
-        // ratatui-image uses, so Kitty would render blank there.
+    fn zellij_preserves_classic_kitty_unless_explicitly_disabled() {
         assert_eq!(
             adjust_protocol_for_multiplexer(ProtocolType::Kitty, Multiplexer::Zellij, false),
             ProtocolType::Halfblocks

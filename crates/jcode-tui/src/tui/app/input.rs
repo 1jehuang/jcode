@@ -1,5 +1,9 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
+#[path = "input/shell_commands.rs"]
+mod shell_commands;
+use shell_commands::*;
+
 use super::{
     App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
     ctrl_bracket_fallback_to_esc, is_context_limit_error, is_request_payload_too_large_error,
@@ -86,99 +90,6 @@ fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> 
 
 pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
     input.trim().strip_prefix('!').map(str::trim)
-}
-
-fn build_input_shell_command(command: &str) -> std::process::Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = std::process::Command::new("cmd.exe");
-        cmd.arg("/C").arg(command);
-        cmd
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut cmd = std::process::Command::new("bash");
-        cmd.arg("-c").arg(command);
-        cmd
-    }
-}
-
-fn combine_shell_output(stdout: &[u8], stderr: &[u8]) -> (String, bool) {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    let mut output = String::new();
-
-    if !stdout.is_empty() {
-        output.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str("[stderr]\n");
-        output.push_str(&stderr);
-    }
-
-    let truncated = if output.len() > INPUT_SHELL_MAX_OUTPUT_LEN {
-        output = truncate_str(&output, INPUT_SHELL_MAX_OUTPUT_LEN).to_string();
-        if !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str("… output truncated");
-        true
-    } else {
-        false
-    };
-
-    (output, truncated)
-}
-
-fn spawn_input_shell_command(session_id: String, command: String, cwd: Option<String>) {
-    std::thread::spawn(move || {
-        let started = std::time::Instant::now();
-        let mut cmd = build_input_shell_command(&command);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        if let Some(dir) = cwd.as_ref() {
-            cmd.current_dir(dir);
-        }
-
-        let event = match cmd.output() {
-            Ok(output) => {
-                let (combined_output, truncated) =
-                    combine_shell_output(&output.stdout, &output.stderr);
-                InputShellCompleted {
-                    session_id,
-                    result: crate::message::InputShellResult {
-                        command,
-                        cwd,
-                        output: combined_output,
-                        exit_code: output.status.code(),
-                        duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                        truncated,
-                        failed_to_start: false,
-                    },
-                }
-            }
-            Err(error) => InputShellCompleted {
-                session_id,
-                result: crate::message::InputShellResult {
-                    command,
-                    cwd,
-                    output: format!("Failed to run command: {}", error),
-                    exit_code: None,
-                    duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                    truncated: false,
-                    failed_to_start: true,
-                },
-            },
-        };
-
-        Bus::global().publish(BusEvent::InputShellCompleted(event));
-    });
 }
 
 pub(super) struct PreparedInput {
@@ -1368,9 +1279,88 @@ pub(super) fn clear_input_for_escape(app: &mut App) {
     }
 }
 
-pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
+pub(super) fn expand_paste_placeholders(app: &App, input: &str) -> String {
+    expand_paste_placeholders_with(&app.pasted_contents, input)
+}
+
+pub(super) fn queue_message(app: &mut App) {
+    let prepared = take_prepared_input(app);
+    app.queued_messages.push(prepared.expanded);
+}
+
+/// True for composer text that runs as a client command rather than a prompt:
+/// a slash command (`/compact`) or an input-line shell command (`!ls`).
+pub(super) fn is_queueable_command_input(input: &str) -> bool {
+    let trimmed = input.trim();
+    trimmed.starts_with('/') || extract_input_shell_command(trimmed).is_some()
+}
+
+/// Ctrl+Enter on a slash or shell command while a turn is running: hold the
+/// command and run it as a real command once the turn ends, instead of
+/// running it now. Returns true when the command was queued.
+pub(super) fn try_queue_command(app: &mut App) -> bool {
+    if !app.is_processing() || !is_queueable_command_input(&app.input) {
+        return false;
+    }
+    let raw_input = std::mem::take(&mut app.input);
+    let expanded = expand_paste_placeholders(app, &raw_input);
+    app.pasted_contents.clear();
+    app.cursor_pos = 0;
+    app.clear_input_undo_history();
+    app.reset_tab_completion();
+    // Close any picker preview the command text opened (e.g. `/model`).
+    app.sync_model_picker_preview_from_input();
+    let command = expanded.trim().to_string();
+    app.set_status_notice(format!("Queued {} to run after this turn", command));
+    app.queued_commands.push(command);
+    true
+}
+
+/// The composer state a queued command temporarily displaces while it runs.
+pub(super) struct ComposerDraft {
+    input: String,
+    cursor_pos: usize,
+    pending_images: Vec<(String, String)>,
+    pasted_contents: Vec<String>,
+}
+
+/// Put `command` in the composer so the normal Enter path can run it,
+/// returning whatever the user was drafting so it can be restored afterwards.
+pub(super) fn swap_in_queued_command(app: &mut App, command: String) -> ComposerDraft {
+    app.set_status_notice(format!("Running queued {}", command));
+    let draft = ComposerDraft {
+        input: std::mem::replace(&mut app.input, command),
+        cursor_pos: app.cursor_pos,
+        pending_images: std::mem::take(&mut app.pending_images),
+        pasted_contents: std::mem::take(&mut app.pasted_contents),
+    };
+    app.cursor_pos = app.input.len();
+    draft
+}
+
+/// Restore the user's draft after a queued command ran. A command that left
+/// its own text in the composer (e.g. one that pre-fills input) wins; the
+/// draft then goes to prompt history so Up recalls it instead of losing it.
+pub(super) fn restore_composer_draft(app: &mut App, draft: ComposerDraft) {
+    if draft.input.is_empty() && draft.pending_images.is_empty() {
+        return;
+    }
+    if app.input.is_empty() {
+        app.input = draft.input;
+        app.cursor_pos = draft.cursor_pos.min(app.input.len());
+        app.pending_images = draft.pending_images;
+        app.pasted_contents = draft.pasted_contents;
+        app.sync_model_picker_preview_from_input();
+    } else {
+        let expanded = expand_paste_placeholders_with(&draft.pasted_contents, &draft.input);
+        app.record_prompt_history(&expanded);
+        app.pending_images.extend(draft.pending_images);
+    }
+}
+
+fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
     let mut result = input.to_string();
-    for content in app.pasted_contents.iter().rev() {
+    for content in pasted_contents.iter().rev() {
         let placeholder = paste_placeholder(content);
         if let Some(pos) = result.rfind(&placeholder) {
             result.replace_range(pos..pos + placeholder.len(), content);
@@ -1379,9 +1369,20 @@ pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
     result
 }
 
-pub(super) fn queue_message(app: &mut App) {
-    let prepared = take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+/// Run commands queued with Ctrl+Enter in a local (non-remote) session. Stops
+/// as soon as one starts a turn; the rest wait for that turn to end.
+pub(super) fn run_queued_commands_local(app: &mut App) {
+    while !app.is_processing
+        && !app.cloud_handoff_blocks_work()
+        && !app.pending_turn
+        && !app.should_quit
+        && !app.queued_commands.is_empty()
+    {
+        let command = app.queued_commands.remove(0);
+        let draft = swap_in_queued_command(app, command);
+        app.submit_input();
+        restore_composer_draft(app, draft);
+    }
 }
 
 pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
@@ -1421,12 +1422,28 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
             count,
             if count == 1 { "" } else { "s" }
         ));
+    } else if let Some(command) = app.queued_commands.pop() {
+        // Commands are recalled one at a time (newest first): joining several
+        // would turn them into a single malformed command.
+        app.input = command;
+        app.cursor_pos = app.input.len();
+        app.sync_model_picker_preview_from_input();
+        app.set_status_notice("Retrieved queued command for editing");
+        return true;
     }
 
     had_pending
 }
 
 pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
+    // Route through the submission guard rather than consuming this draft
+    // into an interleave slot that turn completion would clear.
+    if app.cloud_handoff_blocks_work() {
+        return SendAction::Submit;
+    }
+    if app.pending_login.is_some() {
+        return SendAction::Submit;
+    }
     if !app.is_processing {
         return SendAction::Submit;
     }
@@ -1542,8 +1559,21 @@ impl App {
     /// guardrail circuit breaker first, then tries auto-poke and overnight
     /// poke scheduling. Returns true when a follow-up was queued.
     pub(super) fn schedule_turn_end_followups(&mut self) -> bool {
+        self.schedule_turn_end_followups_after_response(false)
+    }
+
+    pub(super) fn schedule_turn_end_followups_after_response(
+        &mut self,
+        final_response_delivered: bool,
+    ) -> bool {
         if self.guardrail_stops_exhausted_at_turn_end() {
             self.stop_auto_continuation_after_guardrail();
+            return false;
+        }
+        // A handoff owns this idle boundary. Queuing a local continuation here
+        // makes its dispatch safety check see new unsent work and cancel the
+        // transfer, even though the user did not submit anything else.
+        if self.cloud_handoff_blocks_work() {
             return false;
         }
         // The user's own next prompt goes first. A poke queued now would be
@@ -1551,57 +1581,36 @@ impl App {
         if self.has_pending_user_followup() {
             return false;
         }
-        self.schedule_auto_poke_followup_if_needed()
+        if self.all_open_todos_wait_on_background_tasks() {
+            self.last_auto_poke_fingerprint = None;
+            self.auto_poke_attempts = 0;
+            return false;
+        }
+        self.schedule_auto_poke_followup_after_response(final_response_delivered)
             || self.schedule_overnight_poke_followup_if_needed()
     }
 
-    /// Deliver this turn's deferred quality-check reminder, if anything is
-    /// still unresolved. Returns true when a continuation was queued.
-    ///
-    /// Delivered at most once per turn: the reminder asks the model to verify
-    /// weak points, and re-asking after it has done so would loop. The
-    /// observation log is cleared either way, so the next turn starts clean.
-    fn deliver_deferred_gate_digest_if_needed(&mut self) -> bool {
-        if self.todo_gate_digest_delivered {
-            return false;
-        }
-        // In a remote client `self.session` is the local wrapper session, while
-        // todo tools execute against the remote session. Reading the wrapper's
-        // files makes every persisted remote assessment appear to be missing.
-        let session_id = self
-            .remote_session_id
-            .as_deref()
-            .unwrap_or_else(|| self.session_id())
-            .to_string();
-        let observations = crate::todo::load_gate_observations(&session_id).unwrap_or_default();
-        if observations.is_empty() {
-            return false;
-        }
-        let plan = crate::todo::load_plan(&session_id).unwrap_or_default();
-        let goals = crate::todo::load_goals(&session_id).unwrap_or_default();
-        let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
-        let _ = crate::todo::clear_gate_observations(&session_id);
-        let Some(digest) = digest else {
-            crate::logging::info(&format!(
-                "TODO_GATE_DIGEST action=skip reason=nothing_to_report observations={}",
-                observations.len()
-            ));
-            return false;
-        };
-        self.todo_gate_digest_delivered = true;
-        crate::logging::info(&format!(
-            "TODO_GATE_DIGEST action=queue observations={}",
-            observations.len()
-        ));
-        self.push_display_message(DisplayMessage::system(
-            "🔎 We asked the agent to double-check this turn's weak points.",
-        ));
-        self.queued_messages.push(digest);
-        self.pending_queued_dispatch = true;
-        true
+    #[cfg(test)]
+    pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+        self.schedule_auto_poke_followup_after_response(false)
     }
 
-    pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+    fn schedule_auto_poke_followup_after_response(
+        &mut self,
+        final_response_delivered: bool,
+    ) -> bool {
+        // Completion is visible even with /poke off, and never needs another
+        // model turn merely to show the plan's remaining weaknesses.
+        self.refresh_completed_todo_report(true);
+        // Report display remains independent of the optional model follow-up.
+        let observation_session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or_else(|| self.session_id());
+        if !crate::config::config().features.todo_gate_digest {
+            let _ = crate::todo::clear_gate_observations(observation_session_id);
+        }
+
         // The completion-gate circuit breaker clears auto_poke_incomplete_todos,
         // and it can only trip while every todo is complete, so the restore in
         // the all-complete branch never runs for an agent that adds open work
@@ -1624,6 +1633,19 @@ impl App {
         }
 
         let todos = super::commands::poke_todos(self);
+        let incomplete: Vec<_> = todos
+            .iter()
+            .filter(|todo| super::commands::is_incomplete_poke_todo(todo))
+            .filter(|todo| !self.todo_waits_on_background_task(todo))
+            .cloned()
+            .collect();
+        if incomplete.is_empty() && todos.iter().any(super::commands::is_incomplete_poke_todo) {
+            // Completion delivery owns the next wake. Waiting is not resistance
+            // and must not spend either the work or assessment review budget.
+            self.last_auto_poke_fingerprint = None;
+            self.auto_poke_attempts = 0;
+            return false;
+        }
         let todo_session_id = self
             .remote_session_id
             .as_deref()
@@ -1635,8 +1657,8 @@ impl App {
             serde_json::to_string(&(&todo_session_id, &todos, &plan, &goals)).ok();
         if self.final_response_todo_fingerprint.is_some() {
             if self.final_response_todo_fingerprint == todo_fingerprint {
-                // Check before timed reviews and deferred digests too: neither
-                // elapsed time nor a stale observation starts a new todo cycle.
+                // Check before timed reviews too: elapsed time alone does not
+                // start a new todo cycle.
                 return false;
             }
             self.final_response_todo_fingerprint = None;
@@ -1657,16 +1679,12 @@ impl App {
             self.pending_queued_dispatch = true;
             return true;
         }
-        let incomplete: Vec<_> = todos
-            .iter()
-            .filter(|todo| super::commands::is_incomplete_poke_todo(todo))
-            .cloned()
-            .collect();
         if incomplete.is_empty() {
             // Completing or removing a todo list ends the prior poke cycle. If
             // equivalent work appears later, it is a new cycle and deserves
             // one fresh nudge rather than being mistaken for the old stall.
             self.last_auto_poke_fingerprint = None;
+            self.auto_poke_attempts = 0;
             if todos.is_empty() {
                 // No todo list exists yet for this session. Auto-poke is armed
                 // by default (`features.auto_poke`), so disarming here would
@@ -1677,15 +1695,25 @@ impl App {
                 crate::logging::info("AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0");
                 self.todo_final_response_requested = false;
                 self.last_todo_ownership_fingerprint = None;
+                self.todo_gate_digest_delivered = false;
                 return false;
             }
-            // Deferred quality checks land here, once, instead of interrupting
-            // every todo write during the turn. Every point recorded during the
-            // turn is raised, including ones whose score later climbed: work
-            // done while the score was low never benefited from the assessment
-            // that arrived after it.
-            if self.deliver_deferred_gate_digest_if_needed() {
-                return true;
+            if crate::config::config().features.todo_gate_digest {
+                let observations =
+                    crate::todo::load_gate_observations(&todo_session_id).unwrap_or_default();
+                let _ = crate::todo::clear_gate_observations(&todo_session_id);
+                if !self.todo_gate_digest_delivered
+                    && let Some(message) =
+                        crate::todo::build_gate_digest(&observations, &plan, &goals)
+                {
+                    self.todo_gate_digest_delivered = true;
+                    self.push_display_message(DisplayMessage::system(
+                        "🔍 Double-checking this turn's weak points...",
+                    ));
+                    self.queued_messages.push(message);
+                    self.pending_queued_dispatch = true;
+                    return true;
+                }
             }
             let ownership_needs_followup =
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
@@ -1724,8 +1752,6 @@ impl App {
                 return true;
             }
             let confidence_summary = super::commands::todo_confidence_summary(&todos);
-            let confidence_label =
-                super::commands::format_todo_completion_confidence(confidence_summary);
             let needs_spike_challenge = confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
             if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
@@ -1786,10 +1812,15 @@ impl App {
             if !self.todo_final_response_requested {
                 self.todo_final_response_requested = true;
                 self.final_response_todo_fingerprint = todo_fingerprint;
-                self.push_display_message(DisplayMessage::system(format!(
-                    "✅ All todos done. Completion confidence: {}.",
-                    confidence_label
-                )));
+                // The ordinary answer already wrapped up this work. Keep the
+                // completed fingerprint latched, but do not buy another turn
+                // merely to repeat it. Quality gates above still run normally.
+                if final_response_delivered {
+                    crate::logging::info(
+                        "AUTO_POKE_DECISION action=idle reason=final_response_already_delivered",
+                    );
+                    return false;
+                }
                 self.queued_messages
                     .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
                 self.pending_queued_dispatch = true;
@@ -1804,11 +1835,15 @@ impl App {
         // Open work begins a new completion cycle. Keep the prior spike check
         // latched until this point so the synthetic final-response turn cannot
         // retrigger the same evidence gate against unchanged completed todos.
+        self.todo_gate_digest_delivered = false;
         self.todo_confidence_spike_challenged = false;
         self.last_todo_ownership_fingerprint = None;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
-        if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
+        if self.last_auto_poke_fingerprint.as_ref() != Some(&fingerprint) {
+            self.auto_poke_attempts = 0;
+        }
+        if self.auto_poke_attempts >= crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS {
             crate::logging::info(&format!(
                 "AUTO_POKE_DECISION action=idle reason=unchanged_todos incomplete={}",
                 incomplete.len()
@@ -1836,12 +1871,77 @@ impl App {
         // exhaustion should only trip when the gate itself stops moving.
         self.todo_completion_gate_attempts = 0;
         self.last_auto_poke_fingerprint = Some(fingerprint);
+        self.auto_poke_attempts += 1;
         self.queued_messages.push(poke_message);
         self.pending_queued_dispatch = true;
         true
     }
 
+    /// Fingerprint of the current open todos, matching the one auto-poke
+    /// records when it nudges, so a poke sent elsewhere can be credited here.
+    fn current_incomplete_poke_fingerprint(&self) -> Option<String> {
+        let incomplete: Vec<_> = super::commands::poke_todos(self)
+            .into_iter()
+            .filter(super::commands::is_incomplete_poke_todo)
+            .filter(|todo| !self.todo_waits_on_background_task(todo))
+            .collect();
+        if incomplete.is_empty() {
+            return None;
+        }
+        serde_json::to_string(&incomplete).ok()
+    }
+
+    /// Another window attached to this session started a turn. Show what it
+    /// sent, and when it was an auto-poke, treat the nudge as already given so
+    /// this window does not send a duplicate one for the same open work.
+    pub(super) fn handle_peer_user_message(&mut self, content: &str) {
+        let text = content.trim();
+        if text.is_empty() {
+            return;
+        }
+        if !super::commands::is_poke_message(text) {
+            if let Some(swarm) = super::remote_notifications::swarm_delivery_display_message(text) {
+                self.push_display_message(swarm);
+                return;
+            }
+            self.push_display_message(DisplayMessage::user(text.to_string()));
+            return;
+        }
+        let notice = crate::todo::auto_poke_display_summary(text)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let count = text
+                    .strip_prefix("You have ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|n| n.parse::<usize>().ok());
+                match count {
+                    Some(count) => format!(
+                        "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
+                        count,
+                        if count == 1 { "" } else { "s" },
+                    ),
+                    None => text.to_string(),
+                }
+            });
+        self.push_display_message(DisplayMessage::system(notice));
+        // Drop an identical continuation this window queued but has not sent.
+        let before = self.queued_messages.len();
+        self.queued_messages.retain(|queued| queued.trim() != text);
+        if self.queued_messages.len() != before && !self.has_queued_followups() {
+            self.pending_queued_dispatch = false;
+        }
+        if let Some(fingerprint) = self.current_incomplete_poke_fingerprint()
+            && text.starts_with("You have ")
+        {
+            // A peer owns continuation for this unchanged state. Do not send
+            // competing retries from every attached window.
+            self.last_auto_poke_fingerprint = Some(fingerprint);
+            self.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
+        }
+    }
+
     pub(super) fn schedule_queued_dispatch_after_interrupt(&mut self) {
+        self.streaming.response_output.reset();
         if self.has_queued_followups() {
             self.pending_queued_dispatch = true;
         }
@@ -1923,6 +2023,9 @@ pub(super) fn is_next_prompt_new_session_hotkey(code: KeyCode, modifiers: KeyMod
 }
 
 fn input_routes_to_new_session(app: &App) -> bool {
+    if app.pending_login.is_some() {
+        return false;
+    }
     if !app.route_next_prompt_to_new_session || app.input.is_empty() {
         return false;
     }
@@ -1959,6 +2062,14 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
 }
 
 pub(super) fn handle_alternate_enter(app: &mut App) {
+    if app.pending_login.is_some() {
+        app.submit_input();
+        return;
+    }
+    if try_queue_command(app) {
+        return;
+    }
+
     if app.activate_picker_from_preview() {
         return;
     }
@@ -2191,6 +2302,15 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             app.copy_chat_viewport_context_to_clipboard();
             true
         }
+        KeyCode::Char('e') => {
+            let expanded = crate::tui::ui::viewport::toggle_prompt_history_expanded();
+            app.set_status_notice(if expanded {
+                "Prompt history: showing more previous prompts (Alt+E to collapse)"
+            } else {
+                "Prompt history: collapsed"
+            });
+            true
+        }
         _ => false,
     }
 }
@@ -2233,6 +2353,11 @@ pub(super) fn handle_navigation_shortcuts(
         return true;
     }
 
+    if app.toggle_keys.commit_log.matches(code, modifiers) {
+        app.toggle_commit_log_overlay();
+        return true;
+    }
+
     if app.toggle_keys.diff_mode_cycle.matches(code, modifiers) {
         app.diff_mode = app.diff_mode.cycle();
         if !app.diff_pane_visible() {
@@ -2251,13 +2376,16 @@ pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifie
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if app.toggle_keys.commit_log.matches(code, modifiers) {
+        return false;
+    }
+
     if app.scroll_keys.scroll_amount(code, modifiers).is_some()
         || app.scroll_keys.prompt_jump(code, modifiers).is_some()
         || App::ctrl_side_panel_ratio_preset(&code, modifiers).is_some()
         || App::ctrl_prompt_rank(&code, modifiers).is_some()
         || app.scroll_keys.is_bookmark(code, modifiers)
-        || (modifiers.contains(KeyModifiers::ALT)
-            && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g')))
+        || app.toggle_keys.diff_mode_cycle.matches(code, modifiers)
     {
         return true;
     }
@@ -2427,7 +2555,9 @@ pub(super) fn handle_pre_control_shortcuts(
     }
     {
         use crate::tui::TuiState as _;
-        if app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers) {
+        if app.handle_swarm_agent_shortcut(code, modifiers)
+            || (app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers))
+        {
             return true;
         }
     }
@@ -2512,7 +2642,12 @@ pub(super) fn handle_visible_copy_shortcut(
         // Some terminals report Alt+Shift+E as Alt+lowercase `e` with no
         // explicit SHIFT modifier. Keep the relaxed fallback scoped to the
         // expand badge so plain Alt+letter copy shortcuts do not become active.
-        if c.eq_ignore_ascii_case(&'e') && handle_expand_edit_badge_shortcut(app, c) {
+        // Plain Alt+E toggles the expanded prompt history, so only treat it as
+        // the expand badge when that badge is actually on screen.
+        if c.eq_ignore_ascii_case(&'e')
+            && crate::tui::ui::visible_expand_edit_badge()
+            && handle_expand_edit_badge_shortcut(app, c)
+        {
             return true;
         }
         return false;
@@ -2683,11 +2818,7 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
-    if app.handle_inline_interactive_preview_key(&code, modifiers)? {
-        return Ok(true);
-    }
-
-    Ok(false)
+    app.handle_inline_interactive_preview_key(&code, modifiers)
 }
 
 pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<bool> {
@@ -2696,6 +2827,8 @@ pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<
         if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
             app.close_panel_image_preview();
         }
+    } else if app.commit_log_overlay.is_some() {
+        app.handle_commit_log_key(code)?;
     } else if app.changelog_scroll.is_some() {
         app.handle_changelog_key(code)?;
     } else if app.help_scroll.is_some() {
@@ -2767,6 +2900,10 @@ pub(super) fn handle_global_control_shortcuts(
 }
 
 pub(super) fn handle_enter(app: &mut App) -> bool {
+    if app.pending_login.is_some() {
+        app.submit_input();
+        return true;
+    }
     promote_dropped_images(app);
     if app.activate_picker_from_preview() {
         return true;
@@ -2969,8 +3106,11 @@ impl App {
             if matches!(
                 event.kind,
                 crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
-            ) {
-                let _ = self.handle_key_press_event(event);
+            ) && let Err(error) = self.handle_key_press_event(event)
+            {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Could not handle key input: {error}"
+                )));
             }
             return;
         }
@@ -2999,12 +3139,16 @@ impl App {
         if matches!(
             event.kind,
             crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
-        ) {
-            let _ = self.handle_key_press_event(event);
+        ) && let Err(error) = self.handle_key_press_event(event)
+        {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Could not handle key input: {error}"
+            )));
         }
     }
 
     pub(super) fn handle_key_press_event(&mut self, event: KeyEvent) -> Result<()> {
+        self.wake_idle_hibernation();
         // Pick up config.toml keybinding edits before this key is matched.
         // The idle tick refreshes too, but it can run as slowly as the 5s
         // deep-idle cadence, which would leave the first keystroke after an
@@ -3082,14 +3226,8 @@ impl App {
             return Ok(());
         }
 
-        if self.pending_provider_failover.is_some() && !self.is_processing {
-            if code == KeyCode::Esc {
-                self.cancel_pending_provider_failover("Provider auto-switch canceled");
-                return Ok(());
-            }
-            if !is_scroll_only_key(self, code, modifiers) {
-                self.cancel_pending_provider_failover("Provider auto-switch canceled");
-            }
+        if self.handle_key_during_provider_failover(code) {
+            return Ok(());
         }
 
         // Accept an armed post-error fallback offer: switch to the next best
@@ -3264,6 +3402,7 @@ impl App {
     }
 
     pub(super) fn should_redraw_after_resize(&mut self) -> bool {
+        self.wake_idle_hibernation();
         let now = std::time::Instant::now();
         match self.last_resize_redraw {
             Some(last) if now.duration_since(last) < Self::RESIZE_REDRAW_MIN_INTERVAL => {
@@ -3417,6 +3556,7 @@ impl App {
     /// Queue a message to be sent later
     /// Handle bracketed paste: store text content (image URLs are still detected inline)
     pub(super) fn handle_paste(&mut self, text: String) {
+        self.wake_idle_hibernation();
         handle_paste(self, text);
     }
 
@@ -3677,6 +3817,7 @@ impl App {
     /// replayed from the top, so everything from the aborted attempt must
     /// disappear or the replay would render duplicated output.
     pub(super) fn rollback_streaming_attempt(&mut self) {
+        self.streaming.response_output.reset();
         self.stream_buffer.clear();
         self.clear_streaming_render_state();
         self.streaming_tool_calls.clear();
@@ -3782,6 +3923,20 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
+        let command = expand_paste_placeholders(self, &self.input)
+            .trim()
+            .to_string();
+        if !super::commands_cloud::check_cloud_handoff_input(self, &command) {
+            return;
+        }
+        if self.cloud_handoff_blocks_work()
+            && super::commands_cloud::parse_cloud_command(self.input.trim()).is_none()
+        {
+            self.set_status_notice(
+                "Cloud handoff pending. Use /cloud cancel before submitting more work.",
+            );
+            return;
+        }
         // Connected SSH input is dispatched through the wire client, never the
         // local submit fallback (which reads skills and persists prompts).
         if crate::tui::is_ssh_remote() {
@@ -3907,6 +4062,12 @@ impl App {
 
             if let Some(skill) = skill {
                 self.active_skill = Some(skill_name.clone());
+                if !self.is_remote {
+                    self.append_turn_system_reminder(Some(format!(
+                        "# Active Skill\n\n{}",
+                        skill.get_prompt().trim()
+                    )));
+                }
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("Activated skill: {} - {}", skill.name, skill.description),
@@ -3986,29 +4147,36 @@ impl App {
                     .join(", ")
             ));
         }
+        let model_input = crate::prompt::with_swarm_user_message_reminder(
+            &input,
+            self.provider.reasoning_effort().as_deref(),
+        );
         if images.is_empty() {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
-            self.add_provider_message(Message::user(&input));
+            self.add_provider_message(Message::user(&model_input));
             self.session.add_message(
                 Role::User,
                 vec![ContentBlock::Text {
-                    text: input.clone(),
+                    text: model_input.clone(),
                     cache_control: None,
                 }],
             );
         } else {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
-            self.add_provider_message(Message::user_with_images(&input, images.clone()));
+            self.add_provider_message(Message::user_with_images(&model_input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
                 .map(|(media_type, data)| ContentBlock::Image { media_type, data })
                 .collect();
             blocks.push(ContentBlock::Text {
-                text: input.clone(),
+                text: model_input.clone(),
                 cache_control: None,
             });
             self.session.add_message(Role::User, blocks);
         }
+        let reminder = merge_turn_reminders(
+            mission_turn_reminder(&self.session.id),
+            self.take_cloud_recovery_reminder(),
+        );
+        self.append_turn_system_reminder(reminder);
         crate::telemetry::record_turn();
         self.session_save_pending = true;
 
@@ -4055,7 +4223,9 @@ impl App {
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) {
-        while !self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty() {
+        while !self.cloud_handoff_blocks_work()
+            && (!self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty())
+        {
             // Combine all currently queued messages into one, treating [SYSTEM: ...]
             // startup continuations as system reminders rather than user turns.
             let queued_messages = std::mem::take(&mut self.queued_messages);
@@ -4078,10 +4248,16 @@ impl App {
                 }
             }
 
-            self.current_turn_system_reminder =
+            let turn_reminder =
                 merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
+            let turn_reminder =
+                merge_turn_reminders(turn_reminder, self.take_cloud_recovery_reminder());
 
             if has_combined {
+                let combined = crate::prompt::with_swarm_user_message_reminder(
+                    &combined,
+                    self.provider.reasoning_effort().as_deref(),
+                );
                 self.add_provider_message(Message::user(&combined));
                 self.session.add_message(
                     Role::User,
@@ -4091,6 +4267,7 @@ impl App {
                     }],
                 );
             }
+            self.append_turn_system_reminder(turn_reminder);
             self.session_save_pending = true;
             self.clear_streaming_render_state();
             self.stream_buffer.clear();
@@ -4153,7 +4330,6 @@ impl App {
                     }
                 }
             }
-            self.current_turn_system_reminder = None;
             // Loop will check if more messages were queued during this turn
         }
     }

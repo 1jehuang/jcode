@@ -1,0 +1,21 @@
+[package]
+name = "jcode-terminal-prompt"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Terminal-only login presentation for jcode clients: masked secret prompts and Unicode QR codes"
+
+# Client-side only. The shared runtime (jcode-base, jcode-app-core) must not
+# depend on this crate. The CLI installs it into jcode-base's login presenter
+# hook at startup, so a headless or remote server never touches a terminal.
+[lib]
+name = "jcode_terminal_prompt"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+qrcode = { version = "0.14.1", default-features = false }
+
+[dev-dependencies]
+libc = "0.2"

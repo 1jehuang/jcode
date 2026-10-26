@@ -140,9 +140,9 @@ benchmark_tool "agentgrep" "{\"mode\":\"grep\",\"query\":\"tokio::spawn\",\"path
 benchmark_tool "agentgrep" "{\"mode\":\"find\",\"glob\":\"**/*.rs\"}" "agentgrep find (**/*.rs)"
 benchmark_tool "agentgrep" "{\"mode\":\"find\",\"glob\":\"**/*.rs\",\"path\":\"src/tool\"}" "agentgrep find (tool/*.rs)"
 
-benchmark_tool "ls" "{}" "ls (repo root)"
-benchmark_tool "ls" "{\"path\":\"src\"}" "ls (src/)"
-benchmark_tool "ls" "{\"path\":\"src/tool\"}" "ls (src/tool/)"
+benchmark_tool "bash" "{\"command\":\"ls\"}" "bash ls (repo root)"
+benchmark_tool "bash" "{\"command\":\"ls src\"}" "bash ls (src/)"
+benchmark_tool "bash" "{\"command\":\"ls crates/jcode-app-core/src/tool\"}" "bash ls (tools/)"
 
 echo ""
 echo "=== Shell Tools ==="

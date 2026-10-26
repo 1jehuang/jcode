@@ -5,6 +5,8 @@
 //! In centered mode, widgets can appear on both left and right margins.
 //! In left-aligned mode, widgets only appear on the right margin.
 
+pub use super::cloud_git::{DualGitInfo, RepoState};
+pub use super::cloud_status::{CloudMachineStats, CloudProbeState, CloudStatusInfo};
 use super::color_support::rgb;
 #[path = "info_widget_commits.rs"]
 mod commits;
@@ -28,11 +30,9 @@ pub(crate) mod swarm_gallery;
 mod text;
 #[path = "info_widget_tips.rs"]
 mod tips;
-#[path = "info_widget_todos.rs"]
-mod todos_render;
 #[path = "info_widget_usage.rs"]
 mod usage_render;
-use super::info_widget_overview::{InfoPageKind, MAX_TODO_LINES, compute_page_layout};
+use super::info_widget_overview::{InfoPageKind, compute_page_layout};
 use super::workspace_map::VisibleWorkspaceRow;
 use crate::ambient::AmbientStatus;
 pub use crate::memory_types::{
@@ -41,7 +41,6 @@ pub use crate::memory_types::{
 };
 use crate::prompt::ContextInfo;
 use crate::protocol::SwarmMemberStatus;
-use crate::todo::TodoItem;
 use memory_render::{render_memory_compact, render_memory_expanded, render_memory_widget};
 use ratatui::{
     prelude::*,
@@ -63,23 +62,25 @@ pub(crate) use git::{edited_paths_from_tool_call, resolve_edited_path};
 pub use graph::{GraphEdge, GraphNode, build_graph_topology, graph_node_score};
 pub(crate) use memory_utils::is_traceworthy_memory_event;
 use memory_utils::{memory_active_summary, memory_last_trace_summary, memory_state_detail};
-use model::{render_model_info, render_model_widget, runtime_has_data, runtime_height};
+use model::{overview_runtime_height, render_model_info, render_model_widget, runtime_has_data};
 use swarm_background::{render_background_compact, render_background_widget, render_swarm_widget};
 use text::{truncate_smart, truncate_with_ellipsis};
 pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
-pub(crate) use todos_render::swarm_plan_todos;
-use todos_render::{render_todos_compact, render_todos_expanded, render_todos_widget};
+pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
 use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
 pub(super) fn changes_section_height(data: &InfoWidgetData) -> u16 {
+    if let Some(dual) = &data.dual_git_info {
+        return git::dual_git_height(dual);
+    }
     data.git_info.as_ref().map(changes_height).unwrap_or(0)
 }
 
 /// Overview rows used by the Runtime section, mirroring [`render_sections`].
 pub(super) fn model_info_height(data: &InfoWidgetData) -> u16 {
-    runtime_height(data)
+    overview_runtime_height(data)
 }
 
 /// Types of info widgets that can be displayed
@@ -89,8 +90,6 @@ pub enum WidgetKind {
     Overview,
     /// Niri-style workspace map preview
     WorkspaceMap,
-    /// Todo list with progress
-    Todos,
     /// Memory sidecar activity
     MemoryActivity,
     /// Subagents/sessions status
@@ -114,6 +113,8 @@ pub enum WidgetKind {
     Tips,
     /// Changes: the dirty file list (the status line owns branch and counts)
     GitStatus,
+    /// Native SSH cloud machine and workspace details.
+    CloudVm,
     /// Commits: recent history on the current branch
     Commits,
 }
@@ -125,7 +126,6 @@ impl WidgetKind {
             WidgetKind::Diagrams => 0, // Highest priority - user explicitly wants to see it
             WidgetKind::WorkspaceMap => 1,
             WidgetKind::Overview => 2,
-            WidgetKind::Todos => 3,
             WidgetKind::UsageLimits => 5, // Bumped up - important when near limits
             WidgetKind::KvCache => 6,
             WidgetKind::MemoryActivity => 7,
@@ -133,6 +133,7 @@ impl WidgetKind {
             WidgetKind::Compaction => 9,
             WidgetKind::BackgroundTasks => 10,
             WidgetKind::GitStatus => 11,
+            WidgetKind::CloudVm => 12,
             WidgetKind::Commits => 12,
             WidgetKind::SwarmStatus => 12, // Session list - lower priority
             WidgetKind::AmbientMode => 13, // Scheduled agent - lower priority
@@ -146,7 +147,6 @@ impl WidgetKind {
             WidgetKind::Diagrams => Side::Right, // Diagrams on right
             WidgetKind::WorkspaceMap => Side::Right,
             WidgetKind::Overview => Side::Right,
-            WidgetKind::Todos => Side::Right,
             WidgetKind::MemoryActivity => Side::Right,
             WidgetKind::SwarmStatus => Side::Left,
             WidgetKind::Compaction => Side::Left,
@@ -157,6 +157,7 @@ impl WidgetKind {
             WidgetKind::ModelInfo => Side::Left,
             WidgetKind::Tips => Side::Left,
             WidgetKind::GitStatus => Side::Left,
+            WidgetKind::CloudVm => Side::Left,
             WidgetKind::Commits => Side::Left,
         }
     }
@@ -167,7 +168,6 @@ impl WidgetKind {
             WidgetKind::Diagrams => 10, // Diagrams need more space
             WidgetKind::WorkspaceMap => 1,
             WidgetKind::Overview => 8,
-            WidgetKind::Todos => 3,
             WidgetKind::MemoryActivity => 3,
             WidgetKind::SwarmStatus => 3,
             WidgetKind::Compaction => 3,
@@ -178,6 +178,7 @@ impl WidgetKind {
             WidgetKind::ModelInfo => 1,
             WidgetKind::Tips => 3,
             WidgetKind::GitStatus => 1,
+            WidgetKind::CloudVm => 16,
             WidgetKind::Commits => 1,
         }
     }
@@ -188,7 +189,6 @@ impl WidgetKind {
             WidgetKind::Diagrams,
             WidgetKind::WorkspaceMap,
             WidgetKind::Overview,
-            WidgetKind::Todos,
             WidgetKind::UsageLimits,
             WidgetKind::KvCache,
             WidgetKind::MemoryActivity,
@@ -196,6 +196,7 @@ impl WidgetKind {
             WidgetKind::Compaction,
             WidgetKind::BackgroundTasks,
             WidgetKind::GitStatus,
+            WidgetKind::CloudVm,
             WidgetKind::Commits,
             WidgetKind::SwarmStatus,
             WidgetKind::AmbientMode,
@@ -208,7 +209,6 @@ impl WidgetKind {
             WidgetKind::Diagrams => "diagrams",
             WidgetKind::WorkspaceMap => "workspace",
             WidgetKind::Overview => "overview",
-            WidgetKind::Todos => "todos",
             WidgetKind::MemoryActivity => "memory",
             WidgetKind::SwarmStatus => "swarm",
             WidgetKind::BackgroundTasks => "background",
@@ -219,6 +219,7 @@ impl WidgetKind {
             WidgetKind::ModelInfo => "model",
             WidgetKind::Tips => "tips",
             WidgetKind::GitStatus => "git",
+            WidgetKind::CloudVm => "cloud",
             WidgetKind::Commits => "commits",
         }
     }
@@ -243,8 +244,7 @@ impl Side {
 pub(crate) fn is_overview_mergeable(kind: WidgetKind) -> bool {
     matches!(
         kind,
-        WidgetKind::Todos
-            | WidgetKind::SwarmStatus
+        WidgetKind::SwarmStatus
             | WidgetKind::BackgroundTasks
             | WidgetKind::Compaction
             | WidgetKind::ModelInfo
@@ -285,8 +285,6 @@ pub struct SwarmInfo {
     pub selected: usize,
     /// Whether the swarm panel/dock has keyboard focus.
     pub focused: bool,
-    /// Swarm plan progress (completed, running, total), when a plan is active.
-    pub plan_progress: Option<(u32, u32, u32)>,
     /// Spinner frame for animating active agents' status glyphs.
     pub spinner_frame: usize,
 }
@@ -406,6 +404,11 @@ pub struct UsageInfo {
     pub output_tps: Option<f32>,
     /// Whether data was successfully fetched / available to show
     pub available: bool,
+    /// A request was rejected for a usage limit, even without a fresh snapshot.
+    pub limit_reached: bool,
+    /// Masked email of the OAuth account these limits belong to
+    /// (e.g. `j***5@gmail.com`). Never holds an unmasked address.
+    pub account_hint: Option<String>,
 }
 
 /// Session-level KV cache telemetry for providers that report cache usage.
@@ -502,8 +505,11 @@ impl CacheHitInfo {
 }
 
 impl UsageInfo {
-    /// Return the highest usage percentage across all limit windows (0-100).
+    /// Return the highest usage percentage, treating a rejected request as exhausted.
     pub fn max_usage_pct(&self) -> u8 {
+        if self.limit_reached {
+            return 100;
+        }
         let five_hr = (self.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
         let seven_day = (self.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
         let spark = self
@@ -562,7 +568,7 @@ impl MemoryInfo {
 pub use jcode_tui_mermaid::DiagramInfo;
 
 /// Git repository status for the info widget
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct GitInfo {
     pub branch: String,
     pub modified: usize,
@@ -660,17 +666,6 @@ const PAGE_SWITCH_SECONDS: u64 = 30;
 /// Data to display in the info widget
 #[derive(Debug, Default, Clone)]
 pub struct InfoWidgetData {
-    pub todos: Vec<TodoItem>,
-    /// Goal-level assessments (closed feedback loop and objective)
-    /// keyed by todo group (`group: None` covers the ungrouped list). Empty
-    /// when the session has no recorded goals or `todos` is a swarm-plan
-    /// projection.
-    pub todo_goals: Vec<crate::todo::TodoGoal>,
-    /// True when `todos` is actually a projection of the shared swarm plan
-    /// (task DAG) rather than this session's private todo list. The widget
-    /// renders a "Plan" header instead of "Todos" so the two are not
-    /// conflated.
-    pub todos_are_swarm_plan: bool,
     pub context_info: Option<ContextInfo>,
     /// True when context state is being updated and no authoritative snapshot is available.
     pub context_info_stale: bool,
@@ -679,6 +674,12 @@ pub struct InfoWidgetData {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
+    /// Initial remote runtime metadata has not arrived yet. Cleared by the owner
+    /// once the initial snapshot is applied, never inferred from missing values.
+    pub startup_runtime_pending: bool,
+    /// Initial subscription snapshot is pending. Empty authoritative snapshots
+    /// clear this too, so absent quota data never reserves permanent rows.
+    pub startup_usage_pending: bool,
     pub native_compaction_mode: Option<String>,
     pub native_compaction_threshold_tokens: Option<usize>,
     pub session_count: Option<usize>,
@@ -725,6 +726,13 @@ pub struct InfoWidgetData {
     pub is_compacting: bool,
     /// Git repository status
     pub git_info: Option<GitInfo>,
+    /// Machine telemetry is only present for native SSH attachments.
+    pub cloud_info: Option<CloudStatusInfo>,
+    /// Live transport startup/reconnect state overrides cached probe readiness.
+    pub cloud_connection: Option<String>,
+    pub cloud_working: bool,
+    /// Independent local and VM snapshots when this TUI is attached over SSH.
+    pub dual_git_info: Option<DualGitInfo>,
     /// Absolute paths the agent edited this session (edit-style tool calls),
     /// used to mark agent changes in the Changes widget.
     pub agent_edited: std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>,
@@ -745,14 +753,14 @@ impl InfoWidgetData {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.todos.is_empty()
-            && self.context_info.is_none()
+        self.context_info.is_none()
             && self.queue_mode.is_none()
             && self.model.is_none()
             && self.memory_info.is_none()
             && self.swarm_info.is_none()
             && self.background_info.is_none()
             && self.diagrams.is_empty()
+            && self.cloud_info.is_none()
             && self.workspace_rows.is_empty()
     }
 
@@ -772,9 +780,6 @@ impl InfoWidgetData {
                 if runtime_has_data(self) {
                     sections += 1;
                 }
-                if !self.todos.is_empty() {
-                    sections += 1;
-                }
                 if self
                     .background_info
                     .as_ref()
@@ -786,11 +791,12 @@ impl InfoWidgetData {
                 if self.queue_mode.is_some() {
                     sections += 1;
                 }
-                if self
-                    .usage_info
-                    .as_ref()
-                    .map(|u| u.available)
-                    .unwrap_or(false)
+                if super::info_widget_overview::startup_usage_pending(self)
+                    || self
+                        .usage_info
+                        .as_ref()
+                        .map(|u| u.available || u.limit_reached)
+                        .unwrap_or(false)
                 {
                     sections += 1;
                 }
@@ -800,18 +806,21 @@ impl InfoWidgetData {
                 if self.compaction_info.is_some() {
                     sections += 1;
                 }
-                if self
-                    .git_info
-                    .as_ref()
-                    .map(changes_has_data)
-                    .unwrap_or(false)
+                if self.dual_git_info.is_some()
+                    || self
+                        .git_info
+                        .as_ref()
+                        .map(changes_has_data)
+                        .unwrap_or(false)
                 {
+                    sections += 1;
+                }
+                if self.cloud_info.is_some() {
                     sections += 1;
                 }
                 // Only useful as a "join" mode when there are multiple sections.
                 sections >= 2
             }
-            WidgetKind::Todos => !self.todos.is_empty(),
             WidgetKind::MemoryActivity => self
                 .memory_info
                 .as_ref()
@@ -829,19 +838,26 @@ impl InfoWidgetData {
                 .unwrap_or(false),
             WidgetKind::Compaction => self.compaction_info.is_some(),
             WidgetKind::AmbientMode => false,
-            WidgetKind::UsageLimits => self
-                .usage_info
-                .as_ref()
-                .map(|u| u.available)
-                .unwrap_or(false),
+            WidgetKind::UsageLimits => {
+                super::info_widget_overview::startup_usage_pending(self)
+                    || self
+                        .usage_info
+                        .as_ref()
+                        .map(|u| u.available || u.limit_reached)
+                        .unwrap_or(false)
+            }
             WidgetKind::KvCache => self.cache_hit_info.is_some(),
             WidgetKind::ModelInfo => runtime_has_data(self),
             WidgetKind::Tips => false,
-            WidgetKind::GitStatus => self
-                .git_info
-                .as_ref()
-                .map(changes_has_data)
-                .unwrap_or(false),
+            WidgetKind::GitStatus => {
+                self.dual_git_info.is_some()
+                    || self
+                        .git_info
+                        .as_ref()
+                        .map(changes_has_data)
+                        .unwrap_or(false)
+            }
+            WidgetKind::CloudVm => self.cloud_info.is_some(),
             WidgetKind::Commits => self
                 .git_info
                 .as_ref()
@@ -878,7 +894,7 @@ impl InfoWidgetData {
                 if max_pct >= 80 {
                     1 // Very high - right after diagrams
                 } else if max_pct >= 50 {
-                    3 // Elevated - after overview and todos
+                    3 // Elevated - after overview
                 } else {
                     kind.priority()
                 }
@@ -898,7 +914,7 @@ impl InfoWidgetData {
             WidgetKind::SwarmStatus => {
                 // A session actively managing agents wants them visible: the
                 // dock is the cockpit for the swarm, so rank it just under
-                // todos while any managed agent is still live.
+                // other widgets while any managed agent is still live.
                 let managing = self
                     .swarm_info
                     .as_ref()
@@ -965,6 +981,11 @@ struct WidgetsState {
     /// of popping back for a few frames (which resizes the bottom chrome and
     /// bounces the transcript).
     swarm_dock_last_engaged: Option<Instant>,
+    /// `scroll_top` of the previous placement pass and when it last changed.
+    /// A scroll moves content under resident widgets just like streaming does,
+    /// so it counts as churn for a short grace period.
+    last_scroll_top: Option<usize>,
+    last_scroll_change: Option<Instant>,
 }
 
 impl Default for WidgetsState {
@@ -977,6 +998,8 @@ impl Default for WidgetsState {
             settlement: super::info_widget_settle::SettlementTracker::default(),
             anchors_area_width: 0,
             swarm_dock_last_engaged: None,
+            last_scroll_top: None,
+            last_scroll_change: None,
         }
     }
 }
@@ -1026,6 +1049,27 @@ pub fn apply_settlement(margins: &mut Margins, area_width: u16) {
         state.anchors_area_width = area_width;
     }
     let settled = state.settlement.observe(margins, area_width);
+    // A scroll moves content under resident widgets just like streaming does,
+    // so it counts as churn for a short grace period after the last change.
+    if state.last_scroll_top != Some(margins.scroll_top) {
+        if state.last_scroll_top.is_some() {
+            state.last_scroll_change = Some(Instant::now());
+        }
+        state.last_scroll_top = Some(margins.scroll_top);
+    }
+    margins.content_churning |= state
+        .last_scroll_change
+        .is_some_and(|at| at.elapsed() < SCROLL_CHURN_GRACE);
+    // Settlement exists to keep new widgets off content that is still
+    // re-rendering. It counts frames, but an idle client draws only one frame
+    // per state change, so a layout change while idle (History adding the
+    // `mcp:` header row) never accumulated the frames to settle: the free
+    // space stayed "unsettled" and the Overview could not be re-homed until
+    // some unrelated activity redrew a few times. When nothing is churning,
+    // the current widths are already final.
+    if !margins.content_churning {
+        return;
+    }
     intersect_widths(&mut margins.right_reliable, &settled.right);
     if margins.centered {
         intersect_widths(&mut margins.left_reliable, &settled.left);
@@ -1057,7 +1101,7 @@ pub fn calculate_placements(
         None => return Vec::new(),
     };
 
-    let outcome = super::info_widget_layout::calculate_placements_anchored(
+    let outcome = calculate_placements_with_cloud_reflow(
         messages_area,
         margins,
         data,
@@ -1071,6 +1115,51 @@ pub fn calculate_placements(
     }
     outcome.visible
 }
+
+/// Repack cloud details only when asynchronously loaded Overview rows cannot
+/// grow inside their original anchor. Keep the resident layout unless a fresh
+/// priority pass fits the full Overview without losing any visible widget.
+pub(super) fn calculate_placements_with_cloud_reflow(
+    area: Rect,
+    margins: &Margins,
+    data: &InfoWidgetData,
+    enabled: bool,
+    anchors: &[super::info_widget_layout::WidgetAnchor],
+) -> super::info_widget_layout::PlacementOutcome {
+    use super::info_widget_layout::calculate_placements_anchored;
+    let resident = calculate_placements_anchored(area, margins, data, enabled, anchors);
+    if data.cloud_info.is_none() || anchors.is_empty() {
+        return resident;
+    }
+    let Some(overview) = resident
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+    else {
+        return resident;
+    };
+    let needed =
+        calculate_widget_height(WidgetKind::Overview, data, overview.rect.width, area.height);
+    if overview.rect.height >= needed {
+        return resident;
+    }
+    let fresh = calculate_placements_anchored(area, margins, data, enabled, &[]);
+    let fits = fresh.visible.iter().any(|p| {
+        p.kind == WidgetKind::Overview
+            && p.rect.height
+                >= calculate_widget_height(WidgetKind::Overview, data, p.rect.width, area.height)
+    });
+    let preserves = resident
+        .visible
+        .iter()
+        .all(|old| fresh.visible.iter().any(|new| new.kind == old.kind));
+    if fits && preserves { fresh } else { resident }
+}
+
+/// How long after a scroll the transcript still counts as moving for resident
+/// widgets: a covered slot during or just after a scroll is waited out in
+/// place rather than re-homed.
+const SCROLL_CHURN_GRACE: Duration = Duration::from_millis(1500);
 
 /// How long the inline swarm strip keeps standing down after the SwarmStatus
 /// dock disengages. The dock's placement naturally churns while content
@@ -1175,7 +1264,21 @@ pub(crate) fn calculate_widget_height(
             let inner_h = max_height.saturating_sub(border_height);
             let layout = compute_page_layout(&overview, inner_width, inner_h);
             if layout.max_page_height == 0 {
-                return 0;
+                // Taller than the pocket even as a compact page. Rather than
+                // dropping the Overview (and with it usage limits and changes,
+                // which it merges in place of their own widgets), take the
+                // pocket and let the renderer truncate the compact page. The
+                // sections are ordered by importance, so the tail is what goes.
+                let full = compute_page_layout(&overview, inner_width, u16::MAX);
+                if full.max_page_height == 0
+                    || inner_h
+                        < WidgetKind::Overview
+                            .min_height()
+                            .saturating_sub(border_height)
+                {
+                    return 0;
+                }
+                return max_height;
             }
             layout.max_page_height
         }
@@ -1238,6 +1341,28 @@ pub fn render_all(frame: &mut Frame, placements: &[WidgetPlacement], data: &Info
     }
 }
 
+/// Shrink a text widget's box so its bottom border hugs the rendered body.
+/// The slot can be taller than the body (Overview reserves its tallest page,
+/// and resident slots never shrink), which used to leave blank rows inside the
+/// border. The top edge stays put so the widget does not jump.
+fn tight_rects(rect: Rect, inner: Rect, body_lines: usize) -> (Rect, Rect) {
+    let body = (body_lines.min(inner.height as usize)) as u16;
+    if body == 0 || body >= inner.height {
+        return (rect, inner);
+    }
+    let trim = inner.height - body;
+    (
+        Rect {
+            height: rect.height - trim,
+            ..rect
+        },
+        Rect {
+            height: body,
+            ..inner
+        },
+    )
+}
+
 /// Render a single widget at its placement
 fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &InfoWidgetData) {
     let rect = placement.rect;
@@ -1251,10 +1376,9 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
 
     // Diagrams need special handling - render image instead of text
     if placement.kind == WidgetKind::Diagrams {
-        let mut chrome = Framed::default().title(frame::label("◇ Diagram"));
-        if data.diagrams.len() > 1 {
-            chrome = chrome.title_right(frame::dim(format!("1/{}", data.diagrams.len())));
-        }
+        let chrome = Framed::default()
+            .title(frame::label("◇ Diagram"))
+            .footer(frame::dim(diagram_footer(data)));
         frame.render_widget(chrome.apply(block, rect.width), rect);
         render_diagrams_widget(frame, inner, data);
         return;
@@ -1263,6 +1387,7 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         let Some(framed) = render_overview_framed(data, inner) else {
             return;
         };
+        let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
         frame.render_widget(framed.apply(block, rect.width), rect);
         frame.render_widget(Paragraph::new(framed.lines), inner);
         return;
@@ -1271,7 +1396,9 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         if data.workspace_rows.is_empty() || inner.width == 0 || inner.height == 0 {
             return;
         }
-        let chrome = Framed::default().title(frame::label("Workspace"));
+        let chrome = Framed::default()
+            .title(frame::label("Workspace"))
+            .footer(frame::dim(workspace_footer(data)));
         frame.render_widget(chrome.apply(block, rect.width), rect);
         super::workspace_map_widget::render_workspace_map(
             frame.buffer_mut(),
@@ -1285,8 +1412,70 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
     if framed.is_empty() {
         return;
     }
+    let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
     frame.render_widget(framed.apply(block, rect.width), rect);
     frame.render_widget(Paragraph::new(framed.lines), inner);
+}
+
+fn diagram_footer(data: &InfoWidgetData) -> String {
+    let Some(diagram) = data.diagrams.first() else {
+        return "image pending".into();
+    };
+    let dimensions = format!("{}×{}", diagram.width, diagram.height);
+    if data.diagrams.len() > 1 {
+        format!("{dimensions} · 1/{}", data.diagrams.len())
+    } else {
+        dimensions
+    }
+}
+
+fn workspace_footer(data: &InfoWidgetData) -> String {
+    use super::workspace_map::WorkspaceSessionVisualState;
+    let (count, running) = data
+        .workspace_rows
+        .iter()
+        .flat_map(|row| &row.sessions)
+        .fold((0, 0), |(count, running), session| {
+            (
+                count + 1,
+                running + usize::from(session.state == WorkspaceSessionVisualState::Running),
+            )
+        });
+    let noun = if count == 1 { "session" } else { "sessions" };
+    if running > 0 {
+        format!("{count} {noun} · {running} running")
+    } else {
+        format!("{count} {noun}")
+    }
+}
+
+/// Token headroom complements the status line's context percentage rather
+/// than relabeling the Overview or repeating one of its detail rows.
+fn overview_footer(data: &InfoWidgetData) -> String {
+    if data.context_info_stale {
+        return "context syncing".into();
+    }
+    let used = data.observed_context_tokens.or_else(|| {
+        data.context_info
+            .as_ref()
+            .filter(|info| info.total_chars > 0)
+            .map(|info| info.estimated_tokens() as u64)
+    });
+    match (used, data.context_limit) {
+        (Some(used), Some(limit)) => {
+            let left = (limit as u64).saturating_sub(used);
+            let estimate = if data.observed_context_tokens.is_none() {
+                "~"
+            } else {
+                ""
+            };
+            format!(
+                "{estimate}{} ctx left",
+                crate::kv_cache_monitor::format_token_count(left)
+            )
+        }
+        _ => "context not reported".into(),
+    }
 }
 
 /// Render mermaid diagrams widget (renders images, not text)
@@ -1316,7 +1505,25 @@ fn render_overview_framed(data: &InfoWidgetData, inner: Rect) -> Option<Framed> 
     overview.memory_info = None;
     overview.diagrams.clear();
 
-    let layout = compute_page_layout(&overview, inner.width as usize, inner.height);
+    let mut layout = compute_page_layout(&overview, inner.width as usize, inner.height);
+    if layout.pages.is_empty() {
+        // The slot is shorter than even the compact page (its content grew
+        // after placement and there was no room to grow the slot). Show the
+        // compact page truncated rather than nothing: an anchored widget that
+        // renders empty also keeps its slot, so it would stay invisible.
+        let full = compute_page_layout(&overview, inner.width as usize, u16::MAX);
+        if let Some(compact) = full
+            .pages
+            .iter()
+            .find(|page| page.kind == InfoPageKind::CompactOnly)
+            .copied()
+            .or_else(|| full.pages.first().copied())
+        {
+            layout.pages = vec![compact];
+            layout.max_page_height = inner.height;
+            layout.show_dots = false;
+        }
+    }
     if layout.pages.is_empty() || layout.max_page_height == 0 {
         return None;
     }
@@ -1353,13 +1560,6 @@ fn render_overview_framed(data: &InfoWidgetData, inner: Rect) -> Option<Framed> 
 
     let title = match page.kind {
         InfoPageKind::CompactOnly => "Overview",
-        InfoPageKind::TodosExpanded => {
-            if data.todos_are_swarm_plan {
-                "Overview · plan"
-            } else {
-                "Overview · todos"
-            }
-        }
         InfoPageKind::MemoryExpanded => "Overview · memory",
     };
     let mut framed = Framed::body(lines).title(frame::label(title));
@@ -1382,7 +1582,7 @@ fn render_overview_framed(data: &InfoWidgetData, inner: Rect) -> Option<Framed> 
         }
         framed = framed.footer_right(Line::from(dots));
     }
-    Some(framed)
+    Some(framed.footer_if_empty(frame::dim(overview_footer(data))))
 }
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -1550,17 +1750,27 @@ fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -
         WidgetKind::Diagrams | WidgetKind::WorkspaceMap | WidgetKind::Overview => {
             return Framed::default();
         }
-        WidgetKind::Todos => render_todos_widget(data, inner),
         WidgetKind::MemoryActivity => render_memory_widget(data, inner),
         WidgetKind::SwarmStatus => render_swarm_widget(data, inner),
         WidgetKind::BackgroundTasks => render_background_widget(data, inner),
         WidgetKind::Compaction => render_compaction_widget(data, inner),
         WidgetKind::AmbientMode => render_ambient_widget(data, inner),
+        WidgetKind::UsageLimits if super::info_widget_overview::startup_usage_pending(data) => {
+            Framed::body(
+                startup_usage_lines(inner.width)
+                    .into_iter()
+                    .skip(1)
+                    .collect(),
+            )
+            .title(frame::label("OpenAI limits"))
+            .footer(frame::dim("first snapshot"))
+        }
         WidgetKind::UsageLimits => render_usage_widget(data, inner),
         WidgetKind::KvCache => render_kv_cache_widget(data, inner),
         WidgetKind::ModelInfo => render_model_widget(data, inner),
         WidgetKind::Tips => render_tips_widget(inner),
         WidgetKind::GitStatus => render_changes_framed(data, inner),
+        WidgetKind::CloudVm => super::info_widget_cloud::render_cloud_widget(data, inner),
         WidgetKind::Commits => render_commits_widget(data, inner),
     };
     framed.settle()
@@ -1583,9 +1793,18 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let summary_tokens = (info.summary_chars / crate::compaction::CHARS_PER_TOKEN)
         .max(usize::from(info.summary_chars > 0));
     let detail = format!(
-        "{} old · {} active · ~{} summary tok",
-        info.compacted_messages, info.active_messages, summary_tokens
+        "{} old · {} active",
+        info.compacted_messages, info.active_messages
     );
+    let summary = format!(
+        "~{} tok",
+        crate::kv_cache_monitor::format_token_count(summary_tokens as u64)
+    );
+    let footer = if info.mode.trim().is_empty() {
+        summary
+    } else {
+        format!("{summary} · {}", info.mode.trim())
+    };
     Framed::body(vec![Line::from(Span::styled(
         truncate_smart(&detail, inner.width as usize),
         Style::default().fg(rgb(180, 180, 190)),
@@ -1594,7 +1813,7 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
         frame::label("Compaction "),
         Span::styled(status, Style::default().fg(title_color).bold()),
     ]))
-    .title_right(frame::dim(info.mode.to_string()))
+    .footer(frame::dim(footer))
 }
 
 fn render_kv_cache_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
@@ -1675,7 +1894,7 @@ fn kv_cache_pcts(cache: &CacheHitInfo) -> Option<(u8, Option<u8>, Option<u8>, Co
     ))
 }
 
-/// Border headline: `KV cache 90% yield` (or `priming`).
+/// Border headline: `KV cache 90% yield`, or observed hit rate without a baseline.
 fn render_kv_cache_title(cache: &CacheHitInfo) -> Line<'static> {
     let mut spans = vec![frame::label("KV cache ")];
     match kv_cache_pcts(cache) {
@@ -1686,8 +1905,14 @@ fn render_kv_cache_title(cache: &CacheHitInfo) -> Line<'static> {
             ));
             spans.push(frame::dim(" yield"));
         }
-        Some((_, None, _, color)) => {
-            spans.push(Span::styled("priming", Style::default().fg(color).bold()));
+        Some((lifetime_pct, None, _, color)) => {
+            // Restored sessions lack the historical reusable-prefix denominator.
+            // That is missing telemetry, not evidence the cache is still warming.
+            spans.push(Span::styled(
+                format!("{lifetime_pct}%"),
+                Style::default().fg(color).bold(),
+            ));
+            spans.push(frame::dim(" hit"));
         }
         None => {}
     }
@@ -1753,7 +1978,7 @@ fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
         ));
     } else {
         spans.push(Span::styled(
-            "priming",
+            format!("hit {}%", lifetime_pct),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
     }
@@ -1827,6 +2052,14 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let dim = rgb(100, 100, 110);
     let label_color = rgb(140, 140, 150);
     let max_w = inner.width.saturating_sub(2) as usize;
+    let next_due = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
+        info.next_reminder_wake.as_ref()
+    } else {
+        info.next_wake.as_ref()
+    };
+    let budget = info.budget_percent.filter(|pct| pct.is_finite());
+    let schedule_in_footer = budget.is_none();
+    let last_run_in_footer = schedule_in_footer && next_due.is_none();
 
     // Status line with icon
     let (icon, status_text, status_color) = match &info.status {
@@ -1897,30 +2130,41 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
 
     // Last run
     if let Some(ref ago) = info.last_run_ago {
-        let mut spans = vec![Span::styled(
-            format!("Ran {}", ago),
-            Style::default().fg(label_color),
-        )];
+        let mut spans = if last_run_in_footer {
+            Vec::new()
+        } else {
+            vec![Span::styled(
+                format!("Ran {}", ago),
+                Style::default().fg(label_color),
+            )]
+        };
         if let Some(ref summary) = info.last_summary {
-            let remaining = max_w.saturating_sub(4 + ago.len());
+            let remaining = if last_run_in_footer {
+                max_w
+            } else {
+                max_w.saturating_sub(4 + ago.len())
+            };
             if remaining > 5 {
                 spans.push(Span::styled(
-                    truncate_smart(&format!(" - {}", summary), remaining),
+                    truncate_smart(
+                        &if last_run_in_footer {
+                            summary.clone()
+                        } else {
+                            format!(" - {}", summary)
+                        },
+                        remaining,
+                    ),
                     Style::default().fg(dim),
                 ));
             }
         }
-        lines.push(Line::from(spans));
+        if !spans.is_empty() {
+            lines.push(Line::from(spans));
+        }
     }
 
     // Next scheduled run
-    let next_due = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
-        info.next_reminder_wake.as_ref()
-    } else {
-        info.next_wake.as_ref()
-    };
-
-    if let Some(next) = next_due {
+    if let Some(next) = next_due.filter(|_| !schedule_in_footer) {
         let prefix = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
             "Next scheduled task"
         } else {
@@ -1935,26 +2179,22 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let mut framed = Framed::body(lines).title(title);
 
     // Budget meter rides the bottom border.
-    if let Some(budget) = info.budget_percent {
+    if let Some(budget) = budget {
         let pct = (budget * 100.0).round().clamp(0.0, 100.0) as u8;
-        let bar_width = inner.width.saturating_sub(16).clamp(4, 10) as usize;
-        let filled = ((budget * bar_width as f32).round() as usize).min(bar_width);
-        let empty = bar_width.saturating_sub(filled);
-
-        let bar_color = if pct < 20 {
-            rgb(255, 100, 100)
-        } else if pct <= 50 {
-            rgb(255, 200, 100)
-        } else {
-            rgb(100, 200, 100)
-        };
-
-        framed = framed.footer_right(Line::from(vec![
-            frame::dim("budget "),
-            Span::styled("▰".repeat(filled), Style::default().fg(bar_color)),
-            Span::styled("▱".repeat(empty), Style::default().fg(rgb(60, 60, 70))),
-            Span::styled(format!(" {}%", pct), Style::default().fg(bar_color)),
-        ]));
+        framed = framed.footer_right(render_usage_limit_bar(
+            "budget",
+            100 - pct,
+            pct,
+            None,
+            inner.width,
+            false,
+        ));
+    } else if let Some(next) = next_due {
+        framed = framed.footer(frame::dim(format!("next {next}")));
+    } else if let Some(ago) = &info.last_run_ago {
+        framed = framed.footer(frame::dim(format!("ran {ago}")));
+    } else {
+        framed = framed.footer(frame::dim("no run recorded"));
     }
 
     framed
@@ -1982,13 +2222,30 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
 fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     match kind {
         InfoPageKind::CompactOnly => render_sections(data, inner, None),
-        InfoPageKind::TodosExpanded => {
-            render_sections(data, inner, Some(InfoPageKind::TodosExpanded))
-        }
         InfoPageKind::MemoryExpanded => {
             render_sections(data, inner, Some(InfoPageKind::MemoryExpanded))
         }
     }
+}
+
+pub(super) fn compact_usage_rows(
+    info: &UsageInfo,
+    width: u16,
+    display_used: bool,
+) -> Vec<Line<'static>> {
+    render_usage_compact(info, width, display_used)
+}
+
+pub(super) fn startup_usage_lines(width: u16) -> Vec<Line<'static>> {
+    ["OpenAI limits", "Loading…"]
+        .into_iter()
+        .map(|text| {
+            Line::from(Span::styled(
+                truncate_with_ellipsis(text, width as usize),
+                Style::default().fg(rgb(140, 140, 150)),
+            ))
+        })
+        .collect()
 }
 
 fn render_sections(
@@ -2001,14 +2258,6 @@ fn render_sections(
     // Detail layer only: model identity, context %, and branch/counts live on
     // the overscroll status line and are never repeated here.
     lines.extend(render_model_info(data, inner));
-
-    if !data.todos.is_empty() {
-        if matches!(focus, Some(InfoPageKind::TodosExpanded)) {
-            lines.extend(render_todos_expanded(data, inner));
-        } else {
-            lines.extend(render_todos_compact(data, inner));
-        }
-    }
 
     // Memory info
     if let Some(info) = &data.memory_info
@@ -2029,31 +2278,38 @@ fn render_sections(
     }
 
     // Usage info (subscription limits)
-    if let Some(info) = &data.usage_info
-        && info.available
-    {
-        lines.extend(render_usage_compact(
-            info,
-            inner.width,
-            data.usage_display_used,
-        ));
-    }
+    lines.extend(super::info_widget_overview::render_overview_usage(
+        data,
+        inner.width,
+    ));
 
     if let Some(cache) = data.cache_hit_info.as_ref() {
         lines.push(render_kv_cache_summary_line(cache));
     }
 
     // Changed files (the detail behind the line's git counts).
-    if data.git_info.as_ref().is_some_and(changes_has_data) {
+    if data.dual_git_info.is_some() || data.git_info.as_ref().is_some_and(changes_has_data) {
         lines.extend(render_git_widget(data, inner));
     }
 
+    lines.extend(super::info_widget_cloud::render_cloud_summary(
+        data,
+        inner.width,
+    ));
     lines
 }
 
 // ---------------------------------------------------------------------------
 // Tips widget - rotating helpful tips and keyboard shortcuts
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "info_widget_cloud_reflow_tests.rs"]
+mod cloud_reflow_tests;
+
+#[cfg(test)]
+#[path = "info_widget_startup_tests.rs"]
+mod startup_tests;
 
 #[cfg(test)]
 #[path = "info_widget_tests.rs"]
@@ -2150,5 +2406,29 @@ fn format_event_for_expanded(
             ("📋", format!("{} memories", count), rgb(140, 140, 150))
         }
         _ => ("·", String::new(), rgb(100, 100, 110)),
+    }
+}
+
+#[cfg(test)]
+mod tight_rect_tests {
+    use super::tight_rects;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn border_hugs_shorter_body() {
+        let rect = Rect::new(10, 5, 30, 12);
+        let inner = Rect::new(11, 6, 28, 10);
+        let (outer, body) = tight_rects(rect, inner, 4);
+        assert_eq!(outer, Rect::new(10, 5, 30, 6));
+        assert_eq!(body, Rect::new(11, 6, 28, 4));
+    }
+
+    #[test]
+    fn full_or_overflowing_body_keeps_slot() {
+        let rect = Rect::new(0, 0, 30, 12);
+        let inner = Rect::new(1, 1, 28, 10);
+        assert_eq!(tight_rects(rect, inner, 10), (rect, inner));
+        assert_eq!(tight_rects(rect, inner, 25), (rect, inner));
+        assert_eq!(tight_rects(rect, inner, 0), (rect, inner));
     }
 }

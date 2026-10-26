@@ -11,8 +11,8 @@ use crate::protocol::SwarmMemberStatus;
 use jcode_tui_core::keybind::alt_chord_lower;
 use jcode_tui_render::swarm_gallery::{
     GalleryMember, SwarmStripHint, display_order, humanize_age, is_active_status, render_gallery,
-    render_swarm_dock, render_swarm_live_card, render_swarm_panel, render_swarm_strip,
-    render_swarm_strip_vertical, status_accent, status_glyph,
+    render_swarm_live_card, render_swarm_panel, render_swarm_strip, render_swarm_strip_vertical,
+    status_accent, status_glyph,
 };
 use ratatui::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -27,7 +27,7 @@ fn member_label(member: &SwarmMemberStatus) -> String {
 /// Session icon (emoji) for a member, derived from its friendly name (session
 /// names come from the shared `SESSION_NAMES` word list, e.g. "fox" -> 🦊).
 /// Falls back to `None` when the name is unknown so the strip shows the name.
-fn member_icon(member: &SwarmMemberStatus) -> Option<String> {
+pub(super) fn member_icon(member: &SwarmMemberStatus) -> Option<String> {
     let name = member.friendly_name.as_deref()?;
     let icon = crate::id::session_icon(name);
     if icon == "💫" {
@@ -90,6 +90,9 @@ pub(crate) fn members_to_gallery(members: &[SwarmMemberStatus]) -> Vec<GalleryMe
             auth_method: member.runtime.auth_method.clone(),
             effort: member.runtime.effort.clone(),
             elapsed_secs: member.runtime.elapsed_secs,
+            context_tokens: member.runtime.context_tokens,
+            context_limit: member.runtime.context_limit,
+            output_tokens: member.runtime.output_tokens,
             todo_items: member
                 .todo_items
                 .iter()
@@ -112,6 +115,21 @@ pub(crate) fn members_to_gallery(members: &[SwarmMemberStatus]) -> Vec<GalleryMe
                 .collect(),
         })
         .collect()
+}
+
+/// Add display-order badges without changing the sort keys used by pop-out.
+fn badged_gallery(members: &[SwarmMemberStatus]) -> Vec<GalleryMember> {
+    let mut gallery = members_to_gallery(members);
+    for (index, member_index) in display_order(&gallery).into_iter().take(10).enumerate() {
+        let badge = format!("[{}]", alt_chord_lower(&((index + 1) % 10).to_string()));
+        let member = &mut gallery[member_index];
+        member.label = format!("{badge} {}", member.label);
+        // Compact vertical rows use the icon instead of the label as identity.
+        if let Some(icon) = &mut member.icon {
+            *icon = format!("{badge} {icon}");
+        }
+    }
+    gallery
 }
 
 /// Render expanded member cards for insertion directly beneath a swarm tool
@@ -193,10 +211,11 @@ pub(crate) fn render_swarm_page_lines(
     if max_height > 1 {
         out.push(Line::from(Span::styled(
             format!(
-                "{} chat  ·  {} select  ·  {} open  ·  {} prompt  ·  esc chat",
+                "{} chat  ·  {} select  ·  {} open  ·  {} open all  ·  {} prompt  ·  esc chat",
                 alt_chord_lower("n"),
                 alt_chord_lower("↑/↓"),
                 alt_chord_lower("o"),
+                alt_chord_lower("p"),
                 alt_chord_lower("shift+p"),
             ),
             Style::default().fg(Color::Rgb(105, 105, 120)),
@@ -222,6 +241,9 @@ pub(crate) fn render_swarm_page_lines(
             row.member.session_id == selected_id,
             spinner_frame,
             width,
+            display
+                .iter()
+                .position(|&i| members[i].session_id == row.member.session_id),
         ));
     }
 
@@ -358,6 +380,7 @@ fn render_swarm_tree_row(
     selected: bool,
     spinner_frame: usize,
     width: usize,
+    shortcut_index: Option<usize>,
 ) -> Line<'static> {
     let member = row.member;
     let mut prefix = String::new();
@@ -371,7 +394,14 @@ fn render_swarm_tree_row(
         }
         prefix.push_str(if row.is_last { "└─ " } else { "├─ " });
     }
-    let label = member_label(member);
+    let label = match shortcut_index.filter(|&i| i < 10) {
+        Some(i) => format!(
+            "[{}] {}",
+            alt_chord_lower(&((i + 1) % 10).to_string()),
+            member_label(member)
+        ),
+        None => member_label(member),
+    };
     let icon = member_icon(member).unwrap_or_else(|| "🐝".to_string());
     let mut spans = vec![
         Span::styled(
@@ -460,7 +490,7 @@ pub(crate) fn render_swarm_gallery_lines(
     if members.is_empty() {
         return Vec::new();
     }
-    render_gallery(&members_to_gallery(members), width, max_height)
+    render_gallery(&badged_gallery(members), width, max_height)
 }
 
 /// Render the list+detail swarm panel: a compact list of managed agents plus a
@@ -477,7 +507,7 @@ pub(crate) fn render_swarm_panel_lines(
         return Vec::new();
     }
     render_swarm_panel(
-        &members_to_gallery(members),
+        &badged_gallery(members),
         selected,
         focused,
         width,
@@ -508,7 +538,7 @@ pub(crate) fn render_swarm_strip_lines(
     if members.is_empty() {
         return Vec::new();
     }
-    let enter_hint = format!("{focus_key} controls");
+    let enter_hint = format!("{focus_key} controls · {} open all", alt_chord_lower("p"));
     // Focused hints: only Alt-chords (plus esc) are claimed so plain typing
     // keeps flowing to the chat input while the panel is focused.
     let hints = vec![
@@ -525,6 +555,10 @@ pub(crate) fn render_swarm_strip_lines(
             label: "open".into(),
         },
         SwarmStripHint {
+            key: alt_chord_lower("p").into(),
+            label: "open all".into(),
+        },
+        SwarmStripHint {
             key: alt_chord_lower("shift+p").into(),
             label: "prompt".into(),
         },
@@ -535,7 +569,7 @@ pub(crate) fn render_swarm_strip_lines(
     ];
     match crate::config::config().agents.swarm_strip_layout {
         crate::config::SwarmStripLayout::Vertical => render_swarm_strip_vertical(
-            &members_to_gallery(members),
+            &badged_gallery(members),
             selected,
             focused,
             &hints,
@@ -550,7 +584,7 @@ pub(crate) fn render_swarm_strip_lines(
             max_height,
         ),
         crate::config::SwarmStripLayout::Horizontal => render_swarm_strip(
-            &members_to_gallery(members),
+            &badged_gallery(members),
             selected,
             focused,
             &hints,
@@ -569,33 +603,6 @@ pub(crate) fn render_swarm_strip_lines(
 /// Row cap for the vertical strip: agents beyond this collapse into a
 /// `+N more` line (the cap includes that overflow row).
 const SWARM_STRIP_VERTICAL_MAX_ROWS: usize = 4;
-
-/// Render the swarm dock widget body: a narrow vertical agent list for the
-/// info-widget margins. `plan` is the coordinator's swarm plan progress
-/// (completed, total), shown in the header when present.
-#[allow(dead_code)]
-pub(crate) fn render_swarm_dock_lines(
-    members: &[SwarmMemberStatus],
-    selected: usize,
-    focused: bool,
-    plan: Option<(u32, u32)>,
-    spinner_frame: usize,
-    width: usize,
-    max_height: usize,
-) -> Vec<Line<'static>> {
-    if members.is_empty() {
-        return Vec::new();
-    }
-    render_swarm_dock(
-        &members_to_gallery(members),
-        selected,
-        focused,
-        plan,
-        spinner_frame,
-        width,
-        max_height,
-    )
-}
 
 /// Session ids of `members` in the same order the panel/gallery displays them
 /// (coordinator first, then worktree manager, then by session id). Lets the TUI
@@ -649,6 +656,29 @@ mod tests {
         let tiles = members_to_tiles(&members_to_gallery(&members));
         assert_eq!(tiles[0].title, "alpha");
         assert_eq!(tiles[0].role_glyph.as_deref(), Some("★"));
+    }
+
+    #[test]
+    fn shortcut_badges_follow_pop_out_order_and_fit_narrow_rows() {
+        let members = vec![
+            member("z-worker", "running", None, None),
+            member("a-coord", "running", None, Some("coordinator")),
+            member("b-worker", "running", None, None),
+        ];
+        let gallery = badged_gallery(&members);
+        for (index, id) in members_display_order(&members).iter().enumerate() {
+            let member = gallery.iter().find(|m| &m.sort_key == id).unwrap();
+            assert!(
+                member
+                    .label
+                    .starts_with(&format!("[{}]", alt_chord_lower(&(index + 1).to_string())))
+            );
+        }
+        for width in [16, 24, 40, 80] {
+            for line in render_swarm_strip_lines(&members, 0, false, "alt+n", 0, width, 8) {
+                assert!(line.width() <= width, "row exceeds {width} cells: {line:?}");
+            }
+        }
     }
 
     /// Regression: pop-out selection resolves `swarm_panel_selected` through

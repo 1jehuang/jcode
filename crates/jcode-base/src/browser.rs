@@ -33,10 +33,14 @@ pub struct BrowserStatus {
     pub ready: bool,
 }
 
+/// Probes run against whatever tab the user has focused, so each one must be
+/// free of side effects. The scroll probe targets a selector that cannot exist:
+/// an extension that knows `scroll` answers "Element not found" without moving
+/// the page (it used to scroll the user's tab to the top before every action).
 const REQUIRED_BRIDGE_ACTION_PROBES: &[(&str, &str)] = &[
     ("evaluate", r#"{"script":"return 1"}"#),
     ("listFrames", "{}"),
-    ("scroll", r#"{"position":"top"}"#),
+    ("scroll", r##"{"selector":"#__jcode_capability_probe__"}"##),
     (
         "uploadFile",
         r#"{"selector":"input[type=file]","filePath":"/tmp/jcode-browser-capability-probe"}"#,
@@ -172,9 +176,15 @@ pub fn resolve_target_browser(requested: Option<&str>) -> Result<BrowserDetectio
 
 #[path = "browser_session.rs"]
 mod browser_session;
-pub use browser_session::{ensure_browser_session, ensure_browser_session_for};
+pub use browser_session::{
+    browser_session_running, ensure_browser_session, ensure_browser_session_for,
+    ensure_browser_session_for_async, is_stale_session_target_error, reset_browser_session_for,
+};
+#[path = "browser_chromium_diag.rs"]
+mod browser_chromium_diag;
 #[path = "browser_update.rs"]
 mod browser_update;
+pub use browser_chromium_diag::{ChromiumExtensionState, diagnose_silent_chromium_bridge};
 pub use browser_update::{
     BridgeUpdate, auto_update_before_action, installed_bridge_version, update_bridge_if_newer,
 };
@@ -464,6 +474,10 @@ pub async fn ensure_browser_setup_for(target: BrowserDetection) -> Result<String
         ));
     } else if final_status.binary_installed {
         log.push_str(&format!("\nSetup is not complete yet. Browser bridge binaries are installed, but the {} extension/bridge is not responding.\n", name));
+        if let Some(diagnosis) = diagnose_silent_chromium_bridge(kind) {
+            log.push_str(&diagnosis);
+            log.push('\n');
+        }
         log.push_str(
             "Use `jcode browser status` to re-check readiness after any manual browser step.\n",
         );
@@ -513,6 +527,14 @@ fn ping_matches(info: &serde_json::Value, kind: BrowserKind) -> bool {
 }
 
 fn connected_matches(status: &BrowserStatus, kind: BrowserKind) -> bool {
+    status_answered_by(status, kind)
+}
+
+/// Whether the bridge that answered belongs to `kind` (or its family).
+/// Each browser runs its own host, and the CLI falls back to another
+/// browser's host when `kind` has none, so a responding bridge alone does
+/// not mean `kind` is ready (#1743).
+pub fn status_answered_by(status: &BrowserStatus, kind: BrowserKind) -> bool {
     match status.connected_browser.as_deref() {
         None => kind.family() == BrowserFamily::Gecko,
         Some(reported) => {
@@ -841,140 +863,9 @@ fn get_host_asset_name() -> String {
     base.replace("browser-", "host-")
 }
 
-fn native_host_manifest_json(kind: BrowserKind, host_path: &str) -> serde_json::Value {
-    let mut manifest = serde_json::json!({
-        "name": NATIVE_HOST_NAME,
-        "description": "Native host for Browser Agent Bridge (managed by jcode)",
-        "path": host_path,
-        "type": "stdio",
-    });
-    if kind.family() == BrowserFamily::Gecko {
-        manifest["allowed_extensions"] =
-            serde_json::json!([EXTENSION_ID_LOCAL, EXTENSION_ID_LISTED]);
-    } else {
-        manifest["allowed_origins"] =
-            serde_json::json!([format!("chrome-extension://{}/", CHROMIUM_EXTENSION_ID)]);
-    }
-    manifest
-}
-
-/// Whether an existing manifest already points at a live host and allows the
-/// extension this browser uses.
-fn native_host_manifest_is_valid(kind: BrowserKind, existing: &serde_json::Value) -> bool {
-    let host_ok = existing["path"]
-        .as_str()
-        .is_some_and(|p| std::path::Path::new(p).exists());
-    let allowed_ok = if kind.family() == BrowserFamily::Gecko {
-        existing["allowed_extensions"]
-            .as_array()
-            .is_some_and(|ids| {
-                ids.iter()
-                    .any(|id| id.as_str() == Some(EXTENSION_ID_LISTED))
-            })
-    } else {
-        let origin = format!("chrome-extension://{}/", CHROMIUM_EXTENSION_ID);
-        existing["allowed_origins"]
-            .as_array()
-            .is_some_and(|o| o.iter().any(|v| v.as_str() == Some(origin.as_str())))
-    };
-    host_ok && allowed_ok
-}
-
-fn install_native_host_manifest_for(kind: BrowserKind) -> Result<bool> {
-    let dirs = native_messaging_hosts_dirs_for(kind)?;
-    let host_path = host_binary_path();
-    if !host_path.exists() {
-        return Err(anyhow::anyhow!(
-            "Host binary not found at {}. The native messaging host is required for the {} extension to communicate with the bridge.",
-            host_path.display(),
-            kind.display_name()
-        ));
-    }
-    let manifest = native_host_manifest_json(kind, &host_path.to_string_lossy());
-    let mut wrote_any = false;
-    for manifest_dir in dirs {
-        let manifest_path = manifest_dir.join(format!("{}.json", NATIVE_HOST_NAME));
-        let valid = std::fs::read_to_string(&manifest_path)
-            .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            .is_some_and(|existing| native_host_manifest_is_valid(kind, &existing));
-        if !valid {
-            std::fs::create_dir_all(&manifest_dir)?;
-            std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
-            wrote_any = true;
-        }
-        #[cfg(target_os = "windows")]
-        register_windows_native_host_manifest(kind, &manifest_path)?;
-    }
-    Ok(wrote_any)
-}
-
-#[cfg(target_os = "windows")]
-fn register_windows_native_host_manifest(
-    kind: BrowserKind,
-    manifest_path: &std::path::Path,
-) -> Result<()> {
-    for root in kind.windows_native_host_registry_roots() {
-        let key = format!(r"{}\{}", root, NATIVE_HOST_NAME);
-        let output = std::process::Command::new("reg")
-            .args([
-                "add",
-                &key,
-                "/ve",
-                "/t",
-                "REG_SZ",
-                "/d",
-                &manifest_path.to_string_lossy(),
-                "/f",
-            ])
-            .output()
-            .context("Failed to register the native messaging host in the Windows registry")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let details = if stderr.trim().is_empty() {
-                stdout.trim().to_string()
-            } else {
-                stderr.trim().to_string()
-            };
-            anyhow::bail!(
-                "Failed to register the {} native messaging host in the Windows registry: {}",
-                kind.display_name(),
-                details
-            );
-        }
-    }
-    Ok(())
-}
-
-fn native_messaging_hosts_dirs_for(kind: BrowserKind) -> Result<Vec<PathBuf>> {
-    let mut dirs = kind.native_messaging_dirs();
-    if kind.family() == BrowserFamily::Chromium {
-        dirs.extend(extra_native_messaging_dirs(
-            std::env::var_os("JCODE_BROWSER_NATIVE_HOST_DIRS").as_deref(),
-        ));
-    }
-    if dirs.is_empty() {
-        anyhow::bail!(
-            "{} does not use native messaging on this platform",
-            kind.display_name()
-        );
-    }
-    Ok(dirs)
-}
-
-/// Extra `NativeMessagingHosts` directories for Chromium forks jcode does not
-/// know (Helium, Vivaldi, Thorium, ...), from `JCODE_BROWSER_NATIVE_HOST_DIRS`
-/// (an OS path list). Setup installs the Chromium host manifest there too.
-fn extra_native_messaging_dirs(value: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
-    let Some(value) = value else {
-        return Vec::new();
-    };
-    std::env::split_paths(value)
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect()
-}
-
+#[path = "browser_native_host.rs"]
+mod native_host;
+use native_host::*;
 /// Whether the Safari relay host is running. The relay binds its extension
 /// port before the agent port, and other browsers' hosts never take the relay
 /// port, so this stays accurate when another browser's host owns 8766 (#1720).
@@ -1103,6 +994,21 @@ async fn probe_bridge_action_support(
     Ok(!combined.contains(&format!("Unknown action: {}", action)))
 }
 
+/// Oldest extension release that implements every required action.
+const MIN_PROBE_FREE_EXTENSION: (u64, u64, u64) = (0, 10, 0);
+
+/// Whether the ping came from an extension new enough to support every
+/// required action. Extensions report `extensionVersion` since 0.10, so for
+/// them the per-action probes are skipped. Those probes ran inside the user's
+/// focused tab before every browser action and could each wait out the 10s
+/// bridge timeout on a page whose content script was still loading.
+fn ping_reports_current_extension(info: &serde_json::Value) -> bool {
+    info.get("extensionVersion")
+        .and_then(|v| v.as_str())
+        .and_then(browser_update::parse_version)
+        .is_some_and(|v| v >= MIN_PROBE_FREE_EXTENSION)
+}
+
 async fn probe_bridge_missing_actions(kind: BrowserKind) -> Result<Vec<String>> {
     let mut missing = Vec::new();
     for (action, params_json) in REQUIRED_BRIDGE_ACTION_PROBES {
@@ -1132,13 +1038,14 @@ pub async fn inspect_browser_status_for(target: &BrowserDetection) -> Result<Bro
             .unwrap_or("firefox")
             .to_string()
     });
-    let missing_actions = if responding {
-        probe_bridge_missing_actions(target.kind)
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let missing_actions =
+        if responding && !ping.as_ref().is_some_and(ping_reports_current_extension) {
+            probe_bridge_missing_actions(target.kind)
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     let compatible = responding && missing_actions.is_empty();
     let ready = responding && compatible;
 
@@ -1253,8 +1160,8 @@ pub fn is_browser_running(kind: BrowserKind) -> bool {
             if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
                 continue;
             }
-            if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm"))
-                && names.contains(&comm.trim())
+            if let Ok(pid) = name.parse::<u32>()
+                && linux_browser_process_matches(kind, pid)
             {
                 return true;
             }
@@ -1292,6 +1199,15 @@ pub fn is_browser_running(kind: BrowserKind) -> bool {
     {
         false
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_browser_process_matches(kind: BrowserKind, pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .is_ok_and(|comm| kind.process_names().contains(&comm.trim()))
+        // Exited browsers can remain in /proc until their parent reaps them.
+        // Counting one as running skips normal launch and falls into repair.
+        && platform::is_process_running(pid)
 }
 
 /// Launch a browser detached, optionally opening `url`. Returns whether a
@@ -1442,45 +1358,13 @@ async fn install_extension() -> Result<String> {
         .map_err(|_| anyhow::anyhow!("Could not convert XPI path to file URL: {}", xpi.display()))?
         .to_string();
 
-    #[cfg(target_os = "linux")]
-    {
-        let _ = tokio::process::Command::new("xdg-open")
-            .arg(&xpi_url)
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // macOS has no default handler for `.xpi` files, so a plain `open <url>`
-        // fails with kLSApplicationNotFoundErr. Open the XPI directly with
-        // Firefox, which knows how to install extensions. Try the app name first,
-        // then fall back to the bundle id (covers Firefox installed under a
-        // non-default name or when it is not the default browser).
-        let opened = tokio::process::Command::new("open")
-            .args(["-a", "Firefox", &xpi_url])
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !opened {
-            let opened_by_id = tokio::process::Command::new("open")
-                .args(["-b", "org.mozilla.firefox", &xpi_url])
-                .status()
-                .await
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !opened_by_id {
-                // Last resort: let Launch Services pick a handler. This likely
-                // fails for `.xpi`, but keeps the previous behavior as a fallback.
-                let _ = tokio::process::Command::new("open").arg(&xpi_url).spawn();
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = tokio::process::Command::new("cmd")
-            .args(["/C", "start", "", &xpi_url])
-            .spawn();
-    }
+    // A generic file opener may reveal the XPI in a file manager (or open it
+    // with another browser). Use the same Firefox-specific launcher as normal
+    // cold startup, including its ESR/Flatpak and platform-specific fallbacks.
+    anyhow::ensure!(
+        launch_browser_detached(BrowserKind::Firefox, Some(&xpi_url)),
+        "Could not launch Firefox to install the extension"
+    );
 
     msg.push_str("       Opened Firefox with extension install prompt.\n");
     msg.push_str("       Click \"Add\" when prompted to install the extension.\n");

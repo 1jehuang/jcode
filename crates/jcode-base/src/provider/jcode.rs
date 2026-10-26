@@ -12,12 +12,10 @@ pub struct JcodeProvider {
 
 impl JcodeProvider {
     fn runtime_model_spec(model: &str) -> String {
-        // Subscription model ids overlap with direct providers (for example,
-        // `claude-*` and `gpt-*`). Passing a bare id to MultiProvider lets its
-        // family heuristic escape to the user's Anthropic/OpenAI credentials.
-        // Pin the managed OpenRouter slot, whose transport is configured below
-        // as `jcode-subscription`, for every curated model.
-        format!("openrouter:{}", model.trim())
+        // Use the explicit managed-subscription route. `openrouter:` denotes
+        // BYOK and deliberately rebinds the shared slot to an OpenRouter key,
+        // even if the slot previously held a managed subscription runtime.
+        format!("jcode:{}", model.trim())
     }
 
     pub fn new() -> Self {
@@ -336,16 +334,16 @@ mod tests {
     #[test]
     fn jcode_models_are_pinned_to_the_managed_transport() {
         assert_eq!(
-            JcodeProvider::runtime_model_spec("claude-opus-4-8"),
-            "openrouter:claude-opus-4-8"
+            JcodeProvider::runtime_model_spec("claude-opus-5-5"),
+            "jcode:claude-opus-5-5"
         );
         assert_eq!(
-            JcodeProvider::runtime_model_spec("gpt-5.5"),
-            "openrouter:gpt-5.5"
+            JcodeProvider::runtime_model_spec("claude-haiku-5-5"),
+            "jcode:claude-haiku-5-5"
         );
         assert_eq!(
-            JcodeProvider::runtime_model_spec("minimax-m2.5"),
-            "openrouter:minimax-m2.5"
+            JcodeProvider::runtime_model_spec("gpt-6.1-sol"),
+            "jcode:gpt-6.1-sol"
         );
     }
 
@@ -354,33 +352,18 @@ mod tests {
         use crate::subscription_catalog::JcodeTier;
 
         let plus_routes = JcodeProvider::model_routes_for(JcodeTier::Plus);
-        let gpt_route = plus_routes
+        let claude_route = plus_routes
             .iter()
-            .find(|route| route.model == "gpt-5.5")
-            .expect("Plus tier includes GPT-5.5");
-        let route_selection = jcode_provider_core::RouteSelection::from_model_route(gpt_route);
+            .find(|route| route.model == "claude-sonnet-5-5")
+            .expect("Plus tier includes Claude Sonnet 5.5");
+        let route_selection = jcode_provider_core::RouteSelection::from_model_route(claude_route);
         let flagship_routes = JcodeProvider::model_routes_for(JcodeTier::Flagship);
         let expected_models = vec![
-            "claude-opus-4-8",
-            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "gpt-6.1-sol",
             "claude-sonnet-4-6",
-            "gpt-5.5",
-            "claude-fable-5",
-            "gpt-5.6-sol",
-            "qwen3-coder-next",
-            "devstral-2-123b",
-            "deepseek-v3.2",
-            "nova-2-lite",
-            "minimax-m2.5",
-            "mistral-large-3",
-            "kimi-k2.5",
-            "kimi-k2-thinking",
-            "nemotron-nano-3-30b",
-            "gpt-oss-120b",
-            "gpt-oss-20b",
-            "qwen3-next-80b",
-            "glm-5",
-            "glm-4.7-flash",
         ];
 
         assert_eq!(
@@ -404,7 +387,7 @@ mod tests {
                 .map(|model| (*model).to_string())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(route_selection.routed_model_spec(), "gpt-5.5");
+        assert_eq!(route_selection.routed_model_spec(), "claude-sonnet-5-5");
         assert_eq!(
             route_selection.runtime_key,
             jcode_provider_core::RuntimeKey::JcodeSubscription
@@ -412,11 +395,11 @@ mod tests {
         assert_eq!(route_selection.api_method, "jcode-subscription");
         assert_eq!(route_selection.provider_label, "Jcode Subscription");
         assert_eq!(plus_routes, flagship_routes);
-        assert_eq!(flagship_routes.len(), 20);
+        assert_eq!(flagship_routes.len(), 5);
         assert!(
-            flagship_routes
+            !flagship_routes
                 .iter()
-                .any(|route| route.model == "claude-fable-5")
+                .any(|route| route.model.starts_with("gpt-5."))
         );
     }
 }

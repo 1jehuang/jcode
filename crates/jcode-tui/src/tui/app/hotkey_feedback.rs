@@ -112,9 +112,9 @@ pub(super) struct RegistryInputs<'a> {
 /// alternate enter queues; with it on, the roles swap.
 fn alternate_enter_description(queue_mode: bool) -> &'static str {
     if queue_mode {
-        "send now, bypassing queue mode"
+        "send now, bypassing queue mode (/ and ! commands still queue)"
     } else {
-        "queue this message until the turn ends"
+        "queue this message or / ! command until the turn ends"
     }
 }
 
@@ -164,6 +164,11 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
         inputs.toggles.diff_mode_cycle.binding().cloned(),
         "diff_mode_cycle",
         "cycle the diff display mode",
+    );
+    push(
+        inputs.toggles.commit_log.binding().cloned(),
+        "commit_log",
+        "show the project commit log",
     );
     push(
         inputs.toggles.info_widget.binding().cloned(),
@@ -522,6 +527,11 @@ fn contextual_lookup(
                 "copy the visible chat to the clipboard",
             ))
         }
+        KeyCode::Char('e') if modifiers == KeyModifiers::ALT => Some(KnownHotkey::new(
+            alt('e'),
+            "prompt_history",
+            "show more previous prompts",
+        )),
         _ => None,
     }
 }
@@ -1201,6 +1211,7 @@ mod tests {
                 toggles.typing_scroll_lock.binding(),
             ),
             ("diff_mode_cycle", toggles.diff_mode_cycle.binding()),
+            ("commit_log", toggles.commit_log.binding()),
             ("info_widget_toggle", toggles.info_widget.binding()),
             ("swarm_panel_focus", toggles.swarm_panel_focus.binding()),
         ];

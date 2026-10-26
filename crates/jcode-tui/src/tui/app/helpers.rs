@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 mod clipboard_helper;
+mod git_line_cache;
 pub(crate) mod model_names;
 
 use crate::todo::TodoItem;
@@ -20,6 +21,8 @@ static AMBIENT_INFO_CACHE: Mutex<Option<AmbientInfoCacheEntry>> = Mutex::new(Non
 /// edits) instead of waiting out the TTL with a stale branch/dirty count.
 type GitInfoCacheEntry = (std::time::Instant, Option<GitInfo>, bool);
 static GIT_INFO_CACHE: Mutex<Option<GitInfoCacheEntry>> = Mutex::new(None);
+static GIT_LINE_CACHE: std::sync::LazyLock<Mutex<git_line_cache::GitLineCache>> =
+    std::sync::LazyLock::new(|| Mutex::new(git_line_cache::GitLineCache::default()));
 
 /// Stale-while-revalidate cache for per-session todos plus their goal-level
 /// assessments (closed feedback loop etc.). Module-level so the app can force a
@@ -248,7 +251,7 @@ pub(super) fn debug_response_path() -> PathBuf {
 
 #[path = "helpers_rate_limit_parse.rs"]
 mod rate_limit_parse;
-pub(super) use rate_limit_parse::parse_rate_limit_error;
+pub(super) use rate_limit_parse::{MAX_TURN_HOLD_SECS, parse_rate_limit_error};
 
 pub(super) fn is_context_limit_error(error: &str) -> bool {
     if crate::provider::openai_request::is_openai_encrypted_content_too_large_error(error) {
@@ -529,7 +532,7 @@ pub(crate) fn effort_display_label(effort: &str) -> &str {
 fn effort_display_label_with_root<'a>(effort: &'a str, root: Option<&str>) -> &'a str {
     macro_rules! swarm_label {
         ($mode:literal, $detail:literal) => {
-            match root.unwrap_or("max") {
+            match root.unwrap_or("low") {
                 "none" => concat!($mode, " (None + ", $detail, ") [Beta]"),
                 "minimal" => concat!($mode, " (Minimal + ", $detail, ") [Beta]"),
                 "low" => concat!($mode, " (Low + ", $detail, ") [Beta]"),
@@ -541,8 +544,7 @@ fn effort_display_label_with_root<'a>(effort: &'a str, root: Option<&str>) -> &'
         };
     }
     match effort {
-        "swarm" => swarm_label!("Swarm", "light fan-out"),
-        "swarm-deep" => swarm_label!("Swarm Deep", "task graph"),
+        "swarm" => swarm_label!("Swarm", "parallel agents"),
         "max" => "Max",
         "xhigh" => "xHigh",
         "high" => "High",
@@ -618,11 +620,14 @@ pub(super) fn fast_mode_success_message(
     let status = if enabled { "on" } else { "off" };
     if applies_next_request {
         format!(
-            "✓ Fast mode {} ({})\nApplies to the next request/turn. The current in-flight request keeps its existing tier.",
+            "✓ Fast mode configured {} ({})\nRequested for the next provider request, including later in this turn. The current in-flight request is unchanged. Provider acceptance is not yet confirmed.",
             status, label
         )
     } else {
-        format!("✓ Fast mode {} ({})", status, label)
+        format!(
+            "✓ Fast mode configured {} ({})\nRequested for the next provider request. Provider acceptance is not yet confirmed.",
+            status, label
+        )
     }
 }
 
@@ -662,6 +667,35 @@ pub(super) fn fast_mode_default_message(default_enabled: bool, default_label: &s
         "Saved default fast mode is {}.\nDefault tier: {}\nUse /fast default on or /fast default off.",
         if default_enabled { "on" } else { "off" },
         default_label
+    )
+}
+
+/// Suffix for "Switched to model" notices: auth method plus the masked
+/// account email (e.g. `j***y@gmail.com`) when the route uses OAuth, so the
+/// account is recognizable without exposing the full address on screen.
+pub(crate) fn switched_model_account_suffix(
+    auth_label: Option<&str>,
+    oauth_email: Option<&str>,
+) -> String {
+    let email = oauth_email
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(mask_email);
+    match (auth_label, email) {
+        (Some(label), Some(email)) => format!(" (via {label} · {email})"),
+        (Some(label), None) => format!(" (via {label})"),
+        (None, Some(email)) => format!(" ({email})"),
+        (None, None) => String::new(),
+    }
+}
+
+/// Notice after switching the active saved account. The switch rebinds this
+/// session and becomes the default for new sessions, but other sessions that
+/// are already running keep the credentials they loaded.
+pub(super) fn account_switch_notice(provider: &str, label: &str) -> String {
+    format!(
+        "Switched {provider} account to `{label}` for this session and new sessions. \
+         Other running sessions keep their current account until they reload."
     )
 }
 
@@ -1142,7 +1176,6 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
     if crate::tui::is_ssh_remote() {
         return None;
     }
-    use std::time::Instant;
 
     const TTL: Duration = Duration::from_secs(5);
 
@@ -1177,30 +1210,75 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
                 }
                 let stale = cached.clone();
                 *refreshing = true;
-                std::thread::spawn(|| {
-                    let result = gather_git_info_inner();
-                    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-                        *guard = Some((Instant::now(), result, false));
-                    }
-                });
+                spawn_git_info_refresh();
                 return stale;
             }
 
             *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
-            std::thread::spawn(|| {
-                let result = gather_git_info_inner();
-                if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-                    *guard = Some((Instant::now(), result, false));
-                }
-            });
+            spawn_git_info_refresh();
         }
         None
     }
 }
 
+/// Run the git probe on a background thread and store the result. When the
+/// value changed, wake the UI loop: the probe finishes between frames, and an
+/// idle client otherwise kept showing the stale (or, at startup, empty) branch
+/// and dirty counts until some unrelated event happened to redraw.
+#[cfg(not(test))]
+fn spawn_git_info_refresh() {
+    std::thread::spawn(|| {
+        let result = gather_git_info_inner();
+        let changed = if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+            let changed = guard
+                .as_ref()
+                .is_none_or(|(_, cached, _)| *cached != result);
+            *guard = Some((std::time::Instant::now(), result, false));
+            changed
+        } else {
+            false
+        };
+        if changed {
+            crate::bus::Bus::global().publish(crate::bus::BusEvent::GitInfoRefreshed);
+        }
+    });
+}
+
+/// Start the git probe and give it up to `budget` to land before returning.
+///
+/// Called once just before the first frame. The probe usually finishes in a
+/// couple of tens of milliseconds, so a short bounded wait lets the very first
+/// frame already show the branch, dirty counts, and commits instead of
+/// painting without them and growing a git section ~100ms later. If git is
+/// slow (huge repo, cold cache, network filesystem) the wait times out and the
+/// result arrives through the normal `GitInfoRefreshed` wake.
+pub(crate) fn prime_git_info(budget: Duration) {
+    #[cfg(not(test))]
+    {
+        if crate::tui::is_ssh_remote() {
+            return;
+        }
+        let _ = gather_git_info();
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let pending = GIT_INFO_CACHE
+                .lock()
+                .ok()
+                .is_some_and(|guard| guard.as_ref().is_some_and(|(_, _, refreshing)| *refreshing));
+            if !pending || std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    #[cfg(test)]
+    let _ = budget;
+}
+
 /// Fetch a session's todos plus its goal-level assessments through the same
-/// stale-while-revalidate cache, so the info widget can render goal metadata
+/// stale-while-revalidate cache for consumers that need goal metadata
 /// (closed feedback loop and objectives) without extra disk reads per frame.
+#[cfg(test)]
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {
@@ -1441,38 +1519,65 @@ pub(crate) fn gather_git_info_inner() -> Option<GitInfo> {
 }
 
 /// Git status for `dir` (or the process working directory when `None`).
+///
+/// The probe gates the branch, dirty counts, and commit widgets on startup,
+/// so it is latency-bound: one `rev-parse` answers "is this a work tree" and
+/// "where is its root" together, then every remaining query is spawned at
+/// once and collected afterwards. Sequentially these took the sum of seven
+/// git processes; concurrently they take roughly the slowest one.
 pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInfo> {
     let git = || {
         let mut cmd = std::process::Command::new("git");
         if let Some(dir) = dir {
             cmd.current_dir(dir);
         }
+        // A background probe must never contend with the user's own git
+        // commands for `index.lock` (status would otherwise opportunistically
+        // refresh and rewrite the index).
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
         cmd
     };
+    let spawn = |args: &[&str]| git().args(args).spawn().ok();
+    let collect = |child: Option<std::process::Child>| {
+        child
+            .and_then(|child| child.wait_with_output().ok())
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
 
-    let in_repo = git()
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .ok()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !in_repo {
+    let probe = collect(spawn(&[
+        "rev-parse",
+        "--is-inside-work-tree",
+        "--show-toplevel",
+    ]))?;
+    let mut probe_lines = probe.lines();
+    if probe_lines.next().map(str::trim) != Some("true") {
         return None;
     }
+    let repo_root = probe_lines
+        .next()
+        .map(str::trim)
+        .filter(|root| !root.is_empty())
+        .map(std::path::PathBuf::from);
 
-    let branch = git()
-        .args(["branch", "--show-current"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if b.is_empty() { None } else { Some(b) }
-            } else {
-                None
-            }
-        })
+    let branch_child = spawn(&["branch", "--show-current"]);
+    let status_child = spawn(&["status", "--porcelain", "--untracked-files=all"]);
+    let numstat_child = spawn(&["diff", "--numstat", "HEAD"]);
+    let ahead_behind_child = spawn(&["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]);
+    let log_child = spawn(&[
+        "log",
+        "-n",
+        "8",
+        "--shortstat",
+        "--format=%x1e%h%x1f%ct%x1f%s",
+    ]);
+
+    let branch = collect(branch_child)
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty())
         .unwrap_or_else(|| "HEAD".to_string());
 
     let mut modified = 0;
@@ -1480,19 +1585,7 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
     let mut untracked = 0;
     let mut all_files: Vec<crate::tui::info_widget::DirtyFile> = Vec::new();
 
-    let repo_root = git()
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
-
-    if let Ok(output) = git()
-        .args(["status", "--porcelain", "--untracked-files=all"])
-        .output()
-        && output.status.success()
-    {
-        let status = String::from_utf8_lossy(&output.stdout);
+    if let Some(status) = collect(status_child) {
         for line in status.lines() {
             if line.len() < 3 {
                 continue;
@@ -1521,15 +1614,13 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
 
     // Line counts: tracked files from one numstat against HEAD (staged plus
     // unstaged), untracked files by counting their lines.
-    let numstat = git()
-        .args(["diff", "--numstat", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| parse_numstat(&String::from_utf8_lossy(&o.stdout)))
+    let numstat = collect(numstat_child)
+        .map(|text| parse_numstat(&text))
         .unwrap_or_default();
     let mut added_total = 0usize;
     let mut removed_total = 0usize;
+    let mut line_cache = GIT_LINE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    line_cache.begin_scan();
     for file in &mut all_files {
         let key = file
             .path
@@ -1538,8 +1629,14 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
             .unwrap_or(&file.path)
             .trim_matches('"');
         let abs = repo_root.as_ref().map(|root| root.join(key));
+        let metadata = abs
+            .as_deref()
+            .and_then(|p| std::fs::symlink_metadata(p).ok());
         if file.status == '?' {
-            file.added = abs.as_deref().and_then(count_text_lines);
+            file.added = abs
+                .as_deref()
+                .zip(metadata.as_ref())
+                .and_then(|(path, meta)| line_cache.count(path, meta));
             file.removed = file.added.map(|_| 0);
         } else if let Some(&(a, r)) = numstat.get(key) {
             file.added = a;
@@ -1547,11 +1644,10 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
         }
         added_total += file.added.unwrap_or(0);
         removed_total += file.removed.unwrap_or(0);
-        file.modified_at = abs
-            .as_deref()
-            .and_then(|p| std::fs::symlink_metadata(p).ok())
-            .and_then(|m| m.modified().ok());
+        file.modified_at = metadata.and_then(|m| m.modified().ok());
     }
+    line_cache.finish_scan();
+    drop(line_cache);
     // Newest first, so the file being worked on stays visible under the cap.
     // Deleted files have no mtime and sort last.
     all_files.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
@@ -1559,39 +1655,20 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
     all_files.truncate(10);
     let dirty_files = all_files;
 
-    let (ahead, behind) = git()
-        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                let parts: Vec<&str> = text.split('\t').collect();
-                if parts.len() == 2 {
-                    let a = parts[0].parse::<usize>().unwrap_or(0);
-                    let b = parts[1].parse::<usize>().unwrap_or(0);
-                    Some((a, b))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+    let (ahead, behind) = collect(ahead_behind_child)
+        .and_then(|text| {
+            let parts: Vec<&str> = text.trim().split('\t').collect();
+            (parts.len() == 2).then(|| {
+                (
+                    parts[0].parse::<usize>().unwrap_or(0),
+                    parts[1].parse::<usize>().unwrap_or(0),
+                )
+            })
         })
         .unwrap_or((0, 0));
 
-    let recent_commits = git()
-        .args([
-            "log",
-            "-n",
-            "8",
-            "--shortstat",
-            "--format=%x1e%h%x1f%ct%x1f%s",
-        ])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| parse_recent_commits(&String::from_utf8_lossy(&o.stdout), ahead))
+    let recent_commits = collect(log_child)
+        .map(|text| parse_recent_commits(&text, ahead))
         .unwrap_or_default();
 
     Some(GitInfo {
@@ -1675,26 +1752,6 @@ pub(crate) fn parse_numstat(
     out
 }
 
-/// Line count of a small text file, for untracked files. Large or binary
-/// files return `None` so the widget shows no count rather than a bogus one.
-fn count_text_lines(path: &std::path::Path) -> Option<usize> {
-    const MAX_BYTES: u64 = 2 * 1024 * 1024;
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MAX_BYTES {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.contains(&0) {
-        return None;
-    }
-    let lines = bytes.iter().filter(|&&b| b == b'\n').count();
-    Some(if bytes.last().is_some_and(|&b| b != b'\n') {
-        lines + 1
-    } else {
-        lines
-    })
-}
-
 /// Collapse a porcelain `XY` pair into the single letter the Changes widget
 /// shows. Conflicts win, then the worktree side (what the user is editing),
 /// then the index side.
@@ -1712,5 +1769,42 @@ pub(crate) fn porcelain_status_letter(index: u8, worktree: u8) -> char {
         b'D' => 'D',
         b'R' | b'C' => 'R',
         _ => 'M',
+    }
+}
+
+#[cfg(test)]
+mod switched_model_account_suffix_tests {
+    use super::switched_model_account_suffix;
+
+    #[test]
+    fn email_is_masked() {
+        assert_eq!(
+            switched_model_account_suffix(Some("OAuth"), Some("jeremy@gmail.com")),
+            " (via OAuth · j***y@gmail.com)"
+        );
+        assert_eq!(
+            switched_model_account_suffix(Some("OAuth"), Some("me@example.com")),
+            " (via OAuth · m*@example.com)"
+        );
+    }
+
+    #[test]
+    fn no_email_keeps_existing_suffix() {
+        assert_eq!(
+            switched_model_account_suffix(Some("API key"), None),
+            " (via API key)"
+        );
+        assert_eq!(switched_model_account_suffix(None, Some("  ")), "");
+    }
+}
+
+#[cfg(test)]
+mod account_switch_notice_tests {
+    #[test]
+    fn notice_states_that_other_running_sessions_are_unchanged() {
+        let notice = super::account_switch_notice("OpenAI", "openai-fox");
+        assert!(notice.contains("`openai-fox`"));
+        assert!(notice.contains("this session and new sessions"));
+        assert!(notice.contains("Other running sessions keep their current account"));
     }
 }

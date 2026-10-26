@@ -1,5 +1,14 @@
 #[tokio::test]
 async fn handle_resume_session_registers_live_events_before_history_replay() -> Result<()> {
+    restored_resume_with_history_backpressure(false).await
+}
+
+#[tokio::test]
+async fn restored_resume_finishes_when_recovery_turn_owns_agent() -> Result<()> {
+    restored_resume_with_history_backpressure(true).await
+}
+
+async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let (_runtime, prev_runtime) = setup_runtime_dir()?;
 
@@ -125,6 +134,7 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
                 None,
                 None,
                 false,
+                None,
                 false,
                 &mut client_selfdev,
                 &mut client_session_id,
@@ -182,11 +192,29 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
         "resume should still be blocked on history replay while writer is locked"
     );
 
+    // Simulate a recovered/background turn taking the published agent while
+    // History is held by outbound backpressure. The inbound subscribe handler
+    // must still finish so the same connection can read Escape/messages.
+    let recovery_guard = if recovery_turn {
+        Some(
+            tokio::time::timeout(std::time::Duration::from_secs(5), agent.lock())
+                .await
+                .map_err(|_| anyhow!("history preparation must release the agent"))?,
+        )
+    } else {
+        None
+    };
     drop(writer_guard);
 
-    resume_task
-        .await
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), resume_task).await;
+    assert!(
+        result.is_ok(),
+        "restored subscribe must finish without waiting for the recovery turn"
+    );
+    result
+        .unwrap()
         .map_err(|e| anyhow!("resume task join: {e}"))??;
+    drop(recovery_guard);
 
     let events = collect_events_until_done(&mut client_event_rx, 46).await;
     assert!(

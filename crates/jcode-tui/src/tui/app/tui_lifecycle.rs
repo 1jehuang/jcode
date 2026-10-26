@@ -1,90 +1,11 @@
+#[path = "tui_lifecycle_reload_input.rs"]
+mod reload_input;
+
 use super::state_ui::RestoredReloadInput;
 use super::*;
 use crate::tui::{backend, keybind};
 
 impl App {
-    pub(super) fn apply_restored_reload_input(&mut self, restored: RestoredReloadInput) {
-        self.input = restored.input;
-        self.cursor_pos = restored.cursor;
-        self.pending_images = restored.pending_images;
-        self.submit_input_on_startup = restored.submit_on_restore
-            && (!self.input.is_empty() || !self.pending_images.is_empty());
-        crate::logging::info(&format!(
-            "Startup input restored: submit_on_restore={} input_chars={} pending_images={} queued_messages={} hidden_system={} => submit_input_on_startup={}",
-            restored.submit_on_restore,
-            self.input.chars().count(),
-            self.pending_images.len(),
-            restored.queued_messages.len(),
-            restored.hidden_queued_system_messages.len(),
-            self.submit_input_on_startup,
-        ));
-        self.hidden_queued_system_messages = restored.hidden_queued_system_messages;
-        if let Some(status_notice) = restored.startup_status_notice {
-            self.set_status_notice(status_notice);
-        } else if self.submit_input_on_startup {
-            self.set_status_notice("Startup prompt queued");
-        }
-        if let Some((title, message)) = restored.startup_display_message {
-            self.push_display_message(DisplayMessage::system(message).with_title(title));
-        }
-        self.interleave_message = None;
-        self.interleave_images.clear();
-        self.rate_limit_pending_message = restored.rate_limit_pending_message;
-        self.rate_limit_reset = restored.rate_limit_reset;
-        self.observe_page_markdown = restored.observe_page_markdown;
-        self.observe_page_updated_at_ms = restored.observe_page_updated_at_ms;
-        self.set_observe_mode_enabled(restored.observe_mode_enabled, restored.observe_mode_enabled);
-        self.set_split_view_enabled(restored.split_view_enabled, restored.split_view_enabled);
-        self.set_todos_view_enabled(restored.todos_view_enabled, restored.todos_view_enabled);
-        self.todo_confidence_spike_challenged = restored.todo_confidence_spike_challenged;
-        self.last_todo_ownership_fingerprint = restored.last_todo_ownership_fingerprint;
-        self.final_response_todo_fingerprint = restored.final_response_todo_fingerprint;
-        self.todo_final_response_requested = self.final_response_todo_fingerprint.is_some();
-
-        let mut queued_messages = restored.queued_messages;
-        let mut recovered_followups = Vec::new();
-        if let Some(interleave_message) = restored.interleave_message
-            && !interleave_message.trim().is_empty()
-        {
-            recovered_followups.push(interleave_message);
-        }
-        let recovered_interrupts = restored
-            .pending_soft_interrupt_resend
-            .unwrap_or(restored.pending_soft_interrupts);
-        if !recovered_interrupts.is_empty() {
-            crate::logging::info(&format!(
-                "Recovered {} pending soft interrupt(s) after reload; re-queueing them as normal follow-ups",
-                recovered_interrupts.len()
-            ));
-            recovered_followups.extend(recovered_interrupts);
-        }
-        if !recovered_followups.is_empty() {
-            let mut recovered_queue = recovered_followups;
-            recovered_queue.append(&mut queued_messages);
-            queued_messages = recovered_queue;
-            self.set_status_notice("Recovered pending prompts after reload");
-        }
-
-        self.queued_messages = queued_messages;
-        if self.has_queued_followups() {
-            if self.is_remote {
-                // Do not synthesize a processing turn for restored remote follow-ups.
-                // After a reload, the server may still be running the previous turn;
-                // the queue must remain a wait-until-turn-end queue until the history
-                // bootstrap/Done event proves the remote turn is idle. The remote
-                // post-connect/history/tick paths will dispatch once it is safe.
-                self.set_status_notice("Restored queued follow-up after reload");
-            } else {
-                self.is_processing = true;
-                self.status = ProcessingStatus::Sending;
-                if self.processing_started.is_none() {
-                    self.processing_started = Some(Instant::now());
-                }
-                self.pending_turn = true;
-            }
-        }
-    }
-
     /// Re-parse keybinding snapshots when the config cache has reloaded.
     ///
     /// The parsed bindings are cached on `App` for cheap per-keystroke lookup,
@@ -145,12 +66,16 @@ impl App {
     /// Hold the in-flight remote turn until the network recovers, then resume it.
     ///
     /// Connectivity failures (DNS, connection reset, no route, transient TLS,
-    /// timeouts) are always transient: the request never reached the provider,
-    /// so resending after the network comes back is both safe and correct. When
-    /// `force` is set we wait regardless of the pending message's `auto_retry`
-    /// flag and promote it to auto-retry so the tick-based resume re-sends it.
-    /// This prevents a transient disconnect from being misclassified as a
-    /// permanent, non-retryable failure that stops auto-poke.
+    /// timeouts) usually recover: the request never reached the provider, so
+    /// resending is safe. When `force` is set (a real provider attempt just
+    /// failed) we wait regardless of the pending message's `auto_retry` flag
+    /// and promote it to auto-retry so the tick-based resume re-sends it.
+    ///
+    /// A provider-specific failure (for example DNS for one host) can persist
+    /// while the generic connectivity probe succeeds, so each forced wait
+    /// consumes one attempt from the per-turn retry budget and returns `false`
+    /// once it is spent. Offline probe re-waits (`force == false`) do not
+    /// consume attempts because no request was sent.
     pub(super) fn schedule_pending_remote_network_wait_with_force(
         &mut self,
         reason: &str,
@@ -159,6 +84,12 @@ impl App {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
+        if force {
+            if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+                return false;
+            }
+            pending.retry_attempts = pending.retry_attempts.saturating_add(1);
+        }
         if !pending.auto_retry {
             if force {
                 pending.auto_retry = true;
@@ -168,7 +99,8 @@ impl App {
         }
 
         let plan = crate::network_retry::wait_plan();
-        let retry_at = Instant::now() + Duration::from_secs(5);
+        let retry_at =
+            Instant::now() + Duration::from_secs(5 * u64::from(pending.retry_attempts.max(1)));
         pending.retry_at = Some(retry_at);
         self.rate_limit_reset = Some(retry_at);
         self.status = ProcessingStatus::WaitingForNetwork {
@@ -287,6 +219,20 @@ impl App {
     pub(super) fn clear_pending_remote_retry(&mut self) {
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
+    }
+
+    /// Stop automatically resuming a held turn whose retry budget is spent.
+    ///
+    /// Drops the held resend, disarms auto-poke (which would otherwise start
+    /// the same loop again at turn end), puts the user's prompt back in the
+    /// input box, and explains why the turn paused.
+    pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.clear_pending_remote_retry();
+        super::commands::disable_auto_poke(self);
+        self.overnight_auto_poke = None;
+        self.restore_failed_input_to_box();
+        self.push_display_message(DisplayMessage::system(format!("🛑 {message}")));
+        self.set_status_notice(notice);
     }
 
     /// Track a failed turn for the credential-failure circuit breaker.
@@ -414,6 +360,8 @@ impl App {
             mcp_manager,
             messages: Vec::new(),
             session,
+            agent_models_global_scope: false,
+            pending_agent_model_request_id: None,
             display_messages: Vec::new(),
             display_messages_version: 0,
             display_user_message_count: 0,
@@ -424,6 +372,7 @@ impl App {
             pending_history_anchor: None,
             pending_resize_anchor: None,
             input: String::new(),
+            reset_hint_seen: RefCell::new(None),
             command_candidates_cache: RefCell::new(None),
             command_suggestions_cache: RefCell::new(None),
             command_suggestions_epoch: std::cell::Cell::new(0),
@@ -436,8 +385,8 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
-            current_turn_system_reminder: None,
             upstream_provider: None,
             connection_type: None,
             status_detail: None,
@@ -456,6 +405,7 @@ impl App {
             queued_followup_starved_since: None,
             remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
+            scheduled_reload_recoveries: HashSet::new(),
             status: ProcessingStatus::default(),
             subagent_status: None,
             batch_progress: None,
@@ -475,6 +425,7 @@ impl App {
             todo_final_response_requested: false,
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
+            auto_poke_attempts: 0,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
@@ -509,7 +460,11 @@ impl App {
             background_client_action: None,
             pending_background_client_reload: None,
             restart_requested: None,
+            hibernate_exit_requested: None,
             cloud_handoff_requested: None,
+            cloud_job: None,
+            pending_cloud_handoff: None,
+            cloud_recovery_context: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
@@ -542,10 +497,22 @@ impl App {
             remote_provider_model: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
+            remote_provider_oauth_email: None,
+            remote_provider_oauth_account_label: None,
+            oauth_notice_displayed_at: None,
+            remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
+            pending_startup_transcript: None,
+            pending_history_base: None,
+            startup_display_snapshot: None,
+            advertised_history_base: None,
+            model_catalog_after_history: false,
             remote_reasoning_effort: None,
             remote_service_tier: None,
+            remote_available_service_tiers: None,
+            remote_reported_service_tier: None,
+            remote_service_tier_confirmation_pending: false,
             remote_transport: None,
             remote_compaction_mode: None,
             remote_available_entries: Vec::new(),
@@ -579,10 +546,12 @@ impl App {
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
             remote_session_id: None,
+            cloud_environment: Default::default(),
             remote_sessions: Vec::new(),
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
+            remote_swarm_members_received_at: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -639,6 +608,7 @@ impl App {
             todos_view_updated_at_ms: 0,
             todos_view_rendered_hash: 0,
             todo_card_rendered_hash: 0,
+            todo_completion_report: Default::default(),
             pinned_todos_payload: None,
             pinned_todos_rendered_hash: 0,
             pinned_todos_checked_at: None,
@@ -669,6 +639,8 @@ impl App {
             model_picker_load_request_id: 0,
             pending_model_switch: None,
             pending_route_selection: None,
+            pending_automatic_failover_route: None,
+            pending_automatic_failover_request_id: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
@@ -738,6 +710,7 @@ impl App {
             client_focused: true,
             runtime_memory_log,
             idle_heap_release: Default::default(),
+            idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
                 .and_then(|p| std::fs::metadata(&p).ok())
@@ -766,6 +739,7 @@ impl App {
             help_scroll: None,
             model_status_scroll: None,
             model_status_content: String::new(),
+            commit_log_overlay: None,
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
             pending_session_picker_load: None,
@@ -876,6 +850,8 @@ impl App {
             mcp_manager,
             messages: Vec::new(),
             session,
+            agent_models_global_scope: false,
+            pending_agent_model_request_id: None,
             display_messages: Vec::new(),
             display_messages_version: 0,
             display_user_message_count: 0,
@@ -886,6 +862,7 @@ impl App {
             pending_history_anchor: None,
             pending_resize_anchor: None,
             input: String::new(),
+            reset_hint_seen: RefCell::new(None),
             command_candidates_cache: RefCell::new(None),
             command_suggestions_cache: RefCell::new(None),
             command_suggestions_epoch: std::cell::Cell::new(0),
@@ -898,8 +875,8 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
-            current_turn_system_reminder: None,
             upstream_provider: None,
             connection_type: None,
             status_detail: None,
@@ -918,6 +895,7 @@ impl App {
             queued_followup_starved_since: None,
             remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
+            scheduled_reload_recoveries: HashSet::new(),
             status: ProcessingStatus::default(),
             subagent_status: None,
             batch_progress: None,
@@ -937,6 +915,7 @@ impl App {
             todo_final_response_requested: false,
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
+            auto_poke_attempts: 0,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
@@ -971,7 +950,11 @@ impl App {
             background_client_action: None,
             pending_background_client_reload: None,
             restart_requested: None,
+            hibernate_exit_requested: None,
             cloud_handoff_requested: None,
+            cloud_job: None,
+            pending_cloud_handoff: None,
+            cloud_recovery_context: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
@@ -1004,10 +987,22 @@ impl App {
             remote_provider_model: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
+            remote_provider_oauth_email: None,
+            remote_provider_oauth_account_label: None,
+            oauth_notice_displayed_at: None,
+            remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
+            pending_startup_transcript: None,
+            pending_history_base: None,
+            startup_display_snapshot: None,
+            advertised_history_base: None,
+            model_catalog_after_history: false,
             remote_reasoning_effort: None,
             remote_service_tier: None,
+            remote_available_service_tiers: None,
+            remote_reported_service_tier: None,
+            remote_service_tier_confirmation_pending: false,
             remote_transport: None,
             remote_compaction_mode: None,
             remote_available_entries: Vec::new(),
@@ -1041,10 +1036,12 @@ impl App {
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
             remote_session_id: None,
+            cloud_environment: Default::default(),
             remote_sessions: Vec::new(),
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
+            remote_swarm_members_received_at: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -1101,6 +1098,7 @@ impl App {
             todos_view_updated_at_ms: 0,
             todos_view_rendered_hash: 0,
             todo_card_rendered_hash: 0,
+            todo_completion_report: Default::default(),
             pinned_todos_payload: None,
             pinned_todos_rendered_hash: 0,
             pinned_todos_checked_at: None,
@@ -1131,6 +1129,8 @@ impl App {
             model_picker_load_request_id: 0,
             pending_model_switch: None,
             pending_route_selection: None,
+            pending_automatic_failover_route: None,
+            pending_automatic_failover_request_id: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
@@ -1200,6 +1200,7 @@ impl App {
             client_focused: true,
             runtime_memory_log,
             idle_heap_release: Default::default(),
+            idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
                 .and_then(|p| std::fs::metadata(&p).ok())
@@ -1228,6 +1229,7 @@ impl App {
             help_scroll: None,
             model_status_scroll: None,
             model_status_content: String::new(),
+            commit_log_overlay: None,
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
             pending_session_picker_load: None,
@@ -1289,6 +1291,121 @@ impl App {
         self.pending_turn = true;
     }
 
+    /// Show the background-rendered local transcript once it is ready, unless
+    /// server History already superseded it. Returns true when it changed.
+    /// Base to advertise in a Subscribe resuming `session_id`. Waits briefly
+    /// for the startup transcript thread, which renders in tens of ms, far
+    /// less than a full History transfer during a reconnect storm.
+    pub(super) fn take_history_base_for_subscribe(
+        &mut self,
+        session_id: &str,
+    ) -> Option<crate::protocol::HistoryBase> {
+        let rx = self.pending_history_base.take()?;
+        let (id, base) = rx
+            .recv_timeout(std::time::Duration::from_millis(1500))
+            .ok()?;
+        if id != session_id {
+            return None;
+        }
+        let (prefix, images) = match self
+            .startup_display_snapshot
+            .take()
+            .filter(|(snapshot_id, display, _)| snapshot_id == &id && display.len() == base.count)
+        {
+            Some((_, display, images)) => (Some(display), Some(images)),
+            None => (None, None),
+        };
+        self.advertised_history_base = Some(AdvertisedHistoryBase {
+            session_id: id,
+            base,
+            prefix,
+            images,
+        });
+        Some(base)
+    }
+
+    /// Display prefix for a delta History of `count` base messages, if this
+    /// client advertised exactly that base for `session_id`.
+    pub(super) fn take_history_base_prefix(
+        &mut self,
+        session_id: &str,
+        count: usize,
+    ) -> Option<(
+        Vec<DisplayMessage>,
+        Option<Vec<crate::session::RenderedImage>>,
+    )> {
+        let advertised = self.advertised_history_base.as_ref()?;
+        if advertised.session_id != session_id || advertised.base.count != count {
+            self.advertised_history_base = None;
+            return None;
+        }
+        if advertised.prefix.is_none() && self.pending_startup_transcript.is_some() {
+            // The transcript thread already sent the base and renders the
+            // display list right after; wait for it rather than refetching.
+            if let Some(rx) = self.pending_startup_transcript.take()
+                && let Ok(item) = rx.recv_timeout(std::time::Duration::from_secs(2))
+            {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = tx.send(item);
+                self.pending_startup_transcript = Some(rx);
+                self.poll_pending_startup_transcript();
+            }
+        }
+        let advertised = self.advertised_history_base.take()?;
+        let prefix = advertised.prefix?;
+        (prefix.len() == count).then_some((prefix, advertised.images))
+    }
+
+    pub(super) fn poll_pending_startup_transcript(&mut self) -> bool {
+        let Some(rx) = self.pending_startup_transcript.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok((session_id, display, images)) => {
+                self.pending_startup_transcript = None;
+                if let Some(advertised) = self.advertised_history_base.as_mut() {
+                    if advertised.session_id == session_id
+                        && advertised.prefix.is_none()
+                        && advertised.base.count == display.len()
+                    {
+                        advertised.prefix = Some(display.clone());
+                        advertised.images = Some(images.clone());
+                    }
+                } else if self.pending_history_base.is_some() {
+                    self.startup_display_snapshot =
+                        Some((session_id.clone(), display.clone(), images.clone()));
+                }
+                if self.display_messages().is_empty() {
+                    crate::logging::info(&format!(
+                        "[TIMING] startup_transcript_applied: session={}, messages={}, since_app_start={}ms",
+                        session_id,
+                        display.len(),
+                        self.app_started.elapsed().as_millis()
+                    ));
+                    self.replace_display_messages(display);
+                    self.remote_side_pane_images = images;
+                    self.invalidate_side_pane_images_signature();
+                    self.set_side_panel_snapshot(
+                        crate::side_panel::snapshot_for_session(&session_id).unwrap_or_default(),
+                    );
+                    return true;
+                }
+                crate::logging::info(&format!(
+                    "[TIMING] startup_transcript_skipped: session={}, display_already={}, since_app_start={}ms",
+                    session_id,
+                    self.display_messages().len(),
+                    self.app_started.elapsed().as_millis()
+                ));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.pending_startup_transcript = None;
+                false
+            }
+        }
+    }
+
     fn restore_remote_startup_history(&mut self, session_id: &str) {
         let load_start = Instant::now();
         let Ok(mut session) = Session::load_for_remote_startup(session_id) else {
@@ -1313,6 +1430,9 @@ impl App {
         self.set_side_panel_snapshot(
             crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         );
+        if self.remote_session_id.as_deref() != Some(session_id) {
+            self.remote_available_service_tiers = None;
+        }
         self.remote_session_id = Some(session_id.to_string());
         session.strip_transcript_for_remote_client();
         // Strip clears transcript vectors but keeps capacity; free buffers.
@@ -1358,6 +1478,18 @@ impl App {
     }
 
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
+        let new_start = Instant::now();
+        let mut lap = Instant::now();
+        let mut laps: Vec<(&'static str, u128)> = Vec::new();
+        let mut mark = |name: &'static str, laps: &mut Vec<(&'static str, u128)>| {
+            laps.push((name, lap.elapsed().as_millis()));
+            lap = Instant::now();
+        };
+        // Kick the background git probe first so its ~20ms of subprocess work
+        // overlaps with the rest of client setup. `run_remote` gives it a short
+        // bounded wait before the first paint.
+        let _ = super::helpers::gather_git_info();
+        mark("git_kick", &mut laps);
         let provider: Arc<dyn Provider> =
             Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
         let registry = Registry::empty();
@@ -1366,13 +1498,26 @@ impl App {
             .filter(|_| !crate::tui::is_ssh_remote())
             .and_then(|session_id| Session::load_startup_stub(session_id).ok())
             .unwrap_or_else(|| Session::create(None, None));
+        mark("stub", &mut laps);
         let mut app = Self::new_minimal_with_session(provider, registry, session);
+        mark("minimal", &mut laps);
         app.is_remote = true;
         app.runtime_mode = AppRuntimeMode::RemoteClient;
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
         app.remote_startup_phase_started = Some(Instant::now());
 
+        let handoff_preview_session = std::env::var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION").ok();
+        crate::env::remove_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION");
         if let Some(host) = crate::tui::ssh_remote_host() {
+            // An explicit /cloud handoff has a known local source transcript.
+            // Render it before the first paint, while still waiting for authoritative
+            // server History. Never infer this from a remote session ID alone.
+            if let Some(session_id) = resume_session.as_deref()
+                && handoff_preview_session.as_deref() == Some(session_id)
+            {
+                app.restore_remote_startup_history(session_id);
+                app.remote_provider_model = app.session.model.clone();
+            }
             // The server supplies history, credentials, models and project state.
             // Local reload files can belong to an unrelated session with the same id.
             app.onboarding_startup_checked = true;
@@ -1396,10 +1541,7 @@ impl App {
         // metadata once so autocomplete works before the first History event.
         // SSH clients above must use only the remote server's skill metadata.
         app.refresh_skills_snapshot();
-        app.apply_remote_header_hint();
-        // Start the background git probe now so the git widgets are ready by
-        // the first frame or two instead of popping in later.
-        let _ = super::helpers::gather_git_info();
+        mark("skills", &mut laps);
 
         let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -1412,11 +1554,65 @@ impl App {
         if let Some(ref session_id) = resume_session {
             if reload_fast_start {
                 crate::logging::info(&format!(
-                    "Remote reload fast start: deferring persisted transcript for {} until server history",
+                    "Remote reload fast start: rendering persisted transcript for {} in background",
                     session_id
                 ));
+                // The server can take seconds to answer History while dozens
+                // of clients reconnect after a reload. Parse and render the
+                // local copy off the UI thread and show it as soon as it is
+                // ready; server History still replaces it when it arrives.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (base_tx, base_rx) = std::sync::mpsc::channel();
+                let id = session_id.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("jcode-startup-transcript".to_string())
+                    .spawn(move || {
+                        let start = Instant::now();
+                        let Ok(session) = Session::load_for_remote_startup(&id) else {
+                            return;
+                        };
+                        let (rendered, images) =
+                            crate::session::render_messages_and_images(&session);
+                        drop(session);
+                        // Same shape as server History messages, so the
+                        // server can verify this prefix and send only the
+                        // tail (delta History).
+                        let mut fingerprinter = crate::protocol::HistoryFingerprinter::default();
+                        for message in &rendered {
+                            fingerprinter.push(crate::protocol::HistoryMessageRef {
+                                role: &message.role,
+                                content: &message.content,
+                                tool_calls: &message.tool_calls,
+                                tool_data: message.tool_data.as_ref(),
+                            });
+                        }
+                        if fingerprinter.count() > 0 {
+                            let mut base = fingerprinter.base();
+                            base.images_fingerprint =
+                                Some(crate::protocol::history_images_fingerprint(&images));
+                            let _ = base_tx.send((id.clone(), base));
+                        }
+                        drop(base_tx);
+                        let display =
+                            jcode_tui_messages::display_messages_from_rendered_messages(rendered);
+                        crate::logging::info(&format!(
+                            "[TIMING] startup_transcript_background: session={}, messages={}, total={}ms",
+                            id,
+                            display.len(),
+                            start.elapsed().as_millis()
+                        ));
+                        let _ = tx.send((id, display, images));
+                    });
+                if spawned.is_ok() {
+                    app.pending_startup_transcript = Some(rx);
+                    if !crate::tui::is_ssh_remote() {
+                        app.pending_history_base = Some(base_rx);
+                    }
+                }
+                mark("transcript_spawn", &mut laps);
             } else {
                 app.restore_remote_startup_history(session_id);
+                mark("transcript_sync", &mut laps);
             }
             if fresh_spawn && !reload_fast_start {
                 crate::logging::info(&format!(
@@ -1424,12 +1620,27 @@ impl App {
                     session_id
                 ));
             }
-            if let Some(restored) = Self::restore_input_for_reload(session_id) {
+            let restored_input = Self::restore_input_for_reload(session_id);
+            mark("input_read", &mut laps);
+            if let Some(restored) = restored_input {
                 app.apply_restored_reload_input(restored);
             }
+            mark("input_apply", &mut laps);
         }
 
         app.resume_session_id = resume_session;
+        // After `resume_session_id`: the hint needs to know whether this is a
+        // new session (configured effort applies) or a resumed one.
+        app.apply_remote_header_hint();
+        mark("header_hint", &mut laps);
+        crate::logging::info(&format!(
+            "[TIMING] app_new_for_remote: total={}ms, {}",
+            new_start.elapsed().as_millis(),
+            laps.iter()
+                .map(|(name, ms)| format!("{name}={ms}ms"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
         app
     }
 

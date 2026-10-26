@@ -8,7 +8,7 @@
 //! 2. Containment: every placement stays inside the messages area, so widgets
 //!    can never clobber the banner above or the input/status rows below.
 //! 3. Disjointness: placed widgets never overlap each other, even when several
-//!    widgets (todos, background, overview, memory, ...) compete for the same
+//!    widgets (background, overview, memory, ...) compete for the same
 //!    margin pockets and lower-priority widgets are silently dropped.
 
 use super::*;
@@ -17,23 +17,7 @@ use crate::tui::info_widget::{
     SwarmInfo, UsageInfo, UsageProvider,
 };
 
-fn todo(id: &str, status: &str) -> crate::todo::TodoItem {
-    crate::todo::TodoItem {
-        group: None,
-        content: format!("task {id}"),
-        status: status.to_string(),
-        priority: "high".to_string(),
-        id: id.to_string(),
-        blocked_by: Vec::new(),
-        assigned_to: None,
-        confidence: None,
-        completion_confidence: None,
-        confidence_history: Vec::new(),
-    }
-}
-
-/// Kitchen-sink data: every enabled widget kind is eligible at once, so the
-/// placement pass has maximum contention for margin space.
+/// Kitchen-sink data: all represented widgets compete for margin space.
 fn contended_data() -> InfoWidgetData {
     InfoWidgetData {
         model: Some("claude-test-1".to_string()),
@@ -45,7 +29,6 @@ fn contended_data() -> InfoWidgetData {
             total_chars: 60_000,
             ..Default::default()
         }),
-        todos: vec![todo("t1", "in_progress"), todo("t2", "pending")],
         memory_info: Some(MemoryInfo {
             total_count: 4,
             ..Default::default()
@@ -90,7 +73,6 @@ fn contended_data() -> InfoWidgetData {
                     runtime: crate::protocol::SwarmMemberRuntime::default(),
                 },
             ],
-            plan_progress: Some((3, 1, 7)),
             ..Default::default()
         }),
         background_info: Some(BackgroundInfo {
@@ -234,60 +216,7 @@ fn degenerate_sizes_with_full_contention_never_panic_or_escape() {
     }
 }
 
-/// (b) Contention between the standalone todos and background widgets.
-///
-/// When both are eligible, Overview (higher priority) merges them, so the
-/// standalone widgets only compete where Overview cannot fit:
-/// - a single short pocket goes to the highest-priority standalone contender
-///   (todos) and background is silently dropped, without overlap;
-/// - two short pockets let both place disjointly.
-#[test]
-fn todo_and_background_contention_prioritizes_todos_without_overlap() {
-    let data = InfoWidgetData {
-        todos: vec![todo("t1", "in_progress"), todo("t2", "pending")],
-        background_info: Some(BackgroundInfo {
-            running_count: 2,
-            running_tasks: vec!["bash".to_string(), "task".to_string()],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    // One pocket of 6 rows: Overview (min 8 + borders) can't fit; todos
-    // (height 5) wins the pocket and background is dropped.
-    let area = Rect::new(0, 0, 80, 6);
-    let outcome = calculate_placements_anchored(area, &margins_for(40, 6, false), &data, true, &[]);
-    assert_placements_sane("short pocket", area, &outcome.visible);
-    let kinds: Vec<WidgetKind> = outcome.visible.iter().map(|p| p.kind).collect();
-    assert_eq!(
-        kinds,
-        vec![WidgetKind::Todos],
-        "highest-priority standalone contender should win the only pocket"
-    );
-
-    // Two 7-row pockets separated by a full-width row: Overview still can't
-    // fit (needs 10 rows), so todos and background each take a pocket without
-    // overlapping.
-    let mut widths = vec![40u16; 15];
-    widths[7] = 0;
-    let area = Rect::new(0, 0, 80, 15);
-    let margins = Margins {
-        right_widths: widths,
-        left_widths: Vec::new(),
-        centered: false,
-        scroll_top: 10,
-        ..Default::default()
-    };
-    let outcome = calculate_placements_anchored(area, &margins, &data, true, &[]);
-    assert_placements_sane("two pockets", area, &outcome.visible);
-    let kinds: Vec<WidgetKind> = outcome.visible.iter().map(|p| p.kind).collect();
-    assert!(
-        kinds.contains(&WidgetKind::Todos) && kinds.contains(&WidgetKind::BackgroundTasks),
-        "both standalone widgets should place across two pockets, got {kinds:?}"
-    );
-}
-
-/// (b) When Overview is shown, its mergeable widgets (todos, background,
+/// (b) When Overview is shown, its mergeable widgets (background,
 /// swarm, ...) must not also place standalone.
 #[test]
 fn overview_suppresses_mergeable_widgets_under_contention() {
@@ -309,6 +238,85 @@ fn overview_suppresses_mergeable_widgets_under_contention() {
             );
         }
     }
+}
+
+#[test]
+fn high_usage_is_not_duplicated_when_overview_can_fit() {
+    let mut data = contended_data();
+    data.usage_info.as_mut().unwrap().seven_day = 0.94;
+    let area = Rect::new(0, 0, 100, 60);
+    let margins = margins_for(40, 60, false);
+    assert!(
+        data.effective_priority(WidgetKind::UsageLimits)
+            < data.effective_priority(WidgetKind::Overview)
+    );
+
+    // Exercise both a fresh priority-promoted card and a standalone card
+    // carried from a previous frame before Overview had a place.
+    let usage_anchor = WidgetAnchor {
+        placement: WidgetPlacement {
+            kind: WidgetKind::UsageLimits,
+            rect: Rect::new(60, 55, 40, 5),
+            side: Side::Right,
+        },
+        hidden_frames: 0,
+        content_top: margins.scroll_top + 55,
+    };
+    for anchors in [Vec::new(), vec![usage_anchor]] {
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &anchors);
+        assert_placements_sane("high usage", area, &outcome.visible);
+        assert!(
+            outcome
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::Overview)
+        );
+        assert!(
+            !outcome
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::UsageLimits)
+        );
+        assert!(
+            !outcome
+                .anchors
+                .iter()
+                .any(|a| a.placement.kind == WidgetKind::UsageLimits)
+        );
+        let steady = calculate_placements_anchored(area, &margins, &data, true, &outcome.anchors);
+        assert!(
+            steady
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::Overview)
+        );
+        assert!(
+            !steady
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::UsageLimits)
+        );
+    }
+}
+
+#[test]
+fn high_usage_stays_visible_when_overview_cannot_fit() {
+    let mut data = contended_data();
+    data.usage_info.as_mut().unwrap().seven_day = 0.94;
+    let area = Rect::new(0, 0, 100, 7);
+    let outcome = calculate_placements_anchored(area, &margins_for(40, 7, false), &data, true, &[]);
+    assert!(
+        !outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::Overview)
+    );
+    assert!(
+        outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::UsageLimits)
+    );
 }
 
 /// (c) The swarm dock widget is gated on managed members: a session that
@@ -390,19 +398,140 @@ fn stale_anchor_above_shifted_area_is_rehomed_not_drawn_out_of_bounds() {
     let area0 = Rect::new(0, 0, 80, 20);
     let first = calculate_placements_anchored(area0, &margins_for(40, 20, false), &data, true, &[]);
     assert!(!first.visible.is_empty());
-    assert!(
-        first.visible.iter().any(|p| p.rect.y < 5),
-        "expected at least one widget anchored in the top rows"
-    );
-
-    // The area shifts down by 5 rows.
-    let area1 = Rect::new(0, 5, 80, 15);
+    // Shift past an actual resident, independent of how many non-plan
+    // widgets currently fit in the layout.
+    let shifted_y = first.visible.iter().map(|p| p.rect.y).min().unwrap() + 1;
+    assert!(shifted_y < area0.height);
+    let area1 = Rect::new(0, shifted_y, 80, area0.height - shifted_y);
     let second = calculate_placements_anchored(
         area1,
-        &margins_for(40, 15, false),
+        &margins_for(40, area1.height as usize, false),
         &data,
         true,
         &first.anchors,
     );
     assert_placements_sane("shifted area", area1, &second.visible);
+}
+
+/// Content that grows under a resident widget must not make it vanish.
+///
+/// Startup repro: the Overview is placed for {usage, changes}, then History
+/// adds the session row, so its body needs one more line than the slot it is
+/// anchored to. Phase 1 used to keep the stale-height slot, the body no longer
+/// fit, and the Overview rendered nothing for the rest of the session while
+/// still holding the slot (so Phase 2 never re-homed it either).
+#[test]
+fn resident_overview_grows_in_place_when_its_content_grows() {
+    let area = Rect::new(0, 0, 80, 30);
+    let margins = margins_for(40, 30, false);
+    let usage = UsageInfo {
+        provider: UsageProvider::Anthropic,
+        primary_limit_label: Some("5-hour".to_string()),
+        secondary_limit_label: Some("Weekly".to_string()),
+        available: true,
+        ..Default::default()
+    };
+    let git = GitInfo {
+        branch: "master".to_string(),
+        modified: 1,
+        dirty_files: vec![DirtyFile::new('M', "src/main.rs")],
+        dirty_total: 1,
+        ..Default::default()
+    };
+    let before = InfoWidgetData {
+        usage_info: Some(usage),
+        git_info: Some(git),
+        ..Default::default()
+    };
+    let first = calculate_placements_anchored(area, &margins, &before, true, &[]);
+    let overview = first
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("overview placed for usage + changes")
+        .rect;
+
+    let after = InfoWidgetData {
+        session_name: Some("hare".to_string()),
+        ..before.clone()
+    };
+    let second = calculate_placements_anchored(area, &margins, &after, true, &first.anchors);
+    let grown = second
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("overview must stay placed after its content grows")
+        .rect;
+    let needed = crate::tui::info_widget::calculate_widget_height(
+        WidgetKind::Overview,
+        &after,
+        grown.width,
+        30,
+    );
+    assert!(
+        grown.height >= needed,
+        "slot must grow to fit the new body: {grown:?} needs {needed} (was {overview:?})"
+    );
+    assert_eq!(grown.x, overview.x, "resident must not jump sideways");
+    assert_placements_sane("grown overview", area, &second.visible);
+}
+
+/// A resident whose slot is permanently covered by settled content re-homes
+/// right away instead of staying hidden.
+///
+/// Startup repro: the `mcp:` header row arrives with History and lands under
+/// the bottom of the Overview's slot. An idle client draws only a handful of
+/// frames, so the frame-counted hide-in-place backstop never expired and the
+/// Overview stayed invisible for the whole session.
+#[test]
+fn covered_resident_rehomes_immediately_when_content_is_settled() {
+    let area = Rect::new(0, 0, 80, 30);
+    let data = InfoWidgetData {
+        background_info: Some(BackgroundInfo {
+            running_count: 2,
+            running_tasks: vec!["bash".into(), "task".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut margins = margins_for(40, 30, false);
+    let first = calculate_placements_anchored(area, &margins, &data, true, &[]);
+    let anchored = first.visible.first().expect("a widget placed").clone();
+
+    // A settled wide row now covers the anchored slot's first row, with plenty
+    // of free space elsewhere in the margin.
+    margins.right_widths[anchored.rect.y as usize] = 10;
+
+    let settled = calculate_placements_anchored(area, &margins, &data, true, &first.anchors);
+    let rehomed = settled
+        .visible
+        .iter()
+        .find(|p| p.kind == anchored.kind)
+        .unwrap_or_else(|| {
+            panic!(
+                "settled cover must re-home {:?}, not hide it",
+                anchored.kind
+            )
+        });
+    let covered = anchored.rect.y;
+    assert!(
+        !(rehomed.rect.y..rehomed.rect.y + rehomed.rect.height).contains(&covered),
+        "re-homed slot must clear the covered row: {rehomed:?}"
+    );
+    assert_placements_sane("re-homed", area, &settled.visible);
+
+    // While content is churning (streaming / scrolling), it waits in place.
+    margins.content_churning = true;
+    let churning = calculate_placements_anchored(area, &margins, &data, true, &first.anchors);
+    assert!(
+        !churning.visible.iter().any(|p| p.kind == anchored.kind),
+        "churning cover hides in place"
+    );
+    assert!(
+        churning
+            .anchors
+            .iter()
+            .any(|a| a.placement.kind == anchored.kind),
+        "and keeps its anchor to return to"
+    );
 }

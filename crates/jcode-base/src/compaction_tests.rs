@@ -5,6 +5,98 @@ use std::time::{Duration, Instant};
 
 struct MockSummaryProvider;
 
+struct UsageOnlyNativeProvider {
+    accounting_attributions: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Provider for UsageOnlyNativeProvider {
+    fn context_window(&self) -> usize {
+        128_000
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("fallback uses simple completion")
+    }
+
+    fn name(&self) -> &str {
+        "mock-native"
+    }
+
+    fn model(&self) -> String {
+        // generate_compaction_artifact asks for model attribution only at its
+        // accounting boundaries, once for each separately billed attempt.
+        self.accounting_attributions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        "mock-model".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            accounting_attributions: self.accounting_attributions.clone(),
+        })
+    }
+
+    async fn native_compact(
+        &self,
+        _messages: &[Message],
+        _existing_summary_text: Option<&str>,
+        _existing_openai_encrypted_content: Option<&str>,
+    ) -> Result<jcode_provider_core::NativeCompactionResult> {
+        Ok(jcode_provider_core::NativeCompactionResult {
+            summary_text: None,
+            openai_encrypted_content: None,
+            usage: Some(jcode_provider_core::SimpleCompletionUsage {
+                input_tokens: Some(120),
+                output_tokens: Some(8),
+                ..Default::default()
+            }),
+        })
+    }
+
+    async fn complete_simple_with_usage(
+        &self,
+        _prompt: &str,
+        _system: &str,
+    ) -> Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+        assert_eq!(
+            self.accounting_attributions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "native attempt must be accounted before starting fallback"
+        );
+        Ok((
+            "fallback summary".to_string(),
+            jcode_provider_core::SimpleCompletionUsage {
+                input_tokens: Some(20),
+                output_tokens: Some(4),
+                ..Default::default()
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn usage_only_native_compaction_accounts_attempt_then_falls_back() {
+    let attributions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = Arc::new(UsageOnlyNativeProvider {
+        accounting_attributions: attributions.clone(),
+    });
+    let result =
+        generate_compaction_artifact(provider, vec![make_text_message(Role::User, "hello")], None)
+            .await
+            .unwrap();
+    assert_eq!(result.summary_text, "fallback summary");
+    assert!(result.openai_encrypted_content.is_none());
+    assert_eq!(attributions.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
 #[async_trait::async_trait]
 impl Provider for MockSummaryProvider {
     async fn complete(
@@ -140,6 +232,41 @@ fn test_context_usage_prefers_observed_tokens() {
 
     assert!(manager.context_usage_with(&messages) >= 0.90);
     assert!(manager.effective_token_count_with(&messages) >= 900);
+}
+
+#[test]
+fn reactive_threshold_accepts_tokens_or_percentage() {
+    let _lock = crate::storage::lock_test_env();
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.set_mode(crate::config::CompactionMode::Reactive);
+    manager.compaction_config.reactive_threshold = 0.80;
+    manager.compaction_config.reactive_threshold_tokens = 200_000;
+    let messages: Vec<_> = (0..20)
+        .map(|_| make_text_message(Role::User, "x"))
+        .collect();
+    for _ in &messages {
+        manager.notify_message_added();
+    }
+    manager.update_observed_input_tokens(199_999);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(200_000);
+    assert!(manager.should_compact_with(&messages));
+    assert!(!manager.should_compact_with(&messages[..1]));
+
+    manager.compaction_config.reactive_threshold_tokens = 0;
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(800_000);
+    assert!(manager.should_compact_with(&messages));
+
+    manager.compaction_config.reactive_threshold_tokens = 200_000;
+    manager.compaction_config.reactive_threshold = 0.60;
+    manager.set_budget(100_000);
+    manager.update_observed_input_tokens(59_999);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(60_000);
+    assert!(manager.should_compact_with(&messages));
+    manager.suppress_compaction_until_new_message = true;
+    assert!(!manager.should_compact_with(&messages));
 }
 
 #[test]
@@ -1135,6 +1262,31 @@ fn max_context_tokens_caps_budget_from_large_window_models() {
 fn max_context_tokens_zero_means_no_cap() {
     let cfg = crate::config::CompactionConfig::default();
     assert_eq!(CompactionManager::capped_budget(&cfg, 1_000_000), 1_000_000);
+}
+
+#[test]
+fn proactive_floor_accepts_tokens_or_percentage() {
+    let _lock = crate::storage::lock_test_env();
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.compaction_config = crate::config::CompactionConfig::default();
+    manager.turns_since_last_compact = 10;
+    manager.token_history = [100_000, 120_000, 149_999].into_iter().collect();
+    manager.update_observed_input_tokens(149_999);
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(150_000);
+    assert!(!manager.anti_signals_block(&[]));
+
+    manager.compaction_config.proactive_floor_tokens = 0;
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(400_000);
+    assert!(!manager.anti_signals_block(&[]));
+
+    manager.compaction_config.proactive_floor_tokens = 150_000;
+    manager.set_budget(200_000);
+    manager.update_observed_input_tokens(79_999);
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(80_000);
+    assert!(!manager.anti_signals_block(&[]));
 }
 
 #[test]

@@ -1,6 +1,5 @@
 use super::*;
 use crate::tui::core;
-use std::path::PathBuf;
 
 #[derive(Clone, Copy)]
 struct RegisteredCommand {
@@ -121,6 +120,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Show/toggle dimmed technical details on tool rows with an intent",
     ),
     RegisteredCommand::public(
+        "/latex",
+        "Toggle LaTeX images (on/off/status/none/unicode/image)",
+    ),
+    RegisteredCommand::public(
         "/thinking-display",
         "Show/hide the model's thinking text (off/full/current)",
     ),
@@ -157,7 +160,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/version", "Show current version"),
     RegisteredCommand::public("/changelog", "Show recent changes in this build"),
     RegisteredCommand::public("/info", "Show session info and tokens"),
-    RegisteredCommand::public("/reset", "Review and confirm a banked OpenAI usage reset"),
+    RegisteredCommand::public(
+        "/reset",
+        "Review and confirm an OpenAI or Claude usage limit reset",
+    ),
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
         "/productivity",
@@ -213,7 +219,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
     RegisteredCommand::public(
         "/cloud",
-        "Move this session to a cloud machine and keep working",
+        "Move this session to cloud, or /cloud replace to copy local code",
     ),
     RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
@@ -325,6 +331,7 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn set_input_for_test(&mut self, input: impl Into<String>) {
+        self.wake_idle_hibernation();
         self.input = input.into();
         self.cursor_pos = self.input.len();
     }
@@ -557,6 +564,29 @@ impl App {
         let prefix = input.to_lowercase();
         let prefix_trimmed = prefix.trim_end();
 
+        if prefix.starts_with("/cloud ") {
+            let mut candidates = vec![
+                (
+                    "/cloud replace".into(),
+                    "Show safe repository replacement commands",
+                ),
+                (
+                    "/cloud replace --dry-run".into(),
+                    "Preview replacing cloud code with local files",
+                ),
+                ("/cloud status".into(), "Show session location"),
+                ("/cloud cancel".into(), "Cancel a pending cloud command"),
+            ];
+            // Typing the command or a trailing space must never add consent.
+            if prefix.starts_with("/cloud replace --y") {
+                candidates.push((
+                    "/cloud replace --yes".into(),
+                    "Replace cloud code, preserving the old checkout in a backup",
+                ));
+            }
+            return self.rank_suggestions(input.trim_end(), candidates);
+        }
+
         if prefix.starts_with("/reset ") {
             return self.rank_suggestions(
                 // Keep the read-only command first even after a trailing space.
@@ -574,6 +604,18 @@ impl App {
                     (
                         "/reset usage limits openai cancel".into(),
                         "Clear the pending reset confirmation",
+                    ),
+                    (
+                        "/reset usage limits claude".into(),
+                        "Review the Claude session-limit reset (read-only)",
+                    ),
+                    (
+                        "/reset usage limits claude confirm".into(),
+                        "Spend the pending Claude session-limit reset",
+                    ),
+                    (
+                        "/reset usage limits claude cancel".into(),
+                        "Clear the pending Claude reset confirmation",
                     ),
                 ],
             );
@@ -609,7 +651,18 @@ impl App {
                         "/agents memory".into(),
                         "Configure optional memory extraction model",
                     ),
-                    ("/agents ambient".into(), "Configure ambient model"),
+                    (
+                        "/agents ambient".into(),
+                        "Configure ambient model [session]",
+                    ),
+                    (
+                        "/agents default".into(),
+                        "Configure saved global agent defaults",
+                    ),
+                    (
+                        "/agents global".into(),
+                        "Configure saved global agent defaults",
+                    ),
                 ],
             );
         }
@@ -816,15 +869,7 @@ impl App {
 
         if prefix.starts_with("/effort ") {
             let efforts = [
-                "none",
-                "minimal",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "swarm",
-                "swarm-deep",
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "swarm",
             ];
             return self.rank_suggestions(
                 input,
@@ -1439,7 +1484,7 @@ impl App {
     /// the active guided flow phase. Defaults to the starter suggestion cards.
     pub fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
         use crate::tui::OnboardingWelcomeKind;
-        use crate::tui::app::onboarding_flow::{OnboardingPhase, SummaryPill, TelemetryLevel};
+        use crate::tui::app::onboarding_flow::{OnboardingPhase, SummaryPill};
         match self.onboarding_phase() {
             Some(OnboardingPhase::Login { import }) => {
                 let prompt = import.as_ref().map(|review| {
@@ -1463,10 +1508,9 @@ impl App {
                             SummaryPill::ImportLess => crate::tui::ImportSummaryPill::ImportLess,
                             SummaryPill::Telemetry => crate::tui::ImportSummaryPill::Telemetry,
                         },
-                        telemetry: review.telemetry.map(|level| match level {
-                            TelemetryLevel::Everything => crate::tui::TelemetryChoice::Everything,
-                            TelemetryLevel::NoContent => crate::tui::TelemetryChoice::NoContent,
-                            TelemetryLevel::Nothing => crate::tui::TelemetryChoice::Nothing,
+                        telemetry: review.telemetry.map(|t| crate::tui::TelemetryPage {
+                            cursor: t.cursor,
+                            checked: t.checked,
                         }),
                         telemetry_env_forced_off: crate::telemetry::opt_out_forced_by_env(),
                         checked_count: review.checked_count(),
@@ -1764,6 +1808,7 @@ impl App {
                 | "/compact"
                 | "/compact mode"
                 | "/alignment"
+                | "/latex"
                 | "/compact-notifications"
                 | "/show-agentgrep-output"
                 | "/reasoning"
@@ -1778,42 +1823,5 @@ impl App {
 }
 
 #[cfg(test)]
-mod command_registry_tests {
-    use super::*;
-
-    /// Every slash command must be registered exactly once. Duplicate entries
-    /// mean two different handlers claim the same name, so which one runs
-    /// depends on dispatch order rather than on the registry the palette and
-    /// `/help` show the user.
-    #[test]
-    fn registered_commands_have_no_duplicate_names() {
-        let mut seen = std::collections::HashSet::new();
-        let duplicates: Vec<&str> = REGISTERED_COMMANDS
-            .iter()
-            .filter(|command| !seen.insert(command.name))
-            .map(|command| command.name)
-            .collect();
-        assert!(
-            duplicates.is_empty(),
-            "duplicate slash command registrations: {:?}",
-            duplicates
-        );
-    }
-
-    /// Aliases users can actually type must be discoverable through the
-    /// registry, otherwise autocomplete silently omits working commands.
-    #[test]
-    fn known_aliases_are_registered() {
-        let names: std::collections::HashSet<&str> =
-            REGISTERED_COMMANDS.iter().map(|c| c.name).collect();
-        for alias in [
-            "/keybindings",
-            "/commit-and-push",
-            "/resume-all",
-            "/hotkeys",
-            "/keys",
-        ] {
-            assert!(names.contains(alias), "{alias} is not registered");
-        }
-    }
-}
+#[path = "command_registry_tests.rs"]
+mod command_registry_tests;

@@ -12,6 +12,9 @@ use crate::tui::info_widget::{MemoryState, StepStatus};
 use anyhow::Result;
 use std::sync::Arc;
 
+#[path = "remote_tests/korean_input.rs"]
+mod korean_input;
+
 struct MockProvider;
 
 #[async_trait::async_trait]
@@ -39,10 +42,7 @@ impl Provider for MockProvider {
 
 fn create_test_app() -> crate::tui::app::App {
     ensure_test_jcode_home_if_unset();
-    // `has_notification()` (via `unfocused_redraw_warranted`) consults a
-    // process-wide ambient-info cache that another test may have populated
-    // from its own JCODE_HOME (scheduled reminders read as a notification).
-    // Reset it so these tests observe only their own state.
+    // Reset the process-wide ambient cache to isolate redraw assertions.
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -175,206 +175,56 @@ fn client_interaction_restores_focus_so_scroll_redraws_at_full_rate() {
     );
 }
 
+include!("remote_tests/auth_mapping.rs");
+
 #[test]
-fn auth_provider_hint_maps_openai_compatible_login_providers() {
-    assert_eq!(
-        auth_provider_hint_for_login_provider("Azure OpenAI"),
-        Some("azure-openai")
+fn dead_server_respawn_waits_for_repeated_failures_and_throttles() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let mut state = RemoteRunState {
+        reconnect_attempts: 2,
+        ..Default::default()
+    };
+    assert!(!reconnect::should_respawn_dead_server(&state, false, now));
+
+    state.reconnect_attempts = 3;
+    assert!(reconnect::should_respawn_dead_server(&state, false, now));
+    assert!(
+        !reconnect::should_respawn_dead_server(&state, true, now),
+        "SSH clients must not spawn a local server"
     );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("cerebras"),
-        Some("cerebras")
+
+    state.server_reload_in_progress = true;
+    assert!(!reconnect::should_respawn_dead_server(&state, false, now));
+    state.server_reload_in_progress = false;
+
+    state.initial_server_start = true;
+    assert!(
+        !reconnect::should_respawn_dead_server(&state, false, now),
+        "a server we just started gets its startup window first"
     );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("Cerebras"),
-        Some("cerebras")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("minimax"),
-        Some("minimax")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("not-a-provider"),
-        None
-    );
+    state.initial_server_start = false;
+
+    state.last_dead_server_respawn = Some(now);
+    assert!(!reconnect::should_respawn_dead_server(
+        &state,
+        false,
+        now + Duration::from_secs(10)
+    ));
+    assert!(reconnect::should_respawn_dead_server(
+        &state,
+        false,
+        now + Duration::from_secs(61)
+    ));
 }
 
 #[test]
-fn auth_provider_hint_maps_direct_provider_logins_by_display_label() {
-    // LoginCompleted carries the descriptor display label, which must still map
-    // to the canonical server provider id so the auth-change refresh is
-    // attributed correctly (regression: an Anthropic API-key login used to send
-    // no hint, so the server reported "OpenAI credentials are active" and
-    // skipped the post-login model switch).
-    assert_eq!(
-        auth_provider_hint_for_login_provider("Anthropic API"),
-        Some("anthropic-api")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("anthropic-api"),
-        Some("anthropic-api")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("claude-api"),
-        Some("anthropic-api")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("Anthropic/Claude"),
-        Some("claude")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("claude"),
-        Some("claude")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("OpenAI"),
-        Some("openai")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("OpenAI API"),
-        Some("openai-api")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("OpenRouter"),
-        Some("openrouter")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("AWS Bedrock"),
-        Some("bedrock")
-    );
-}
-
-#[test]
-fn auth_provider_hint_resolves_every_emitted_login_completed_provider() {
-    // Every string published as `LoginCompleted.provider` (see the emit sites in
-    // src/tui/app/auth.rs) must resolve to a canonical server provider id so the
-    // auth-change refresh is attributed to the right provider and the post-login
-    // model auto-select runs. Before the loose display-name resolution, only
-    // Azure and OpenAI-compatible logins resolved; every direct provider sent no
-    // hint, so the server fell back to the session's active provider (the
-    // "OpenAI credentials are active" bug) and skipped the model switch.
-    //
-    // Pairs of (emitted string, expected canonical hint). `None` is only correct
-    // for auto-import, which intentionally has no single runtime to attribute to.
-    let cases: &[(&str, Option<&str>)] = &[
-        // OAuth logins emit lowercase descriptor ids.
-        ("openai", Some("openai")),
-        ("claude", Some("claude")),
-        ("gemini", Some("gemini")),
-        ("copilot", Some("copilot")),
-        ("antigravity", Some("antigravity")),
-        ("cursor", Some("cursor")),
-        // API-key paste logins emit descriptor display labels.
-        ("Anthropic API", Some("anthropic-api")),
-        ("OpenAI API", Some("openai-api")),
-        ("AWS Bedrock", Some("bedrock")),
-        ("OpenRouter", Some("openrouter")),
-        // Azure keeps its dedicated runtime id mapping.
-        ("Azure OpenAI", Some("azure-openai")),
-        // Auto-import has no single runtime to attribute the refresh to.
-        ("auto-import", None),
-    ];
-
-    for (emitted, expected) in cases {
-        assert_eq!(
-            auth_provider_hint_for_login_provider(emitted),
-            *expected,
-            "login provider {emitted:?} should resolve to {expected:?}"
-        );
-    }
-
-    // Every login provider descriptor must resolve to the EXACT canonical hint
-    // implied by its target, across its display label, id, and every alias.
-    // Asserting the exact value (not just `is_some`) is what catches a
-    // wrong-attribution bug like the original "OpenAI credentials are active"
-    // after an Anthropic login - a weak `is_some` check would have passed even
-    // while the hint pointed at the wrong provider.
-    use crate::provider_catalog::LoginProviderTarget;
-    for descriptor in crate::provider_catalog::login_providers() {
-        // Expected hint mirrors auth_provider_hint_for_login_provider's target
-        // mapping, the single source of truth for post-login attribution.
-        let expected: Option<String> = match descriptor.target {
-            LoginProviderTarget::AutoImport => None,
-            LoginProviderTarget::Azure => Some("azure-openai".to_string()),
-            LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id.to_string()),
-            _ => Some(descriptor.id.to_string()),
-        };
-
-        // The emitted string can be the descriptor id, its display label, or any
-        // alias (LoginCompleted.provider varies by surface/auth path).
-        let mut emitted: Vec<&str> = vec![descriptor.id, descriptor.display_name];
-        emitted.extend_from_slice(descriptor.aliases);
-        for label in emitted {
-            assert_eq!(
-                auth_provider_hint_for_login_provider(label),
-                expected.as_deref(),
-                "login provider {:?} (id {:?}, target {:?}) emitted as {label:?} must attribute \
-                 to {expected:?}; a wrong/missing hint mislabels the catalog-refresh message and \
-                 skips the post-login model switch",
-                descriptor.display_name,
-                descriptor.id,
-                descriptor.target
-            );
-        }
-    }
-}
-
-#[test]
-fn auth_changed_event_for_anthropic_api_login_targets_claude_api_route() {
-    let auth = super::auth_changed_event_for_login_provider("Anthropic API")
-        .expect("Anthropic API login should produce a typed auth event");
-    // The server maps the descriptor id `anthropic-api` to the `claude-api`
-    // route family for model selection and labelling.
-    assert_eq!(auth.provider.as_str(), "anthropic-api");
-    assert_eq!(
-        auth.auth_method,
-        Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey)
-    );
-    assert_eq!(
-        auth.credential_source,
-        Some(crate::protocol::AuthCredentialSource::ApiKeyFile)
-    );
-    // Direct providers must not claim the OpenAI-compatible runtime/namespace.
-    assert!(auth.expected_runtime.is_none());
-    assert!(auth.expected_catalog_namespace.is_none());
-}
-
-#[test]
-fn auth_changed_event_for_oauth_claude_login_is_not_marked_as_api_key_paste() {
-    let auth = super::auth_changed_event_for_login_provider("claude")
-        .expect("Claude OAuth login should produce a typed auth event");
-    assert_eq!(auth.provider.as_str(), "claude");
-    // OAuth logins are not API-key pastes.
-    assert!(auth.auth_method.is_none());
-    assert!(auth.credential_source.is_none());
-}
-
-#[test]
-fn auth_changed_event_for_cerebras_login_carries_runtime_and_catalog_identity() {
-    let auth = super::auth_changed_event_for_login_provider("Cerebras")
-        .expect("Cerebras login should produce typed auth event");
-
-    assert_eq!(auth.provider.as_str(), "cerebras");
-    assert_eq!(
-        auth.credential_source,
-        Some(crate::protocol::AuthCredentialSource::ApiKeyFile)
-    );
-    assert_eq!(
-        auth.auth_method,
-        Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey)
-    );
-    assert_eq!(
-        auth.expected_runtime
-            .as_ref()
-            .map(crate::protocol::RuntimeProviderKey::as_str),
-        Some("openai-compatible")
-    );
-    assert_eq!(
-        auth.expected_catalog_namespace
-            .as_ref()
-            .map(crate::protocol::CatalogNamespace::as_str),
-        Some("cerebras")
-    );
+fn long_disconnect_redraws_slowly() {
+    use std::time::Duration;
+    let short = reconnect::disconnected_redraw_period(false, Some(Duration::from_secs(5)));
+    let long = reconnect::disconnected_redraw_period(false, Some(Duration::from_secs(120)));
+    assert_eq!(short, Duration::from_secs(1));
+    assert!(long >= Duration::from_secs(5), "issue #1887: {long:?}");
 }
 
 #[test]
@@ -567,11 +417,13 @@ fn process_remote_followups_auto_submits_staged_startup_prompt() {
 }
 
 #[test]
-fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
+fn process_remote_followups_waits_for_history_before_sending_startup_image() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
     app.input = "Start the fork immediately".to_string();
+    let images = vec![("image/png".to_string(), "aW1hZ2U=".to_string())];
+    app.pending_images = images.clone();
     app.cursor_pos = app.input.len();
     app.submit_input_on_startup = true;
 
@@ -580,57 +432,56 @@ fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     assert!(!remote.has_loaded_history());
 
+    let next_request_id = remote.next_request_id_for_test();
     rt.block_on(process_remote_followups(&mut app, &mut remote));
 
-    assert!(!app.submit_input_on_startup);
-    assert!(app.input.is_empty());
+    assert!(app.submit_input_on_startup);
+    assert_eq!(app.input, "Start the fork immediately");
+    assert_eq!(app.pending_images, images);
+    assert!(!app.is_processing);
+    assert!(app.current_message_id.is_none());
+    assert!(app.pending_startup_prompt_echo.is_none());
+    assert_eq!(remote.next_request_id_for_test(), next_request_id);
     assert!(
-        app.is_processing,
-        "the ordered startup request should start immediately"
-    );
-    assert!(
-        app.pending_startup_prompt_echo.as_deref() == Some("Start the fork immediately"),
-        "the user echo must be retained until bootstrap History is applied"
+        !app.display_messages()
+            .iter()
+            .any(|message| message.role == "user")
     );
 
-    let startup_id = app.current_message_id.expect("startup request was sent");
-    let next_request_id = remote.next_request_id_for_test();
-    let processing_started = app.processing_started;
-    let visible_turn_started = app.visible_turn_started;
-    // A queued recovery continuation must not dispatch behind the already-sent
-    // startup turn when Subscribe's earlier, idle History snapshot arrives.
-    app.hidden_queued_system_messages
-        .push("Continue after reload".to_string());
     handle_server_event(&mut app, startup_history("startup-session"), &mut remote);
     assert!(remote.has_loaded_history());
     assert_eq!(app.remote_session_id.as_deref(), Some("startup-session"));
-    assert!(app.is_processing);
-    assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
-    assert_eq!(app.current_message_id, Some(startup_id));
-    assert_eq!(app.processing_started, processing_started);
-    assert_eq!(app.visible_turn_started, visible_turn_started);
-    assert_eq!(
-        app.rate_limit_pending_message
-            .as_ref()
-            .map(|pending| pending.content.as_str()),
-        Some("Start the fork immediately")
-    );
+    assert!(!app.is_processing);
+    assert_eq!(remote.next_request_id_for_test(), next_request_id);
 
     rt.block_on(process_remote_followups(&mut app, &mut remote));
-    assert_eq!(
-        remote.next_request_id_for_test(),
-        next_request_id,
-        "History must not enable a second send"
-    );
-    assert_eq!(app.current_message_id, Some(startup_id));
+    assert!(!app.submit_input_on_startup);
+    assert!(app.input.is_empty());
+    assert!(app.pending_images.is_empty());
     assert!(app.is_processing);
+    assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
+    let startup_id = app.current_message_id.expect("startup request was sent");
+    assert_eq!(startup_id, next_request_id);
+    let sent = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("sent payload");
+    assert_eq!(sent.content, "Start the fork immediately");
+    assert_eq!(sent.images, images);
+
+    let next_request_id = remote.next_request_id_for_test();
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert_eq!(remote.next_request_id_for_test(), next_request_id);
+    assert_eq!(app.current_message_id, Some(startup_id));
     assert_eq!(
-        app.hidden_queued_system_messages,
-        vec!["Continue after reload"]
+        app.display_messages()
+            .iter()
+            .filter(|message| {
+                message.role == "user" && message.content == "Start the fork immediately"
+            })
+            .count(),
+        1
     );
-    assert!(app.display_messages().iter().any(|message| {
-        message.role == "user" && message.content == "Start the fork immediately"
-    }));
     assert!(app.pending_startup_prompt_echo.is_none());
 }
 
@@ -639,10 +490,13 @@ fn startup_history(session_id: &str) -> ServerEvent {
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![],
+        messages_base_count: None,
+        images_unchanged: false,
         images: vec![],
         provider_name: None,
         provider_model: None,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         available_models: vec![],
@@ -663,14 +517,105 @@ fn startup_history(session_id: &str) -> ServerEvent {
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
+        provider_oauth_email: None,
+        provider_oauth_account_label: None,
         resolved_credential: None,
         reasoning_effort: None,
         service_tier: None,
+        available_service_tiers: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
         applets: Default::default(),
     }
+}
+
+#[test]
+fn history_speed_capabilities_are_authoritative_and_identity_scoped() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let history = |session: &str, model: &str, tiers: Option<Vec<String>>| {
+        let mut event = startup_history(session);
+        if let ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_service_tiers,
+            ..
+        } = &mut event
+        {
+            *provider_name = Some("openai".into());
+            *provider_model = Some(model.into());
+            *available_service_tiers = tiers;
+        }
+        event
+    };
+    handle_server_event(
+        &mut app,
+        history(
+            "speed-session",
+            "gpt-6-astra",
+            Some(vec!["priority".into()]),
+        ),
+        &mut remote,
+    );
+    assert_eq!(
+        app.remote_available_service_tiers,
+        Some(vec!["priority".into()])
+    );
+    // Missing capability metadata from an old server does not erase a known
+    // capability snapshot for the same identity.
+    handle_server_event(
+        &mut app,
+        history("speed-session", "gpt-6-astra", None),
+        &mut remote,
+    );
+    assert_eq!(
+        app.remote_available_service_tiers,
+        Some(vec!["priority".into()])
+    );
+    handle_server_event(
+        &mut app,
+        history("speed-session", "gpt-6-astra", Some(vec![])),
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_service_tiers, Some(vec![]));
+    handle_server_event(
+        &mut app,
+        history("speed-session", "gpt-6.1-sol", None),
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_service_tiers, None);
+    app.remote_available_service_tiers = Some(vec!["priority".into()]);
+    let model_changed = serde_json::from_value(serde_json::json!({
+        "type": "model_changed", "id": 1, "model": "gpt-6-astra", "provider_name": "openai"
+    }))
+    .unwrap();
+    app.model_catalog_after_history = false;
+    handle_server_event(&mut app, model_changed, &mut remote);
+    assert_eq!(app.remote_available_service_tiers, None);
+    assert!(app.model_catalog_after_history);
+    app.model_catalog_after_history = false;
+    handle_server_event(
+        &mut app,
+        ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("openai".into()),
+            provider_model: Some("gpt-6-astra".into()),
+            available_models: vec![],
+            available_model_routes: vec![],
+        },
+        &mut remote,
+    );
+    assert!(app.model_catalog_after_history);
+    app.remote_available_service_tiers = Some(vec!["priority".into()]);
+    handle_server_event(
+        &mut app,
+        history("another-speed-session", "gpt-6-astra", None),
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_service_tiers, None);
 }
 
 #[test]
@@ -684,9 +629,10 @@ fn startup_send_state_is_not_preserved_for_real_session_switch() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
     rt.block_on(process_remote_followups(&mut app, &mut remote));
     assert!(app.current_message_id.is_some());
-    assert!(app.pending_startup_prompt_echo.is_some());
+    assert!(app.is_processing);
 
     handle_server_event(&mut app, startup_history("different-session"), &mut remote);
 
@@ -1314,3 +1260,184 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
         "the prompt should be queued for the remote tick loop"
     );
 }
+
+fn swarm_dm_notification(sender: &str, body: &str, tldr: Option<&str>) -> ServerEvent {
+    ServerEvent::Notification {
+        from_session: format!("session_{sender}_123"),
+        from_name: Some(sender.to_string()),
+        notification_type: crate::protocol::NotificationType::Message {
+            scope: Some("dm".to_string()),
+            channel: None,
+            tldr: tldr.map(str::to_string),
+        },
+        message: format!("DM from {sender}: {body}"),
+    }
+}
+
+fn soft_interrupt_injected(content: &str, display_role: Option<&str>) -> ServerEvent {
+    ServerEvent::SoftInterruptInjected {
+        content: content.to_string(),
+        display_role: display_role.map(str::to_string),
+        point: "A".to_string(),
+        tools_skipped: None,
+        client_ids: Vec::new(),
+    }
+}
+
+fn assert_no_long_rows(app: &crate::tui::app::App) {
+    for message in app.display_messages() {
+        if message.role == "swarm" {
+            let lines = crate::tui::ui::render_swarm_message(
+                message,
+                100,
+                crate::config::DiffDisplayMode::Off,
+            );
+            assert_eq!(lines.len(), 1, "swarm row must be one row: {message:?}");
+        } else {
+            assert!(
+                !message.content.contains("DM from"),
+                "raw DM text leaked into a {} row: {:?}",
+                message.role,
+                message.content
+            );
+        }
+    }
+}
+
+#[test]
+fn injected_swarm_dm_is_deduped_against_its_notification_card() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    let body = "Finished the parser refactor. ".repeat(15) + "\n\nDetails follow.";
+    handle_server_event(
+        &mut app,
+        swarm_dm_notification("fox", &body, Some("parser refactor done")),
+        &mut remote,
+    );
+    let before = app.display_messages().len();
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(&format!("DM from fox: {body}"), Some("system")),
+        &mut remote,
+    );
+    assert_eq!(
+        app.display_messages().len(),
+        before,
+        "injected copy of an already-shown DM must not add a row"
+    );
+    assert_no_long_rows(&app);
+}
+
+#[test]
+fn injected_swarm_dm_without_card_renders_one_collapsed_row() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    let body = "word ".repeat(200);
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(&format!("DM from owl: {body}"), Some("system")),
+        &mut remote,
+    );
+    let last = app.display_messages().last().expect("row");
+    assert_eq!(last.role, "swarm");
+    assert_eq!(last.title.as_deref(), Some("DM from owl"));
+    assert_no_long_rows(&app);
+}
+
+#[test]
+fn restored_display_snapshot_normalizes_only_raw_swarm_deliveries() {
+    use crate::tui::DisplayMessage;
+    let mut app = create_test_app();
+    let body = "Detailed implementation report. ".repeat(40);
+    let encoded = jcode_tui_messages::encode_collapsible_swarm_content("report", &body);
+    let expanded = jcode_tui_messages::toggle_collapsible_swarm_content(&encoded).unwrap();
+    app.replace_display_messages(vec![
+        DisplayMessage::system(format!("DM from hatchling: {body}")),
+        DisplayMessage::user(format!("#parser from owl: {body}")),
+        DisplayMessage::assistant(format!("DM from fox: {body}")),
+        DisplayMessage::swarm("DM from sheep", expanded.clone()),
+    ]);
+    let messages = app.display_messages();
+    for message in &messages[..2] {
+        assert_eq!(message.role, "swarm");
+        assert_eq!(
+            crate::tui::ui::render_swarm_message(
+                message,
+                100,
+                crate::config::DiffDisplayMode::Off,
+            ).len(),
+            1,
+        );
+    }
+    assert_eq!(messages[2].role, "assistant");
+    assert_eq!(messages[3].content, expanded);
+}
+
+#[test]
+fn history_restore_renders_swarm_deliveries_as_one_row() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    let mut history = startup_history("history-session");
+    if let ServerEvent::History { messages, .. } = &mut history {
+        let long = "Investigated the flaky test in depth. ".repeat(20);
+        for (role, content) in [
+            ("user", format!("DM from fox: {long}")),
+            ("system", format!("#parser from owl: {long}")),
+            ("user", "please review my change".to_string()),
+            ("assistant", format!("DM from fox: {long}")),
+        ] {
+            messages.push(crate::protocol::HistoryMessage {
+                response_stats: None,
+                role: role.to_string(),
+                content,
+                tool_calls: None,
+                tool_data: None,
+            });
+        }
+    }
+    handle_server_event(&mut app, history, &mut remote);
+
+    let roles: Vec<(String, Option<String>)> = app
+        .display_messages()
+        .iter()
+        .map(|m| (m.role.clone(), m.title.clone()))
+        .collect();
+    assert!(
+        roles.contains(&("swarm".to_string(), Some("DM from fox".to_string()))),
+        "{roles:?}"
+    );
+    assert!(
+        roles.contains(&("swarm".to_string(), Some("#parser · owl".to_string()))),
+        "{roles:?}"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "user" && m.content == "please review my change"),
+        "ordinary user prompts are untouched: {roles:?}"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.starts_with("DM from fox")),
+        "assistant text is never rewritten: {roles:?}"
+    );
+    for message in app.display_messages().iter().filter(|m| m.role == "swarm") {
+        let lines =
+            crate::tui::ui::render_swarm_message(message, 100, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 1, "{message:?}");
+    }
+}
+
+include!("remote_tests/recall_cancellation.rs");

@@ -159,6 +159,50 @@ impl Sidecar {
         Self::with_configured_model(configured_model)
     }
 
+    pub fn for_session(session: &crate::session::Session) -> Self {
+        let model = session
+            .effective_agent_model("memory", crate::config::Config::load().agents.memory_model);
+        let inherit = model.as_deref() == Some("inherit");
+        let model = if inherit {
+            session.model.clone()
+        } else {
+            model
+        };
+        if let Some(model) = model.as_deref()
+            && let Some(provider) = crate::provider::active_provider_fork()
+        {
+            let request = if inherit {
+                crate::provider::MultiProvider::model_switch_request_for_session_route(
+                    model,
+                    session.provider_key.as_deref(),
+                    session.route_api_method.as_deref(),
+                )
+            } else {
+                model.to_string()
+            };
+            if crate::provider::set_model_with_auth_refresh(provider.as_ref(), &request).is_ok() {
+                return Self {
+                    client: crate::provider::shared_http_client(),
+                    model: provider.model(),
+                    max_tokens: DEFAULT_MAX_TOKENS,
+                    backend: SidecarBackend::Provider,
+                    provider: Some(provider),
+                    reasoning_override: None,
+                };
+            }
+        }
+        // No live routing provider: retain extraction auto-selection as fallback
+        // for unsupported coordinator models and strip transport prefixes for
+        // the dedicated OpenAI/Claude clients.
+        let model = model.map(|model| {
+            model
+                .split_once(':')
+                .map(|(_, id)| id.to_string())
+                .unwrap_or(model)
+        });
+        Self::with_configured_model(model)
+    }
+
     fn with_configured_model(configured_model: Option<String>) -> Self {
         let (backend, model, provider) = if let Some(model) = configured_model {
             match crate::provider::provider_for_model(&model) {
@@ -312,6 +356,13 @@ impl Sidecar {
         let (text, usage) = provider
             .complete_simple_with_usage(user_message, system)
             .await
+            .inspect_err(|error| {
+                crate::telemetry::record_simple_completion_failure_usage(
+                    None,
+                    crate::telemetry::UsageSource::Sidecar,
+                    error,
+                );
+            })
             .context("Sidecar completion via active provider failed")?;
         crate::telemetry::record_simple_completion_usage(
             None,
@@ -497,7 +548,7 @@ impl Sidecar {
                 .await
                 .context("Failed to parse OpenAI API response")
                 .map_err(OpenAiSidecarError::other)?;
-            record_openai_sidecar_usage(model, result.get("usage"));
+            record_openai_sidecar_usage(model, Some(&result));
             extract_openai_response_text(&result).map_err(OpenAiSidecarError::other)
         }
     }
@@ -633,7 +684,7 @@ impl Sidecar {
             crate::telemetry::record_provider_usage(
                 None,
                 "claude",
-                model,
+                reported_sidecar_model(model, result.model.as_deref()),
                 crate::telemetry::UsageSource::Sidecar,
                 crate::telemetry::ProviderUsage {
                     input_tokens: usage.input_tokens,
@@ -968,10 +1019,7 @@ async fn collect_openai_sse_text(response: reqwest::Response, model: &str) -> Re
                             }
                         }
                         "response.completed" | "response.incomplete" => {
-                            record_openai_sidecar_usage(
-                                model,
-                                event.response.as_ref().and_then(|r| r.get("usage")),
-                            );
+                            record_openai_sidecar_usage(model, event.response.as_ref());
                             return Ok(text);
                         }
                         "response.failed" | "error" => {
@@ -1014,8 +1062,18 @@ fn parse_openai_usage(usage: &serde_json::Value) -> Option<crate::telemetry::Pro
     })
 }
 
-fn record_openai_sidecar_usage(model: &str, usage: Option<&serde_json::Value>) {
-    if let Some(parsed) = usage.and_then(parse_openai_usage) {
+fn reported_sidecar_model<'a>(requested: &'a str, reported: Option<&'a str>) -> &'a str {
+    reported
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(requested)
+}
+
+fn record_openai_sidecar_usage(model: &str, response: Option<&serde_json::Value>) {
+    if let Some(response) = response
+        && let Some(parsed) = response.get("usage").and_then(parse_openai_usage)
+    {
+        let model = reported_sidecar_model(model, response.get("model").and_then(|v| v.as_str()));
         crate::telemetry::record_provider_usage(
             None,
             "openai",
@@ -1150,6 +1208,7 @@ fn is_anthropic_oauth_forbidden(err: &anyhow::Error) -> bool {
 
 #[derive(Deserialize)]
 struct ClaudeMessagesResponse {
+    model: Option<String>,
     content: Vec<ClaudeContentBlock>,
     usage: Option<ClaudeUsage>,
 }
@@ -1180,6 +1239,26 @@ mod tests {
     use super::*;
     use crate::auth::codex;
     use std::ffi::OsString;
+
+    #[test]
+    fn sidecar_model_prefers_reported_identity_with_requested_fallback() {
+        assert_eq!(
+            reported_sidecar_model("alias", Some("served-snapshot")),
+            "served-snapshot"
+        );
+        assert_eq!(
+            reported_sidecar_model("alias", Some(" served-snapshot ")),
+            "served-snapshot"
+        );
+        for reported in [None, Some(""), Some("  ")] {
+            assert_eq!(reported_sidecar_model("alias", reported), "alias");
+        }
+        let parsed: ClaudeMessagesResponse = serde_json::from_value(serde_json::json!({
+            "model": "claude-served-snapshot", "content": []
+        }))
+        .unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("claude-served-snapshot"));
+    }
 
     #[test]
     fn parses_openai_responses_usage_with_cached_subset() {
@@ -1433,6 +1512,72 @@ mod tests {
                 reply: self.reply.clone(),
             })
         }
+    }
+
+    /// Stub that records the model it was switched to.
+    struct SwitchableProvider(std::sync::Mutex<String>);
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for SwitchableProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            anyhow::bail!("no network in tests")
+        }
+
+        fn name(&self) -> &str {
+            "switchable"
+        }
+
+        fn model(&self) -> String {
+            self.0.lock().unwrap().clone()
+        }
+
+        fn set_model(&self, model: &str) -> Result<()> {
+            *self.0.lock().unwrap() = model.to_string();
+            Ok(())
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(SwitchableProvider(std::sync::Mutex::new(self.model())))
+        }
+    }
+
+    /// The local TUI end-of-session path builds its sidecar with
+    /// `for_session`, so a session's `/agents memory` choice must win over the
+    /// global default there too.
+    #[test]
+    fn session_sidecar_uses_session_memory_model_override() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[agents]\nmemory_model = \"global-memory-model\"\n",
+        )
+        .unwrap();
+        crate::provider::set_active_provider(std::sync::Arc::new(SwitchableProvider(
+            std::sync::Mutex::new("coordinator-model".into()),
+        )));
+        let mut session =
+            crate::session::Session::create_with_id("sidecar_memory".into(), None, None);
+        session.save_prepared().unwrap();
+        session
+            .set_agent_model_override("memory", Some("session-memory-model".into()))
+            .unwrap();
+        assert_eq!(
+            Sidecar::for_session(&session).model_name(),
+            "session-memory-model"
+        );
+        session.set_agent_model_override("memory", None).unwrap();
+        assert_eq!(
+            Sidecar::for_session(&session).model_name(),
+            "global-memory-model"
+        );
     }
 
     /// With NO OpenAI/Claude credentials, the sidecar must select the live

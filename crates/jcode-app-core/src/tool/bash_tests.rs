@@ -7,6 +7,24 @@ use crate::tool::bash::{
 use serde_json::json;
 use tokio::sync::mpsc;
 
+#[cfg(not(windows))]
+#[test]
+fn bash_definition_prefers_repository_search_tools() {
+    let definition = BashTool::new().to_definition();
+    assert_eq!(definition.name, "bash");
+    assert!(
+        definition
+            .description
+            .contains("prefer agentgrep or rg over grep -r")
+    );
+    assert!(
+        definition
+            .description
+            .contains("hidden and ignored files by default, not all untracked files")
+    );
+    assert!(definition.description.contains("--hidden --no-ignore"));
+}
+
 #[test]
 fn bash_optional_nulls_use_omitted_defaults() {
     let omitted: BashInput = serde_json::from_value(json!({"command": "printf ok"})).unwrap();
@@ -136,6 +154,110 @@ fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolC
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     }
+}
+
+#[test]
+fn cloud_environment_hydrates_commands_without_transcript_values() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir(repo.join("subdir")).unwrap();
+    let original_home = std::env::var_os("JCODE_HOME");
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(original_home);
+    crate::env::set_var("JCODE_HOME", &state);
+    let name = "CLOUD_TEST_RESOURCE_TOKEN";
+    let secret = "opaque-sentinel-do-not-return";
+    let original_value = std::env::var_os(name);
+    crate::cloud_environment::save_environment(&repo, name, secret).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for persistent in [false, true] {
+            let mut ctx = make_ctx(None);
+            ctx.working_dir = Some(repo.join("subdir"));
+            if persistent {
+                ctx.execution_mode = crate::tool::ToolExecutionMode::AgentTurn;
+                ctx.graceful_shutdown_signal = Some(jcode_agent_runtime::InterruptSignal::new());
+            }
+            let result = BashTool::new().execute(json!({
+                "command": "test \"${CLOUD_TEST_RESOURCE_TOKEN:+present}\" = present && printf resource-ready"
+            }), ctx).await.unwrap();
+            assert_eq!(result.output.lines().next(), Some("resource-ready"));
+            assert!(!result.output.contains(secret));
+        }
+        let mut ctx = make_ctx(None);
+        ctx.working_dir = Some(repo.join("subdir"));
+        let result = BashTool::new().execute(json!({
+            "command": "test \"${CLOUD_TEST_RESOURCE_TOKEN:+present}\" = present && printf resource-ready",
+            "run_in_background": true,
+            "notify": false,
+            "wake": false
+        }), ctx).await.unwrap();
+        let id = result.metadata.as_ref().unwrap()["task_id"].as_str().unwrap();
+        let mut completed = false;
+        for _ in 0..100 {
+            if let Some(status) = crate::background::global().status(id).await
+                && status.status != BackgroundTaskStatus::Running
+            {
+                assert_eq!(status.status, BackgroundTaskStatus::Completed);
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(completed, "background command did not finish");
+        let output = crate::background::global().output(id).await.unwrap();
+        assert!(output.contains("resource-ready"));
+        assert!(!output.contains(secret));
+    });
+    assert_eq!(
+        std::env::var_os(name),
+        original_value,
+        "daemon environment must not change"
+    );
+}
+
+#[tokio::test]
+async fn background_handoff_names_reason_task_and_productive_wait_without_bg_tutorial() {
+    let result = BashTool::new()
+        .execute(
+            json!({"command": "printf done", "run_in_background": true, "wake": true}),
+            make_ctx(None),
+        )
+        .await
+        .expect("background command should start");
+    assert!(
+        result
+            .output
+            .contains("Command started in background as requested.")
+    );
+    assert!(result.output.contains(BACKGROUND_WAIT_GUIDANCE));
+    assert!(
+        result
+            .output
+            .contains("The agent will be woken when the task completes.")
+    );
+    assert!(!result.output.contains("action=\"wait\""));
+    assert!(!result.output.contains("To check progress"));
+    let metadata = result.metadata.expect("background metadata");
+    let id = metadata["task_id"].as_str().expect("task id");
+    assert!(result.output.contains(&format!("Task ID: {id}")));
+    crate::background::global()
+        .wait(id, Duration::from_secs(5), false)
+        .await;
 }
 
 fn make_agent_ctx(signal: jcode_agent_runtime::InterruptSignal) -> ToolContext {
@@ -300,6 +422,8 @@ async fn test_command_timeout_with_stdin_channel() {
         result.output
     );
     let metadata = result.metadata.expect("expected background metadata");
+    assert!(result.output.contains(BACKGROUND_WAIT_GUIDANCE));
+    assert!(!result.output.contains("Use `bg`"));
     assert_eq!(metadata["background"], true);
     assert_eq!(metadata["timeout_promoted"], true);
     assert_eq!(metadata["foreground_timeout_ms"], 1000);
@@ -519,83 +643,31 @@ async fn test_stderr_captured_with_stdin() {
     );
 }
 
-#[test]
-fn test_parse_progress_marker_handles_percent_payloads() {
-    let progress = parse_progress_marker(
-        r#"JCODE_PROGRESS {"percent":25,"message":"Downloading dependencies"}"#,
-    )
-    .expect("marker should parse");
-
-    assert_eq!(progress.percent, Some(25.0));
-    assert_eq!(
-        progress.message.as_deref(),
-        Some("Downloading dependencies")
+#[tokio::test]
+async fn unanswered_stdin_request_closes_stdin_instead_of_hanging() {
+    // Client receives the request but never answers, like the TUI does.
+    let (tx, mut rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+    let held = tokio::spawn(async move {
+        let mut pending = Vec::new();
+        while let Some(req) = rx.recv().await {
+            pending.push(req);
+        }
+    });
+    let tool = BashTool::new();
+    let input = json!({"command": "cat; echo got_eof", "timeout": 20000});
+    let started = std::time::Instant::now();
+    let result = tool.execute(input, make_ctx(Some(tx))).await.unwrap();
+    assert!(result.output.contains("got_eof"), "{}", result.output);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
     );
-    assert_eq!(progress.kind, BackgroundTaskProgressKind::Determinate);
-    assert_eq!(progress.source, BackgroundTaskProgressSource::Reported);
+    held.abort();
 }
 
-#[test]
-fn test_parse_heuristic_progress_handles_ratio_output() {
-    let progress = parse_heuristic_progress("Running test 3/10 tests")
-        .expect("heuristic parser should not fail")
-        .expect("heuristic ratio progress should parse");
-
-    assert_eq!(progress.current, Some(3));
-    assert_eq!(progress.total, Some(10));
-    assert_eq!(progress.percent, Some(30.0));
-    assert_eq!(progress.unit.as_deref(), Some("tests"));
-    assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
-}
-
-#[test]
-fn test_parse_heuristic_progress_handles_percent_output() {
-    let progress = parse_heuristic_progress("download progress 42% complete")
-        .expect("heuristic parser should not fail")
-        .expect("heuristic percent progress should parse");
-
-    assert_eq!(progress.percent, Some(42.0));
-    assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
-    assert_eq!(
-        progress.message.as_deref(),
-        Some("download progress 42% complete")
-    );
-}
-
-#[test]
-fn test_parse_heuristic_progress_handles_phase_output() {
-    let progress = parse_heuristic_progress("Compiling jcode v0.10.2")
-        .expect("heuristic parser should not fail")
-        .expect("phase progress should parse");
-
-    assert_eq!(progress.kind, BackgroundTaskProgressKind::Indeterminate);
-    assert_eq!(progress.percent, None);
-    assert_eq!(progress.message.as_deref(), Some("Compiling jcode v0.10.2"));
-    assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
-}
-
-#[test]
-fn test_parse_heuristic_progress_handles_of_output() {
-    let progress = parse_heuristic_progress("Downloaded 3 of 12 crates")
-        .expect("heuristic parser should not fail")
-        .expect("heuristic of progress should parse");
-
-    assert_eq!(progress.current, Some(3));
-    assert_eq!(progress.total, Some(12));
-    assert_eq!(progress.percent, Some(25.0));
-    assert_eq!(progress.unit.as_deref(), Some("crates"));
-}
-
-#[test]
-fn test_parse_heuristic_progress_handles_byte_ratio_output() {
-    let progress = parse_heuristic_progress("Downloaded 1.5/3.0 GiB")
-        .expect("heuristic parser should not fail")
-        .expect("heuristic byte ratio progress should parse");
-
-    assert_eq!(progress.percent, Some(50.0));
-    assert_eq!(progress.unit.as_deref(), Some("gib"));
-    assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
-}
+#[path = "bash_tests/progress_parsing.rs"]
+mod progress_parsing;
 
 #[tokio::test]
 async fn test_background_command_progress_marker_updates_status_and_stays_out_of_output() {

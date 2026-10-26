@@ -582,23 +582,7 @@ fn test_help_topic_shows_commit_push_command_details() {
     assert!(msg.content.contains("push"));
 }
 
-#[test]
-fn test_fast_release_command_starts_synthetic_user_turn() {
-    let mut app = create_test_app();
-    app.input = "/fast-release".to_string();
-    app.submit_input();
-
-    assert!(app.is_processing);
-    assert!(app.pending_turn);
-    let notice = app
-        .display_messages()
-        .last()
-        .expect("missing launch notice");
-    assert_eq!(notice.role, "system");
-    assert!(notice
-        .content
-        .contains("Starting logical commits + push + fast local release"));
-}
+include!("release_commands.rs");
 
 #[test]
 fn test_triage_command_starts_synthetic_user_turn() {
@@ -623,152 +607,21 @@ fn test_triage_command_includes_focus_in_prompt() {
     assert!(prompt.contains("Additional focus from the user: only crash reports"));
 }
 
-#[test]
-fn test_cut_release_alias_starts_fast_release_turn() {
-    let mut app = create_test_app();
-    app.input = "/cut-release".to_string();
-    app.submit_input();
 
-    assert!(app.is_processing);
-    assert!(app.pending_turn);
-    let notice = app
-        .display_messages()
-        .last()
-        .expect("missing launch notice");
-    assert!(notice.content.contains("fast local release"));
-}
 
-#[test]
-fn test_fast_release_prompt_uses_selfdev_cache() {
-    let fast_prompt = super::commands::build_fast_release_prompt();
-    assert!(fast_prompt.contains("quick-release.sh --prepare-fast"));
-    assert!(fast_prompt.contains("quick-release.sh --fast-local"));
-    assert!(fast_prompt.contains("warm target/selfdev cache"));
-    assert!(fast_prompt.contains("Do not run the separate local macOS cross-build"));
-    let prepare = fast_prompt.find("--prepare-fast").unwrap();
-    let bump = fast_prompt.find("Bump the version").unwrap();
-    assert!(prepare < bump);
-}
 
-#[test]
-fn test_fast_macos_release_command_uses_prepared_cross_build() {
-    let mut app = create_test_app();
-    app.input = "/fast-macos-release".to_string();
-    app.submit_input();
 
-    assert!(app.is_processing);
-    assert!(app.pending_turn);
-    let notice = app
-        .display_messages()
-        .last()
-        .expect("missing launch notice");
-    assert!(notice.content.contains("fast macOS release"));
 
-    let prompt = super::commands::build_fast_macos_release_prompt();
-    assert!(prompt.contains("quick-release.sh --prepare-fast-macos"));
-    assert!(prompt.contains("quick-release.sh --fast-macos-local"));
-    assert!(prompt.contains("macOS arm64"));
-    let prepare = prompt.find("--prepare-fast-macos").unwrap();
-    let bump = prompt.find("Bump the version").unwrap();
-    assert!(prepare < bump);
-}
 
-#[test]
-fn test_help_topic_shows_fast_macos_release_details() {
-    let mut app = create_test_app();
-    app.input = "/help fast-macos-release".to_string();
-    app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing help response");
-    assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("/fast-macos-release"));
-    assert!(msg.content.contains("--prepare-fast-macos"));
-    assert!(msg.content.contains("--fast-macos-local"));
-    assert!(msg.content.contains("osxcross"));
-}
 
-#[test]
-fn test_remote_release_command_uses_tag_only_ci_path() {
-    let mut app = create_test_app();
-    app.input = "/remote-release".to_string();
-    app.submit_input();
 
-    assert!(app.is_processing);
-    assert!(app.pending_turn);
-    let notice = app
-        .display_messages()
-        .last()
-        .expect("missing launch notice");
-    assert_eq!(notice.role, "system");
-    assert!(notice
-        .content
-        .contains("Starting logical commits + push + remote release"));
 
-    let prompt = super::commands::build_remote_release_prompt();
-    assert!(prompt.contains("quick-release.sh --remote"));
-    assert!(prompt.contains("without any local build"));
-    assert!(prompt.contains("publication gated"));
-    assert!(prompt.contains("Only use the following Jcode-specific procedure"));
-    assert!(prompt.contains("repository's own established release conventions"));
-    assert!(prompt.contains("Do not assume the project uses Cargo"));
-    assert!(prompt.contains("tag-triggered or workflow-dispatch CI release"));
-}
 
-#[test]
-fn test_commit_push_release_alias_starts_synthetic_user_turn() {
-    let mut app = create_test_app();
-    app.input = "/commit-push-release".to_string();
-    app.submit_input();
 
-    assert!(app.is_processing);
-    assert!(app.pending_turn);
-    let notice = app
-        .display_messages()
-        .last()
-        .expect("missing launch notice");
-    assert_eq!(notice.role, "system");
-    assert!(notice
-        .content
-        .contains("Starting logical commits + push + fast local release"));
-}
 
-#[test]
-fn test_help_topic_shows_cut_release_command_details() {
-    let mut app = create_test_app();
-    app.input = "/help cut-release".to_string();
-    app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing help response");
-    assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("/fast-release"));
-    assert!(msg.content.contains("--prepare-fast"));
-    assert!(msg.content.contains("--fast-local"));
-    assert!(msg.content.contains("target/selfdev"));
-    assert!(msg.content.contains("compatibility alias"));
-}
 
-#[test]
-fn test_help_topic_shows_remote_release_command_details() {
-    let mut app = create_test_app();
-    app.input = "/help remote-release".to_string();
-    app.submit_input();
-
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing help response");
-    assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("/remote-release"));
-    assert!(msg.content.contains("--remote"));
-    assert!(msg.content.contains("without running any local build"));
-    assert!(msg.content.contains("remains a draft"));
-}
 
 #[test]
 fn test_help_topic_shows_catchup_command_details() {
@@ -918,6 +771,44 @@ fn test_maybe_show_catchup_after_history_adds_brief_page_and_marks_seen() {
             persisted.updated_at,
             &persisted.status
         ));
+    });
+}
+
+#[test]
+fn test_catchup_brief_reveals_side_panel_the_user_hid() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        // The user dismissed the panel before opening Catch Up.
+        app.dismiss_side_panel();
+        assert!(app.side_panel.focused_page_id.is_none());
+
+        let mut target = Session::create(None, Some("hidden catchup".to_string()));
+        target.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "Check the release notes.".to_string(),
+                cache_control: None,
+            }],
+        );
+        target.mark_closed();
+        target.save().expect("save catchup session");
+        let target_id = target.id.clone();
+
+        app.begin_in_flight_catchup_resume(PendingCatchupResume {
+            target_session_id: target_id.clone(),
+            source_session_id: Some(app.session.id.clone()),
+            queue_position: None,
+            show_brief: true,
+        });
+        app.maybe_show_catchup_after_history(&target_id);
+
+        assert_eq!(
+            app.side_panel.focused_page_id.as_deref(),
+            Some("catchup"),
+            "an explicit Catch Up must show its brief"
+        );
+        assert!(!app.side_panel_user_hidden);
     });
 }
 
@@ -1621,6 +1512,42 @@ fn test_goals_show_command_focuses_goal_page() {
 }
 
 #[test]
+fn test_initiatives_commands_reopen_a_closed_side_panel() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().expect("project dir");
+        let goal = crate::goal::create_goal(
+            crate::goal::GoalCreateInput {
+                title: "Ship mobile MVP".to_string(),
+                scope: crate::goal::GoalScope::Project,
+                ..crate::goal::GoalCreateInput::default()
+            },
+            Some(project.path()),
+        )
+        .expect("create goal");
+
+        let mut app = create_test_app();
+        app.session.working_dir = Some(project.path().display().to_string());
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        for command in [
+            "/initiatives".to_string(),
+            "/initiatives resume".to_string(),
+            format!("/initiatives show {}", goal.id),
+        ] {
+            // The user closed the panel, then asks for initiatives.
+            app.dismiss_side_panel();
+            assert!(!app.diff_pane_visible());
+            app.input = command.clone();
+            app.submit_input();
+            assert!(
+                app.diff_pane_visible() && app.side_panel.focused_page().is_some(),
+                "{command} must show the side panel the user closed"
+            );
+            assert!(!app.side_panel_user_hidden, "{command}");
+        }
+    });
+}
+
+#[test]
 fn test_compact_mode_command_updates_local_session_mode() {
     let mut app = create_test_app();
 
@@ -1668,7 +1595,7 @@ fn test_fast_on_while_processing_mentions_next_request_locally() {
     assert_eq!(last.role, "system");
     assert_eq!(
         last.content,
-        "✓ Fast mode on (Fast)\nApplies to the next request/turn. The current in-flight request keeps its existing tier."
+        "✓ Fast mode configured on (Fast)\nRequested for the next provider request, including later in this turn. The current in-flight request is unchanged. Provider acceptance is not yet confirmed."
     );
     assert_eq!(
         app.status_notice(),

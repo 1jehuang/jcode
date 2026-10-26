@@ -1,6 +1,7 @@
 use crate::bus::FileOp;
 use crate::plan::VersionedPlan;
 use crate::protocol::ServerEvent;
+use crate::provider::Provider;
 use jcode_agent_runtime::{
     InterruptSignal, SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource,
 };
@@ -8,7 +9,7 @@ use jcode_swarm_core::{SwarmLifecycleStatus, SwarmMemberRecord, SwarmRole};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 use std::time::Instant;
 use tokio::sync::{RwLock, mpsc};
 
@@ -30,6 +31,13 @@ use tokio::sync::{RwLock, mpsc};
 static BACKGROUND_TOOL_SIGNALS: LazyLock<StdMutex<HashMap<String, InterruptSignal>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+// The Agent keeps its provider Arc stable across model/account/route changes.
+// Key by session rather than connection so a busy reattachment cannot accidentally
+// configure the connection's provisional provider. Only weak references: a
+// registered control must not keep an idle session alive.
+static SESSION_PROVIDERS: LazyLock<StdMutex<HashMap<String, Weak<dyn Provider>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
 /// Register (or replace) the background-tool signal for a session.
 pub(super) fn register_background_tool_signal(session_id: &str, signal: InterruptSignal) {
     if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock() {
@@ -45,10 +53,15 @@ pub(super) fn background_tool_signal_for_session(session_id: &str) -> Option<Int
         .and_then(|map| map.get(session_id).cloned())
 }
 
-/// Move a session's background-tool signal registration to a new session id.
+/// Move a session's out-of-band control registrations to a new session id.
 pub(super) fn rename_background_tool_signal(old_session_id: &str, new_session_id: &str) {
     if old_session_id == new_session_id {
         return;
+    }
+    if let Ok(mut map) = SESSION_PROVIDERS.lock()
+        && let Some(provider) = map.remove(old_session_id)
+    {
+        map.insert(new_session_id.to_string(), provider);
     }
     if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock()
         && let Some(signal) = map.remove(old_session_id)
@@ -57,8 +70,11 @@ pub(super) fn rename_background_tool_signal(old_session_id: &str, new_session_id
     }
 }
 
-/// Drop a session's background-tool signal registration.
+/// Drop a session's out-of-band control registrations.
 pub(super) fn remove_background_tool_signal(session_id: &str) {
+    if let Ok(mut map) = SESSION_PROVIDERS.lock() {
+        map.remove(session_id);
+    }
     if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock() {
         map.remove(session_id);
     }
@@ -212,7 +228,7 @@ pub struct SwarmMember {
     pub friendly_name: Option<String>,
     /// Session that should receive direct completion report-back for this member, if any.
     pub report_back_to_session_id: Option<String>,
-    /// Latest explicit completion report submitted by this member.
+    /// Latest automatically captured output tail (or a legacy explicit report).
     pub latest_completion_report: Option<String>,
     /// Role: "agent" or "coordinator"
     pub role: String,
@@ -449,6 +465,36 @@ pub(super) async fn fanout_live_client_event(
     delivered
 }
 
+/// Deliver `event` to every live attachment of `session_id` except the
+/// connection that caused it.
+pub(super) async fn fanout_peer_client_event(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    exclude_connection_id: &str,
+    event: ServerEvent,
+) -> usize {
+    let targets = {
+        let mut members = swarm_members.write().await;
+        let Some(member) = members.get_mut(session_id) else {
+            return 0;
+        };
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        member
+            .event_txs
+            .iter()
+            .filter(|(connection_id, _)| connection_id.as_str() != exclude_connection_id)
+            .map(|(_, tx)| tx.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut delivered = 0;
+    for tx in targets {
+        if tx.send(event.clone()).is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
+}
+
 pub(super) fn session_event_fanout_sender(
     session_id: String,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -485,6 +531,17 @@ pub(super) fn enqueue_soft_interrupt(
     urgent: bool,
     source: SoftInterruptSource,
 ) -> bool {
+    enqueue_soft_interrupt_with_id(queue, content, images, urgent, source, None)
+}
+
+pub(super) fn enqueue_soft_interrupt_with_id(
+    queue: &SoftInterruptQueue,
+    content: String,
+    images: Vec<(String, String)>,
+    urgent: bool,
+    source: SoftInterruptSource,
+    client_id: Option<String>,
+) -> bool {
     let content_bytes = content.len();
     let content_chars = content.chars().count();
     if let Ok(mut pending) = queue.lock() {
@@ -494,6 +551,7 @@ pub(super) fn enqueue_soft_interrupt(
             images,
             urgent,
             source,
+            client_id,
         });
         crate::logging::info(&format!(
             "SOFT_INTERRUPT_QUEUE_PUSH source={:?} urgent={} content_bytes={} content_chars={} pending_before={} pending_after={}",
@@ -529,6 +587,24 @@ pub struct SessionControlHandle {
 }
 
 impl SessionControlHandle {
+    /// The provider uses interior synchronization for request configuration.
+    /// Never use this to mutate conversation state or an already-sent request.
+    pub fn with_provider(self, provider: Arc<dyn Provider>) -> Self {
+        if let Ok(mut map) = SESSION_PROVIDERS.lock() {
+            map.retain(|_, provider| provider.strong_count() > 0);
+            map.insert(self.session_id.clone(), Arc::downgrade(&provider));
+        }
+        self
+    }
+
+    pub fn provider_handle(&self) -> Option<Arc<dyn Provider>> {
+        SESSION_PROVIDERS
+            .lock()
+            .ok()?
+            .get(&self.session_id)?
+            .upgrade()
+    }
+
     pub fn new(
         session_id: impl Into<String>,
         soft_interrupt_queue: SoftInterruptQueue,
@@ -570,6 +646,79 @@ impl SessionControlHandle {
         source: SoftInterruptSource,
     ) -> bool {
         enqueue_soft_interrupt(&self.soft_interrupt_queue, content, images, urgent, source)
+    }
+
+    pub fn queue_soft_interrupt_with_id(
+        &self,
+        content: String,
+        images: Vec<(String, String)>,
+        urgent: bool,
+        source: SoftInterruptSource,
+        client_id: Option<String>,
+    ) -> bool {
+        enqueue_soft_interrupt_with_id(
+            &self.soft_interrupt_queue,
+            content,
+            images,
+            urgent,
+            source,
+            client_id,
+        )
+    }
+
+    /// Soft interrupts queued and not yet injected.
+    pub fn pending_soft_interrupt_count(&self) -> usize {
+        self.soft_interrupt_queue
+            .lock()
+            .map(|queue| queue.len())
+            .unwrap_or(0)
+    }
+
+    /// Remove the queued interrupts whose caller id is in `client_ids`.
+    ///
+    /// Injection drains the queue under the same lock, so each requested id is
+    /// reported exactly once: in `cancelled` if it was still queued, otherwise
+    /// in `not_queued` (already injected, or never queued here). Order follows
+    /// the request, and duplicate requested ids are reported once.
+    pub fn cancel_soft_interrupts_by_id(
+        &self,
+        client_ids: &[String],
+    ) -> (Vec<String>, Vec<String>) {
+        let mut requested: Vec<String> = Vec::new();
+        for id in client_ids {
+            if !requested.contains(id) {
+                requested.push(id.clone());
+            }
+        }
+        let removed: Vec<String> = match self.soft_interrupt_queue.lock() {
+            Ok(mut queue) => {
+                let mut removed = Vec::new();
+                queue.retain(|message| match &message.client_id {
+                    Some(id) if requested.contains(id) => {
+                        removed.push(id.clone());
+                        false
+                    }
+                    _ => true,
+                });
+                removed
+            }
+            Err(_) => {
+                crate::logging::warn(&format!(
+                    "SOFT_INTERRUPT_QUEUE_CANCEL_BY_ID_FAILED session={} reason=queue_lock_poisoned",
+                    self.session_id
+                ));
+                Vec::new()
+            }
+        };
+        let (cancelled, not_queued): (Vec<String>, Vec<String>) =
+            requested.into_iter().partition(|id| removed.contains(id));
+        crate::logging::info(&format!(
+            "SOFT_INTERRUPT_QUEUE_CANCEL_BY_ID session={} cancelled={} not_queued={}",
+            self.session_id,
+            cancelled.len(),
+            not_queued.len()
+        ));
+        (cancelled, not_queued)
     }
 
     pub fn clear_soft_interrupts(&self) {
@@ -748,6 +897,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
                 images: Vec::new(),
                 urgent,
                 source,
+                client_id: None,
             },
         )
         .map(|_| true)

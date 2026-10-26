@@ -108,14 +108,18 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
                 .map(|s| serde_json::Value::String(crate::util::truncate_str(s, 200).to_string()))
                 .unwrap_or(serde_json::Value::Null),
         )]),
-        "websearch" | "codesearch" | "session_search" | "conversation_search" => obj(vec![(
-            "query",
-            input
-                .get("query")
-                .and_then(|v| v.as_str())
-                .map(|s| serde_json::Value::String(crate::util::truncate_str(s, 200).to_string()))
-                .unwrap_or(serde_json::Value::Null),
-        )]),
+        "websearch" | "web_search" | "codesearch" | "session_search" | "conversation_search" => {
+            obj(vec![(
+                "query",
+                input
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        serde_json::Value::String(crate::util::truncate_str(s, 200).to_string())
+                    })
+                    .unwrap_or(serde_json::Value::Null),
+            )])
+        }
         "open" => obj(vec![
             (
                 "action",
@@ -455,6 +459,10 @@ pub(crate) fn compact_display_message_tool_data(message: &mut DisplayMessage) {
 }
 
 pub(crate) fn compact_display_messages_for_storage(messages: &mut [DisplayMessage]) {
+    // Local startup, reload snapshots, and paged history bypass the remote
+    // History event handler. Normalize here too so persisted model-facing DMs
+    // cannot return as full, pink system messages after a restore.
+    super::remote_notifications::normalize_swarm_delivery_messages(messages);
     for message in messages {
         compact_display_message_tool_data(message);
     }

@@ -12,6 +12,8 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "open".to_string(),
                 content: "Still open".to_string(),
@@ -22,6 +24,8 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -46,84 +50,57 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
     });
 }
 
-#[test]
-fn test_model_picker_preview_arrow_keys_navigate() {
-    let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+include!("model_picker_startup_tests.rs");
 
-    // Type /model to open preview
-    for c in "/model".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+#[test]
+fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
+    with_temp_jcode_home(|| {
+        for command in ["/cloud", "/local"] {
+            let mut app = create_test_app();
+            crate::todo::save_todos(
+                &app.session.id,
+                &[crate::todo::TodoItem {
+                    stage: None,
+                    details: None,
+                    group: None,
+                    id: "open".into(),
+                    content: "Continue on the destination".into(),
+                    status: "in_progress".into(),
+                    priority: "high".into(),
+                    blocked_by: Vec::new(),
+                    assigned_to: None,
+                    confidence: None,
+                    completion_confidence: None,
+                    confidence_history: Vec::new(),
+                    external_blocker: None,
+                    waiting_on: Vec::new(),
+                }],
+            )
             .unwrap();
-    }
+            app.auto_poke_default_on = true;
+            app.auto_poke_incomplete_todos = true;
+            app.is_processing = true;
+            let session = app.session.id.clone();
+            assert!(super::commands_cloud::handle_cloud_command(
+                &mut app, command, &session
+            ));
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker preview should be open");
-    assert!(picker.preview);
-    let initial_selected = picker.selected;
+            // The local completion path used to enqueue a poke here, which
+            // immediately made the pending transfer fail its safety check.
+            // Remote Done uses the same turn-end scheduling entry point.
+            super::local::finish_turn(&mut app);
+            assert!(app.pending_cloud_handoff.is_some());
+            assert!(app.queued_messages.is_empty());
+            assert!(!app.pending_queued_dispatch);
+            assert!(app.auto_poke_incomplete_todos);
+            assert!(app.last_auto_poke_fingerprint.is_none());
 
-    // Down arrow should navigate in preview mode
-    app.handle_key(KeyCode::Down, KeyModifiers::empty())
-        .unwrap();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("picker should still be open");
-    assert!(picker.preview, "should remain in preview mode");
-    assert_eq!(picker.selected, initial_selected + 1);
-
-    // Up arrow should navigate back
-    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("picker should still be open");
-    assert!(picker.preview, "should remain in preview mode");
-    assert_eq!(picker.selected, initial_selected);
-
-    // Opening the preview should place the cursor in the model filter argument.
-    assert_eq!(app.input(), "/model ");
-}
-
-#[test]
-fn test_open_model_picker_without_routes_shows_actionable_guidance() {
-    let mut app = create_test_app();
-
-    app.open_model_picker();
-    wait_for_model_picker_load(&mut app);
-
-    assert!(app.inline_interactive_state.is_none());
-    assert_eq!(app.status_notice(), Some("No models available".to_string()));
-
-    let last = app.display_messages.last().expect("display message");
-    assert_eq!(last.role, "system");
-    assert!(last.content.contains("/login"));
-    assert!(last.content.contains("/account"));
-    assert!(last.content.contains("/model"));
-}
-
-#[test]
-fn test_remote_model_picker_during_startup_waits_for_session_catalog() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
-    app.remote_provider_model = Some("gpt-5.6-sol".to_string());
-    app.remote_available_entries.clear();
-    app.remote_model_options.clear();
-
-    app.open_model_picker();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("loading model picker should be open");
-    assert_eq!(picker.entries.len(), 1);
-    assert_eq!(picker.entries[0].name, "gpt-5.6-sol");
-    assert_eq!(picker.entries[0].options[0].detail, "updating model list…");
+            // Cancellation restores normal scheduling, not a disabled poke.
+            super::commands_cloud::handle_cloud_command(&mut app, "/cloud cancel", &session);
+            assert!(app.schedule_turn_end_followups());
+            assert!(!app.queued_messages.is_empty());
+        }
+    });
 }
 
 #[test]
@@ -137,12 +114,8 @@ fn test_remote_model_command_opens_picker_without_catalog_request() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     let request_id_before = remote.next_request_id_for_test();
 
-    rt.block_on(app.handle_remote_key(
-        KeyCode::Enter,
-        KeyModifiers::empty(),
-        &mut remote,
-    ))
-    .unwrap();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .unwrap();
 
     assert!(app.inline_interactive_state.is_some());
     assert_eq!(
@@ -593,17 +566,25 @@ fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
     app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
         .unwrap();
     let picker = app.inline_interactive_state.as_ref().unwrap();
-    assert!(!picker.filtered.is_empty(), "typed input should filter models");
+    assert!(
+        !picker.filtered.is_empty(),
+        "typed input should filter models"
+    );
     assert!(picker.filtered.len() < picker.entries.len());
 
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
     assert!(app.session.subagent_model.is_some());
     assert_eq!(app.provider.model(), "counting-a");
 }
 
 #[test]
 fn test_model_picker_reuses_cached_entries_until_invalidated() {
+    // The cache key includes account/config paths. Keep them stable while
+    // account-selection regressions scope their own temporary homes.
+    let _env_lock = crate::storage::lock_test_env();
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
@@ -2247,12 +2228,21 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
             .unwrap();
     }
-    // Explicit navigation makes the selection deliberate, so Enter activates.
-    // Navigate to the Anthropic API key row (an offline api-key prompt flow).
-    app.handle_key(KeyCode::Down, KeyModifiers::empty())
-        .unwrap();
-    app.handle_key(KeyCode::Down, KeyModifiers::empty())
-        .unwrap();
+    // Navigate deliberately to the offline API-key flow by semantic action,
+    // rather than assuming a fixed number of saved-account/add-account rows.
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    let target = picker
+        .filtered
+        .iter()
+        .position(|&index| {
+            matches!(&picker.entries[index].action, crate::tui::PickerAction::Login(provider)
+                if provider.id == "anthropic-api")
+        })
+        .expect("Anthropic API key login should be listed");
+    for _ in 0..target {
+        app.handle_key(KeyCode::Down, KeyModifiers::empty())
+            .unwrap();
+    }
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 
@@ -2346,6 +2336,8 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Finish the remaining task".to_string(),
@@ -2356,6 +2348,8 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2379,6 +2373,8 @@ fn test_poke_status_reports_current_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Finish the remaining task".to_string(),
@@ -2389,6 +2385,8 @@ fn test_poke_status_reports_current_state() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2433,6 +2431,8 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Keep going".to_string(),
@@ -2443,6 +2443,8 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2482,6 +2484,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Finish the remaining task".to_string(),
@@ -2492,6 +2496,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2518,6 +2524,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    stage: None,
+                    details: None,
                     group: None,
                     id: "todo-1".to_string(),
                     content: "Finish the remaining task".to_string(),
@@ -2528,8 +2536,12 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    stage: None,
+                    details: None,
                     group: None,
                     id: "todo-2".to_string(),
                     content: "Pick up the newly discovered task".to_string(),
@@ -2540,6 +2552,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    waiting_on: Vec::new(),
                 },
             ],
         )
@@ -2550,7 +2564,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
         assert!(app.queued_messages()[0].contains("You have 2 incomplete todos"));
-        assert!(!app.queued_messages()[0].contains("Pick up the newly discovered task"));
+        assert!(app.queued_messages()[0].contains("Pick up the newly discovered task"));
         assert!(!app.queued_messages()[0].contains("/poke off"));
     });
 }
@@ -2583,6 +2597,8 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Keep going".to_string(),
@@ -2593,6 +2609,8 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2615,6 +2633,8 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    stage: None,
+                    details: None,
                     group: None,
                     id: "todo-1".to_string(),
                     content: "Finish risky provider path".to_string(),
@@ -2627,8 +2647,12 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                         80,
                     )),
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    stage: None,
+                    details: None,
                     group: None,
                     id: "todo-2".to_string(),
                     content: "Document straightforward behavior".to_string(),
@@ -2641,6 +2665,8 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                         95,
                     )),
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    waiting_on: Vec::new(),
                 },
             ],
         )
@@ -2731,7 +2757,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
         );
         assert!(app.hidden_queued_system_messages.is_empty());
-        assert!(app.display_messages().iter().any(|msg| {
+        assert!(!app.display_messages().iter().any(|msg| {
             msg.content
                 .contains("All todos done. Completion confidence: verified.")
         }));
@@ -2754,6 +2780,8 @@ fn test_todo_completion_gate_detects_abrupt_confidence_increase() {
         priority: "high".to_string(),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
         completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        external_blocker: None,
+        waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(0),
             crate::todo::ConfidenceState::from_legacy_score(100),
@@ -2774,6 +2802,8 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
         priority: "high".to_string(),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
         completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        external_blocker: None,
+        waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::Speculative,
             crate::todo::ConfidenceState::Plausible,
@@ -2802,6 +2832,8 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 priority: "high".to_string(),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                external_blocker: None,
+                waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
                     crate::todo::ConfidenceState::from_legacy_score(100),
@@ -2872,7 +2904,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 .iter()
                 .filter(|message| message.content.contains("All todos done"))
                 .count(),
-            1
+            0
         );
     });
 }
@@ -2898,6 +2930,8 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Done without poke".to_string(),
@@ -2908,6 +2942,8 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2933,6 +2969,8 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Keep going".to_string(),
@@ -2943,6 +2981,8 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -3112,6 +3152,8 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
                     status: "completed".into(),
                     confidence: Some(planning),
                     completion_confidence: Some(completion),
+                    external_blocker: None,
+                    waiting_on: Vec::new(),
                     confidence_history: history,
                     ..Default::default()
                 }],
@@ -3145,4 +3187,18 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
             );
         }
     });
+}
+
+#[test]
+fn test_remote_alt_e_toggles_prompt_history_without_typing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let before = crate::tui::ui::viewport::prompt_history_expanded();
+    rt.block_on(app.handle_remote_key(KeyCode::Char('e'), KeyModifiers::ALT, &mut remote))
+        .unwrap();
+    assert!(app.input.is_empty(), "Alt+E must not type: {:?}", app.input);
+    assert_ne!(crate::tui::ui::viewport::prompt_history_expanded(), before);
+    crate::tui::ui::viewport::toggle_prompt_history_expanded();
 }

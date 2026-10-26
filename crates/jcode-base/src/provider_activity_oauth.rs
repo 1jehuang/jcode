@@ -1,6 +1,7 @@
-//! Recorded ChatGPT usage, deliberately separate from the API-key spend ledger.
+//! Recorded OAuth usage, deliberately separate from the API-key spend ledger.
 //! A stable sidecar lock serializes read/modify/atomic-replace across processes.
 use chrono::{DateTime, Local, Utc};
+use jcode_core::util::format_number_u64;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::OpenOptions, path::Path};
 
@@ -11,9 +12,30 @@ struct Totals {
     input: u64,
     output: u64,
     cached: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    cache_creation: u64,
     known_usd: f64,
     unpriced_requests: u64,
     incomplete_requests: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn format_usage_tokens(tokens: u64) -> String {
+    for (unit, suffix) in [
+        (1_000_000_000_000_000_000_u64, "Quint"),
+        (1_000_000_000_000_000, "Quad"),
+        (1_000_000_000_000, "Tril"),
+        (1_000_000_000, "Bil"),
+        (1_000_000, "Mil"),
+    ] {
+        if tokens >= unit {
+            return format!("{:.3} {}", tokens as f64 / unit as f64, suffix);
+        }
+    }
+    format_number_u64(tokens)
 }
 
 impl Totals {
@@ -22,6 +44,7 @@ impl Totals {
         self.input = self.input.saturating_add(other.input);
         self.output = self.output.saturating_add(other.output);
         self.cached = self.cached.saturating_add(other.cached);
+        self.cache_creation = self.cache_creation.saturating_add(other.cache_creation);
         self.known_usd += other.known_usd;
         self.unpriced_requests = self
             .unpriced_requests
@@ -33,26 +56,50 @@ impl Totals {
 
     fn display(&self) -> String {
         if self.requests == 0 {
-            return "No recorded usage (API-equivalent estimate, not a bill)".into();
+            return "No recorded usage".into();
         }
-        let cost = if self.unpriced_requests == self.requests {
-            "cost unknown (pricing unavailable)".into()
+        let estimate = if self.known_usd > 0.0 && self.known_usd < 0.01 {
+            "<$0.01 est.".to_string()
+        } else {
+            format!("${:.2} est.", self.known_usd)
+        };
+        let cost = if self.unpriced_requests == self.requests && self.known_usd == 0.0 {
+            "cost unknown".into()
         } else if self.unpriced_requests > 0 {
             format!(
-                "${:.4} known + unknown cost ({} unpriced responses)",
-                self.known_usd, self.unpriced_requests
+                "{} + unknown cost ({} unpriced)",
+                estimate,
+                format_number_u64(self.unpriced_requests)
             )
         } else {
-            format!("${:.4}", self.known_usd)
+            estimate
         };
         let partial = if self.incomplete_requests > 0 {
-            "; partial token counts"
+            " · partial tokens"
         } else {
             ""
         };
+        let cached = if self.cached > 0 {
+            format!(" · {} cached", format_usage_tokens(self.cached))
+        } else {
+            String::new()
+        };
+        let created = if self.cache_creation > 0 {
+            format!(
+                " · {} cache creation",
+                format_usage_tokens(self.cache_creation)
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} input / {} output tokens ({} cached input), {} API-equivalent estimate, not a bill; recorded only{}",
-            self.input, self.output, self.cached, cost, partial
+            "{} in · {} out{}{} · {}{}",
+            format_usage_tokens(self.input),
+            format_usage_tokens(self.output),
+            cached,
+            created,
+            cost,
+            partial
         )
     }
 }
@@ -160,6 +207,7 @@ fn priced_usage(
         input: input.unwrap_or(0),
         output: output.unwrap_or(0),
         cached,
+        cache_creation: 0,
         known_usd: cost.unwrap_or(0.0),
         unpriced_requests: u64::from(cost.is_none()),
         incomplete_requests: u64::from(!complete),
@@ -199,12 +247,129 @@ pub fn openai_oauth_usage_summary(label: &str) -> Vec<(String, String)> {
         Err(_) => {
             return ["Today", "Lifetime"]
                 .into_iter()
-                .map(|key| {
-                    (
-                        key.into(),
-                        "Recorded usage unavailable (ledger could not be read)".into(),
-                    )
-                })
+                .map(|key| (key.into(), "Usage unavailable (unreadable ledger)".into()))
+                .collect();
+        }
+    };
+    summary(&store, label, Local::now())
+}
+
+fn anthropic_path() -> anyhow::Result<std::path::PathBuf> {
+    Ok(crate::storage::jcode_dir()?.join("anthropic_oauth_usage.json"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn anthropic_priced_usage(
+    model: &str,
+    input: Option<u64>,
+    output: Option<u64>,
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+    tier: Option<&str>,
+    cache_creation_5m: Option<u64>,
+    cache_creation_1h: Option<u64>,
+) -> Totals {
+    let cached = cache_read.unwrap_or(0);
+    let created = cache_creation.unwrap_or(0);
+    let complete = input.is_some() && output.is_some();
+    // Only trust a TTL breakdown that exactly accounts for all cache writes.
+    // Missing or inconsistent breakdowns must not silently get the 5m rate.
+    let writes_known = cache_creation_5m
+        .unwrap_or(0)
+        .checked_add(cache_creation_1h.unwrap_or(0))
+        == Some(created);
+    let cost = jcode_provider_core::pricing::anthropic_api_pricing_with_tier(model, tier).and_then(
+        |price| {
+            if !complete {
+                return None;
+            }
+            let input_price = price.input_price_per_mtok_micros?;
+            let output_price = price.output_price_per_mtok_micros?;
+            let read_price = if cached > 0 {
+                price.cache_read_price_per_mtok_micros?
+            } else {
+                0
+            };
+            Some(
+                (input.unwrap() as f64 * input_price as f64
+                    + output.unwrap() as f64 * output_price as f64
+                    + cached as f64 * read_price as f64
+                    + if writes_known {
+                        (cache_creation_5m.unwrap_or(0) as f64 * 1.25
+                            + cache_creation_1h.unwrap_or(0) as f64 * 2.0)
+                            * input_price as f64
+                    } else {
+                        0.0
+                    })
+                    / 1_000_000_000_000.0,
+            )
+        },
+    );
+    Totals {
+        requests: 1,
+        input: input
+            .unwrap_or(0)
+            .saturating_add(cached)
+            .saturating_add(created),
+        output: output.unwrap_or(0),
+        cached,
+        cache_creation: created,
+        known_usd: cost.unwrap_or(0.0),
+        unpriced_requests: u64::from(cost.is_none() || !writes_known),
+        incomplete_requests: u64::from(!complete),
+    }
+}
+
+/// Record one authoritative Anthropic OAuth completion against its captured
+/// credential label. Input excludes both cache reads and cache creation.
+/// Tier is passed to the shared pricing helper. Cache-write costs are known
+/// only when the 5-minute and 1-hour breakdown sums to total cache creation.
+#[allow(clippy::too_many_arguments)]
+pub fn record_anthropic_oauth_usage(
+    label: &str,
+    model: &str,
+    input: Option<u64>,
+    output: Option<u64>,
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+    tier: Option<&str>,
+    cache_creation_5m: Option<u64>,
+    cache_creation_1h: Option<u64>,
+) {
+    if label.trim().is_empty()
+        || [input, output, cache_read, cache_creation]
+            .iter()
+            .all(Option::is_none)
+    {
+        return;
+    }
+    let totals = anthropic_priced_usage(
+        model,
+        input,
+        output,
+        cache_read,
+        cache_creation,
+        tier,
+        cache_creation_5m,
+        cache_creation_1h,
+    );
+    if let Err(error) =
+        anthropic_path().and_then(|path| update(&path, label, &totals, Local::now()))
+    {
+        crate::logging::warn(&format!(
+            "Could not persist recorded Anthropic OAuth usage: {error}"
+        ));
+    }
+}
+
+/// Local-day and lifetime recorded usage, separate from API-key spend.
+pub fn anthropic_oauth_usage_summary(label: &str) -> Vec<(String, String)> {
+    let store = match anthropic_path().and_then(|path| load(&path)) {
+        Ok(store) => store,
+        Err(_) => {
+            return ["Today", "Lifetime"]
+                .into_iter()
+                .map(|key| (key.into(), "Usage unavailable (unreadable ledger)".into()))
                 .collect();
         }
     };
@@ -225,16 +390,17 @@ fn summary(store: &Store, label: &str, now: DateTime<Local>) -> Vec<(String, Str
         .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
     {
         lifetime.push_str(&format!(
-            "; since {}",
-            first.with_timezone(&Local).format("%Y-%m-%d %H:%M %:z")
+            " · since {}",
+            first.with_timezone(&Local).format("%Y-%m-%d")
         ));
     }
     vec![
-        (
-            "Today".into(),
-            format!("{}; since local midnight", today.display()),
-        ),
+        ("Today".into(), today.display()),
         ("Lifetime".into(), lifetime),
+        (
+            "Tracking".into(),
+            "Jcode only · API-equivalent cost, not a bill · today starts at local midnight".into(),
+        ),
     ]
 }
 
@@ -242,6 +408,212 @@ fn summary(store: &Store, label: &str, now: DateTime<Local>) -> Vec<(String, Str
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn anthropic_totals_cache_pricing_and_unknown_models() {
+        let usage = anthropic_priced_usage(
+            "claude-sonnet-4-6",
+            Some(1_000_000),
+            Some(100_000),
+            Some(400_000),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(usage.input, 1_400_000);
+        assert_eq!(usage.cached, 400_000);
+        assert!((usage.known_usd - 4.62).abs() < 1e-9);
+        assert_eq!(usage.unpriced_requests, 0);
+        let writes = anthropic_priced_usage(
+            "claude-sonnet-4-6",
+            Some(1_000_000),
+            Some(100_000),
+            Some(400_000),
+            Some(200_000),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(writes.input, 1_600_000);
+        assert_eq!(writes.cache_creation, 200_000);
+        assert!((writes.known_usd - 4.62).abs() < 1e-9);
+        assert_eq!(writes.unpriced_requests, 1);
+        assert!(writes.display().contains("200,000 cache creation"));
+        assert!(writes.display().contains("$4.62 est. + unknown cost"));
+        let unknown = anthropic_priced_usage(
+            "future-model",
+            Some(10),
+            Some(5),
+            Some(20),
+            Some(30),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(unknown.input, 60);
+        assert_eq!(unknown.known_usd, 0.0);
+        assert!(unknown.display().contains("cost unknown"));
+        let partial = anthropic_priced_usage(
+            "claude-sonnet-4-6",
+            None,
+            Some(5),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(partial.incomplete_requests, 1);
+        assert_eq!(partial.unpriced_requests, 1);
+    }
+
+    #[test]
+    fn anthropic_accounts_days_and_storage_are_isolated() {
+        let dir = tempfile::tempdir().unwrap();
+        let anthropic = dir.path().join("anthropic_oauth_usage.json");
+        let openai = dir.path().join("openai_oauth_usage.json");
+        let before = Local.with_ymd_and_hms(2026, 10, 22, 23, 59, 59).unwrap();
+        let after = Local.with_ymd_and_hms(2026, 10, 23, 0, 0, 0).unwrap();
+        let usage = anthropic_priced_usage(
+            "claude-sonnet-4-6",
+            Some(10),
+            Some(5),
+            Some(20),
+            Some(30),
+            None,
+            None,
+            None,
+        );
+        update(&anthropic, "one", &usage, before).unwrap();
+        update(&anthropic, "one", &usage, after).unwrap();
+        update(&anthropic, "two", &usage, after).unwrap();
+        let store = load(&anthropic).unwrap();
+        assert_eq!(store.accounts["one"].lifetime.input, 120);
+        assert_eq!(store.accounts["one"].lifetime.cache_creation, 60);
+        assert_eq!(store.accounts["two"].lifetime.input, 60);
+        assert!(summary(&store, "one", after)[0].1.starts_with("60 in"));
+        assert!(
+            summary(&store, "absent", after)[0]
+                .1
+                .contains("No recorded usage")
+        );
+        assert!(!openai.exists());
+        let old = priced_usage("gpt-5.5", None, Some(10), Some(5), None);
+        assert!(
+            serde_json::to_value(old)
+                .unwrap()
+                .get("cache_creation")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn anthropic_cache_ttl_and_fast_tier_pricing() {
+        for (tier, expected) in [
+            (None, 15.875),
+            (Some("auto"), 95.25),
+            (Some("priority"), 95.25),
+        ] {
+            let usage = anthropic_priced_usage(
+                "claude-opus-4-6",
+                Some(1_000_000),
+                Some(100_000),
+                Some(500_000),
+                Some(1_000_000),
+                tier,
+                Some(500_000),
+                Some(500_000),
+            );
+            assert!((usage.known_usd - expected).abs() < 1e-9);
+            assert_eq!(usage.unpriced_requests, 0);
+            assert_eq!(usage.input, 2_500_000);
+        }
+        for (created, five, hour) in [
+            (100, Some(99), Some(0)),
+            (100, None, None),
+            (100, Some(u64::MAX), Some(101)),
+            (0, Some(1), Some(0)),
+        ] {
+            let usage = anthropic_priced_usage(
+                "claude-opus-4-6",
+                Some(1_000_000),
+                Some(0),
+                None,
+                Some(created),
+                None,
+                five,
+                hour,
+            );
+            assert_eq!(usage.unpriced_requests, 1);
+            assert_eq!(usage.known_usd, 5.0);
+        }
+        for (five, hour, expected) in [(Some(1_000_000), None, 6.25), (None, Some(1_000_000), 10.0)]
+        {
+            let usage = anthropic_priced_usage(
+                "claude-opus-4-6",
+                Some(0),
+                Some(0),
+                None,
+                Some(1_000_000),
+                None,
+                five,
+                hour,
+            );
+            assert_eq!(usage.known_usd, expected);
+            assert_eq!(usage.unpriced_requests, 0);
+        }
+    }
+
+    #[test]
+    fn display_compacts_large_usage_counts() {
+        let totals = Totals {
+            requests: 12_346,
+            input: 12_345_678,
+            output: 999,
+            cached: 1_234_567,
+            cache_creation: 0,
+            known_usd: 12.3456,
+            unpriced_requests: 12_345,
+            incomplete_requests: 1,
+        };
+        assert_eq!(
+            totals.display(),
+            "12.346 Mil in · 999 out · 1.235 Mil cached · $12.35 est. + unknown cost (12,345 unpriced) · partial tokens"
+        );
+        let max = Totals {
+            requests: 1,
+            input: u64::MAX,
+            ..Totals::default()
+        };
+        assert!(max.display().starts_with("18.447 Quint in · 0 out"));
+    }
+
+    #[test]
+    fn compact_token_units_keep_small_counts_exact() {
+        for (tokens, expected) in [
+            (0, "0"),
+            (999_999, "999,999"),
+            (1_000_000, "1.000 Mil"),
+            (2_456_000_000, "2.456 Bil"),
+            (1_000_000_000_000, "1.000 Tril"),
+        ] {
+            assert_eq!(format_usage_tokens(tokens), expected);
+        }
+    }
+
+    #[test]
+    fn compact_display_omits_empty_cache_and_preserves_small_costs() {
+        let totals = Totals {
+            requests: 1,
+            input: 1_234,
+            output: 56,
+            known_usd: 0.0001,
+            ..Totals::default()
+        };
+        assert_eq!(totals.display(), "1,234 in · 56 out · <$0.01 est.");
+        assert_eq!(Totals::default().display(), "No recorded usage");
+    }
 
     #[test]
     fn cached_input_discount_and_output_semantics() {
@@ -310,7 +682,7 @@ mod tests {
             priced_usage("gpt-5.5", None, Some(2), Some(1), Some(3)),
         ] {
             assert_eq!(usage.unpriced_requests, 1);
-            assert!(usage.display().contains("partial token counts"));
+            assert!(usage.display().contains("partial tokens"));
         }
     }
 
@@ -326,9 +698,13 @@ mod tests {
         update(&path, "two", &usage, after).unwrap();
         let store = load(&path).unwrap();
         let rows = summary(&store, "one", after);
-        assert!(rows[0].1.contains("50 input / 20 output"));
-        assert!(rows[1].1.contains("100 input / 40 output"));
+        assert!(rows[0].1.contains("50 in · 20 out"));
+        assert!(rows[1].1.contains("100 in · 40 out"));
         assert!(rows[1].1.contains("since 2026-09-05"));
+        assert_eq!(rows[2].0, "Tracking");
+        assert!(rows[2].1.contains("not a bill"));
+        assert!(rows[2].1.contains("local midnight"));
+        assert!(!rows[0].1.contains("not a bill"));
         assert_eq!(store.accounts["two"].lifetime.input, 50);
         assert!(
             summary(&store, "absent", after)[0]

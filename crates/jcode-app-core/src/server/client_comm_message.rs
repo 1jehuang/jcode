@@ -110,6 +110,7 @@ pub(super) async fn handle_comm_message(
     wake: Option<bool>,
     tldr: Option<String>,
     to_swarm: Option<String>,
+    require_target: bool,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -313,11 +314,27 @@ pub(super) async fn handle_comm_message(
             members.keys().cloned().collect()
         };
 
+        if require_target && scope == "broadcast" && cross_swarm_id.is_none() {
+            let sender_is_coordinator = swarm_members
+                .read()
+                .await
+                .get(&from_session)
+                .is_some_and(|member| member.role == "coordinator");
+            if !sender_is_coordinator {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: "message needs a target: pass to_session (the agent to message) or channel. Only the coordinator can message everyone without one.".to_string(),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        }
+
         // Broadcast-style sends are subtree-scoped: a sender reaches only the
         // agents it (transitively) spawned, via the report-back ancestry chain.
         // The swarm coordinator keeps whole-swarm reach as an escape hatch.
         // This prevents one agent from producing a member-cap-sized
-        // notification storm (see docs/SWARM_TASK_GRAPH.md section 8a).
+        // notification storm.
         let subtree_broadcast_targets: Vec<String> = {
             let members = swarm_members.read().await;
             let sender_is_coordinator = members

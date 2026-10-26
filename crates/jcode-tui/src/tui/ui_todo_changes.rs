@@ -25,8 +25,40 @@ use ratatui::text::{Line, Span};
 const MAX_CHANGE_LINES: usize = 6;
 
 /// Parse the todo list a `todo` tool call wrote. Returns `None` for read calls
-/// (no `todos` argument) or when the payload cannot be parsed for display.
+/// (no full-list argument) or when the payload cannot be parsed for display.
 pub(super) fn todos_from_tool_input(tc: &ToolCall) -> Option<Vec<TodoItem>> {
+    if let Some(phases) = tc.input.get("phases").filter(|value| !value.is_null()) {
+        #[derive(serde::Deserialize)]
+        struct Phase {
+            phase: u32,
+            lanes: Vec<Lane>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Lane {
+            lane: String,
+            items: Vec<TodoItem>,
+        }
+
+        let phases = serde_json::from_value::<Vec<Phase>>(phases.clone()).ok()?;
+        let mut todos = Vec::new();
+        for phase in phases {
+            if phase.phase == 0 || phase.lanes.is_empty() {
+                return None;
+            }
+            for lane in phase.lanes {
+                let name = lane.lane.trim();
+                if name.is_empty() || lane.items.is_empty() {
+                    return None;
+                }
+                for mut item in lane.items {
+                    item.stage = Some(phase.phase);
+                    item.group = Some(name.to_string());
+                    todos.push(item);
+                }
+            }
+        }
+        return Some(todos);
+    }
     let todos = tc.input.get("todos")?;
     if todos.is_null() {
         return None;
@@ -303,6 +335,84 @@ pub(super) fn render_todo_change_lines(
 mod tests {
     use super::*;
 
+    fn parse(input: serde_json::Value) -> Option<Vec<TodoItem>> {
+        todos_from_tool_input(&ToolCall {
+            input,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn nested_input_inherits_parents_and_preserves_order() {
+        let item = |id: &str| serde_json::to_value(todo(id, id, "pending")).unwrap();
+        let parsed = parse(serde_json::json!({"phases": [
+            {"phase": 1, "lanes": [
+                {"lane": "  parser  ", "items": [item("a"), item("b")]},
+                {"lane": "tests", "items": [item("c")]}
+            ]},
+            {"phase": 2, "lanes": [{"lane": "ship", "items": [item("d")]}]}
+        ]}))
+        .unwrap();
+        assert_eq!(
+            parsed.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c", "d"]
+        );
+        assert_eq!(
+            parsed.iter().map(|t| t.stage).collect::<Vec<_>>(),
+            [Some(1), Some(1), Some(1), Some(2)]
+        );
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|t| t.group.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("parser"), Some("parser"), Some("tests"), Some("ship")]
+        );
+    }
+
+    #[test]
+    fn legacy_input_remains_compatible_with_nested_deltas() {
+        let mut original = todo("a", "Task", "pending");
+        original.stage = Some(1);
+        original.group = Some("work".into());
+        let previous = parse(serde_json::json!({"todos": [original]})).unwrap();
+        let next = parse(serde_json::json!({"phases": [{"phase": 1, "lanes": [
+            {"lane": "work", "items": [todo("a", "Task", "completed")]}
+        ]}]}))
+        .unwrap();
+        assert_eq!(previous[0].stage, next[0].stage);
+        assert_eq!(previous[0].group, next[0].group);
+        let diff = compute_diff(Some(&previous), &next);
+        assert_eq!(diff.to_completed, 1);
+        assert_eq!(diff.added, 0);
+        assert_eq!(diff.removed, 0);
+    }
+
+    #[test]
+    fn malformed_nested_input_is_not_a_write() {
+        for input in [
+            serde_json::json!({"phases": {}}),
+            serde_json::json!({"phases": [null]}),
+            serde_json::json!({"phases": [{"phase": 1}]}),
+            serde_json::json!({"phases": [{"phase": 0, "lanes": []}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": []}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": [{"lane": "work", "items": []}]}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": [{"lane": "  ", "items": [todo("a", "Task", "pending")]}]}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": [{"lane": 5, "items": []}]}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": [{"lane": "work", "items": [null]}]}]}),
+        ] {
+            assert!(parse(input).is_none());
+        }
+    }
+
+    #[test]
+    fn read_calls_and_empty_writes_remain_distinct() {
+        assert!(parse(serde_json::json!({})).is_none());
+        assert!(parse(serde_json::json!({"phases": null, "todos": null})).is_none());
+        assert_eq!(parse(serde_json::json!({"phases": []})), Some(vec![]));
+        assert_eq!(parse(serde_json::json!({"todos": []})), Some(vec![]));
+    }
+
     fn todo(id: &str, content: &str, status: &str) -> TodoItem {
         TodoItem {
             id: id.to_string(),
@@ -313,8 +423,12 @@ mod tests {
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),
+            external_blocker: None,
+            waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
+            stage: None,
+            details: None,
         }
     }
 

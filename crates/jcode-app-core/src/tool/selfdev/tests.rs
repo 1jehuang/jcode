@@ -328,7 +328,26 @@ fn test_recovery_directive_prefers_reload_context_when_present() {
         directive.reconnect_notice.as_deref(),
         Some("Reloaded with build new-build")
     );
-    assert!(directive.continuation_message.contains("Reload succeeded"));
+    assert!(
+        directive
+            .continuation_message
+            .starts_with("Reload complete. Resuming your task.\n\n")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("Build: old-build → new-build.")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("check whether it already completed or is still running")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("unless genuinely blocked")
+    );
     assert!(
         directive
             .continuation_message
@@ -816,6 +835,10 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
         .await
         .expect("second build should queue");
 
+    for output in [&first.output, &second.output] {
+        assert!(output.contains(crate::tool::BACKGROUND_WAIT_GUIDANCE));
+        assert!(!output.contains("Use `bg"));
+    }
     let first_meta = first.metadata.expect("first metadata");
     let second_meta = second.metadata.expect("second metadata");
     let first_task_id = first_meta["task_id"].as_str().expect("first task id");
@@ -1440,4 +1463,21 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
         .expect("racing request exists");
     assert_eq!(reloaded.state, BuildRequestState::Queued);
     assert!(reloaded.error.is_none());
+}
+
+/// The reload must publish from the same checkout the build used. A primary
+/// repo derived from the running binary's compile location (another worktree)
+/// used to win, which published a stale binary from that worktree.
+#[test]
+fn reload_repo_resolver_prefers_session_working_dir_over_binary_origin() {
+    let session_repo = create_repo_fixture();
+    let other_worktree = create_repo_fixture();
+    let nested = session_repo.path().join("crates");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+
+    let resolved = reload::resolve_selfdev_reload_repo_dir_from(
+        Some(other_worktree.path().to_path_buf()),
+        Some(&nested),
+    );
+    assert_eq!(resolved.as_deref(), Some(session_repo.path()));
 }

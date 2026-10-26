@@ -3,6 +3,37 @@ use crate::logging;
 use crate::message::{Message, ToolDefinition};
 
 impl Agent {
+    pub(crate) fn runtime_skills_snapshot(&self) -> serde_json::Value {
+        let registry = self.current_skills_snapshot();
+        let mut loaded = registry.list();
+        loaded.sort_by(|a, b| a.name.cmp(&b.name));
+        let skills: Vec<_> = loaded
+            .iter()
+            .map(|skill| {
+                serde_json::json!({
+                    "name": skill.name, "description": skill.description,
+                    "path": skill.path, "allowed_tools": skill.allowed_tools,
+                })
+            })
+            .collect();
+        let endorsed: Vec<_> = crate::skill::endorsed_skills().iter().map(|skill| serde_json::json!({
+            "name": skill.name, "description": skill.description, "category": skill.category,
+            "source": skill.source, "install": skill.install, "installed": registry.contains(skill.name),
+        })).collect();
+        serde_json::json!({"skills": skills, "endorsed": endorsed, "active_skill": self.active_skill})
+    }
+
+    pub(crate) fn runtime_agent_model_overrides(&self) -> serde_json::Value {
+        serde_json::json!(self.session.agent_model_overrides)
+    }
+
+    pub(crate) async fn runtime_context_snapshot(&self) -> serde_json::Value {
+        let mut context = self.debug_context().await;
+        context["messages"] = serde_json::json!(self.session.visible_conversation_messages());
+        context["context_window"] = serde_json::json!(self.provider_context_window());
+        context
+    }
+
     /// Explicitly prepare/freeze the same tool surface used by provider turns.
     /// Unlike `debug_context`, this may update the tool cache. It never calls a provider.
     pub async fn prepare_debug_context(&mut self) -> serde_json::Value {
@@ -97,23 +128,6 @@ impl Agent {
         pending
     }
 
-    fn append_current_turn_system_reminder(&self, split: &mut crate::prompt::SplitSystemPrompt) {
-        let Some(reminder) = self
-            .current_turn_system_reminder
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        else {
-            return;
-        };
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
-        }
-        split.dynamic_part.push_str("# System Reminder\n\n");
-        split.dynamic_part.push_str(reminder);
-    }
-
     /// Build split system prompt for better caching
     /// Returns static (cacheable) and dynamic (not cached) parts separately
     pub(super) fn build_system_prompt_split(
@@ -127,11 +141,10 @@ impl Agent {
             };
         }
 
-        let skills = self.current_skills_snapshot();
-        let skill_prompt = self
-            .active_skill
-            .as_ref()
-            .and_then(|name| skills.get(name).map(|skill| skill.get_prompt().to_string()));
+        // The active skill prompt is announced once in the transcript when the
+        // skill is activated (see `announce_active_skill`). Keeping it out of
+        // the system prompt means switching skills never invalidates the cache.
+        let skill_prompt: Option<String> = None;
 
         // Frozen per session so skill installs never rewrite the cached
         // system prefix. Later installs are announced in the transcript.
@@ -143,19 +156,13 @@ impl Agent {
             .as_ref()
             .map(std::path::PathBuf::from);
 
-        let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
+        let (split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
             skill_prompt.as_deref(),
             available_skills,
             self.session.is_canary,
             memory_prompt,
             working_dir.as_deref(),
             self.agents_md_snapshot.clone(),
-        );
-
-        self.append_current_turn_system_reminder(&mut split);
-        crate::prompt::append_swarm_effort_directive(
-            &mut split,
-            self.provider.reasoning_effort().as_deref(),
         );
 
         split

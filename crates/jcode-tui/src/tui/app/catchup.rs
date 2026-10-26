@@ -75,6 +75,11 @@ impl App {
                 .then_with(|| a.id.cmp(&b.id))
         });
         snapshot.focused_page_id = Some(CATCHUP_PAGE_ID.to_string());
+        // Opening Catch Up is an explicit request to read the brief, so it
+        // reveals the panel even after the user hid it. Ordinary refreshes
+        // still keep a dismissed panel hidden.
+        self.side_panel_user_hidden = false;
+        self.side_panel_explicit_hidden = false;
         self.apply_side_panel_snapshot(snapshot);
         let _ = crate::catchup::mark_seen(&session.id, session.updated_at);
     }

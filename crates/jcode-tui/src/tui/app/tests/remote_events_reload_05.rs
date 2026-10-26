@@ -241,6 +241,8 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
                 priority: "high".to_string(),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                external_blocker: None,
+                waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
                     crate::todo::ConfidenceState::from_legacy_score(100),
@@ -296,6 +298,8 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
                 priority: "high".to_string(),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                external_blocker: None,
+                waiting_on: Vec::new(),
                 confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(50)],
                 ..Default::default()
             }],
@@ -359,6 +363,8 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
                 group: Some("release".to_string()),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                external_blocker: None,
+                waiting_on: Vec::new(),
                 confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(100)],
                 ..Default::default()
             }],
@@ -411,6 +417,8 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
                 group: Some("release".to_string()),
                 confidence: Some(crate::todo::ConfidenceState::Verified),
                 completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+                external_blocker: None,
+                waiting_on: Vec::new(),
                 confidence_history: vec![crate::todo::ConfidenceState::Verified],
                 ..Default::default()
             }],
@@ -451,6 +459,8 @@ fn save_unfinished_ownership_fixture(session_id: &str) {
             status: "completed".to_string(),
             confidence: Some(crate::todo::ConfidenceState::Verified),
             completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+            external_blocker: None,
+            waiting_on: Vec::new(),
             confidence_history: vec![crate::todo::ConfidenceState::Verified],
             ..Default::default()
         }],
@@ -863,17 +873,16 @@ fn test_repeated_guardrail_refusals_stop_auto_poke_loop() {
     });
 }
 
-/// The deferred quality review must fire at turn end, and must re-arm when the
-/// auto-poke cycle finishes. Without the re-arm a session could only ever
-/// deliver one digest, so later work would silently lose the review.
+/// Legacy gate observations must never queue a digest or weak-point notice.
+/// Normal completion still requests a final response and ends the poke cycle.
 #[test]
-fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
+fn test_gate_digest_is_disabled_at_turn_end() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
 
-        // Completed work with validated confidence, so the completion gate is
-        // satisfied and the digest is the only thing left to say.
+        // Completed work with validated confidence satisfies the completion gate.
+        // A stale observation must not delay the normal final-response handoff.
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
@@ -883,6 +892,8 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
                 priority: "high".to_string(),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                external_blocker: None,
+                waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::from_legacy_score(97),
                     crate::todo::ConfidenceState::from_legacy_score(100),
@@ -923,29 +934,82 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
 
         assert!(
             app.schedule_auto_poke_followup_if_needed(),
-            "an unresolved review point should schedule the digest"
+            "normal completion should still request the final response"
         );
-        let digest = app
-            .queued_messages
-            .last()
-            .expect("digest should be queued")
-            .clone();
-        assert!(digest.starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
-        assert!(app.todo_gate_digest_delivered);
-        // Consumed, so the same points cannot be raised twice.
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
+        assert!(!app.todo_gate_digest_delivered);
+        assert!(app.display_messages().iter().all(|message| {
+            !message
+                .content
+                .contains("double-check this turn's weak points")
+        }));
+        // Discarded without delivering a review.
         assert!(
             crate::todo::load_gate_observations(&app.session.id)
                 .expect("reload")
                 .is_empty()
         );
 
-        // Simulate the turn running, then the cycle completing.
+        // Simulate the final-response turn completing. No extra turn is queued.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(app.queued_messages.is_empty());
+        assert!(!app.todo_gate_digest_delivered);
+    });
+}
+
+#[test]
+fn test_gate_digest_explicit_opt_in_runs_once_before_completion() {
+    with_temp_jcode_home(|| {
+        write_test_config("[features]\ntodo_gate_digest = true\n");
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "digest-opt-in".into(),
+                content: "Ship the fix".into(),
+                status: "completed".into(),
+                priority: "high".into(),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let observations = [crate::todo::GateObservation {
+            kind: crate::todo::GateObservationKind::IntentUnderstanding,
+            group: None,
+            state: Some("partial".into()),
+        }];
+        crate::todo::append_gate_observations(&app.session.id, &observations).unwrap();
+        // /poke off still displays the completion report, but never sends a digest.
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = false;
+        assert!(!app.schedule_auto_poke_followup_if_needed());
         assert!(
-            app.schedule_auto_poke_followup_if_needed(),
-            "with nothing left outstanding the final response should be requested"
+            app.display_messages()
+                .iter()
+                .any(|message| message.title.as_deref() == Some("Todo completion"))
         );
+        app.auto_poke_incomplete_todos = true;
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.todo_gate_digest_delivered);
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(app.queued_messages[0].starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
+        assert!(
+            crate::todo::load_gate_observations(&app.session.id)
+                .unwrap()
+                .is_empty()
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        // Repeated observations cannot buy another aggregate turn this cycle.
+        crate::todo::append_gate_observations(&app.session.id, &observations).unwrap();
+        assert!(app.schedule_auto_poke_followup_if_needed());
         assert_eq!(
             app.queued_messages,
             vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
@@ -953,10 +1017,6 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         assert!(!app.schedule_auto_poke_followup_if_needed());
-        assert!(
-            !app.todo_gate_digest_delivered,
-            "a finished cycle must re-arm the review for later work"
-        );
     });
 }
 
@@ -967,238 +1027,17 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
 // of every session and never poked again, which is exactly what the logs
 // showed (`AUTO_POKE_DECISION action=disarm reason=no_todos` on nearly every
 // session, followed by no pokes for the rest of the day).
-#[test]
-fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        app.auto_poke_incomplete_todos = true;
-        app.auto_poke_default_on = true;
-
-        assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
-            "no todos means nothing to poke about this turn"
-        );
-        assert!(
-            app.auto_poke_incomplete_todos,
-            "a todo-free turn must not disable the default-on feature"
-        );
-
-        // Later work with incomplete todos must still be poked.
-        crate::todo::save_todos(
-            &app.session.id,
-            &[crate::todo::TodoItem {
-                id: "todo-1".to_string(),
-                content: "Finish the thing".to_string(),
-                status: "pending".to_string(),
-                priority: "high".to_string(),
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
-                ..Default::default()
-            }],
-        )
-        .expect("save incomplete todo");
-
-        assert!(
-            app.schedule_auto_poke_followup_if_needed(),
-            "incomplete todos on a later turn must still schedule a poke"
-        );
-    });
-}
+include!("auto_poke_cycles.rs");
 
 #[test]
-fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
+fn peer_user_prompt_renders_as_user_message() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        app.auto_poke_incomplete_todos = true;
-        let pending = |content: &str| crate::todo::TodoItem {
-            id: "todo-1".to_string(),
-            content: content.to_string(),
-            status: "pending".to_string(),
-            priority: "high".to_string(),
-            confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
-            ..Default::default()
-        };
-
-        crate::todo::save_todos(&app.session.id, &[pending("Wait for worker")]).expect("save");
-        assert!(app.schedule_auto_poke_followup_if_needed());
-
-        // Simulate dispatch and completion of the automatically poked turn.
-        app.queued_messages.clear();
-        app.pending_queued_dispatch = false;
+        app.handle_peer_user_message("can you show me what he sent?");
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
-            "an unchanged list must not consume another model turn"
-        );
-
-        crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
-            .expect("update");
-        assert!(
-            app.schedule_auto_poke_followup_if_needed(),
-            "changing the todo list must re-arm the automatic nudge"
-        );
-
-        app.queued_messages.clear();
-        app.pending_queued_dispatch = false;
-        crate::todo::save_todos(&app.session.id, &[]).expect("finish cycle");
-        assert!(!app.schedule_auto_poke_followup_if_needed());
-        crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
-            .expect("start equivalent new cycle");
-        assert!(
-            app.schedule_auto_poke_followup_if_needed(),
-            "an equivalent todo in a new cycle must receive one fresh nudge"
-        );
-    });
-}
-
-#[test]
-fn completed_cycle_rearms_auto_poke_only_when_default_on() {
-    with_temp_jcode_home(|| {
-        let completed = |id: &str| crate::todo::TodoItem {
-            id: id.to_string(),
-            content: "Done".to_string(),
-            status: "completed".to_string(),
-            priority: "high".to_string(),
-            confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-            completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-            confidence_history: vec![
-                crate::todo::ConfidenceState::Validated,
-                crate::todo::ConfidenceState::Verified,
-            ],
-            ..Default::default()
-        };
-
-        let mut app = create_test_app();
-        app.auto_poke_incomplete_todos = true;
-        app.auto_poke_default_on = true;
-        crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save");
-        crate::todo::save_goals(
-            &app.session.id,
-            &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
-                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
-                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
-                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
-                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
-                ..Default::default()
-            }],
-        )
-        .expect("save passing goal");
-        assert!(app.schedule_auto_poke_followup_if_needed());
-        assert_eq!(
-            app.queued_messages,
-            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
-        );
-        app.queued_messages.clear();
-        app.pending_queued_dispatch = false;
-        assert!(!app.schedule_auto_poke_followup_if_needed());
-        assert!(
-            app.auto_poke_incomplete_todos,
-            "default-on auto-poke should cover the next batch of work too"
-        );
-
-        // The final handoff must stay latched across a client reload too.
-        app.save_input_for_reload(&app.session.id);
-        let restored = App::restore_input_for_reload(&app.session.id)
-            .expect("final handoff should survive reload");
-        let mut reloaded = create_test_app();
-        reloaded.session.id = app.session.id.clone();
-        reloaded.auto_poke_incomplete_todos = true;
-        reloaded.auto_poke_default_on = true;
-        reloaded.apply_restored_reload_input(restored);
-        assert_eq!(
-            reloaded.final_response_todo_fingerprint,
-            app.final_response_todo_fingerprint
-        );
-        assert!(reloaded.todo_final_response_requested);
-        app = reloaded;
-
-        // An overdue timed review alone must not restart finished work.
-        let review_path = crate::storage::jcode_dir()
-            .expect("jcode home")
-            .join("todos")
-            .join(format!("{}-review-state.json", app.session.id));
-        crate::storage::write_json_fast(
-            &review_path,
-            &serde_json::json!({
-                "cycle_started_at": "2020-01-01T00:00:00Z",
-                "review_delivered": false,
-            }),
-        )
-        .expect("age review");
-
-        // A late observation must not resurrect gates after the final answer,
-        // even when the scheduler is called repeatedly with the same todo state.
-        crate::todo::append_gate_observations(
-            &app.session.id,
-            &[crate::todo::GateObservation {
-                kind: crate::todo::GateObservationKind::IntentUnderstanding,
-                group: None,
-                state: Some("uncertain".to_string()),
-            }],
-        )
-        .expect("record late observation");
-        for _ in 0..3 {
-            assert!(!app.schedule_auto_poke_followup_if_needed());
-            assert!(app.queued_messages.is_empty());
-            assert!(!app.pending_queued_dispatch);
-        }
-
-        // Rewriting identical data is not a new cycle either.
-        crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save");
-        assert!(!app.schedule_auto_poke_followup_if_needed());
-
-        assert!(
-            crate::todo::take_long_session_review_if_due(&app.session.id)
-                .expect("the final-response guard must not consume the timed review")
-        );
-
-        // A real todo change re-arms the quality checks and final handoff.
-        let mut changed = completed("todo-1");
-        changed.completion_confidence = Some(crate::todo::ConfidenceState::Plausible);
-        crate::todo::save_todos(&app.session.id, &[changed]).expect("save changed todo");
-        assert!(app.schedule_auto_poke_followup_if_needed());
-        assert!(app.queued_messages[0].starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
-        assert!(!app.todo_final_response_requested);
-        app.queued_messages.clear();
-        app.pending_queued_dispatch = false;
-        assert!(app.schedule_auto_poke_followup_if_needed());
-        assert!(
-            app.queued_messages[0].starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE)
-        );
-        app.queued_messages.clear();
-        app.pending_queued_dispatch = false;
-        crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save validated");
-        assert!(app.schedule_auto_poke_followup_if_needed());
-        assert_eq!(
-            app.queued_messages,
-            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
-        );
-
-        // An explicit /poke off must stick.
-        let mut app = create_test_app();
-        app.auto_poke_incomplete_todos = true;
-        app.auto_poke_default_on = true;
-        crate::tui::app::commands::disable_auto_poke(&mut app);
-        crate::todo::save_todos(&app.session.id, &[completed("todo-2")]).expect("save");
-        crate::todo::save_goals(
-            &app.session.id,
-            &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
-                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
-                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
-                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
-                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
-                ..Default::default()
-            }],
-        )
-        .expect("save passing goal");
-        app.auto_poke_incomplete_todos = true; // pretend a stale arm survived
-        app.todo_final_response_requested = true; // final handoff already delivered
-        assert!(!app.schedule_auto_poke_followup_if_needed());
-        assert!(
-            !app.auto_poke_incomplete_todos,
-            "/poke off must not be undone by the default-on re-arm"
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.role == "user" && msg.content == "can you show me what he sent?")
         );
     });
 }

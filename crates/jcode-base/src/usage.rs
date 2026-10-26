@@ -4,15 +4,21 @@
 
 use crate::auth;
 mod accessors;
+mod account_fetch;
+pub use account_fetch::fetch_oauth_account_usage;
 mod anthropic_reset;
 mod api_keys;
 mod cache;
 mod disk_cache;
 mod display;
+mod flight;
+mod local_activity;
 mod model;
 mod openai_helpers;
 mod openai_reset;
 mod provider_fetch;
+mod remote_accounts;
+mod startup_snapshot;
 pub use accessors::*;
 pub use anthropic_reset::{
     AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
@@ -21,6 +27,12 @@ pub use anthropic_reset::{
 };
 use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
+pub use cache::{
+    account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
+};
+pub use disk_cache::{
+    export_last_good as export_limits_snapshot, import_last_good as import_limits_snapshot,
+};
 pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
 pub use openai_reset::{
@@ -29,6 +41,11 @@ pub use openai_reset::{
     prepare_openai_usage_reset_for_account,
 };
 use provider_fetch::*;
+pub use remote_accounts::{
+    clear_remote_account_usage, remote_account_list, remote_account_usage_received,
+    set_remote_account_usage,
+};
+pub use startup_snapshot::{AccountUsageStartupPublisher, hydrate_remote_account_usage};
 
 use anyhow::{Context, Result};
 pub use display::{format_reset_time, format_usage_bar};
@@ -49,8 +66,24 @@ const OPENAI_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// Cache duration (refresh every 5 minutes - usage data is slow-changing)
 const CACHE_DURATION: Duration = Duration::from_secs(300);
 
+/// Conservative Anthropic polling policy, not a provider-guaranteed allowance.
+const ANTHROPIC_CACHE_DURATION: Duration = Duration::from_secs(900);
+
 /// Error backoff duration (wait 5 minutes before retrying after auth/credential errors)
 const ERROR_BACKOFF: Duration = Duration::from_secs(300);
+
+/// Network/transport failures (no HTTP response) are usually momentary, so
+/// retry them much sooner than auth or API errors.
+const TRANSPORT_ERROR_BACKOFF: Duration = Duration::from_secs(30);
+
+/// How long a last-good OpenAI snapshot may stand in for a failed transport probe.
+const TRANSPORT_LAST_GOOD_MAX_AGE: Duration = Duration::from_secs(900);
+
+/// Prefix of OpenAI usage errors where the request never got an HTTP response.
+const TRANSPORT_ERROR_PREFIX: &str = "Failed to fetch: ";
+
+/// In-request retry delays for transport failures before giving up.
+const TRANSIENT_RETRY_DELAYS_MS: [u64; 2] = [500, 1500];
 
 /// Rate limit backoff duration (wait 15 minutes before retrying after 429 errors)
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(900);
@@ -65,23 +98,23 @@ static PROVIDER_USAGE_CACHE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> Result<UsageData> {
-    if let Some(cached) = cached_anthropic_usage(&cache_key) {
-        return Ok(cached);
-    }
-    // Short-lived CLI processes (`jcode usage --json`) share one fetch cadence
-    // and one 429 backoff through the persisted cache.
-    if let Some(shared) = disk_cache::fresh(&cache_key) {
-        store_anthropic_usage(cache_key, shared.clone());
-        return match &shared.last_error {
-            Some(error) => Err(anyhow::anyhow!(error.clone())),
-            None => Ok(shared),
-        };
-    }
+    flight::fetch(cache_key.clone(), || {
+        fetch_anthropic_usage_data_uncached(access_token, cache_key, USAGE_URL)
+    })
+    .await
+}
 
+async fn fetch_anthropic_usage_data_uncached(
+    access_token: String,
+    cache_key: String,
+    url: &str,
+) -> Result<UsageData> {
+    let mut request_log = flight::RequestLog::new(&cache_key);
+    let probe_started = Instant::now();
     let client = crate::provider::shared_http_client();
     let response = crate::provider::anthropic::apply_oauth_attribution_headers(
         client
-            .get(USAGE_URL)
+            .get(url)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .header(
@@ -98,37 +131,55 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     let response = match response {
         Ok(response) => response,
         Err(e) => {
-            let err = anthropic_usage_error(format!("Failed to fetch usage data: {}", e));
-            store_anthropic_usage(cache_key, err.clone());
-            anyhow::bail!(
-                err.last_error
-                    .unwrap_or_else(|| "Failed to fetch usage data".into())
+            return cache_anthropic_usage_failure(
+                cache_key,
+                format!("Failed to fetch usage data: {}", e),
             );
         }
     };
 
+    request_log.received(
+        response.status().as_u16(),
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+    );
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
-        let message = format!("Usage API error ({}): {}", status, error_text);
-        disk_cache::store_error(&cache_key, &message);
-        // A throttled usage endpoint does not change the real quota: keep
-        // showing the last good limits rather than blanking the meters.
-        if let Some(mut last_good) = disk_cache::last_good(&cache_key) {
-            last_good.fetched_at = Some(Instant::now());
-            store_anthropic_usage(cache_key, last_good.clone());
-            return Ok(last_good);
-        }
-        let err = anthropic_usage_error(message);
-        store_anthropic_usage(cache_key, err.clone());
-        anyhow::bail!(err.last_error.unwrap_or_else(|| "Usage API error".into()));
+        // Cache the status immediately: a stalled error body must not discard
+        // a received 429 when an outer timeout cancels the request.
+        let message = format!("Usage API error ({})", status);
+        return cache_anthropic_usage_failure_with_hint(
+            cache_key,
+            message,
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
     }
 
-    let data: UsageResponse = response
-        .json()
-        .await
-        .context("Failed to parse usage response")?;
+    let data: UsageResponse = match response.json().await {
+        Ok(data) => data,
+        Err(error) => {
+            return cache_anthropic_usage_failure(
+                cache_key,
+                format!("Failed to parse usage response: {error}"),
+            );
+        }
+    };
 
+    let quota_known = data
+        .five_hour
+        .as_ref()
+        .and_then(|window| window.utilization)
+        .is_some()
+        && data
+            .seven_day
+            .as_ref()
+            .and_then(|window| window.utilization)
+            .is_some();
     let usage = UsageData {
         five_hour: data
             .five_hour
@@ -168,12 +219,50 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
             .and_then(|e| e.is_enabled)
             .unwrap_or(false),
         fetched_at: Some(Instant::now()),
+        last_success_at: Some(Instant::now()),
+        refresh_after: None,
         last_error: None,
     };
 
-    disk_cache::store_success(&cache_key, &usage);
+    if let Some(label) = cache_key.strip_prefix("label:")
+        && quota_known
+        && !usage.is_stale()
+        && [usage.five_hour, usage.seven_day]
+            .into_iter()
+            .chain(usage.seven_day_opus)
+            .chain(usage.model_scoped.iter().map(|window| window.utilization))
+            .all(|ratio| ratio.is_finite() && (0.0..0.99).contains(&ratio))
+    {
+        crate::provider::models::clear_quota_unavailability_after_probe(
+            "claude",
+            label,
+            probe_started,
+        );
+    }
+    let usage = disk_cache::store_success(&cache_key, &usage);
     store_anthropic_usage(cache_key, usage.clone());
     Ok(usage)
+}
+
+/// A failed request keeps any last-known limits, but marks them as stale and
+/// shares the error timestamp for cross-process endpoint backoff.
+fn cache_anthropic_usage_failure(cache_key: String, message: String) -> Result<UsageData> {
+    cache_anthropic_usage_failure_with_hint(cache_key, message, None)
+}
+
+fn cache_anthropic_usage_failure_with_hint(
+    cache_key: String,
+    message: String,
+    retry_after: Option<&str>,
+) -> Result<UsageData> {
+    let data = disk_cache::store_error_with_hint(&cache_key, &message, retry_after);
+    let has_good = data.last_success_at.is_some();
+    store_anthropic_usage(cache_key, data.clone());
+    if has_good {
+        Ok(data)
+    } else {
+        Err(anyhow::anyhow!(message))
+    }
 }
 
 /// Fetch usage from all connected providers with OAuth credentials.
@@ -195,13 +284,13 @@ where
     let openai_generation = openai_usage_generation();
 
     let now = Instant::now();
-    let cached_results = if let Ok(map) = cache.lock() {
-        let mut cached = map.values().map(|(_, r)| r.clone()).collect::<Vec<_>>();
-        sort_reports_most_recent_first(&mut cached);
-        cached
+    let mut cached_results = if let Ok(map) = cache.lock() {
+        map.values().map(|(_, r)| r.clone()).collect::<Vec<_>>()
     } else {
         Vec::new()
     };
+    local_activity::refresh_cached_oauth_activity(&mut cached_results);
+    sort_reports_most_recent_first(&mut cached_results);
     let all_fresh = if let Ok(map) = cache.lock() {
         !map.is_empty()
             && map
@@ -313,12 +402,27 @@ fn sort_reports_most_recent_first(results: &mut [ProviderUsage]) {
 }
 
 /// Stamp a report with last-used recency from the activity ledger: sets the
-/// sort key and appends human-readable activity details. OpenAI OAuth totals
+/// sort key and appends human-readable activity details. OAuth totals
 /// are attached after fetching (including cached/error reports), so local usage
 /// never waits for the provider quota cache to expire.
 fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
-    if let Some(label) = source_key.strip_prefix("openai:oauth:") {
-        let mut details = crate::provider_activity::openai_oauth_usage_summary(label);
+    let oauth_details = source_key
+        .strip_prefix("openai:oauth:")
+        .map(|label| {
+            (
+                label,
+                crate::provider_activity::openai_oauth_usage_summary(label),
+            )
+        })
+        .or_else(|| {
+            source_key.strip_prefix("claude:oauth:").map(|label| {
+                (
+                    label,
+                    crate::provider_activity::anthropic_oauth_usage_summary(label),
+                )
+            })
+        });
+    if let Some((label, mut details)) = oauth_details {
         details.push(("Account label".to_string(), label.to_string()));
         // Replace rather than duplicate local values if a caller reattaches.
         report
@@ -326,6 +430,7 @@ fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
             .retain(|(key, _)| !details.iter().any(|(local_key, _)| local_key == key));
         report.extra_info.extend(details);
     }
+    report.extra_info.retain(|(key, _)| key != "Last used");
     if let Some(used) = crate::provider_activity::last_used_unix_secs(source_key) {
         report.last_used_unix_secs = Some(used);
         report.extra_info.push((
@@ -424,6 +529,12 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
         "cursor" => auth::cursor::has_cursor_native_auth(),
         "jcode" => crate::subscription_catalog::configured_api_key().is_some(),
         _ => {
+            // The native Muse subscription stores its credential outside the env
+            // files, so it needs its own check; without it the subscription is
+            // reported twice and the generic entry wins with an empty snapshot.
+            if source_key == format!("openai-compatible:{}", crate::auth::muse::PROFILE_ID) {
+                return crate::auth::muse::has_cached_auth();
+            }
             // Direct OpenAI-compatible profiles are reported by the API-key
             // module whenever their key is configured.
             source_key
@@ -457,6 +568,12 @@ fn enqueue_activity_sweeper_task(tasks: &mut tokio::task::JoinSet<Option<Provide
     for (source_key, entry) in leftover {
         tasks.spawn(async move {
             let mut extra_info = Vec::new();
+            if source_key == "jcode" {
+                extra_info.push((
+                    "Inference balance".to_string(),
+                    "Unavailable: no Jcode account credential configured. Use /login jcode to load your remaining allowance.".to_string(),
+                ));
+            }
             if let Some(spend) = entry.spend {
                 extra_info.push((
                     "Local spend (this machine)".to_string(),
@@ -613,12 +730,13 @@ async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
 
     match report {
         Some(report) => {
-            let usage_data = usage_data_from_provider_report(report);
+            let mut usage_data = usage_data_from_provider_report(report);
             if let Ok(creds) = auth::claude::load_credentials() {
                 let cache_key = anthropic_usage_cache_key(
                     &creds.access_token,
                     auth::claude::active_account_label().as_deref(),
                 );
+                usage_data = cached_or_shared_anthropic_usage(&cache_key).unwrap_or(usage_data);
                 store_anthropic_usage(cache_key, usage_data.clone());
             }
             *cached = usage_data;

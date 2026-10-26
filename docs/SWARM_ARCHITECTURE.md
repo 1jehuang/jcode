@@ -1,8 +1,12 @@
 # Swarm Architecture
 
-Status: Largely implemented (see `SWARM_TASK_GRAPH.md` for the DAG-first model
-that supersedes the agent-first framing here; its staged comm migration is in
-progress)
+Status: Largely implemented.
+
+Swarm mode (`/effort swarm`) does not change the system prompt. It appends
+"Use swarms to get things done in parallel." to each user message and runs the
+root at the configured `agents.swarm_root_effort`. The former deep task-graph
+mode (`swarm-deep`, critique/verify gates, `task_graph`/`expand_node`/
+`complete_node`/`inject_gap`) has been removed.
 
 This document captures the swarm coordination design. It describes how agents
 coordinate, plan, communicate, and integrate work with optional git worktrees.
@@ -19,17 +23,12 @@ coordinate, plan, communicate, and integrate work with optional git worktrees.
 
 ## Roles
 
-### Mode-gated spawning
+### Root-only spawning
 
-Normal ad hoc swarms and light-swarm mode are one-level fan-out: only the root
-session may spawn agents. Workers report their result to the root and cannot
-create another generation. This keeps opportunistic swarm use bounded by
-construction.
-
-Recursive spawning is reserved for roots running in `swarm-deep` mode. Their
-descendants may spawn children at arbitrary depth, subject to the configurable
-live-worker budget and the absolute swarm member cap. The root session that first
-spawns in a repo is depth 0.
+Swarms are one-level fan-out: only the root session may spawn agents. Workers
+report their result to the root and cannot create another generation. This
+keeps swarm use bounded by construction. The root session that first spawns in
+a repo is depth 0.
 
 The spawn/parent edge is encoded by `report_back_to_session_id`: a child spawned
 by `P` reports back to `P`. Walking that chain reconstructs ancestry and depth,
@@ -47,8 +46,7 @@ report-back coherent across member churn.
 The single per-swarm "coordinator" slot still exists, but only for shared,
 swarm-level plan operations (propose/approve/assign/task-control on the one
 shared plan). Only a root session claims that slot, and only when it is empty or
-stale. Authorized deep descendants do not claim or disturb this slot when they
-spawn.
+stale.
 
 Nested owners coordinate their own subtree through spawn prompts, direct
 messages, and stop, not through the shared plan. Plan/task operations
@@ -78,13 +76,16 @@ concurrently would make the shared plan incoherent.
 ### Agents
 
 - Execute tasks in parallel.
-- Receive the full plan plus their scoped instructions on spawn.
+- Receive their assigned todo lane, prepopulated and rendered before work starts.
+  The existing lane is the source of truth and syncs only with that worker.
+  The spawn `prompt` is optional extra context, so coordinators need not repeat
+  lane tasks or details in a long prompt. A missing lane is created from the
+  prompt or label. The spawn result confirms the lane and seeded item count.
 - Propose plan updates when they discover issues or new requirements.
 - Coordinate directly with other agents via DM or channels.
 - Emit lifecycle events when they start, finish, or stop unexpectedly.
-- In a deep swarm, may spawn child agents and stop any agent in the subtree they
-  spawned. In light and ad hoc swarms, workers cannot spawn. Stopping agents
-  outside their own subtree still requires `force=true`.
+- Cannot spawn agents. Stopping agents outside their own subtree requires
+  `force=true`.
 
 ## Agent Lifecycle States
 
@@ -105,23 +106,19 @@ concurrently would make the shared plan incoherent.
   shutdown, or mark complete).
 - Lifecycle updates drive the swarm info widget status indicators.
 
-## Completion Report Policy
+## Automatic Worker Output
 
-- Spawned or assigned agents owned by a coordinator (`report_back_to_session_id`) must
-  finish each prompted work turn with a useful final assistant response. The server
-  automatically forwards that final response to the owning coordinator as the
-  completion report.
-- A completion report should include outcome/status, changes or findings, validation
-  performed, and blockers or follow-ups. It should not be just `done`, a lifecycle
-  status change, or a tool transcript.
-- Reports are required for spawn prompts, assigned plan tasks, and explicit
-  start/wake/resume/retry task-control runs. If a worker fails before producing a
-  final response, the coordinator still receives the failure lifecycle notification.
-- Reports are not required for idle spawn-without-prompt sessions, user-created peers
-  that have no report-back owner, ordinary status broadcasts while work is still
-  running, or intentional cleanup/stop of an idle worker.
-- Agents should avoid sending a separate final-report DM unless they need interactive
-  coordination before finishing; the automatic forwarded report is the default path.
+- When an owned worker finishes a prompted turn, the server automatically forwards
+  a bounded tail of its output to the owning coordinator. Workers do not need a
+  reporting tool call, a special completion format, or a separate final-report DM.
+- Automatic output delivery covers spawn prompts, assigned plan tasks, and explicit
+  start/wake/resume/retry task-control runs. Lifecycle notifications still communicate
+  failures and status changes independently of the captured output.
+- Idle spawn-without-prompt sessions and user-created peers without a report-back
+  owner do not create completion deliveries.
+- Ordinary messages remain available for interactive coordination while work is
+  underway. The legacy explicit reporting action is retained only for compatibility
+  with old transcripts and scripts, and is not advertised to models.
 
 ## User Interaction
 
@@ -199,7 +196,7 @@ resolution. The system supports:
 - Direct messages (DMs) - the preferred exception channel
 - Subtree broadcast (reaches only the sender's spawned subtree; the swarm
   coordinator keeps whole-swarm reach as an escape hatch)
-- Topic channels (group chats) - discouraged; prefer DMs and task-graph artifacts
+- Topic channels (group chats) - discouraged; prefer DMs
 - Shared context keys (set/read/append) - discouraged; prefer the repo and
   typed node artifacts. Share notifications are subtree-scoped like broadcasts.
 - Channel discovery and member inspection

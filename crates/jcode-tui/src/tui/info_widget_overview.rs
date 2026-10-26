@@ -1,14 +1,11 @@
 use super::info_widget::{
-    InfoWidgetData, UsageProvider, changes_section_height, is_traceworthy_memory_event,
-    model_info_height,
+    AuthMethod, InfoWidgetData, changes_section_height, compact_usage_rows,
+    is_traceworthy_memory_event, model_info_height,
 };
-
-pub(crate) const MAX_TODO_LINES: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InfoPageKind {
     CompactOnly,
-    TodosExpanded,
     MemoryExpanded,
 }
 
@@ -40,16 +37,6 @@ pub(crate) fn compute_page_layout(
     }
 
     let mut candidates: Vec<InfoPage> = Vec::new();
-    let todos_compact = compact_todos_height(data);
-
-    let todos_expanded = expanded_todos_height(data);
-    if todos_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::TodosExpanded,
-            height: compact_height - todos_compact + todos_expanded,
-        });
-    }
-
     let memory_compact = compact_memory_height(data);
     let memory_expanded = expanded_memory_height(data);
     if memory_expanded > 0 {
@@ -89,10 +76,6 @@ pub(crate) fn compute_page_layout(
     }
 }
 
-fn compact_todos_height(data: &InfoWidgetData) -> u16 {
-    if data.todos.is_empty() { 0 } else { 2 }
-}
-
 fn compact_memory_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.memory_info
         && info.should_render()
@@ -118,26 +101,52 @@ fn compact_background_height(data: &InfoWidgetData) -> u16 {
     0
 }
 
-fn compact_usage_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.usage_info
-        && info.available
-    {
-        // Must mirror render_usage_compact exactly, otherwise the compact
-        // overview page either clips its last lines or reserves blank rows.
-        if matches!(info.provider, UsageProvider::CostBased) {
-            // Single "$cost · tokens" line.
-            return 1;
-        }
-        // Subscription-style providers render an optional provider label plus
-        // whichever primary, secondary, and Spark windows are actually present.
-        let label = info.provider.label();
-        let label_line = u16::from(!label.is_empty());
-        let primary_line = u16::from(info.primary_limit_label.is_some());
-        let secondary_line = u16::from(info.secondary_limit_label.is_some());
-        let spark_line = u16::from(info.spark.is_some());
-        return label_line + primary_line + secondary_line + spark_line;
+/// Only a genuine pending first snapshot reserves space. An absent snapshot
+/// after initialization is not evidence that this account supports quota data.
+pub(super) fn startup_usage_pending(data: &InfoWidgetData) -> bool {
+    data.startup_usage_pending
+        && matches!(data.auth_method, AuthMethod::OpenAIOAuth)
+        && !data
+            .usage_info
+            .as_ref()
+            .is_some_and(|info| info.available || info.limit_reached)
+}
+
+pub(super) fn render_overview_usage(
+    data: &InfoWidgetData,
+    width: u16,
+) -> Vec<ratatui::text::Line<'static>> {
+    if startup_usage_pending(data) {
+        return super::info_widget::startup_usage_lines(width);
     }
-    0
+    data.usage_info
+        .as_ref()
+        .filter(|info| info.available || info.limit_reached)
+        .map(|info| compact_usage_rows(info, width, data.usage_display_used))
+        .unwrap_or_default()
+}
+
+fn compact_usage_height(data: &InfoWidgetData) -> u16 {
+    if startup_usage_pending(data) {
+        return 2;
+    }
+    let Some(info) = data.usage_info.as_ref() else {
+        return 0;
+    };
+    if info.limit_reached {
+        return 1;
+    }
+    if !info.available {
+        return 0;
+    }
+    if matches!(info.provider, super::info_widget::UsageProvider::CostBased) {
+        return 1;
+    }
+    // Mirror render_usage_compact without formatting bars during measurement.
+    u16::from(!info.provider.label().is_empty())
+        + u16::from(info.primary_limit_label.is_some())
+        + u16::from(info.secondary_limit_label.is_some())
+        + u16::from(info.spark.is_some())
 }
 
 fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
@@ -148,26 +157,12 @@ fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
 /// counts) are not sections here, only the detail behind them.
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
     model_info_height(data)
-        + compact_todos_height(data)
         + compact_memory_height(data)
         + compact_background_height(data)
         + compact_usage_height(data)
         + compact_kv_cache_height(data)
         + changes_section_height(data)
-}
-
-fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
-    if data.todos.is_empty() {
-        return 0;
-    }
-
-    let available_lines = MAX_TODO_LINES.saturating_sub(1);
-    let todo_lines = data.todos.len().min(available_lines);
-    let mut height = 1 + u16::try_from(todo_lines).unwrap_or(u16::MAX);
-    if data.todos.len() > available_lines {
-        height += 1;
-    }
-    height
+        + u16::from(data.cloud_info.is_some())
 }
 
 fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
@@ -194,7 +189,6 @@ fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{InfoPageKind, compute_page_layout};
-    use crate::todo::TodoItem;
     use crate::tui::info_widget::{InfoWidgetData, MemoryInfo};
     use std::collections::HashMap;
 
@@ -214,20 +208,8 @@ mod tests {
     }
 
     #[test]
-    fn compute_page_layout_keeps_multiple_expanded_pages_when_height_allows() {
+    fn compute_page_layout_only_offers_non_plan_pages() {
         let data = InfoWidgetData {
-            todos: vec![TodoItem {
-                group: None,
-                content: "ship refactor".to_string(),
-                status: "pending".to_string(),
-                priority: "high".to_string(),
-                id: "todo-1".to_string(),
-                blocked_by: Vec::new(),
-                assigned_to: None,
-                confidence: None,
-                completion_confidence: None,
-                confidence_history: Vec::new(),
-            }],
             memory_info: Some(MemoryInfo {
                 total_count: 3,
                 project_count: 2,
@@ -241,14 +223,8 @@ mod tests {
 
         let layout = compute_page_layout(&data, 40, 8);
 
-        assert!(layout.pages.len() >= 2);
-        assert!(layout.show_dots);
-        assert!(
-            layout
-                .pages
-                .iter()
-                .any(|page| page.kind == InfoPageKind::TodosExpanded)
-        );
+        assert_eq!(layout.pages.len(), 1);
+        assert!(!layout.show_dots);
         assert!(
             layout
                 .pages

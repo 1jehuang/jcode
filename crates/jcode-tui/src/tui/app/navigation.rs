@@ -2,6 +2,9 @@ use super::*;
 use crate::tui::ui::input_ui;
 use ratatui::layout::Rect;
 
+#[path = "panel_controls.rs"]
+mod panel_controls;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MouseScrollTraceState {
     chat_offset: usize,
@@ -185,6 +188,12 @@ impl App {
         else {
             return false;
         };
+        // A collapsed tool-image label is also a show action. Honor it even
+        // when the global image visibility preference was previously off.
+        if !self.inline_images_visible {
+            self.inline_images_visible = true;
+            super::ui_prefs::save_inline_images_visible(true);
+        }
         let level = self.cycle_image_expand(image_id);
         let size = match level {
             crate::tui::ui::inline_image_ui::ImageExpandLevel::Fit => "fit",
@@ -275,10 +284,12 @@ impl App {
         let Some(message) = self.display_messages.get(msg_idx) else {
             return false;
         };
-        if message.role != "swarm" {
+        let oauth = message.role == "system" && message.title.as_deref() == Some("OpenAI login");
+        if message.role != "swarm" && !oauth {
             return false;
         }
-        let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&message.content)
+        let normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&normalized)
         else {
             return false;
         };
@@ -288,7 +299,11 @@ impl App {
         if !self.replace_display_message_content(msg_idx, toggled) {
             return false;
         }
-        self.set_status_notice(if expanded {
+        self.set_status_notice(if oauth && expanded {
+            "Login details expanded"
+        } else if oauth {
+            "Login details collapsed"
+        } else if expanded {
             "Swarm message expanded"
         } else {
             "Swarm message collapsed"
@@ -297,6 +312,26 @@ impl App {
     }
 
     pub(super) fn try_open_link_at(&mut self, column: u16, row: u16) -> bool {
+        if let Some(index) = super::super::ui::oauth_login_link_message_from_screen(column, row)
+            && let Some(message) = self.display_messages.get(index)
+            && message.role == "system"
+            && message.title.as_deref() == Some("OpenAI login")
+            && let Some(parsed) =
+                jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
+            && let Some(url) = parsed.body.lines().find_map(|line| {
+                line.strip_prefix("[Open OpenAI sign-in](")?
+                    .strip_suffix(')')
+            })
+        {
+            let url = url.to_string();
+            let opened = Self::open_auth_browser(&url);
+            self.set_status_notice(if opened {
+                "Sign-in browser launch requested"
+            } else {
+                "Could not open browser. Expand details to copy the URL."
+            });
+            return true;
+        }
         let Some(target) = super::super::ui::link_target_from_screen(column, row) else {
             return false;
         };
@@ -530,8 +565,11 @@ impl App {
         }
     }
 
+    /// Mirrors the renderer: a File diff pane is only drawn once an edit exists.
     pub(super) fn diff_pane_visible(&self) -> bool {
-        self.diff_mode.has_side_pane() || self.side_panel.focused_page().is_some()
+        !crate::tui::TuiState::swarm_panel_full_page(self)
+            && (self.side_panel.focused_page().is_some()
+                || (self.diff_mode.is_file() && self.display_edit_tool_message_count > 0))
     }
 
     pub(super) fn set_diff_pane_focus(&mut self, focus: bool) {
@@ -685,14 +723,14 @@ impl App {
         crate::tui::clear_side_panel_render_caches();
     }
 
-    fn side_pane_has_visual_images(&self) -> bool {
+    pub(super) fn side_pane_has_visual_images(&self) -> bool {
         if self.side_panel_user_hidden {
             return false;
         }
         self.side_pane_has_visual_images_ignoring_user_hidden()
     }
 
-    fn side_pane_has_visual_images_ignoring_user_hidden(&self) -> bool {
+    pub(super) fn side_pane_has_visual_images_ignoring_user_hidden(&self) -> bool {
         // Images now render inline in the transcript flow, not in the side
         // panel, so they no longer drive the side-panel visibility heuristics.
         false
@@ -971,6 +1009,7 @@ impl App {
                 });
                 true
             }
+            MouseScrollTarget::CommitLogOverlay => self.scroll_commit_log_overlay(direction),
             MouseScrollTarget::ModelStatusOverlay => {
                 let Some(current) = self.model_status_scroll else {
                     return false;
@@ -1117,9 +1156,14 @@ impl App {
             .get(&image_id)
             .copied()
             .unwrap_or_default();
-        let next = ImageExpandLevel::from_index(
+        let mut next = ImageExpandLevel::from_index(
             crate::tui::mermaid::next_distinct_mermaid_inline_level(image_id, current as u8),
         );
+        // Fit is also the default collapsed state for tool images. Even a
+        // width-bound image with identical size caps must be able to open.
+        if current == ImageExpandLevel::Fit && next == ImageExpandLevel::Fit {
+            next = ImageExpandLevel::Large;
+        }
         if matches!(next, ImageExpandLevel::Fit) {
             self.expanded_images.remove(&image_id);
         } else {
@@ -1133,98 +1177,6 @@ impl App {
         };
         self.set_status_notice(status);
         next
-    }
-
-    pub(super) fn toggle_side_panel(&mut self) {
-        if self.side_panel_user_hidden {
-            self.side_panel_user_hidden = false;
-            self.side_panel_explicit_hidden = false;
-            self.pinned_images_auto_hide_deadline = None;
-            if self.side_panel.pages.is_empty() {
-                if self.side_pane_has_visual_images_ignoring_user_hidden() {
-                    self.sync_diagram_fit_context();
-                    self.set_status_notice("Image side panel: ON");
-                } else {
-                    self.notify_no_side_panel_pages();
-                }
-                return;
-            }
-        }
-
-        if self.side_pane_has_visual_images() {
-            self.side_panel_user_hidden = true;
-            self.side_panel_explicit_hidden = true;
-            self.pinned_images_auto_hide_deadline = None;
-            self.set_diff_pane_focus(false);
-            self.sync_diagram_fit_context();
-            self.set_status_notice("Image side panel: OFF");
-            return;
-        }
-
-        if self.side_panel.pages.is_empty() {
-            self.notify_no_side_panel_pages();
-            return;
-        }
-
-        if self.side_panel.focused_page().is_some() {
-            // Alt+M cycle: split -> fullscreen -> hidden -> split.
-            if !self.side_panel_fullscreen {
-                self.side_panel_fullscreen = true;
-                self.sync_diagram_fit_context();
-                crate::tui::clear_side_panel_render_caches();
-                let title = self
-                    .side_panel
-                    .focused_page()
-                    .map(|page| page.title.clone())
-                    .unwrap_or_default();
-                self.set_status_notice(format!("Side panel: {title} (fullscreen)"));
-                return;
-            }
-            self.side_panel_fullscreen = false;
-            crate::tui::clear_side_panel_render_caches();
-            self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
-            self.side_panel.focused_page_id = None;
-            self.side_panel_user_hidden = true;
-            self.side_panel_explicit_hidden = true;
-            if !self.diff_pane_visible() {
-                self.set_diff_pane_focus(false);
-            }
-            self.sync_diagram_fit_context();
-            self.set_status_notice("Side panel: OFF");
-            return;
-        }
-
-        let restore_id = self
-            .last_side_panel_focus_id
-            .as_deref()
-            .filter(|id| self.side_panel.pages.iter().any(|page| page.id == *id))
-            .map(str::to_owned)
-            .or_else(|| self.side_panel.pages.first().map(|page| page.id.clone()));
-
-        let Some(restore_id) = restore_id else {
-            self.notify_no_side_panel_pages();
-            return;
-        };
-
-        self.side_panel.focused_page_id = Some(restore_id.clone());
-        self.last_side_panel_focus_id = Some(restore_id);
-        self.side_panel_fullscreen = false;
-        self.side_panel_user_hidden = false;
-        self.side_panel_explicit_hidden = false;
-        self.sync_diagram_fit_context();
-        let status = self
-            .side_panel
-            .focused_page()
-            .map(|page| format!("Side panel: {}", page.title))
-            .unwrap_or_else(|| "Side panel: ON".to_string());
-        self.set_status_notice(status);
-    }
-
-    fn notify_no_side_panel_pages(&mut self) {
-        let diagram_key = crate::tui::keybind::diagram_pane_visibility_key_label();
-        self.set_status_notice(format!(
-            "Side panel: no pages ({diagram_key} toggles diagrams)"
-        ));
     }
 
     pub(super) fn adjust_diagram_zoom(&mut self, delta: i8) {
@@ -1436,6 +1388,20 @@ impl App {
             finish_mouse_event!(false, "panel_image_preview");
         }
 
+        if self.commit_log_overlay.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.enqueue_mouse_scroll(MouseScrollTarget::CommitLogOverlay, -1);
+                    finish_mouse_event!(true, "commit_log_overlay_scroll_up");
+                }
+                MouseEventKind::ScrollDown => {
+                    self.enqueue_mouse_scroll(MouseScrollTarget::CommitLogOverlay, 1);
+                    finish_mouse_event!(true, "commit_log_overlay_scroll_down");
+                }
+                _ => finish_mouse_event!(false, "commit_log_overlay_non_scroll"),
+            }
+        }
+
         if self.changelog_scroll.is_some() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -1535,6 +1501,19 @@ impl App {
         let mut terminal_width: u16 = 0;
         let mut terminal_height: u16 = 0;
         if let Some(layout) = layout {
+            if self.side_panel.focused_page().is_some()
+                && !crate::tui::TuiState::swarm_panel_full_page(self)
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && layout
+                    .diff_pane_area
+                    .and_then(super::super::ui::side_panel_dismiss_area)
+                    .is_some_and(|area| {
+                        super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+                    })
+            {
+                self.dismiss_side_panel();
+                finish_mouse_event!(false, "side_panel_dismiss");
+            }
             current_messages_area = Some(layout.messages_area);
             current_diagram_area = layout.diagram_area;
             input_area = layout.input_area;
@@ -1590,8 +1569,8 @@ impl App {
                 super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
             })
         {
-            self.pinned_todos_expanded = true;
-            finish_mouse_event!(false, "pinned_todos_expand");
+            self.pinned_todos_expanded = !self.pinned_todos_expanded;
+            finish_mouse_event!(false, "pinned_todos_toggle");
         }
 
         // A left press in the composer moves the caret first (native text-field

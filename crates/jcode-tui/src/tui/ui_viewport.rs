@@ -41,21 +41,77 @@ fn copy_badge_alt_label_from_config(configured: &str) -> String {
     }
 }
 
-pub(crate) fn copy_badge_alt_badge() -> String {
-    format!("[{}]", copy_badge_alt_label())
+pub(crate) fn shortcut_badge_spans(
+    key: char,
+    alt_style: Style,
+    shift_style: Style,
+    key_style: Style,
+) -> [Span<'static>; 5] {
+    let dim = Style::default().fg(dim_color());
+    [
+        Span::styled("[", dim),
+        Span::styled(copy_badge_alt_label(), alt_style),
+        Span::styled("⇧", shift_style),
+        Span::styled(key.to_ascii_uppercase().to_string(), key_style),
+        Span::styled("]", dim),
+    ]
 }
 
 fn copy_badge_shortcut_width(key_label: &str) -> usize {
     // Includes the single separator space rendered between the row content and
     // the first badge.
-    UnicodeWidthStr::width(format!(" {} [⇧] [{key_label}]", copy_badge_alt_badge()).as_str())
+    UnicodeWidthStr::width(format!(" [{}⇧{key_label}]", copy_badge_alt_label()).as_str())
 }
 
-/// Display width reserved for the inline expand-edit badge (`[Alt] [⇧] [E] …`).
+/// Display width reserved for the compact inline expand-edit badge (`[Alt⇧E] …`).
 /// The badge text differs between the collapsed (` expand`) and just-activated
 /// (` ✓ Expanded`) states, so callers pass the suffix that will actually render.
 pub(crate) fn expand_badge_reserved_width(badge_text: &str) -> usize {
-    UnicodeWidthStr::width(format!(" {} [⇧] [E]{badge_text}", copy_badge_alt_badge()).as_str())
+    UnicodeWidthStr::width(format!(" [{}⇧E]{badge_text}", copy_badge_alt_label()).as_str())
+}
+
+fn expand_badge_spans(
+    alt_label: &str,
+    alt_active: bool,
+    shift_active: bool,
+    key_active: bool,
+    expanded: bool,
+) -> [Span<'static>; 7] {
+    let dim = Style::default().fg(dim_color());
+    let modifier = |active| {
+        if active {
+            Style::default().fg(queued_color()).bold()
+        } else {
+            dim
+        }
+    };
+    let key_style = if key_active {
+        Style::default().fg(accent_color()).bold()
+    } else {
+        dim
+    };
+    let (label, label_style) = if expanded {
+        (" ✓ Expanded", Style::default().fg(ai_color()).bold())
+    } else {
+        (" expand", dim)
+    };
+    [
+        Span::styled(" ", dim),
+        Span::styled("[", dim),
+        Span::styled(alt_label.to_owned(), modifier(alt_active)),
+        Span::styled("⇧", modifier(shift_active)),
+        Span::styled("E", key_style),
+        Span::styled("]", dim),
+        Span::styled(label, label_style),
+    ]
+}
+
+fn expand_badge_target_line(active: &ActiveFileDiffContext, inline: bool) -> usize {
+    if inline {
+        active.end_line.saturating_sub(1).max(active.start_line)
+    } else {
+        active.start_line
+    }
 }
 
 fn lower_bound(values: &[usize], target: usize) -> usize {
@@ -174,6 +230,10 @@ pub(crate) fn trim_line_trailing_spaces(line: &mut Line<'static>) {
 /// must be cut, end it with a dim ellipsis so the truncation is visible
 /// instead of silently swallowing words.
 pub(crate) fn truncate_line_for_copy_badge(line: &mut Line<'static>, max_content_width: usize) {
+    if max_content_width == 0 {
+        line.spans.clear();
+        return;
+    }
     if line.width() <= max_content_width {
         trim_line_trailing_spaces(line);
         return;
@@ -342,7 +402,7 @@ pub(super) fn draw_messages(
     area: Rect,
     prepared: Arc<PreparedChatFrame>,
     show_native_scrollbar: bool,
-) -> info_widget::Margins {
+) -> (info_widget::Margins, Option<super::NativeScrollbar>) {
     let (render_area, scrollbar_area) =
         super::split_native_scrollbar_area(area, show_native_scrollbar);
     let left_inset = super::left_aligned_content_inset(render_area.width, app.centered_mode());
@@ -353,9 +413,15 @@ pub(super) fn draw_messages(
         height: render_area.height,
     };
     let wrapped_user_indices = &prepared.wrapped_user_indices;
-    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts;
-    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends;
-    let user_prompt_texts = &prepared.user_prompt_texts;
+    let clear_start = super::terminal_clear_start(app, &prepared);
+    let preview_start = clear_start.map_or(0, |start| {
+        prepared
+            .wrapped_user_prompt_starts
+            .partition_point(|line| *line < start)
+    });
+    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts[preview_start..];
+    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends[preview_start..];
+    let user_prompt_texts = &prepared.user_prompt_texts[preview_start..];
 
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
@@ -369,6 +435,7 @@ pub(super) fn draw_messages(
         user_prompt_texts,
         text_render_area,
         pinned_todo_band.len() as u16,
+        preview_start + app.compacted_hidden_user_prompts(),
     );
 
     super::set_last_max_scroll(max_scroll);
@@ -407,7 +474,14 @@ pub(super) fn draw_messages(
         super::set_tail_catchup_active(false);
         user_scroll.min(max_scroll)
     } else {
-        resolve_tail_follow_scroll(max_scroll, viewport_height)
+        // A clear is an explicit viewport boundary, not a jump to animate
+        // through old history. Never show rows preceding it while tailing.
+        if let Some(start) = clear_start {
+            super::set_tail_catchup_active(false);
+            max_scroll.max(start)
+        } else {
+            resolve_tail_follow_scroll(max_scroll, viewport_height)
+        }
     };
 
     // Publish the resolved geometry so scroll handlers and the anchor-reconcile
@@ -425,6 +499,7 @@ pub(super) fn draw_messages(
             user_prompt_texts,
             scroll,
             text_render_area.width,
+            preview_start + app.compacted_hidden_user_prompts(),
         )
     } else {
         0u16
@@ -437,7 +512,11 @@ pub(super) fn draw_messages(
                 .y
                 .saturating_add(prompt_preview_lines)
                 .saturating_add(line as u16),
-            width: text_render_area.width,
+            width: if swarm_beside_pinned_todos(app, text_render_area.width) {
+                text_render_area.width / 2
+            } else {
+                text_render_area.width
+            },
             height: 1,
         }
     }));
@@ -515,6 +594,9 @@ pub(super) fn draw_messages(
         // prompt preview) is synthetic (not part of the scrolled transcript), so
         // offset by it to keep the content rows aligned.
         scroll_top: scroll.saturating_sub(top_band_lines as usize),
+        content_churning: app.is_processing()
+            || !app.streaming_text().is_empty()
+            || app.has_pending_mouse_scroll_animation(),
         ..Default::default()
     };
     margins
@@ -710,6 +792,28 @@ pub(super) fn draw_messages(
         }
     }
 
+    // A todo completion report that just arrived pulses its text color briefly.
+    if policy.enable_decorative_animations
+        && let Some((msg_idx, t)) =
+            super::todo_completion_flash::update(app.display_messages(), now_ms)
+        && let Some(body) = prepared
+            .sections
+            .iter()
+            .find(|section| section.kind == PreparedSectionKind::Body)
+        && let Some(end) = body.prepared.message_boundaries.get(msg_idx)
+    {
+        let start = msg_idx
+            .checked_sub(1)
+            .and_then(|i| body.prepared.message_boundaries.get(i))
+            .map_or(0, |b| b.wrapped_len);
+        let (start, end) = (body.line_start + start, body.line_start + end.wrapped_len);
+        for abs_idx in start.max(scroll)..end.min(visible_end) {
+            if let Some(line) = visible_lines.get_mut(abs_idx - scroll) {
+                super::todo_completion_flash::apply(line, t);
+            }
+        }
+    }
+
     if let Some(active) = &active_file_context {
         let highlight_style = Style::default().fg(file_link_color()).bold();
         let accent_style = Style::default().fg(file_link_color());
@@ -729,54 +833,43 @@ pub(super) fn draw_messages(
         }
     }
 
-    let expand_edit_badge_visible = active_inline_edit_context.as_ref().is_some_and(|active| {
-        active.expandable
-            && (!app.diff_mode().is_full_inline() || expand_feedback_active)
-            && active.start_line >= scroll
-            && active.start_line < visible_end
-    });
-    let visible_expand_badge_line = expand_edit_badge_visible
-        .then(|| {
-            active_inline_edit_context
-                .as_ref()
-                .map(|active| active.start_line)
-        })
-        .flatten();
-    super::set_visible_expand_edit_badge(expand_edit_badge_visible, visible_expand_badge_line);
+    super::set_visible_expand_edit_badge(false, None);
     super::set_visible_expand_edit_badge_rect(None);
 
     let expand_badge_line = if expand_feedback_active {
-        copy_badge_ui.expand_feedback_line.or_else(|| {
-            active_inline_edit_context
-                .as_ref()
-                .map(|active| active.start_line)
-        })
+        active_inline_edit_context
+            .as_ref()
+            .map(|active| expand_badge_target_line(active, app.diff_mode().is_inline()))
+            .or(copy_badge_ui.expand_feedback_line)
     } else {
         active_inline_edit_context
             .as_ref()
             .filter(|active| active.expandable && !app.diff_mode().is_full_inline())
-            .map(|active| active.start_line)
+            .map(|active| expand_badge_target_line(active, app.diff_mode().is_inline()))
     };
 
-    if let Some(mut badge_line) = expand_badge_line {
+    let badge_text = if expand_feedback_active {
+        " ✓ Expanded"
+    } else {
+        " expand"
+    };
+    let reserved = expand_badge_reserved_width(badge_text);
+    // Never wrap shortcut chrome or expose an invisible click target.
+    if let Some(mut badge_line) =
+        expand_badge_line.filter(|_| reserved <= content_area.width as usize)
+    {
         if expand_feedback_active && visible_end > scroll {
             badge_line = badge_line.clamp(scroll, visible_end.saturating_sub(1));
         }
         if badge_line >= scroll && badge_line < visible_end {
             let rel_idx = badge_line - scroll;
             if let Some(line) = visible_lines.get_mut(rel_idx) {
-                let badge_text = if expand_feedback_active {
-                    " ✓ Expanded"
-                } else {
-                    " expand"
-                };
-                let reserved = expand_badge_reserved_width(badge_text);
                 let max_content_width = (content_area.width as usize).saturating_sub(reserved);
                 truncate_line_for_copy_badge(line, max_content_width);
 
                 // Reserve the badge's width in the info-widget margin profile so a
                 // floating widget (e.g. the KV cache panel) docks far enough left to
-                // clear the appended `[Alt] [⇧] [E] expand` block instead of being
+                // clear the appended `[Alt⇧E] expand` block instead of being
                 // squeezed into a too-narrow slot that wraps/collides with it. The
                 // margin row for `visible_lines[rel_idx]` is offset by the synthetic
                 // top band (pinned todos + prompt preview), matching the
@@ -786,36 +879,14 @@ pub(super) fn draw_messages(
                     *width = (*width).saturating_sub(reserved as u16);
                 }
 
-                let alt_style = if copy_badge_ui.alt_is_active(copy_badge_now) {
-                    Style::default().fg(queued_color()).bold()
-                } else {
-                    Style::default().fg(dim_color())
-                };
-                let shift_style = if copy_badge_ui.shift_is_active(copy_badge_now) {
-                    Style::default().fg(queued_color()).bold()
-                } else {
-                    Style::default().fg(dim_color())
-                };
-                let key_style = if copy_badge_ui.key_is_active('e', copy_badge_now) {
-                    Style::default().fg(accent_color()).bold()
-                } else {
-                    Style::default().fg(dim_color())
-                };
-
                 let badge_start = line.width().saturating_add(1);
-                line.spans.push(Span::raw(" "));
-                line.spans
-                    .push(Span::styled(copy_badge_alt_badge(), alt_style));
-                line.spans.push(Span::raw(" "));
-                line.spans.push(Span::styled("[⇧]", shift_style));
-                line.spans.push(Span::raw(" "));
-                line.spans.push(Span::styled("[E]", key_style));
-                let badge_text_style = if expand_feedback_active {
-                    Style::default().fg(ai_color()).bold()
-                } else {
-                    Style::default().fg(dim_color())
-                };
-                line.spans.push(Span::styled(badge_text, badge_text_style));
+                line.spans.extend(expand_badge_spans(
+                    &copy_badge_alt_label(),
+                    copy_badge_ui.alt_is_active(copy_badge_now),
+                    copy_badge_ui.shift_is_active(copy_badge_now),
+                    copy_badge_ui.key_is_active('e', copy_badge_now),
+                    expand_feedback_active,
+                ));
 
                 let final_width = line.width();
                 let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {
@@ -833,6 +904,7 @@ pub(super) fn draw_messages(
                     width: final_width.saturating_sub(badge_start) as u16,
                     height: 1,
                 }));
+                super::set_visible_expand_edit_badge(true, Some(badge_line));
             }
         }
     }
@@ -885,14 +957,7 @@ pub(super) fn draw_messages(
             let shortcut_start = line.width();
 
             line.spans
-                .push(Span::styled(copy_badge_alt_badge(), alt_style));
-            line.spans.push(Span::raw(" "));
-            line.spans.push(Span::styled("[⇧]", shift_style));
-            line.spans.push(Span::raw(" "));
-            line.spans.push(Span::styled(
-                format!("[{}]", key.to_ascii_uppercase()),
-                key_style,
-            ));
+                .extend(shortcut_badge_spans(key, alt_style, shift_style, key_style));
 
             let final_width = line.width();
             let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {
@@ -992,11 +1057,24 @@ pub(super) fn draw_messages(
             .partition_point(|region| region.abs_line_idx < visible_end);
 
         for region in &prepared.image_regions[visible_image_start..visible_image_end] {
+            if region.height == 0 {
+                continue;
+            }
             let abs_idx = region.abs_line_idx;
             let hash = region.hash;
             let total_height = region.height;
             let image_end = region.end_line;
             let is_fit = region.render == jcode_tui_messages::ImageRegionRender::Fit;
+            // Scale fit images into the exact box layout reserved for them
+            // (`region.width` cols x `region.height` rows). Fitting into the
+            // full content width instead let the rounded-up row count upscale
+            // the picture a few cells wider than the margin carve assumed, so
+            // it drew over info widgets docked beside it.
+            let fit_cols = if region.width == 0 {
+                content_area.width
+            } else {
+                region.width.min(content_area.width)
+            };
 
             if let Some(native_latex) = crate::tui::markdown::handterm_native_latex_for_hash(hash) {
                 // Native math writes real terminal cells rather than an overlay,
@@ -1035,7 +1113,7 @@ pub(super) fn draw_messages(
             // the ones actually on screen get decoded/scaled, and a cold image
             // schedules background prep instead of stalling this frame.
             let fit_ready = if is_fit && image_end > scroll && abs_idx < visible_end {
-                super::inline_image_ui::ensure_drawable(hash, content_area.width, total_height)
+                super::inline_image_ui::ensure_drawable(hash, fit_cols, total_height)
             } else {
                 true
             };
@@ -1070,7 +1148,7 @@ pub(super) fn draw_messages(
                                 hash,
                                 image_area,
                                 frame.buffer_mut(),
-                                content_area.width,
+                                fit_cols,
                                 total_height,
                                 0,
                                 centered,
@@ -1127,7 +1205,7 @@ pub(super) fn draw_messages(
                                 hash,
                                 image_area,
                                 frame.buffer_mut(),
-                                content_area.width,
+                                fit_cols,
                                 total_height,
                                 skip_rows,
                                 centered,
@@ -1176,6 +1254,9 @@ pub(super) fn draw_messages(
                 .image_regions
                 .partition_point(|region| region.abs_line_idx < prefetch_end);
             for region in &prepared.image_regions[band_start..band_end] {
+                if region.height == 0 {
+                    continue;
+                }
                 // Only inline raster images use the prewarm pipeline; mermaid
                 // crops build their own state at draw time. In pinned mode the
                 // raster images still render in the flow, so always prefetch.
@@ -1188,7 +1269,12 @@ pub(super) fn draw_messages(
                 if on_screen {
                     continue;
                 }
-                super::inline_image_ui::prefetch(region.hash, content_area.width, region.height);
+                let fit_cols = if region.width == 0 {
+                    content_area.width
+                } else {
+                    region.width.min(content_area.width)
+                };
+                super::inline_image_ui::prefetch(region.hash, fit_cols, region.height);
             }
         }
     }
@@ -1236,7 +1322,42 @@ pub(super) fn draw_messages(
         frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
     }
 
-    if crate::config::config().display.prompt_preview && scroll > 0 {
+    if crate::config::config().display.prompt_preview && scroll > 0 && prompt_history_expanded() {
+        let items = expanded_prompt_preview_items(
+            wrapped_user_prompt_starts,
+            user_prompt_texts,
+            scroll,
+            preview_start + app.compacted_hidden_user_prompts(),
+        );
+        if !items.is_empty() {
+            let dim_style = Style::default().dim();
+            let width = content_area.width.saturating_sub(1) as usize;
+            let lines: Vec<Line<'static>> = items
+                .into_iter()
+                .map(|(num, text)| {
+                    let mut line = Line::from(vec![
+                        Span::styled(num, dim_style.fg(dim_color()).bg(user_bg())),
+                        Span::styled("› ", dim_style.fg(user_color()).bg(user_bg())),
+                        Span::styled(text, dim_style.fg(user_text()).bg(user_bg())),
+                    ]);
+                    if line.width() > width {
+                        truncate_line_in_place_to_width(&mut line, width.saturating_sub(1));
+                        line.spans
+                            .push(Span::styled("…", dim_style.fg(dim_color()).bg(user_bg())));
+                    }
+                    line
+                })
+                .collect();
+            let preview_area = Rect {
+                x: content_area.x,
+                y: render_area.y,
+                width: content_area.width.saturating_sub(1),
+                height: lines.len() as u16,
+            };
+            clear_area(frame, preview_area);
+            frame.render_widget(Paragraph::new(lines), preview_area);
+        }
+    } else if crate::config::config().display.prompt_preview && scroll > 0 {
         let last_offscreen_prompt_idx =
             lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
 
@@ -1245,7 +1366,8 @@ pub(super) fn draw_messages(
         {
             let prompt_text = prompt_text.trim();
             if !prompt_text.is_empty() {
-                let prompt_num = prompt_order + 1 + app.compacted_hidden_user_prompts();
+                let prompt_num =
+                    preview_start + prompt_order + 1 + app.compacted_hidden_user_prompts();
                 let num_str = format!("{}", prompt_num);
                 let prefix_len = num_str.len() + 2;
                 let content_width =
@@ -1329,15 +1451,15 @@ pub(super) fn draw_messages(
         );
     }
 
-    if let Some(scrollbar_area) = scrollbar_area {
-        super::render_native_scrollbar(
-            frame,
-            scrollbar_area,
-            scroll,
-            total_lines,
-            visible_height,
-            false,
-        );
+    let chat_scrollbar = scrollbar_area.map(|area| super::NativeScrollbar {
+        area,
+        scroll,
+        total_lines,
+        visible_height,
+        focused: false,
+    });
+    if let Some(scrollbar) = chat_scrollbar {
+        scrollbar.render(frame);
     }
 
     // Derive the dock-gating "reliable" width profile for *new* info widgets:
@@ -1352,7 +1474,7 @@ pub(super) fn draw_messages(
     }
     info_widget::apply_settlement(&mut margins, content_area.width);
 
-    margins
+    (margins, chat_scrollbar)
 }
 
 /// Look-ahead window (in rows) used to compute the "reliable" margin profile that
@@ -1377,10 +1499,70 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
     out
 }
 
-/// Lines for the pinned todo band. Background tasks render in the
-/// `background` info widget, not here.
-fn pinned_todo_band_lines(
+/// Whether the pinned band has room for a separate swarm column.
+pub(crate) fn swarm_beside_pinned_todos(app: &dyn TuiState, width: u16) -> bool {
+    width >= 120
+        && crate::config::config().display.pin_todos
+        && app.pinned_todos_payload().is_some()
+        && app.inline_swarm_gallery_active()
+        && !app.inline_swarm_members().is_empty()
+        && !pinned_todo_band_lines_for_payload(
+            app.pinned_todos_payload(),
+            app.pinned_todos_expanded(),
+            app.diff_mode(),
+            width / 2,
+            3,
+        )
+        .0
+        .is_empty()
+}
+
+pub(crate) fn pinned_todo_band_lines(
     app: &dyn TuiState,
+    width: u16,
+    viewport_height: u16,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let beside = swarm_beside_pinned_todos(app, width);
+    let todo_width = if beside { width / 2 } else { width };
+    let (mut lines, more) = pinned_todo_band_lines_for_payload(
+        app.pinned_todos_payload(),
+        app.pinned_todos_expanded(),
+        app.diff_mode(),
+        todo_width,
+        viewport_height,
+    );
+    if beside && !lines.is_empty() {
+        let right_width = width.saturating_sub(todo_width + 2) as usize;
+        let members = app.inline_swarm_members();
+        let swarm = super::info_widget::swarm_gallery::render_swarm_strip_lines(
+            &members,
+            app.swarm_panel_selected(),
+            app.swarm_panel_focused(),
+            &crate::tui::keybind::swarm_panel_focus_key_label(),
+            (app.animation_elapsed() * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS) as usize,
+            right_width,
+            ((viewport_height as usize) / 3).clamp(3, 16),
+        );
+        lines.resize_with(lines.len().max(swarm.len()), || Line::from(""));
+        for (index, line) in lines.iter_mut().enumerate() {
+            *line = super::truncate_line_with_ellipsis_to_width(line, todo_width as usize);
+            if let Some(right) = swarm.get(index) {
+                line.spans.push(Span::raw(
+                    " ".repeat((todo_width as usize).saturating_sub(line.width()) + 2),
+                ));
+                line.spans.extend(right.spans.clone());
+            }
+        }
+    }
+    (lines, more)
+}
+
+/// Pinned todo band for an arbitrary todo payload. Shared by the live chat
+/// viewport and the `/resume` preview so both render the band identically.
+pub(crate) fn pinned_todo_band_lines_for_payload(
+    payload: Option<&str>,
+    expanded: bool,
+    diff_mode: crate::config::DiffDisplayMode,
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
@@ -1389,14 +1571,17 @@ fn pinned_todo_band_lines(
     }
 
     let card_lines = if crate::config::config().display.pin_todos {
-        app.pinned_todos_payload()
+        payload
             .map(|payload| {
-                let msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                // Distinct title keeps the line cache from sharing entries with
+                // the width-capped inline transcript card.
+                let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                msg.title = Some("Pinned todos".to_string());
                 super::messages::get_cached_message_lines(
                     &msg,
                     width,
-                    app.diff_mode(),
-                    super::messages::render_todos_message,
+                    diff_mode,
+                    super::messages::render_pinned_todos_message,
                 )
             })
             .unwrap_or_default()
@@ -1406,12 +1591,14 @@ fn pinned_todo_band_lines(
     if card_lines.is_empty() {
         return (Vec::new(), None);
     }
+    let mut card_lines = card_lines;
+    super::messages::animate_lane_spinners(&mut card_lines);
 
     // Band budget: about a third of the viewport.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
     let content_budget = budget.max(2);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let has_more = card_lines.len() > content_budget && !app.pinned_todos_expanded();
+    let has_more = card_lines.len() > content_budget && !expanded;
     let mut more_line = None;
     if has_more {
         let shown = content_budget.saturating_sub(1);
@@ -1423,6 +1610,13 @@ fn pinned_todo_band_lines(
             Style::default().fg(dim_color()),
         )));
     } else {
+        if expanded {
+            more_line = Some(lines.len());
+            lines.push(Line::from(Span::styled(
+                "  ▴ Collapse todos",
+                Style::default().fg(dim_color()),
+            )));
+        }
         lines.extend(card_lines);
     }
     (lines, more_line)
@@ -1450,7 +1644,17 @@ fn compute_prompt_preview_line_count(
     user_prompt_texts: &[String],
     scroll: usize,
     area_width: u16,
+    prompt_number_offset: usize,
 ) -> u16 {
+    if prompt_history_expanded() {
+        return expanded_prompt_preview_items(
+            wrapped_user_prompt_starts,
+            user_prompt_texts,
+            scroll,
+            prompt_number_offset,
+        )
+        .len() as u16;
+    }
     let last_offscreen = lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
     let Some(prompt_order) = last_offscreen else {
         return 0;
@@ -1462,12 +1666,52 @@ fn compute_prompt_preview_line_count(
     if prompt_text.is_empty() {
         return 0;
     }
-    let num_str = format!("{}", prompt_order + 1);
+    let num_str = format!("{}", prompt_number_offset + prompt_order + 1);
     let prefix_len = num_str.len() + 2;
     let content_width = area_width.saturating_sub(prefix_len as u16 + 2) as usize;
     let text_flat = prompt_text.replace('\n', " ");
     let display_width = UnicodeWidthStr::width(text_flat.as_str());
     if display_width > content_width { 2 } else { 1 }
+}
+
+/// Number of previous prompts shown when the expanded prompt history (Alt+E) is on.
+const EXPANDED_PROMPT_PREVIEW_COUNT: usize = 6;
+
+static PROMPT_HISTORY_EXPANDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn prompt_history_expanded() -> bool {
+    PROMPT_HISTORY_EXPANDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Toggle the expanded previous-prompt band. Returns the new state.
+pub(crate) fn toggle_prompt_history_expanded() -> bool {
+    !PROMPT_HISTORY_EXPANDED.fetch_xor(true, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Last few offscreen prompts, oldest first, as `(number, flattened text)`.
+fn expanded_prompt_preview_items(
+    wrapped_user_prompt_starts: &[usize],
+    user_prompt_texts: &[String],
+    scroll: usize,
+    prompt_number_offset: usize,
+) -> Vec<(String, String)> {
+    let offscreen = lower_bound(wrapped_user_prompt_starts, scroll).min(user_prompt_texts.len());
+    let mut items: Vec<(String, String)> = (0..offscreen)
+        .rev()
+        .filter_map(|idx| {
+            let text = user_prompt_texts[idx].trim();
+            (!text.is_empty()).then(|| {
+                (
+                    format!("{}", prompt_number_offset + idx + 1),
+                    text.split_whitespace().collect::<Vec<_>>().join(" "),
+                )
+            })
+        })
+        .take(EXPANDED_PROMPT_PREVIEW_COUNT)
+        .collect();
+    items.reverse();
+    items
 }
 
 fn compute_max_scroll_with_prompt_preview(
@@ -1476,8 +1720,10 @@ fn compute_max_scroll_with_prompt_preview(
     user_prompt_texts: &[String],
     area: Rect,
     pinned_todo_lines: u16,
+    prompt_number_offset: usize,
 ) -> usize {
-    let mut max_scroll = total_lines.saturating_sub(area.height as usize);
+    let mut max_scroll =
+        total_lines.saturating_sub(area.height.saturating_sub(pinned_todo_lines) as usize);
     let preview_enabled = crate::config::config().display.prompt_preview;
     if max_scroll == 0 || (!preview_enabled && pinned_todo_lines == 0) {
         return max_scroll;
@@ -1490,6 +1736,7 @@ fn compute_max_scroll_with_prompt_preview(
                 user_prompt_texts,
                 max_scroll,
                 area.width,
+                prompt_number_offset,
             )
         } else {
             0
@@ -1508,100 +1755,5 @@ fn compute_max_scroll_with_prompt_preview(
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn handterm_native_latex_cell_symbol_moves_invokes_and_restores_cursor() {
-        assert_eq!(
-            super::handterm_native_latex_cell_symbol(r"\frac{a}{b}", 3, 2).as_deref(),
-            Some("\x1b[s\x1b[2A\x1b[1D\x1b_L;\\frac{a}{b}\x1b\\\x1b[u\x1b[1C")
-        );
-        assert_eq!(
-            super::handterm_native_latex_cell_symbol("x", 1, 1).as_deref(),
-            Some("\x1b[s\x1b_L;x\x1b\\\x1b[u\x1b[1C")
-        );
-        assert!(super::handterm_native_latex_cell_symbol("x\x1by", 1, 1).is_none());
-    }
-
-    #[test]
-    fn tail_follow_small_appends_snap_to_bottom() {
-        // Streaming-sized appends (<= min jump) snap directly; no animation.
-        crate::tui::ui::set_last_resolved_chat_scroll(100);
-        let scroll = super::resolve_tail_follow_scroll(103, 30);
-        assert_eq!(scroll, 103);
-        assert!(!crate::tui::ui::tail_catchup_active());
-    }
-
-    #[test]
-    fn tail_follow_large_append_slides_in_bounded_steps() {
-        // A 12-row jump advances by at most TAIL_CATCHUP_MAX_STEP per frame
-        // and reports an active catch-up until it reaches the bottom.
-        crate::tui::ui::set_last_resolved_chat_scroll(100);
-        let first = super::resolve_tail_follow_scroll(112, 30);
-        assert!(first < 112, "must not snap: {first}");
-        assert!(
-            first - 100 <= super::TAIL_CATCHUP_MAX_STEP,
-            "step bounded: {first}"
-        );
-        assert!(crate::tui::ui::tail_catchup_active());
-
-        // Subsequent frames converge to the bottom and clear the flag.
-        let mut scroll = first;
-        let mut guard = 0;
-        while scroll < 112 {
-            crate::tui::ui::set_last_resolved_chat_scroll(scroll);
-            scroll = super::resolve_tail_follow_scroll(112, 30);
-            guard += 1;
-            assert!(guard < 50, "catch-up must converge");
-        }
-        assert_eq!(scroll, 112);
-        assert!(!crate::tui::ui::tail_catchup_active());
-    }
-
-    #[test]
-    fn explicit_tail_follow_request_skips_content_catch_up_animation() {
-        crate::tui::ui::set_last_resolved_chat_scroll(40);
-        crate::tui::ui::request_tail_follow_snap();
-
-        let scroll = super::resolve_tail_follow_scroll(80, 30);
-
-        assert_eq!(scroll, 80);
-        assert!(!crate::tui::ui::tail_catchup_active());
-    }
-
-    #[test]
-    fn tail_follow_caps_lag_to_one_viewport() {
-        // A huge append (way beyond a screen) starts at most one viewport
-        // behind the bottom so the catch-up never replays pages of content.
-        crate::tui::ui::set_last_resolved_chat_scroll(100);
-        let scroll = super::resolve_tail_follow_scroll(400, 30);
-        assert!(scroll >= 400 - 30, "lag capped to viewport: {scroll}");
-        assert!(crate::tui::ui::tail_catchup_active());
-    }
-
-    #[test]
-    fn tail_follow_backward_motion_snaps() {
-        // Content shrank (commit collapsed reasoning): snap, don't animate.
-        crate::tui::ui::set_last_resolved_chat_scroll(100);
-        let scroll = super::resolve_tail_follow_scroll(80, 30);
-        assert_eq!(scroll, 80);
-        assert!(!crate::tui::ui::tail_catchup_active());
-    }
-
-    #[test]
-    fn default_copy_badge_alt_label_matches_platform() {
-        #[cfg(target_os = "macos")]
-        assert_eq!(super::copy_badge_alt_label_from_config(""), "⌥");
-
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(super::copy_badge_alt_label_from_config(""), "Alt");
-    }
-
-    #[test]
-    fn copy_badge_alt_label_uses_trimmed_config_override() {
-        assert_eq!(
-            super::copy_badge_alt_label_from_config(" Option "),
-            "Option"
-        );
-        assert_eq!(super::copy_badge_alt_label_from_config("⌥"), "⌥");
-    }
-}
+#[path = "ui_viewport_tests.rs"]
+mod tests;

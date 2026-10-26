@@ -308,8 +308,19 @@ fn assert_rendered_expand_badge_shortcut_expands_to_full_diff(
         "expected collapsed diff:\n{rendered}"
     );
     assert!(
-        rendered.contains("[E] expand"),
+        rendered.contains("⇧E] expand"),
         "expected visible expand badge for collapsed edit diff:\n{rendered}"
+    );
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.contains("╰─") && line.contains("⇧E] expand")),
+        "expand badge should be on the footer:\n{rendered}"
+    );
+    assert!(
+        !rendered
+            .lines()
+            .any(|line| line.contains("✓ edit") && line.contains("⇧E] expand"))
     );
     assert!(
         crate::tui::ui::visible_expand_edit_badge_line().is_some(),
@@ -334,7 +345,7 @@ fn assert_rendered_expand_badge_shortcut_expands_to_full_diff(
         "expanded full inline diff should not be collapsed:\n{rendered}"
     );
     assert!(
-        rendered.contains("[E] ✓ Expanded"),
+        rendered.contains("⇧E] ✓ Expanded"),
         "expanded full inline diff should briefly show the activated expand badge like copy feedback:\n{rendered}"
     );
     assert!(
@@ -380,6 +391,31 @@ fn test_expand_badge_rendered_shortcut_expands_with_alt_lowercase_event() {
 }
 
 #[test]
+fn test_expand_badge_brackets_match_dim_shortcut_color() {
+    let _render_lock = scroll_render_test_lock();
+    let (app, mut terminal) = make_edit_badge_test_app(20);
+    render_and_snap(&app, &mut terminal);
+    let buf = terminal.backend().buffer();
+    let area = *buf.area();
+    for row in 0..area.height {
+        let line = (0..area.width)
+            .map(|col| buf[(col, row)].symbol())
+            .collect::<String>();
+        if let Some(end) = line.find("⇧E] expand") {
+            let start = line[..end].rfind('[').expect("opening shortcut bracket");
+            let opening = unicode_width::UnicodeWidthStr::width(&line[..start]) as u16;
+            let key = unicode_width::UnicodeWidthStr::width(&line[..end]) as u16 + 1;
+            let closing = key + 1;
+            assert_ne!(buf[(key, row)].fg, ratatui::style::Color::Reset);
+            assert_eq!(buf[(opening, row)].fg, buf[(key, row)].fg);
+            assert_eq!(buf[(closing, row)].fg, buf[(key, row)].fg);
+            return;
+        }
+    }
+    panic!("expand shortcut must be visible");
+}
+
+#[test]
 fn test_clicking_expand_edit_badge_expands_to_full_diff() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = make_edit_badge_test_app(20);
@@ -392,7 +428,7 @@ fn test_clicking_expand_edit_badge_expands_to_full_diff() {
         let line = (0..area.width)
             .map(|col| buf[(col, row)].symbol())
             .collect::<String>();
-        if let Some(byte) = line.find("[E] expand") {
+        if let Some(byte) = line.find("⇧E] expand") {
             badge = Some((line[..byte].chars().count() as u16, row));
             break 'rows;
         }
@@ -427,7 +463,7 @@ fn test_expand_badge_shortcut_works_while_diff_pane_focused() {
 
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
-        rendered.contains("[E] expand"),
+        rendered.contains("⇧E] expand"),
         "expected visible expand badge before shortcut:\n{rendered}"
     );
 
@@ -453,7 +489,7 @@ fn test_remote_expand_badge_rendered_shortcut_expands_with_alt_uppercase_event()
 
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
-        rendered.contains("[E] expand"),
+        rendered.contains("⇧E] expand"),
         "expected visible expand badge before remote key injection:\n{rendered}"
     );
 
@@ -479,7 +515,7 @@ fn test_remote_expand_badge_rendered_shortcut_expands_with_alt_lowercase_event()
 
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
-        rendered.contains("[E] expand"),
+        rendered.contains("⇧E] expand"),
         "expected visible expand badge before remote key injection:\n{rendered}"
     );
 
@@ -502,7 +538,7 @@ fn test_expand_badge_does_not_render_for_short_untruncated_edit_diff() {
 
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
-        !rendered.contains("[E] expand"),
+        !rendered.contains("⇧E] expand"),
         "short full-visible edit diff should not show expand badge:\n{rendered}"
     );
 }
@@ -520,7 +556,7 @@ fn test_expand_badge_renders_when_diffs_are_hidden() {
         app.diff_mode = mode;
         let rendered = render_and_snap(&app, &mut terminal);
         assert!(
-            rendered.contains("[E] expand"),
+            rendered.contains("⇧E] expand"),
             "{mode:?} should keep the expand badge on edit rows:\n{rendered}"
         );
     }
@@ -771,6 +807,141 @@ fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
 }
 
 #[test]
+fn test_side_panel_dismiss_survives_local_page_refresh() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        for (command, page_id) in [
+            ("/splitview on", "split_view"),
+            ("/observe on", "observe"),
+            ("/todos on", "session_todos"),
+        ] {
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.dismiss_side_panel();
+            app.push_display_message(DisplayMessage::assistant("new live content"));
+            app.refresh_split_view_if_needed();
+            app.observe_tool_call(&crate::message::ToolCall {
+                id: "side-refresh".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"file_path": "AGENTS.md"}),
+                intent: None,
+                thought_signature: None,
+            });
+            app.refresh_todos_view_if_needed();
+            assert!(
+                app.side_panel.focused_page().is_none(),
+                "refresh reopened {page_id}"
+            );
+            assert_eq!(app.last_side_panel_focus_id.as_deref(), Some(page_id));
+            app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+                .unwrap();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.dismiss_side_panel();
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            assert!(
+                !app.side_panel_user_hidden,
+                "explicit app command should reveal"
+            );
+        }
+    });
+}
+
+#[test]
+fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, _) = make_edit_badge_test_app(30);
+    // The File diff cache is process-global and keyed by path and message
+    // index. Sibling tests render shorter `demo.txt` edits at the same index,
+    // so use a path of our own to always render this 30-line diff.
+    if let Some(tool) = app.display_messages[1].tool_data.as_mut() {
+        tool.input["file_path"] = serde_json::json!("side-close-file-diff.txt");
+    }
+    app.bump_display_messages_version();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(app.diff_pane_visible(), "File diff should remain visible");
+    assert!(app.diff_pane_focus, "visible File diff should retain focus");
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        .unwrap();
+    assert!(
+        app.diff_pane_scroll > 0,
+        "j should still scroll the File diff"
+    );
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    assert!(app.diff_pane_focus);
+}
+
+#[test]
+fn test_side_panel_close_in_file_mode_without_edits_restores_composer() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+    assert_eq!(app.display_edit_tool_message_count, 0);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(!app.diff_pane_visible());
+    assert!(
+        !app.diff_pane_focus,
+        "focus must not stay on an invisible File diff pane"
+    );
+    render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::last_layout_snapshot()
+            .unwrap()
+            .diff_pane_area
+            .is_none(),
+        "no right pane should remain without edits"
+    );
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "j", "normal typing must reach the composer");
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+}
+
+#[test]
 fn test_mouse_click_in_input_switches_focus_from_side_panel() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
@@ -885,6 +1056,7 @@ fn test_click_on_inline_image_label_line_cycles_level() {
         height: 400,
         label: "shot.png".to_string(),
         uses_text_fallback: true,
+        collapsed_by_default: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
 
@@ -960,6 +1132,17 @@ fn test_click_on_inline_image_label_line_cycles_level() {
     );
 }
 
+#[test]
+fn test_collapsed_width_bound_image_can_open() {
+    use crate::tui::ui::inline_image_ui::ImageExpandLevel;
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    let id = 0xCA1100;
+    crate::tui::mermaid::register_inline_level_geometries(id, [(4, 80); 3]);
+    assert_eq!(app.cycle_image_expand(id), ImageExpandLevel::Large);
+    assert_eq!(app.cycle_image_expand(id), ImageExpandLevel::Fit);
+}
+
 /// Kitty reports mouse motion at pixel granularity, so a physically plain
 /// click usually arrives as Down -> Drag(same cell) -> Up. The same-cell Drag
 /// must NOT start a selection drag; the release must still fall through to the
@@ -983,6 +1166,7 @@ fn test_kitty_jitter_click_on_image_label_still_cycles_level() {
         height: 400,
         label: "shot.png".to_string(),
         uses_text_fallback: false,
+        collapsed_by_default: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let label_line = section
@@ -1152,6 +1336,14 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         rendered.contains("shot.png"),
         "image label line must render in the live frame, got:\n{rendered}"
     );
+    assert!(
+        !rendered.contains("click to show image"),
+        "tool image must be shown by default: {rendered}"
+    );
+    assert!(
+        !rendered.contains("IIMG:"),
+        "internal marker must never leak"
+    );
 
     // Find the label line in the actual buffer: scan rows for the row carrying
     // the image label, then click a cell inside the label text.
@@ -1165,7 +1357,7 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         }
         // The transcript also shows the tool-call row ("read shot.png"); the
         // image label row is the one that carries the show/hide badge keys.
-        if !line.contains("shot.png") || !line.contains("[I]") {
+        if !line.contains("shot.png") || !line.contains("1×1") {
             continue;
         }
         // Click the first cell of the label text (the hit-region is the whole
@@ -1208,7 +1400,15 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "clicking the rendered image label must cycle Fit -> Large \
          (this is the exact path the user reported as broken)"
     );
-    assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
+    assert!(
+        app.status_notice()
+            .is_some_and(|notice| notice.starts_with("Image size: large"))
+    );
+    let expanded = render_and_snap(&app, &mut terminal);
+    assert!(
+        !expanded.contains("click to show image"),
+        "expanded image must stay visible: {expanded}"
+    );
 }
 
 /// The inline-image placeholder marker row must never reach the terminal as
@@ -1322,6 +1522,7 @@ fn test_click_on_inline_image_body_cycles_level() {
         height: 200,
         label: "shot.png".to_string(),
         uses_text_fallback: false,
+        collapsed_by_default: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let region = *section
@@ -1416,6 +1617,7 @@ fn test_ctrl_wheel_over_inline_image_zooms_without_wrapping() {
         height: 200,
         label: "pinch.png".to_string(),
         uses_text_fallback: false,
+        collapsed_by_default: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let region = *section
@@ -1543,8 +1745,7 @@ fn test_copy_selection_partial_drag_over_inline_math_copies_whole_formula() {
             text.contains("Euler").then_some((abs, text))
         })
         .expect("prose line");
-    let euler_col =
-        unicode_width::UnicodeWidthStr::width(&text[..text.find("Euler").unwrap()]);
+    let euler_col = unicode_width::UnicodeWidthStr::width(&text[..text.find("Euler").unwrap()]);
     // Drag from the start of "Euler" to two cells into the formula.
     let start_col = euler_col;
     let end_col = euler_col + "Euler ".len() + 2;
@@ -1579,7 +1780,10 @@ fn test_unicode_math_copy_badge_copies_latex_to_clipboard() {
     let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_math_copy_test_app();
     let screen = render_and_snap(&app, &mut terminal);
-    assert!(screen.contains("[S]"), "math frame should get a badge: {screen}");
+    assert!(
+        screen.contains("⇧S]"),
+        "math frame should get a badge: {screen}"
+    );
 
     app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
         .unwrap();

@@ -34,6 +34,13 @@ async fn resume_background_awaits_finalizes_states_expired_while_down() {
     );
 
     let await_runtime = AwaitMembersRuntime::default();
+    let dependency_id = crate::server::await_members_state::load_state(&key)
+        .unwrap()
+        .dependency_id();
+    assert!(
+        !crate::todo::await_dependency::running(_runtime_dir.path(), &dependency_id, requester,),
+        "an expired wait releases todos even before recovery finalizes it"
+    );
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         (requester.to_string(), member(requester, swarm_id, "ready")),
         (peer.to_string(), member(peer, swarm_id, "running")),
@@ -76,12 +83,22 @@ async fn resume_background_awaits_finalizes_states_expired_while_down() {
     .expect("expired background await should publish SwarmAwaitCompleted on resume");
 
     assert!(!event.completed, "expired await should finalize as timeout");
-    assert!(event.summary.contains("Timed out"), "summary: {}", event.summary);
+    assert!(
+        event.summary.contains("Timed out"),
+        "summary: {}",
+        event.summary
+    );
     assert!(event.notify);
     assert!(event.wake);
 
     let final_state = crate::server::await_members_state::load_state(&key)
         .expect("state should still be persisted");
+    assert_eq!(final_state.dependency_id(), dependency_id);
+    assert!(!crate::todo::await_dependency::running(
+        _runtime_dir.path(),
+        &dependency_id,
+        requester
+    ));
     let final_response = final_state
         .final_response
         .expect("expired await should have a persisted final response");

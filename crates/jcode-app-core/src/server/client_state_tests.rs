@@ -17,6 +17,208 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 
 struct MockProvider(Option<&'static str>);
 
+#[derive(Clone)]
+struct CapabilityRefreshProvider {
+    refreshed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Provider for CapabilityRefreshProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("not used")
+    }
+
+    fn name(&self) -> &str {
+        "capability-refresh-regression"
+    }
+    fn model(&self) -> String {
+        "known-model".into()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+    fn available_models_display(&self) -> Vec<String> {
+        vec![self.model()]
+    }
+    fn model_capabilities_need_refresh(&self) -> bool {
+        !self.refreshed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    async fn prefetch_models(&self) -> Result<()> {
+        self.refreshed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn available_service_tiers(&self) -> Vec<&'static str> {
+        if self.model_capabilities_need_refresh() {
+            Vec::new()
+        } else {
+            vec!["priority", "flex"]
+        }
+    }
+}
+
+#[tokio::test]
+async fn model_prefetch_hydrates_capabilities_with_existing_model_names() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let provider: Arc<dyn Provider> = Arc::new(CapabilityRefreshProvider {
+        refreshed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let session_id = "capability-refresh-session";
+    let session = crate::session::Session::create_with_id(session_id.into(), None, None);
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    assert!(!provider.available_models_display().is_empty());
+    assert!(provider.available_service_tiers().is_empty());
+    let mut events = crate::bus::Bus::global().subscribe();
+    super::spawn_model_prefetch_update(provider.clone(), agent.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                events.recv().await.unwrap(),
+                crate::bus::BusEvent::ModelsUpdated
+            ) && !provider.model_capabilities_need_refresh()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("capability-only hydration must publish a catalog update");
+    assert_eq!(provider.available_models_display(), vec!["known-model"]);
+    assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
+
+    let (stream, mut peer) = crate::transport::stream_pair().unwrap();
+    let (_, writer) = stream.into_split();
+    let writer = Arc::new(Mutex::new(writer));
+    handle_get_model_catalog(44, session_id, &agent, &provider, &writer)
+        .await
+        .unwrap();
+    drop(writer);
+    let mut bytes = Vec::new();
+    peer.read_to_end(&mut bytes).await.unwrap();
+    let event: crate::protocol::ServerEvent = serde_json::from_slice(&bytes).unwrap();
+    let crate::protocol::ServerEvent::History {
+        available_service_tiers,
+        ..
+    } = event
+    else {
+        panic!("expected history")
+    };
+    assert_eq!(
+        available_service_tiers,
+        Some(vec!["priority".into(), "flex".into()])
+    );
+    if let Some(home) = prev_home {
+        crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+struct IdentityProvider {
+    credential: Option<jcode_provider_core::ResolvedCredential>,
+    label: Option<&'static str>,
+}
+
+#[async_trait]
+impl Provider for IdentityProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("not used")
+    }
+    fn name(&self) -> &str {
+        "openai"
+    }
+    fn model(&self) -> String {
+        "test-model".into()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            credential: self.credential,
+            label: self.label,
+        })
+    }
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        self.credential
+    }
+    fn oauth_account_label(&self) -> Option<String> {
+        self.label.map(str::to_owned)
+    }
+    fn active_oauth_account_email(&self) -> Option<String> {
+        self.label.map(|label| format!("{label}@example.test"))
+    }
+}
+
+#[test]
+fn provider_oauth_email_uses_exact_live_account() {
+    let provider = IdentityProvider {
+        credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+        label: Some("work"),
+    };
+    let email = super::selected_provider_oauth_email(&provider, true, || {
+        provider.active_oauth_account_email()
+    })
+    .unwrap();
+    assert_eq!(email.as_str(), "work@example.test");
+}
+
+#[test]
+fn provider_oauth_email_never_probes_disabled_api_key_or_unknown_accounts() {
+    use jcode_provider_core::ResolvedCredential::{ApiKey, Oauth};
+    for (enabled, credential, label) in [
+        (false, Some(Oauth), Some("work")),
+        (true, Some(ApiKey), Some("work")),
+    ] {
+        let provider = IdentityProvider { credential, label };
+        assert!(
+            super::selected_provider_oauth_email(&provider, enabled, || {
+                panic!("identity lookup must not run")
+            })
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn provider_oauth_email_accepts_authoritative_oauth_only_and_skips_unknown_identity() {
+    let provider = IdentityProvider {
+        credential: None,
+        label: Some("effective"),
+    };
+    let email = super::selected_provider_oauth_email(&provider, true, || {
+        provider.active_oauth_account_email()
+    })
+    .unwrap();
+    assert_eq!(email.as_str(), "effective@example.test");
+    let unknown = IdentityProvider {
+        credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+        label: None,
+    };
+    assert!(
+        super::selected_provider_oauth_email(&unknown, true, || unknown
+            .active_oauth_account_email())
+        .is_none()
+    );
+}
+
 #[async_trait]
 impl Provider for MockProvider {
     async fn complete(
@@ -50,12 +252,24 @@ impl Provider for MockProvider {
         "mock-model".to_string()
     }
 
+    fn available_service_tiers(&self) -> Vec<&'static str> {
+        if self.0.is_some() {
+            vec!["priority", "flex"]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn service_tier(&self) -> Option<String> {
         self.0.map(str::to_string)
     }
 
     fn reasoning_effort(&self) -> Option<String> {
         Some("high".to_string())
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        self.0.map(|_| "daemon-work".to_string())
     }
 }
 
@@ -175,6 +389,7 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
             "test",
             None,
             false,
+            None,
         )
     };
     for processing in [false, true] {
@@ -225,8 +440,10 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
                 images,
                 provider_name,
                 provider_model,
+                provider_oauth_account_label,
                 reasoning_effort,
                 service_tier,
+                available_service_tiers,
                 activity,
                 all_sessions,
                 client_count,
@@ -237,8 +454,13 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
                 assert!(images.is_empty());
                 assert_eq!(provider_name.as_deref(), Some("Mock Profile"));
                 assert_eq!(provider_model.as_deref(), Some("mock-model"));
+                assert_eq!(provider_oauth_account_label.as_deref(), Some("daemon-work"));
                 assert_eq!(reasoning_effort.as_deref(), Some("high"));
                 assert_eq!(service_tier.as_deref(), Some("priority"));
+                assert_eq!(
+                    available_service_tiers,
+                    Some(vec!["priority".to_string(), "flex".to_string()])
+                );
                 assert_eq!(
                     activity.is_some_and(|activity| activity.is_processing),
                     index >= 3
@@ -374,6 +596,7 @@ async fn assert_history_service_tier_and_pdf_capability(
             super::HistoryPayloadMode::Full,
             true,
             supports_pdf_panels,
+            None,
         );
         tokio::pin!(history);
         assert!(futures::poll!(&mut history).is_pending());
@@ -404,6 +627,7 @@ async fn assert_history_service_tier_and_pdf_capability(
                 "🔥",
                 None,
                 supports_pdf_panels,
+                None,
             ),
         )
         .await
@@ -460,10 +684,16 @@ async fn assert_history_service_tier_and_pdf_capability(
             messages,
             activity,
             service_tier,
+            available_service_tiers,
             side_panel,
+            provider_oauth_account_label,
             ..
         } => {
             assert_eq!(id, 42);
+            assert_eq!(
+                provider_oauth_account_label.as_deref(),
+                tier.map(|_| "daemon-work")
+            );
             assert_eq!(returned_session_id, session_id);
             assert_eq!(messages.len(), 1);
             assert_eq!(
@@ -475,6 +705,14 @@ async fn assert_history_service_tier_and_pdf_capability(
                 }
             );
             assert_eq!(service_tier.as_deref(), tier);
+            assert_eq!(
+                available_service_tiers,
+                Some(if tier.is_some() {
+                    vec!["priority".to_string(), "flex".to_string()]
+                } else {
+                    Vec::new()
+                })
+            );
             assert_eq!(
                 side_panel,
                 super::super::client_writer::side_panel_for_client(
@@ -577,10 +815,16 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
             provider_name,
             provider_model,
             service_tier,
+            available_service_tiers,
             reasoning_effort,
+            provider_oauth_account_label,
             ..
         } => {
             assert_eq!(id, 43);
+            assert_eq!(
+                provider_oauth_account_label.as_deref(),
+                tier.map(|_| "daemon-work")
+            );
             assert_eq!(returned_session_id, session_id);
             assert_eq!(provider_name.as_deref(), Some("Mock Profile"));
             assert_eq!(
@@ -592,6 +836,14 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
                 })
             );
             assert_eq!(service_tier.as_deref(), tier);
+            assert_eq!(
+                available_service_tiers,
+                Some(if tier.is_some() {
+                    vec!["priority".to_string(), "flex".to_string()]
+                } else {
+                    Vec::new()
+                })
+            );
             assert_eq!(reasoning_effort.as_deref(), Some("high"));
         }
         other => panic!("expected history event, got {:?}", other),
@@ -755,9 +1007,132 @@ fn history_reload_recovery_does_not_mark_delivered_until_continuation_is_accepte
         !super::super::reload_recovery::has_pending_for_session(session_id),
         "accepted continuation should consume the durable pending intent"
     );
+    // Leftover initiating context and interrupted-session evidence must not
+    // recreate a continuation that the durable store says was consumed.
+    crate::tool::selfdev::ReloadContext {
+        task_context: Some("finish reload task".to_string()),
+        version_before: "before".to_string(),
+        version_after: "after".to_string(),
+        session_id: session_id.to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    }
+    .save()?;
+    assert!(
+        super::history_reload_recovery_snapshot(session_id, Some(true)).is_none(),
+        "delivered intent must override leftover context and interruption evidence"
+    );
     assert!(
         super::history_reload_recovery_snapshot(session_id, None).is_none(),
         "delivered server-owned recovery intent should no longer be emitted"
     );
+    super::super::reload_recovery::persist_intent(
+        "reload-next",
+        session_id,
+        super::super::reload_recovery::ReloadRecoveryRole::Initiator,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: "new reload continuation".to_string(),
+        },
+        "next reload",
+    )?;
+    assert_eq!(
+        super::history_reload_recovery_snapshot(session_id, None)
+            .unwrap()
+            .continuation_message,
+        "new reload continuation"
+    );
     Ok(())
+}
+
+fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
+    ["one", "two", "three", "four"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, content)| crate::protocol::HistoryMessage {
+            response_stats: None,
+            role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
+            content: content.to_string(),
+            tool_calls: None,
+            tool_data: None,
+        })
+        .collect()
+}
+
+fn delta_test_base(
+    messages: &[crate::protocol::HistoryMessage],
+    count: usize,
+) -> crate::protocol::HistoryBase {
+    crate::protocol::HistoryBase {
+        count,
+        fingerprint: crate::protocol::history_prefix_fingerprint(
+            messages[..count]
+                .iter()
+                .map(crate::protocol::HistoryMessageRef::from),
+        ),
+        images_fingerprint: None,
+    }
+}
+
+#[test]
+fn history_base_match_sends_only_the_tail() {
+    let messages = delta_test_messages();
+    let base = delta_test_base(&messages, 3);
+    let (tail, base_count) = super::apply_history_base(messages, Some(base));
+    assert_eq!(base_count, Some(3));
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].content, "four");
+}
+
+#[test]
+fn history_base_full_match_sends_empty_tail() {
+    let messages = delta_test_messages();
+    let base = delta_test_base(&messages, 4);
+    let (tail, base_count) = super::apply_history_base(messages, Some(base));
+    assert_eq!(base_count, Some(4));
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn history_base_mismatch_or_overlong_sends_full_transcript() {
+    let messages = delta_test_messages();
+    let mut edited = delta_test_messages();
+    edited[1].content = "rewound".to_string();
+    let stale = delta_test_base(&edited, 3);
+    let (full, base_count) = super::apply_history_base(messages.clone(), Some(stale));
+    assert_eq!((full.len(), base_count), (4, None));
+
+    let mut longer = delta_test_messages();
+    longer.push(longer[0].clone());
+    let overlong = delta_test_base(&longer, 5);
+    let (full, base_count) = super::apply_history_base(messages.clone(), Some(overlong));
+    assert_eq!((full.len(), base_count), (4, None));
+
+    let (full, base_count) = super::apply_history_base(messages, None);
+    assert_eq!((full.len(), base_count), (4, None));
+}
+
+#[test]
+fn history_images_base_omits_only_matching_image_sets() {
+    let image = |data: &str| crate::session::RenderedImage {
+        media_type: "image/png".to_string(),
+        data: data.to_string(),
+        label: None,
+        source: crate::session::RenderedImageSource::UserInput,
+        anchor: None,
+        history_message_index: None,
+    };
+    let images = vec![image("a"), image("b")];
+    let base = |fingerprint| crate::protocol::HistoryBase {
+        count: 1,
+        fingerprint: 0,
+        images_fingerprint: Some(fingerprint),
+    };
+    let matching = crate::protocol::history_images_fingerprint(&images);
+    let (sent, unchanged) = super::apply_history_images_base(images.clone(), Some(base(matching)));
+    assert!(unchanged && sent.is_empty());
+    let other = crate::protocol::history_images_fingerprint(&[image("a")]);
+    let (sent, unchanged) = super::apply_history_images_base(images.clone(), Some(base(other)));
+    assert!(!unchanged && sent.len() == 2);
+    let (sent, unchanged) = super::apply_history_images_base(images, None);
+    assert!(!unchanged && sent.len() == 2);
 }

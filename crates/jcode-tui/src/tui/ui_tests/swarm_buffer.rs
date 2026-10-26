@@ -410,7 +410,7 @@ fn swarm_strip_stands_down_through_dock_blinks() {
 
 /// The swarm dock widget renders the compact summary at the cell level:
 /// place it through the real `calculate_placements` + `render_all` path into
-/// a TestBackend and assert the summary + progress bar landed inside the
+/// a TestBackend and assert the agent summary landed inside the
 /// placement rect.
 #[test]
 fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
@@ -421,7 +421,6 @@ fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
     let data = crate::tui::info_widget::InfoWidgetData {
         swarm_info: Some(crate::tui::info_widget::SwarmInfo {
             managed_members: vec![coordinator, strip_member("s1", "reviewer", "completed")],
-            plan_progress: Some((3, 2, 7)),
             ..Default::default()
         }),
         ..Default::default()
@@ -466,8 +465,8 @@ fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
         "expected agents tally inside dock rect, got:\n{dock_text}"
     );
     assert!(
-        dock_text.contains("nodes 3/7"),
-        "expected node progress on dock border, got:\n{dock_text}"
+        !dock_text.contains("nodes "),
+        "plan progress must not appear in the dock, got:\n{dock_text}"
     );
     assert!(
         dock_text.contains("researcher") && dock_text.contains("reviewer"),
@@ -544,8 +543,13 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
         .draw(|frame| crate::tui::ui::draw(frame, state))
         .expect("overscroll frame");
     let rows = buffer_rows(&terminal);
-    // The overscroll line is the last row of the frame.
-    rows.last().cloned().unwrap_or_default()
+    // The status line is pinned directly below the input, so it is the last
+    // non-blank row of the frame (rows below it are unused viewport).
+    rows.iter()
+        .rev()
+        .find(|row| !row.trim().is_empty())
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[test]
@@ -618,10 +622,16 @@ fn overscroll_model_is_pink() {
         .draw(|frame| crate::tui::ui::draw(frame, &state))
         .expect("overscroll frame");
     let buf = terminal.backend().buffer();
-    let y = buf.area.height - 1;
-    let row: String = (0..buf.area.width)
-        .map(|x| buf[(x, y)].symbol().to_string())
-        .collect();
+    let row_at = |y: u16| -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    };
+    let y = (0..buf.area.height)
+        .rev()
+        .find(|&y| !row_at(y).trim().is_empty())
+        .expect("status line rendered");
+    let row = row_at(y);
     let col = row
         .find("GPT-5.6 Sol")
         .map(|byte| row[..byte].chars().count() as u16)

@@ -1,6 +1,5 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::append_swarm_completion_report_instructions;
 use super::swarm::{
     now_unix_ms, swarm_task_heartbeat_interval, swarm_task_stale_after, touch_swarm_task_progress,
 };
@@ -234,98 +233,10 @@ fn active_assignment_error(task_id: &str, conflict: &ActiveAssignmentConflict) -
     )
 }
 
-/// Decide whether a worker's just-finished turn should auto-mark its assigned
-/// node `done`.
-///
-/// A turn must NOT force-complete a node when the worker decomposed it into a
-/// composite (`expanded`): that node is now a synthesis/join point that has to
-/// wait for its children (and, in deep mode, its critique/verify gate) before it
-/// can close, and it will be re-woken to synthesize. Likewise a node the worker
-/// already drove to a terminal status (e.g. via `complete_node`, or that failed)
-/// must not be reopened/reclosed. A node that is `queued` at turn end was
-/// re-queued mid-turn by someone else (`inject_gap` re-queuing its gate, a
-/// reassign, a requeue): it is no longer this worker's to close, and force-doing
-/// so would bypass gate artifact validation and strand injected gap nodes. Only
-/// a plain, still-running atomic turn auto-completes.
-/// What to do with a node whose worker turn ended while the node is still
-/// marked running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TurnEndDisposition {
-    /// Light mode: the worker just ran an atomic node; mark it done.
-    AutoComplete,
-    /// Deep mode, first offense: the worker never called `complete_node`, so
-    /// re-queue the node for a fresh worker. Deep completion is artifact-or-
-    /// nothing; silently marking it done would bypass artifact validation and
-    /// every gate rule.
-    RequeueNoArtifact,
-    /// Deep mode, repeated offense: fail the node loudly instead of cycling
-    /// workers forever. `task_control retry` / `requeue_failed` remain the
-    /// recovery paths.
-    FailNoArtifact,
-    /// The node is already terminal, queued (expanded or gap-injected this
-    /// turn), or otherwise not this turn's responsibility.
-    LeaveAlone,
-}
-
-/// Decide the turn-end disposition for a node.
-///
-/// Light mode keeps the historical lenient behavior: a running atomic node
-/// auto-completes, an expanded composite stays open for synthesis. Deep mode
-/// abolishes auto-complete entirely — the typed artifact contract is only real
-/// if there is no path to "done" that skips it. A running node at turn end
-/// (atomic without `complete_node`, or a re-woken composite synthesis that
-/// never synthesized) gets one fresh attempt, then fails.
-fn turn_end_disposition(
-    is_deep: bool,
-    status: &str,
-    expanded: bool,
-    prior_no_artifact_requeues: u32,
-) -> TurnEndDisposition {
-    let running = matches!(status, "running" | "running_stale");
-    if !running {
-        return TurnEndDisposition::LeaveAlone;
-    }
-    if is_deep {
-        return if prior_no_artifact_requeues == 0 {
-            TurnEndDisposition::RequeueNoArtifact
-        } else {
-            TurnEndDisposition::FailNoArtifact
-        };
-    }
-    if expanded {
-        // The worker decomposed the node; it must stay open to synthesize later.
-        return TurnEndDisposition::LeaveAlone;
-    }
-    TurnEndDisposition::AutoComplete
-}
-
-#[cfg(test)]
-fn turn_end_should_auto_complete(status: &str, expanded: bool) -> bool {
-    turn_end_disposition(false, status, expanded, 0) == TurnEndDisposition::AutoComplete
-}
-
-/// Assignment content for a (re-)dispatched node.
-///
-/// For a re-woken composite (`is_composite_synthesis`), the node's original
-/// content is the now-stale decomposition brief, so replace it with an explicit
-/// synthesis instruction that tells the planner to integrate its children and
-/// finish with `complete_node`. Otherwise the original content is used verbatim.
-fn composite_synthesis_content(
-    item_id: &str,
-    raw_content: &str,
-    is_composite_synthesis: bool,
-) -> String {
-    if is_composite_synthesis {
-        format!(
-            "Synthesis turn for composite node '{item_id}'. Its children (and the deep-mode \
-             critique/verify gate) are complete; their outputs are provided below. Read them, \
-             write one synthesized result, and finish by calling `swarm complete_node` with \
-             node_id=\"{item_id}\" and an artifact summarizing the integrated findings. Do NOT \
-             call expand_node again. Original brief: {raw_content}"
-        )
-    } else {
-        raw_content.to_string()
-    }
+/// A worker turn that ends while its task is still running auto-completes the
+/// task. Anything already terminal or re-queued mid-turn is left alone.
+fn turn_end_should_auto_complete(status: &str) -> bool {
+    matches!(status, "running" | "running_stale")
 }
 
 #[derive(Clone, Debug)]
@@ -336,73 +247,6 @@ struct TaskSnapshot {
     progress: Option<SwarmTaskProgress>,
 }
 
-/// Attach the deep-mode execution contract to an assignment's content when the
-/// plan is running deep.
-///
-/// This is the mechanism that makes the swarm's large agent budget actually get
-/// used: every dispatched node carries an in-band directive telling the worker
-/// it may `expand_node` into MANY parallel children and must close with a typed
-/// artifact, and every gate carries the `inject_gap`-or-pass contract. Without
-/// it, only the seeding session (which ran at `swarm-deep` effort) knows the
-/// deep workflow, and freshly spawned workers execute serially. A re-woken
-/// composite synthesis keeps its dedicated synthesis brief instead, since
-/// re-expanding there would loop.
-fn deep_mode_assignment_content(
-    plan: &VersionedPlan,
-    item_id: &str,
-    is_composite_synthesis: bool,
-    content: &str,
-) -> String {
-    if !plan.mode.eq_ignore_ascii_case("deep") || is_composite_synthesis {
-        return content.to_string();
-    }
-    let is_gate = plan
-        .node_meta
-        .get(item_id)
-        .map(|meta| meta.is_gate)
-        .unwrap_or(false);
-    if is_gate {
-        // The gate's audit scope is its non-gate dependencies (composite gates
-        // audit their siblings; the root gate audits the whole root set). The
-        // server rejects a pass whose artifact does not account for each of
-        // these by id, so the directive enumerates them up front instead of
-        // letting the gate discover the rejection by trial and error.
-        let audited_ids: Vec<String> = plan
-            .items
-            .iter()
-            .find(|item| item.id == item_id)
-            .map(|item| {
-                item.blocked_by
-                    .iter()
-                    .filter(|dep| {
-                        plan.node_meta
-                            .get(dep.as_str())
-                            .map(|meta| !meta.is_gate)
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Completed scope nodes whose artifacts self-reported low confidence:
-        // the strictest debts, named as priority probe targets.
-        let audited: HashSet<&str> = audited_ids.iter().map(String::as_str).collect();
-        let low_confidence_siblings: Vec<String> =
-            jcode_plan::bridge::low_confidence_completed_ids(plan)
-                .into_iter()
-                .filter(|id| audited.contains(id.as_str()))
-                .collect();
-        jcode_swarm_core::append_deep_gate_instructions(
-            content,
-            item_id,
-            &audited_ids,
-            &low_confidence_siblings,
-        )
-    } else {
-        jcode_swarm_core::append_deep_node_instructions(content, item_id)
-    }
-}
-
 async fn task_snapshot_for(
     swarm_id: &str,
     task_id: &str,
@@ -411,18 +255,8 @@ async fn task_snapshot_for(
     let plans = swarm_plans.read().await;
     let plan = plans.get(swarm_id)?;
     let item = plan.items.iter().find(|item| item.id == task_id)?;
-    // Hydrate with forward dataflow from completed upstream dependencies so
-    // resume/start/wake re-injects the same artifact context an initial
-    // assignment would carry, then attach the deep-mode contract the same way
-    // the initial assignment path does.
-    let hydrated = jcode_plan::bridge::hydrate_assignment(plan, task_id, &item.content);
-    let is_composite_synthesis = plan
-        .node_meta
-        .get(task_id)
-        .map(|meta| meta.expanded && !meta.is_gate)
-        .unwrap_or(false);
     Some(TaskSnapshot {
-        content: deep_mode_assignment_content(plan, task_id, is_composite_synthesis, &hydrated),
+        content: item.content.clone(),
         status: item.status.clone(),
         assigned_to: item.assigned_to.clone(),
         progress: plan.task_progress.get(task_id).cloned(),
@@ -489,12 +323,14 @@ async fn active_swarm_member(
     members.get(session_id).cloned()
 }
 
+/// Live agent for `session_id`, restoring a headless worker from disk when its
+/// agent is not loaded (for example a worker that failed before a reload).
 async fn task_agent_session(
     session_id: &str,
     sessions: &SessionAgents,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<Arc<Mutex<Agent>>> {
-    let guard = sessions.read().await;
-    guard.get(session_id).cloned()
+    super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await
 }
 
 async fn resolve_assignment_target_session(
@@ -563,28 +399,6 @@ async fn task_id_for_target_session(
         return Err("No swarm plan exists for this swarm.".to_string());
     };
     task_control_target_item_id(&plan.items, target_session, action)
-}
-
-/// Test-only re-export of the private assignment resolver so the e2e tests can
-/// assert composite re-wake routing without going through the full assign path.
-#[cfg(test)]
-pub(super) async fn resolve_assignment_target_for_task_test_hook(
-    req_session_id: &str,
-    swarm_id: &str,
-    task_id: &str,
-    requested_target: Option<&str>,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
-) -> Result<String, String> {
-    resolve_assignment_target_for_task(
-        req_session_id,
-        swarm_id,
-        task_id,
-        requested_target,
-        swarm_members,
-        swarm_plans,
-    )
-    .await
 }
 
 async fn next_unassigned_runnable_task_id(
@@ -670,38 +484,6 @@ async fn resolve_assignment_target_for_task(
         .await;
     }
 
-    // Composite owner re-wake affinity: a composite (expanded) node that has
-    // become runnable again is the synthesis/join step. Prefer routing it back to
-    // the agent that planned the decomposition (its recorded owner), so the same
-    // planner integrates its children rather than a fresh worker. Only honor this
-    // when that owner is still a live, eligible swarm member.
-    {
-        let plans = swarm_plans.read().await;
-        if let Some(plan) = plans.get(swarm_id) {
-            let planner = plan.node_meta.get(task_id).and_then(|meta| {
-                (meta.expanded && !meta.is_gate)
-                    .then(|| meta.planner.clone())
-                    .flatten()
-            });
-            if let Some(owner) = planner
-                && owner != req_session_id
-            {
-                let members = swarm_members.read().await;
-                let owner_eligible =
-                    filter_swarm_agent_candidates(&members, req_session_id, swarm_id)
-                        .iter()
-                        .any(|member| member.session_id == owner);
-                // The planner affinity deliberately bypasses the busy check (the
-                // synthesis needs its decomposition context), but not the race
-                // claim: if another in-flight pick just took this member, fall
-                // through to normal selection instead of double-booking it.
-                if owner_eligible && try_claim_auto_assign_target(swarm_id, &owner) {
-                    return Ok(owner);
-                }
-            }
-        }
-    }
-
     let affinities = {
         let plans = swarm_plans.read().await;
         let Some(plan) = plans.get(swarm_id) else {
@@ -771,8 +553,7 @@ fn spawn_assigned_task_run(
     event_counter: Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) {
-    let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         {
             let now_ms = now_unix_ms();
             let mut plans = swarm_plans.write().await;
@@ -888,7 +669,7 @@ fn spawn_assigned_task_run(
             let agent = agent_arc.lock().await;
             agent.message_count()
         };
-        let result = super::client_lifecycle::process_message_streaming_mpsc(
+        let result = super::turn_failover::process_server_initiated_message(
             Arc::clone(&agent_arc),
             &assignment_text,
             vec![],
@@ -896,11 +677,9 @@ fn spawn_assigned_task_run(
             event_tx,
         )
         .await;
-        let completion_report = if result.is_ok() {
+        let completion_report = {
             let agent = agent_arc.lock().await;
-            agent.latest_assistant_text_after(start_message_index)
-        } else {
-            None
+            agent.recent_assistant_output_tail_after(start_message_index)
         };
         let _ = heartbeat_stop_tx.send(true);
         let _ = heartbeat_task.await;
@@ -914,93 +693,25 @@ fn spawn_assigned_task_run(
                         .map(|plan| plan.items.clone())
                         .unwrap_or_default()
                 };
-                let mut applied_disposition = TurnEndDisposition::LeaveAlone;
+                let mut auto_completed = false;
                 {
                     let now_ms = now_unix_ms();
                     let mut plans = swarm_plans.write().await;
                     if let Some(plan) = plans.get_mut(&swarm_id)
                         && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
+                        && turn_end_should_auto_complete(&item.status)
                     {
-                        // A worker turn ends in one of three ways for its node:
-                        //  1. it decomposed the node via `expand_node` -> the node is
-                        //     now a composite synthesis/join point that must stay
-                        //     in-progress until its children (and deep-mode gate)
-                        //     finish; it is re-woken later to synthesize.
-                        //  2. it already finished the node via `complete_node` -> the
-                        //     node is terminal and owned by no one.
-                        //  3. it just ran and the node is still `running`.
-                        // Case 3 is mode-dependent: light mode auto-completes
-                        // (cheap fan-out, artifacts optional), deep mode never
-                        // does — a deep node only closes through `complete_node`
-                        // with a validated artifact, so an artifact-less turn is
-                        // re-queued once to a fresh worker and then failed.
-                        let expanded = plan
-                            .node_meta
-                            .get(&task_id)
-                            .map(|m| m.expanded && !m.is_gate)
-                            .unwrap_or(false);
-                        let is_deep = plan.mode.eq_ignore_ascii_case("deep");
-                        let prior_requeues = plan
-                            .task_progress
-                            .get(&task_id)
-                            .and_then(|p| p.no_artifact_requeues)
-                            .unwrap_or(0);
-                        match turn_end_disposition(is_deep, &item.status, expanded, prior_requeues)
-                        {
-                            TurnEndDisposition::AutoComplete => {
-                                applied_disposition = TurnEndDisposition::AutoComplete;
-                                item.status = "done".to_string();
-                                let progress =
-                                    plan.task_progress.entry(task_id.clone()).or_default();
-                                progress.last_heartbeat_unix_ms = Some(now_ms);
-                                progress.last_checkpoint_unix_ms = Some(now_ms);
-                                progress.checkpoint_summary = Some("task completed".to_string());
-                                progress.completed_at_unix_ms = Some(now_ms);
-                                progress.stale_since_unix_ms = None;
-                                progress.checkpoint_count =
-                                    Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                plan.version += 1;
-                            }
-                            TurnEndDisposition::RequeueNoArtifact => {
-                                applied_disposition = TurnEndDisposition::RequeueNoArtifact;
-                                item.status = "queued".to_string();
-                                item.assigned_to = None;
-                                let progress =
-                                    plan.task_progress.entry(task_id.clone()).or_default();
-                                progress.assigned_session_id = None;
-                                progress.no_artifact_requeues = Some(prior_requeues + 1);
-                                progress.last_heartbeat_unix_ms = Some(now_ms);
-                                progress.last_checkpoint_unix_ms = Some(now_ms);
-                                progress.checkpoint_summary = Some(
-                                    "requeued: deep-mode turn ended without a complete_node \
-                                     artifact"
-                                        .to_string(),
-                                );
-                                progress.stale_since_unix_ms = None;
-                                progress.checkpoint_count =
-                                    Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                plan.version += 1;
-                            }
-                            TurnEndDisposition::FailNoArtifact => {
-                                applied_disposition = TurnEndDisposition::FailNoArtifact;
-                                item.status = "failed".to_string();
-                                let progress =
-                                    plan.task_progress.entry(task_id.clone()).or_default();
-                                progress.last_heartbeat_unix_ms = Some(now_ms);
-                                progress.last_checkpoint_unix_ms = Some(now_ms);
-                                progress.checkpoint_summary = Some(
-                                    "failed: repeated deep-mode turns ended without a \
-                                     complete_node artifact"
-                                        .to_string(),
-                                );
-                                progress.completed_at_unix_ms = Some(now_ms);
-                                progress.stale_since_unix_ms = None;
-                                progress.checkpoint_count =
-                                    Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                plan.version += 1;
-                            }
-                            TurnEndDisposition::LeaveAlone => {}
-                        }
+                        auto_completed = true;
+                        item.status = "done".to_string();
+                        let progress = plan.task_progress.entry(task_id.clone()).or_default();
+                        progress.last_heartbeat_unix_ms = Some(now_ms);
+                        progress.last_checkpoint_unix_ms = Some(now_ms);
+                        progress.checkpoint_summary = Some("task completed".to_string());
+                        progress.completed_at_unix_ms = Some(now_ms);
+                        progress.stale_since_unix_ms = None;
+                        progress.checkpoint_count =
+                            Some(progress.checkpoint_count.unwrap_or(0) + 1);
+                        plan.version += 1;
                     }
                 }
                 let swarm_state = SwarmState {
@@ -1010,10 +721,10 @@ fn spawn_assigned_task_run(
                     coordinators: Arc::clone(&swarm_coordinators),
                 };
                 persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                let plan_reason = match applied_disposition {
-                    TurnEndDisposition::RequeueNoArtifact => "task_requeued_no_artifact",
-                    TurnEndDisposition::FailNoArtifact => "task_failed_no_artifact",
-                    _ => "task_completed",
+                let plan_reason = if auto_completed {
+                    "task_completed"
+                } else {
+                    "task_turn_ended"
                 };
                 broadcast_swarm_plan_with_previous(
                     &swarm_id,
@@ -1024,10 +735,6 @@ fn spawn_assigned_task_run(
                     &swarms_by_id,
                 )
                 .await;
-                // The worker's member status reflects its own turn (it ran to
-                // completion) even when its node was requeued/failed for missing
-                // an artifact: lifecycle and node state are separate axes, and a
-                // "completed" worker is reusable for the requeued node.
                 update_member_status_with_report(
                     &target_session,
                     "completed",
@@ -1076,10 +783,11 @@ fn spawn_assigned_task_run(
                     &swarms_by_id,
                 )
                 .await;
-                update_member_status(
+                update_member_status_with_report(
                     &target_session,
                     "failed",
                     Some(truncate_detail(&error.to_string(), 120)),
+                    completion_report,
                     &swarm_members,
                     &swarms_by_id,
                     Some(&event_history),
@@ -1595,26 +1303,8 @@ async fn handle_comm_assign_task_with_mode(
             })
         };
         if let Some(found_idx) = found_idx {
-            // Resolve identity + forward-dataflow context before taking the
-            // mutable borrow, so hydration can read sibling artifacts immutably.
             let item_id = plan.items[found_idx].id.clone();
-            let raw_content = plan.items[found_idx].content.clone();
-            // A re-woken composite is the synthesis/join step: its original content
-            // was the (now-stale) decomposition brief, so replace it with an explicit
-            // synthesis instruction. Without this the planner replays the old "expand
-            // me" prompt and reports instead of calling `complete_node`, leaving the
-            // composite `running_stale` forever.
-            let is_composite_synthesis = plan
-                .node_meta
-                .get(&item_id)
-                .map(|meta| meta.expanded && !meta.is_gate)
-                .unwrap_or(false);
-            let effective_content =
-                composite_synthesis_content(&item_id, &raw_content, is_composite_synthesis);
-            let hydrated =
-                jcode_plan::bridge::hydrate_assignment(plan, &item_id, &effective_content);
-            let content =
-                deep_mode_assignment_content(plan, &item_id, is_composite_synthesis, &hydrated);
+            let content = plan.items[found_idx].content.clone();
 
             // Index resolved under this same plan lock, so it stays valid.
             let item = &mut plan.items[found_idx];
@@ -1697,6 +1387,14 @@ async fn handle_comm_assign_task_with_mode(
         coordinators: Arc::clone(swarm_coordinators),
     };
     persist_swarm_state_for(&swarm_id, &swarm_state).await;
+    // Mirror the assignment onto the requesting coordinator's matching todo so
+    // the pinned todo band shows this worker's emoji on that row.
+    super::swarm_todo_link::link_assignment(
+        &req_session_id,
+        &selected_task_id,
+        &content,
+        &target_session,
+    );
 
     broadcast_swarm_plan(
         &swarm_id,
@@ -1726,7 +1424,9 @@ async fn handle_comm_assign_task_with_mode(
             .get(&req_session_id)
             .and_then(|member| member.friendly_name.clone())
     };
-    let notification = if let Some(ref extra) = message {
+    let brief =
+        super::swarm_todo_link::assignment_brief(&req_session_id, &selected_task_id, &content);
+    let mut notification = if let Some(ref extra) = message {
         format!(
             "Task assigned to you by coordinator: {} — {}",
             content, extra
@@ -1734,7 +1434,10 @@ async fn handle_comm_assign_task_with_mode(
     } else {
         format!("Task assigned to you by coordinator: {}", content)
     };
-    let queued_task_prompt = append_swarm_completion_report_instructions(&notification);
+    if let Some(brief) = brief.as_deref() {
+        notification.push_str("\n\n");
+        notification.push_str(brief);
+    }
     let assignment_text = combine_assignment_text(&content, message.as_deref());
     set_member_task_label(&target_session, &assignment_text, swarm_members).await;
     update_member_status(
@@ -1749,13 +1452,10 @@ async fn handle_comm_assign_task_with_mode(
     )
     .await;
 
-    let target_agent = {
-        let agent_sessions = sessions.read().await;
-        agent_sessions.get(&target_session).cloned()
-    };
+    let target_agent = task_agent_session(&target_session, sessions, swarm_members).await;
     let _ = queue_soft_interrupt_for_session(
         &target_session,
-        queued_task_prompt,
+        notification.clone(),
         false,
         SoftInterruptSource::System,
         soft_interrupt_queues,
@@ -1921,6 +1621,7 @@ pub(super) async fn handle_comm_assign_next(
             match super::comm_session::spawn_swarm_agent(
                 &req_session_id,
                 &swarm_id,
+                None,
                 working_dir.clone(),
                 None,
                 None,
@@ -2070,6 +1771,39 @@ pub(super) async fn handle_comm_task_control(
         return;
     };
 
+    // Workers spawned directly (without a plan) have no task to resume, but
+    // their owner still needs a reliable way to rouse an idle or failed one.
+    // The spawner (any ancestor in the report-back chain) owns its subtree,
+    // exactly like `stop`, so it may wake/resume/retry its own workers even
+    // when it does not hold the swarm coordinator slot. That slot can be lost
+    // across a server reload, which used to strand every worker with
+    // "Only the coordinator can control assigned tasks".
+    if task_id.trim().is_empty()
+        && action_wakes_without_plan(action)
+        && let Some(target) = target_session.as_deref()
+        && let Some(owner_swarm_id) =
+            requester_owns_target(&req_session_id, target, swarm_members).await
+        && !target_has_plan_assignment(&owner_swarm_id, target, swarm_members, swarm_plans).await
+    {
+        wake_session_without_plan(
+            id,
+            &req_session_id,
+            &owner_swarm_id,
+            target,
+            message.as_deref(),
+            client_event_tx,
+            sessions,
+            soft_interrupt_queues,
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        )
+        .await;
+        return;
+    }
+
     let swarm_id = match require_plan_driver_swarm(
         id,
         &req_session_id,
@@ -2084,6 +1818,34 @@ pub(super) async fn handle_comm_task_control(
         Some(swarm_id) => swarm_id,
         None => return,
     };
+
+    // Workers spawned directly (without a plan) have no task to resume, but
+    // the coordinator still needs a reliable way to rouse an idle one. Treat
+    // wake/resume/start on a target session with no plan-assigned task as a
+    // direct session wake instead of failing with "No swarm plan exists".
+    if task_id.trim().is_empty()
+        && action_wakes_without_plan(action)
+        && let Some(target) = target_session.as_deref()
+        && !target_has_plan_assignment(&swarm_id, target, swarm_members, swarm_plans).await
+    {
+        wake_session_without_plan(
+            id,
+            &req_session_id,
+            &swarm_id,
+            target,
+            message.as_deref(),
+            client_event_tx,
+            sessions,
+            soft_interrupt_queues,
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        )
+        .await;
+        return;
+    }
 
     let task_id = if task_id.trim().is_empty() {
         let Some(target_session) = target_session.as_deref() else {
@@ -2188,7 +1950,8 @@ pub(super) async fn handle_comm_task_control(
             // first and only then discover the agent was missing or busy,
             // leaving a live task falsely queued with its run history mangled
             // even though the request was rejected.
-            let Some(agent_arc) = task_agent_session(&assignee, sessions).await else {
+            let Some(agent_arc) = task_agent_session(&assignee, sessions, swarm_members).await
+            else {
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
                     message: format!(
@@ -2276,7 +2039,6 @@ pub(super) async fn handle_comm_task_control(
             }
 
             if action == TaskControlAction::Wake {
-                let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
                 let wake_message = format!(
                     "Coordinator requested you wake and continue task '{}'.\n\n{}",
                     task_id, assignment_text
@@ -2416,16 +2178,17 @@ pub(super) async fn handle_comm_task_control(
                 let prior_name = active_swarm_member(&assignee, swarm_members)
                     .await
                     .and_then(|member| member.friendly_name);
-                let summaries =
-                    if let Some(agent_arc) = task_agent_session(&assignee, sessions).await {
-                        if let Ok(agent) = agent_arc.try_lock() {
-                            agent.get_tool_call_summaries(12)
-                        } else {
-                            vec![]
-                        }
+                let summaries = if let Some(agent_arc) =
+                    task_agent_session(&assignee, sessions, swarm_members).await
+                {
+                    if let Ok(agent) = agent_arc.try_lock() {
+                        agent.get_tool_call_summaries(12)
                     } else {
                         vec![]
-                    };
+                    }
+                } else {
+                    vec![]
+                };
                 let mut salvage = format_salvage_message(
                     &assignee,
                     prior_name.as_deref(),
@@ -2553,26 +2316,218 @@ pub(super) fn handle_client_debug_response(
     let _ = client_debug_response_tx.send((id, output));
 }
 
+/// Resolve a target given as a session id or unique friendly name within
+/// `swarm_id`.
+async fn resolve_swarm_member_target(
+    swarm_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Result<String, String> {
+    let members = swarm_members.read().await;
+    if let Some(member) = members.get(target) {
+        if member.swarm_id.as_deref() == Some(swarm_id) {
+            return Ok(target.to_string());
+        }
+        return Err(format!("Session '{target}' is not in this swarm."));
+    }
+    let mut matches: Vec<&str> = members
+        .values()
+        .filter(|member| member.swarm_id.as_deref() == Some(swarm_id))
+        .filter(|member| member.friendly_name.as_deref() == Some(target))
+        .map(|member| member.session_id.as_str())
+        .collect();
+    matches.sort_unstable();
+    match matches.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => Err(format!(
+            "Unknown target '{target}' - use an exact session_id or a unique friendly name within the swarm."
+        )),
+        many => Err(format!(
+            "Friendly name '{target}' is ambiguous in swarm. Use an exact session id instead. Matches: {}",
+            many.join(", ")
+        )),
+    }
+}
+
+/// Task-control actions that, on a target with no plan task, mean "wake this
+/// session and let it continue". Retry is included: a spawned worker whose
+/// turn failed has no plan task to re-dispatch, so retrying means waking it.
+fn action_wakes_without_plan(action: TaskControlAction) -> bool {
+    matches!(
+        action,
+        TaskControlAction::Wake
+            | TaskControlAction::Resume
+            | TaskControlAction::Start
+            | TaskControlAction::Retry
+    )
+}
+
+/// When `req_session_id` is a spawner (any ancestor) of `target`, return the
+/// target's swarm id. Ownership follows the report-back chain, the same rule
+/// `stop` uses, so it survives losing the coordinator slot.
+async fn requester_owns_target(
+    req_session_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Option<String> {
+    let members = swarm_members.read().await;
+    let swarm_id = members.get(req_session_id)?.swarm_id.clone()?;
+    let target_id = if members.contains_key(target) {
+        target.to_string()
+    } else {
+        let mut matches = members
+            .values()
+            .filter(|member| member.swarm_id.as_deref() == Some(swarm_id.as_str()))
+            .filter(|member| member.friendly_name.as_deref() == Some(target))
+            .map(|member| member.session_id.clone());
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        first
+    };
+    if target_id == req_session_id {
+        return None;
+    }
+    let target_member = members.get(&target_id)?;
+    if target_member.swarm_id.as_deref() != Some(swarm_id.as_str()) {
+        return None;
+    }
+    super::swarm_is_self_or_ancestor(&members, req_session_id, &target_id).then_some(swarm_id)
+}
+
+/// Whether `target` (session id or friendly name) owns any task in the swarm
+/// plan. Targets without plan tasks are woken directly instead.
+async fn target_has_plan_assignment(
+    swarm_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+) -> bool {
+    let resolved = resolve_swarm_member_target(swarm_id, target, swarm_members)
+        .await
+        .unwrap_or_else(|_| target.to_string());
+    let plans = swarm_plans.read().await;
+    plans.get(swarm_id).is_some_and(|plan| {
+        plan.items.iter().any(|item| {
+            matches!(item.assigned_to.as_deref(), Some(owner) if owner == target || owner == resolved)
+        })
+    })
+}
+
+/// Wake an idle swarm member that has no plan task to resume.
+///
+/// Starts a tracked live turn immediately when the agent is idle. When it is
+/// busy, the message is queued as a soft interrupt, which a running turn
+/// drains at its next safe point.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "direct wake needs the same swarm bookkeeping handles as task control"
+)]
+async fn wake_session_without_plan(
+    id: u64,
+    req_session_id: &str,
+    swarm_id: &str,
+    target: &str,
+    message: Option<&str>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &super::SessionInterruptQueues,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    event_counter: &Arc<std::sync::atomic::AtomicU64>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+) {
+    let session_id = match resolve_swarm_member_target(swarm_id, target, swarm_members).await {
+        Ok(session_id) => session_id,
+        Err(message) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message,
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    if session_id == req_session_id {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Coordinator cannot wake itself.".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    if task_agent_session(&session_id, sessions, swarm_members)
+        .await
+        .is_none()
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!(
+                "Session '{}' has no live agent on the server. Spawn a replacement instead.",
+                session_id
+            ),
+            retry_after_secs: None,
+        });
+        return;
+    }
+
+    let wake_message = match message.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => format!("Coordinator requested you wake and continue.\n\n{text}"),
+        None => "Coordinator requested you wake and continue your assigned work.".to_string(),
+    };
+
+    let woke = super::live_turn::run_live_turn_if_idle(
+        &session_id,
+        &wake_message,
+        None,
+        sessions,
+        super::live_turn::LiveTurnSwarmContext::new(
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        ),
+    )
+    .await;
+    let status = if woke {
+        "running"
+    } else {
+        let _ = queue_soft_interrupt_for_session(
+            &session_id,
+            wake_message,
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await;
+        "queued"
+    };
+
+    let _ = client_event_tx.send(ServerEvent::CommTaskControlResponse {
+        id,
+        action: "wake".to_string(),
+        task_id: "(no plan task)".to_string(),
+        target_session: Some(session_id),
+        status: status.to_string(),
+        summary: PlanGraphStatus::empty_for_swarm(swarm_id),
+    });
+}
+
 /// Authorize a session to drive task dispatch for its swarm plan.
 ///
-/// Light mode keeps the single-coordinator rule: a coordinator is the one driver,
-/// which matches the cheap fan-out preset. Deep mode follows the task-DAG
-/// ownership model (see `docs/SWARM_TASK_GRAPH.md` section 2): the plan is a tree
-/// of ownership over a graph, and the agent that seeded/participates in the graph
-/// must be able to dispatch it even when another session already holds the
-/// swarm-level coordinator slot. Without this, a deep-mode agent that joins a
-/// shared swarm can seed a graph but is then blocked from spawning/assigning any
-/// of it, so nothing ever runs.
-///
-/// Returns the swarm id when the caller is the coordinator, or (deep mode only) a
-/// participant of the swarm's plan.
+/// Only the swarm coordinator may drive dispatch. Returns the swarm id when the
+/// caller is the coordinator.
 async fn require_plan_driver_swarm(
     id: u64,
     req_session_id: &str,
     permission_error: &str,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    _swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
 ) -> Option<String> {
     let swarm_id = {
@@ -2601,25 +2556,81 @@ async fn require_plan_driver_swarm(
         return Some(swarm_id);
     }
 
-    // Deep mode: any participant of the plan may drive its own task graph.
-    let is_deep_participant = {
-        let plans = swarm_plans.read().await;
-        plans
-            .get(&swarm_id)
-            .map(|plan| {
-                jcode_plan::bridge::parse_mode(&plan.mode) == jcode_plan::dag::Mode::Deep
-                    && plan.participants.contains(req_session_id)
-            })
-            .unwrap_or(false)
-    };
-    if is_deep_participant {
-        return Some(swarm_id);
-    }
-
     let _ = client_event_tx.send(ServerEvent::Error {
         id,
         message: permission_error.to_string(),
         retry_after_secs: None,
     });
     None
+}
+
+/// Close the reporter's own open plan task when it sends a terminal report.
+///
+/// Client-attached assignees run their turn in the client, so no server-side
+/// turn-end hook marks their task done. A `completed`/`done` report closes the
+/// task as done and a `failed` report closes it as failed. Only tasks assigned
+/// to the reporter and still queued/running are touched.
+pub(super) async fn close_reporter_task_on_terminal_report(
+    req_session_id: &str,
+    status: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+) {
+    let new_status = match status.trim().to_ascii_lowercase().as_str() {
+        "completed" | "done" => "done",
+        "failed" => "failed",
+        _ => return,
+    };
+    let Some(swarm_id) = swarm_members
+        .read()
+        .await
+        .get(req_session_id)
+        .and_then(|member| member.swarm_id.clone())
+    else {
+        return;
+    };
+    let previous_items;
+    {
+        let mut plans = swarm_plans.write().await;
+        let Some(plan) = plans.get_mut(&swarm_id) else {
+            return;
+        };
+        previous_items = plan.items.clone();
+        let now_ms = now_unix_ms();
+        let mut changed = false;
+        for item in plan.items.iter_mut().filter(|item| {
+            item.assigned_to.as_deref() == Some(req_session_id)
+                && matches!(item.status.as_str(), "queued" | "running" | "running_stale")
+        }) {
+            item.status = new_status.to_string();
+            let progress = plan.task_progress.entry(item.id.clone()).or_default();
+            progress.last_checkpoint_unix_ms = Some(now_ms);
+            progress.checkpoint_summary = Some(format!("task {new_status} via report"));
+            progress.completed_at_unix_ms = Some(now_ms);
+            progress.stale_since_unix_ms = None;
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
+        plan.version += 1;
+    }
+    let swarm_state = SwarmState {
+        members: Arc::clone(swarm_members),
+        swarms_by_id: Arc::clone(swarms_by_id),
+        plans: Arc::clone(swarm_plans),
+        coordinators: Arc::clone(swarm_coordinators),
+    };
+    persist_swarm_state_for(&swarm_id, &swarm_state).await;
+    broadcast_swarm_plan_with_previous(
+        &swarm_id,
+        Some("task_reported".to_string()),
+        Some(&previous_items),
+        swarm_plans,
+        swarm_members,
+        swarms_by_id,
+    )
+    .await;
 }

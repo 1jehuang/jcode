@@ -83,6 +83,20 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     if let Some(Command::Auth(AuthCommand::Import { json, .. })) = &args.command {
         return super::auth_import::run(&args.provider, *json);
     }
+    // Explicit MCP management is independent of provider profiles, sessions,
+    // and the daemon. In particular, list must remain offline and scriptable.
+    if matches!(args.command, Some(Command::Mcp { .. })) {
+        let Some(Command::Mcp { action }) = args.command else {
+            unreachable!("MCP command checked above");
+        };
+        return super::mcp::run(action).await;
+    }
+    // The standalone picker is the entire command, not a resume ID lookup.
+    // In particular, cancelling it must not continue into provider/agent startup
+    // with an empty session ID.
+    if args.resume.as_deref() == Some("") {
+        return tui_launch::list_sessions();
+    }
     resolve_resume_arg(&mut args)?;
 
     // One-time config migration: users whose config.toml still carries the old
@@ -135,6 +149,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     match args.command {
+        Some(Command::Mcp { action }) => super::mcp::run(action).await?,
         Some(Command::Serve {
             temporary_server,
             owner_pid,
@@ -285,6 +300,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             json,
             ndjson,
         }) => {
+            register_on_demand_server_spawner_for_run(
+                args.provider,
+                args.model.clone(),
+                args.provider_profile.clone(),
+            );
             commands::run_single_message_command(
                 &args.provider,
                 args.model.as_deref(),
@@ -465,6 +485,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             session,
         }) => {
             commands::run_transcript_command(text, map_transcript_mode(mode), session).await?;
+        }
+        Some(Command::Companion { status, no_voice }) => {
+            commands::run_companion_command(status, no_voice).await?;
         }
         Some(Command::Dictate { r#type }) => {
             commands::run_dictate_command(r#type).await?;
@@ -684,10 +707,6 @@ fn auth_doctor_provider_arg<'a>(
 
 fn resolve_resume_arg(args: &mut Args) -> Result<()> {
     if let Some(ref resume_id) = args.resume {
-        if resume_id.is_empty() {
-            return tui_launch::list_sessions();
-        }
-
         let resume_id = resume_id.clone();
         match resolve_resume_id(&resume_id) {
             Ok(full_id) => {
@@ -763,173 +782,8 @@ fn resolve_resume_id(resume_id: &str) -> Result<String> {
     }
 }
 
-fn map_memory_subcommand(subcmd: MemoryCommand) -> commands::MemorySubcommand {
-    match subcmd {
-        MemoryCommand::List { scope, tag } => commands::MemorySubcommand::List { scope, tag },
-        MemoryCommand::Search { query, semantic } => {
-            commands::MemorySubcommand::Search { query, semantic }
-        }
-        MemoryCommand::Export { output, scope } => {
-            commands::MemorySubcommand::Export { output, scope }
-        }
-        MemoryCommand::Import {
-            input,
-            scope,
-            overwrite,
-        } => commands::MemorySubcommand::Import {
-            input,
-            scope,
-            overwrite,
-        },
-        MemoryCommand::Stats => commands::MemorySubcommand::Stats,
-        MemoryCommand::ClearTest => commands::MemorySubcommand::ClearTest,
-    }
-}
-
-fn map_ambient_subcommand(subcmd: AmbientCommand) -> commands::AmbientSubcommand {
-    match subcmd {
-        AmbientCommand::Status => commands::AmbientSubcommand::Status,
-        AmbientCommand::Log => commands::AmbientSubcommand::Log,
-        AmbientCommand::Trigger => commands::AmbientSubcommand::Trigger,
-        AmbientCommand::Stop => commands::AmbientSubcommand::Stop,
-        AmbientCommand::RunVisible => commands::AmbientSubcommand::RunVisible,
-    }
-}
-
-fn map_cloud_sessions_subcommand(
-    action: CloudSessionsCommand,
-) -> commands::CloudSessionsSubcommand {
-    match action {
-        CloudSessionsCommand::Configure {
-            api_base,
-            api_token,
-            api_token_env,
-            api_token_id,
-            user_id,
-            helper,
-            clear,
-        } => commands::CloudSessionsSubcommand::Configure {
-            api_base,
-            api_token,
-            api_token_env,
-            api_token_id,
-            user_id,
-            helper,
-            clear,
-        },
-        CloudSessionsCommand::Status { json } => commands::CloudSessionsSubcommand::Status { json },
-        CloudSessionsCommand::Upload {
-            session_file,
-            raw,
-            jade,
-        } => commands::CloudSessionsSubcommand::Upload {
-            session_file,
-            raw,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
-        },
-        CloudSessionsCommand::UploadLatest {
-            sessions_dir,
-            raw,
-            jade,
-        } => commands::CloudSessionsSubcommand::UploadLatest {
-            sessions_dir,
-            raw,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
-        },
-        CloudSessionsCommand::Sync {
-            sessions_dir,
-            since_days,
-            all,
-            max,
-            min_interval_mins,
-            raw,
-            dry_run,
-            force,
-            json,
-            jade,
-        } => commands::CloudSessionsSubcommand::Sync {
-            sessions_dir,
-            since_days,
-            all,
-            max,
-            min_interval_mins,
-            raw,
-            dry_run,
-            force,
-            json,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
-        },
-        CloudSessionsCommand::List { limit, json, jade } => {
-            commands::CloudSessionsSubcommand::List {
-                limit,
-                json,
-                user_id: jade.user_id,
-                profile: jade.profile,
-                region: jade.region,
-                helper: jade.helper,
-            }
-        }
-        CloudSessionsCommand::Verify { session_id, jade } => {
-            commands::CloudSessionsSubcommand::Verify {
-                session_id,
-                user_id: jade.user_id,
-                profile: jade.profile,
-                region: jade.region,
-                helper: jade.helper,
-            }
-        }
-        CloudSessionsCommand::Dashboard {
-            limit,
-            output,
-            open,
-            with_view,
-            jade,
-        } => commands::CloudSessionsSubcommand::Dashboard {
-            limit,
-            output,
-            open,
-            with_view,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
-        },
-        CloudSessionsCommand::View {
-            session_id,
-            format,
-            output,
-            open,
-            jade,
-        } => commands::CloudSessionsSubcommand::View {
-            session_id,
-            format: format.as_arg().to_string(),
-            output,
-            open,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
-        },
-    }
-}
-
-fn map_transcript_mode(mode: TranscriptModeArg) -> crate::protocol::TranscriptMode {
-    match mode {
-        TranscriptModeArg::Insert => crate::protocol::TranscriptMode::Insert,
-        TranscriptModeArg::Append => crate::protocol::TranscriptMode::Append,
-        TranscriptModeArg::Replace => crate::protocol::TranscriptMode::Replace,
-        TranscriptModeArg::Send => crate::protocol::TranscriptMode::Send,
-    }
-}
+mod subcommand_mapping;
+use subcommand_mapping::*;
 
 async fn run_default_command(args: Args) -> Result<()> {
     startup_profile::mark("run_main_none_branch");
@@ -1073,6 +927,12 @@ async fn run_default_command(args: Args) -> Result<()> {
         // can never disturb a running server.
         if server::reap_stale_socket_if_dead(&server::socket_path()).await {
             output::stderr_info("Removed a stale jcode socket from a previous server.");
+        }
+        // Dead servers leave their registry entries behind, the Windows analog
+        // of a stale socket file (issue #1887). Prune them before the spawn so
+        // this cannot race the new server's own registration.
+        if let Ok(mut registry) = crate::registry::ServerRegistry::load().await {
+            let _ = registry.cleanup_stale().await;
         }
 
         maybe_prompt_server_bootstrap_login(&args.provider).await?;
@@ -1376,11 +1236,121 @@ pub(crate) async fn spawn_server(
     spawn_server_with_executable(provider_choice, model, provider_profile, None).await
 }
 
+/// Lifecycle of a spawned `jcode serve` child.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ServerLifetime {
+    /// The long-lived shared daemon: survives this process and serves later
+    /// clients.
+    #[default]
+    Shared,
+    /// A server owned by this process: `jcode serve --temporary-server
+    /// --owner-pid <pid>` self-destructs once the owner exits, so a one-shot
+    /// run leaves no daemon behind.
+    OwnedByThisProcess,
+}
+
 async fn spawn_server_with_executable(
     provider_choice: &ProviderChoice,
     model: Option<&str>,
     provider_profile: Option<&str>,
     executable: Option<std::path::PathBuf>,
+) -> Result<()> {
+    spawn_server_with_lifetime(
+        provider_choice,
+        model,
+        provider_profile,
+        executable,
+        ServerLifetime::Shared,
+    )
+    .await
+}
+
+/// Start an ephemeral server owned by this process on the socket it dials.
+///
+/// Headless `jcode run` runs its agent in-process, so `--socket X` selects a
+/// path that nothing ever binds and the `swarm` tool has no server to talk to
+/// (issue #1748). This gives that run a server for as long as it lives: the
+/// child is marked `--temporary-server --owner-pid <our pid>`, so it shuts
+/// itself down within seconds of the run exiting.
+///
+/// The current executable is used deliberately instead of the shared-server
+/// update candidate: a run started from a locally built binary must be served
+/// by that same binary, or `--socket`-isolated self-dev checks would silently
+/// measure the installed build (see AGENTS.md, "Verifying a change at
+/// runtime").
+pub(crate) async fn spawn_owned_server(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+) -> Result<()> {
+    spawn_server_with_lifetime(
+        provider_choice,
+        model,
+        provider_profile,
+        std::env::current_exe().ok(),
+        ServerLifetime::OwnedByThisProcess,
+    )
+    .await
+}
+
+/// Let a headless one-shot `jcode run` start a server on demand.
+///
+/// `jcode run` hosts its agent in-process, so there is no server for tools
+/// that need one. Registering the spawner here (rather than at startup) keeps
+/// it to the `run` command: interactive and client launches already bootstrap
+/// a daemon through their own paths. Nothing is started by registering. The
+/// first tool that cannot reach a server triggers the spawn, so runs that never
+/// use `swarm` keep their current startup cost.
+///
+/// Which server gets started follows the dialed socket:
+///
+/// - Shared socket (no `--socket`): the long-lived daemon, exactly as
+///   `jcode server start` or a TUI launch would start it. An ephemeral server
+///   here would squat the path every later client uses and then vanish with
+///   this run.
+/// - Custom `--socket`: a server owned by this run. The caller asked for an
+///   isolated socket, so nobody else is waiting on it, and the run must not
+///   leave a daemon behind on a one-off path.
+fn register_on_demand_server_spawner_for_run(
+    provider_choice: ProviderChoice,
+    model: Option<String>,
+    provider_profile: Option<String>,
+) {
+    crate::server_spawn::register_on_demand_server_spawner(Box::new(move || {
+        let model = model.clone();
+        let provider_profile = provider_profile.clone();
+        Box::pin(async move {
+            let model = model.as_deref();
+            let provider_profile = provider_profile.as_deref();
+            if server::socket_path_is_custom() {
+                spawn_owned_server(&provider_choice, model, provider_profile).await
+            } else {
+                spawn_server(&provider_choice, model, provider_profile).await
+            }
+        })
+    }));
+}
+
+/// The `serve` subcommand argv for a spawned server of the given lifetime.
+///
+/// Split out so the contract with `Command::Serve` is testable without
+/// starting a process.
+fn serve_subcommand_args(lifetime: ServerLifetime, owner_pid: u32) -> Vec<String> {
+    let mut args = vec!["serve".to_string()];
+    if lifetime == ServerLifetime::OwnedByThisProcess {
+        args.push("--temporary-server".to_string());
+        args.push("--owner-pid".to_string());
+        args.push(owner_pid.to_string());
+    }
+    args
+}
+
+async fn spawn_server_with_lifetime(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+    executable: Option<std::path::PathBuf>,
+    lifetime: ServerLifetime,
 ) -> Result<()> {
     let socket_path = server::socket_path();
     if server_is_running_at(&socket_path).await {
@@ -1388,7 +1358,12 @@ async fn spawn_server_with_executable(
         return Ok(());
     }
 
-    if wait_for_existing_reload_server("server spawn").await {
+    // The reload marker describes the shared daemon's handoff. An owned server
+    // has no predecessor to wait for, and waiting on a marker written by the
+    // shared daemon would stall this run for the handoff timeout.
+    let awaits_reload_handoff = lifetime == ServerLifetime::Shared;
+
+    if awaits_reload_handoff && wait_for_existing_reload_server("server spawn").await {
         startup_profile::mark("server_ready");
         return Ok(());
     }
@@ -1401,13 +1376,19 @@ async fn spawn_server_with_executable(
         return Ok(());
     }
 
-    if wait_for_existing_reload_server("server spawn after lock").await {
+    if awaits_reload_handoff && wait_for_existing_reload_server("server spawn after lock").await {
         startup_profile::mark("server_ready");
         return Ok(());
     }
 
     startup_profile::mark("server_spawn_start");
-    output::stderr_info("Starting server...");
+    match lifetime {
+        ServerLifetime::Shared => output::stderr_info("Starting server..."),
+        ServerLifetime::OwnedByThisProcess => output::stderr_info(format!(
+            "Starting a temporary server on {} for this run...",
+            socket_path.display()
+        )),
+    }
     let client_requested_selfdev = selfdev::client_selfdev_requested();
     let exe = executable
         .or_else(|| {
@@ -1432,9 +1413,8 @@ async fn spawn_server_with_executable(
     if let Some(model) = model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg("serve")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+    cmd.args(serve_subcommand_args(lifetime, std::process::id()));
+    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
 
     #[cfg(unix)]
     {
@@ -1490,6 +1470,20 @@ async fn spawn_server_with_executable(
     Ok(())
 }
 
+/// True when the shared server accepts a fresh connection and answers a ping.
+///
+/// A Ping is a one-shot control request, so sending it over the held keepalive
+/// connection would make the server close that connection after replying.
+/// Probe through a short-lived client instead.
+async fn keepalive_server_answers_ping() -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut probe = server::Client::connect().await?;
+        probe.ping().await
+    })
+    .await
+    .is_ok_and(|result| result.unwrap_or(false))
+}
+
 async fn run_server_keepalive(
     provider_choice: &ProviderChoice,
     model: Option<&str>,
@@ -1507,6 +1501,7 @@ async fn run_server_keepalive(
     });
     let mut client: Option<server::Client> = None;
     let mut first_attempt = true;
+    let mut unhealthy_server_hold_skip = false;
 
     loop {
         let delay = if first_attempt {
@@ -1521,25 +1516,28 @@ async fn run_server_keepalive(
             _ = &mut owner_closed => return Ok(()),
             _ = tokio::time::sleep(delay) => {
                 if client.is_some() {
-                    // A Ping is a one-shot control request, so sending it over
-                    // the held connection would make the server close that
-                    // connection after replying. Probe through a short-lived
-                    // client instead and leave the counted keepalive connected.
-                    let healthy = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        async {
-                            let mut probe = server::Client::connect().await?;
-                            probe.ping().await
-                        },
-                    )
-                    .await
-                    .is_ok_and(|result| result.unwrap_or(false));
-                    if healthy {
+                    if keepalive_server_answers_ping().await {
                         continue;
                     }
+                    // Release the hold before anything else. A server that has
+                    // a listener but no longer answers must not be pinned: the
+                    // held connection is what kept such zombies alive for days
+                    // (issue #1887). Without it the server's idle exit can run.
                     client = None;
+                    unhealthy_server_hold_skip = true;
                 }
-                if spawn_server(provider_choice, model, provider_profile).await.is_ok()
+                if !server::has_live_listener(&server::socket_path()).await {
+                    unhealthy_server_hold_skip = false;
+                    if spawn_server(provider_choice, model, provider_profile).await.is_err() {
+                        continue;
+                    }
+                } else if unhealthy_server_hold_skip {
+                    // Give the unresponsive server one full interval with no
+                    // hold so it can idle-exit before we probe it again.
+                    unhealthy_server_hold_skip = false;
+                    continue;
+                }
+                if keepalive_server_answers_ping().await
                     && let Ok(connected) = server::Client::connect().await
                 {
                     client = Some(connected);

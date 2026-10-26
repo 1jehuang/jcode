@@ -114,10 +114,13 @@ fn file_activity_summary_line(operation: &str, summary: Option<&str>) -> String 
         .filter(|summary| !summary.is_empty())
         .map(capitalize)
         .unwrap_or_else(|| capitalize(operation))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Single-line file-activity body for compact notifications mode: keeps the
-/// compacted path and the summary line, dropping the intent and diff preview.
+/// Single-line file-activity preview in every notifications mode. Intent and
+/// diff details live behind the explicit expand control, never inline by default.
 fn format_file_activity_message_compact(
     path: &str,
     operation: &str,
@@ -144,14 +147,140 @@ pub(super) fn present_swarm_notification(
         tldr: Some(tldr), ..
     } = notification_type
     {
-        let tldr = tldr.trim();
+        let tldr = jcode_tui_messages::swarm_preview_line(
+            tldr,
+            jcode_tui_messages::SWARM_INLINE_BODY_MAX_CHARS,
+        );
         if !tldr.is_empty() && !presentation.message.trim().is_empty() {
             presentation.status_notice = format!("{} · {}", presentation.status_notice, tldr);
             presentation.message =
-                jcode_tui_messages::encode_collapsible_swarm_content(tldr, &presentation.message);
+                jcode_tui_messages::encode_collapsible_swarm_content(&tldr, &presentation.message);
         }
     }
+    // Never render long agent prose inline: anything beyond one short row is
+    // collapsed behind a derived one-row preview, expandable on demand.
+    if collapses_to_one_row(notification_type) {
+        presentation.message =
+            jcode_tui_messages::collapse_long_swarm_content(&presentation.message);
+    }
     presentation
+}
+
+/// Notification kinds whose transcript body is agent-authored prose that
+/// should never render as more than one row by default. Plan, await and
+/// background-task notices have their own compact renderers.
+fn collapses_to_one_row(notification_type: &NotificationType) -> bool {
+    match notification_type {
+        NotificationType::Message { scope, .. } => !matches!(
+            scope.as_deref(),
+            Some("plan" | "background_task" | "swarm_await")
+        ),
+        NotificationType::SharedContext { .. } => true,
+        NotificationType::FileConflict { .. } => false,
+    }
+}
+
+/// If `content` is the model-facing text of a swarm message delivered to this
+/// session (`DM from X: ...`, `#chan from X: ...`, `broadcast from X: ...`),
+/// return a one-row swarm display message for it instead of the raw text.
+pub(super) fn swarm_delivery_display_message(content: &str) -> Option<crate::tui::DisplayMessage> {
+    let trimmed = content.trim();
+    let (title, body) = if let Some(rest) = trimmed.strip_prefix("Cross-swarm DM from ") {
+        let (sender, body) = rest.split_once(": ")?;
+        (format!("DM from {}", sender.trim()), body)
+    } else if let Some(rest) = trimmed.strip_prefix("DM from ") {
+        let (sender, body) = rest.split_once(": ")?;
+        if sender.contains(char::is_whitespace) {
+            return None;
+        }
+        (format!("DM from {}", sender), body)
+    } else if let Some(rest) = trimmed.strip_prefix("broadcast from ") {
+        let (sender, body) = rest.split_once(": ")?;
+        if sender.contains(char::is_whitespace) {
+            return None;
+        }
+        (format!("Broadcast · {}", sender), body)
+    } else {
+        let rest = trimmed.strip_prefix('#')?;
+        let (head, body) = rest.split_once(": ")?;
+        let (channel, sender) = head.split_once(" from ")?;
+        if channel.contains(char::is_whitespace) {
+            return None;
+        }
+        (format!("#{} · {}", channel, sender.trim()), body)
+    };
+    if title.contains('\n') {
+        return None;
+    }
+    Some(crate::tui::DisplayMessage::swarm(
+        title,
+        jcode_tui_messages::collapse_long_swarm_content(body),
+    ))
+}
+
+/// Full underlying body of swarm display content, collapsed or not.
+pub(super) fn swarm_display_full_body(content: &str) -> &str {
+    match jcode_tui_messages::parse_collapsible_swarm_content(content) {
+        Some(parsed) if !parsed.body.trim().is_empty() => parsed.body.trim(),
+        Some(parsed) => parsed.tldr.trim(),
+        None => content.trim(),
+    }
+}
+
+/// Restore the same compact presentation for model-facing file notices that
+/// older transcripts saved without the structured notification payload.
+fn file_activity_delivery_display_message(content: &str) -> Option<crate::tui::DisplayMessage> {
+    let trimmed = content.trim();
+    let rest = trimmed
+        .strip_prefix("⚠️ File activity: ")
+        .or_else(|| trimmed.strip_prefix("⚠ File activity: "))?;
+    let (path, activity) = if let Some((path, rest)) = rest.split_once(" \u{2014} ") {
+        // Current wire format includes a scope (overlapping/nearby) segment.
+        let (_, activity) = rest.split_once(" \u{2014} ")?;
+        (path, activity)
+    } else {
+        // Older messages used a hyphen and had no scope segment.
+        rest.split_once(" - ")?
+    };
+    let (sender, activity) = activity.split_once(' ')?;
+    let activity = activity
+        .strip_prefix("previously ")
+        .or_else(|| activity.strip_prefix("just "))?;
+    if sender.is_empty() || sender.contains(char::is_whitespace) {
+        return None;
+    }
+    let (operation, tail) = activity.split_once(" this file")?;
+    let tail = tail
+        .strip_prefix(" you previously worked with")
+        .unwrap_or(tail);
+    let summary = tail
+        .strip_prefix(": ")
+        .map(|value| value.split(" \u{2014} intent: ").next().unwrap_or(value));
+    let preview = format_file_activity_message_compact(path, operation, summary).replace('`', "");
+    Some(crate::tui::DisplayMessage::swarm(
+        format!("File activity · {}", compact_swarm_session_label(sender)),
+        jcode_tui_messages::encode_collapsible_swarm_content(&preview, trimmed),
+    ))
+}
+
+/// Rewrite user/system transcript rows that are really delivered swarm
+/// messages into one-row swarm rows. Used for restored history, where the
+/// original notification card is not available.
+pub(super) fn normalize_swarm_delivery_messages(messages: &mut [crate::tui::DisplayMessage]) {
+    for message in messages.iter_mut() {
+        if !matches!(message.role.as_str(), "user" | "system") {
+            continue;
+        }
+        if message.role == "system"
+            && let Some(activity) = file_activity_delivery_display_message(&message.content)
+        {
+            *message = activity;
+            continue;
+        }
+        if let Some(swarm) = swarm_delivery_display_message(&message.content) {
+            *message = swarm;
+        }
+    }
 }
 
 fn present_swarm_notification_inner(
@@ -318,6 +447,94 @@ mod tests {
     use crate::protocol::NotificationType;
 
     #[test]
+    fn restored_file_activity_is_compact_and_retains_full_body() {
+        let notices = [
+            "⚠ File activity: /home/jeremy/jcode/src/parser.rs \u{2014} overlapping lines \u{2014} moss just edited this file you previously worked with: edited lines 2-9 \u{2014} intent: fix parser",
+            "⚠️ File activity: /home/jeremy/jcode/src/parser.rs - moss previously read this file: read lines 2-9",
+            "⚠ File activity: /home/jeremy/jcode/src/parser.rs \u{2014} nearby lines \u{2014} moss previously read this file",
+        ];
+        for content in notices {
+            let mut messages = vec![crate::tui::DisplayMessage::system(content)];
+            super::normalize_swarm_delivery_messages(&mut messages);
+            let message = &messages[0];
+            assert_eq!(message.role, "swarm");
+            assert_eq!(message.title.as_deref(), Some("File activity · moss"));
+            let parsed = jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
+                .expect("restored activity retains expandable details");
+            assert!(!parsed.expanded);
+            assert!(parsed.tldr.starts_with("…/jeremy/jcode/src/parser.rs · "));
+            assert!(!parsed.tldr.contains("previously"));
+            assert!(!parsed.tldr.contains("intent:"));
+            assert_eq!(parsed.body, content);
+            let normalized = message.content.clone();
+            super::normalize_swarm_delivery_messages(&mut messages);
+            assert_eq!(
+                messages[0].content, normalized,
+                "normalization is idempotent"
+            );
+        }
+    }
+
+    #[test]
+    fn file_activity_normalizer_preserves_user_prose_and_unrecognized_notices() {
+        for content in [
+            "⚠ File activity: file.rs - not a delivered file notice",
+            "⚠ File activity: file.rs \u{2014} missing peer information",
+            "A normal multiline\nstatus notice",
+        ] {
+            let mut messages = vec![crate::tui::DisplayMessage::system(content)];
+            super::normalize_swarm_delivery_messages(&mut messages);
+            assert_eq!(messages[0].role, "system");
+            assert_eq!(messages[0].content, content);
+        }
+        let content = "⚠ File activity: file.rs - moss previously read this file";
+        let mut message = crate::tui::DisplayMessage::system(content);
+        message.role = "user".to_string();
+        let mut messages = vec![message];
+        super::normalize_swarm_delivery_messages(&mut messages);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, content);
+    }
+
+    #[test]
+    fn file_activity_is_single_row_with_details_hidden_for_both_settings() {
+        let notification = NotificationType::FileConflict {
+            path: "/home/jeremy/jcode/src/parser.rs".to_string(),
+            operation: "edited".to_string(),
+            intent: Some("fix parser".to_string()),
+            summary: Some("edited lines 2-9\n  and adjusted tests".to_string()),
+            detail: Some("- old line\n+ new line".to_string()),
+        };
+        let render = |compact| {
+            let presentation =
+                present_swarm_notification("moss", &notification, "raw notice", compact);
+            let parsed = jcode_tui_messages::parse_collapsible_swarm_content(&presentation.message)
+                .expect("details remain collapsible");
+            assert!(!parsed.tldr.contains('\n'));
+            assert!(!parsed.expanded);
+            assert!(parsed.body.contains("- old line"));
+            let message =
+                crate::tui::DisplayMessage::swarm(presentation.title, presentation.message);
+            let lines = crate::tui::ui::render_swarm_message(
+                &message,
+                60,
+                crate::config::DiffDisplayMode::Off,
+            );
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].width() <= 60);
+            let text = lines[0]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(!text.contains("fix parser"));
+            assert!(!text.contains("old line"));
+            text
+        };
+        assert_eq!(render(false), render(true));
+    }
+
+    #[test]
     fn compact_plan_message_body_drops_redundant_plan_prefix() {
         assert_eq!(
             compact_plan_message_body("Plan updated by sheep (4 items, v1)"),
@@ -354,6 +571,46 @@ mod tests {
             "{}",
             presentation.status_notice
         );
+    }
+
+    #[test]
+    fn present_swarm_notification_without_tldr_collapses_long_body() {
+        let body = "Investigated the parser. ".repeat(20);
+        let presentation = present_swarm_notification(
+            "sheep",
+            &NotificationType::Message {
+                scope: Some("dm".to_string()),
+                channel: None,
+                tldr: None,
+            },
+            &format!("DM from sheep: {body}\n\nMore details here."),
+            false,
+        );
+        let parsed = jcode_tui_messages::parse_collapsible_swarm_content(&presentation.message)
+            .expect("long body must collapse");
+        assert!(!parsed.expanded);
+        assert!(!parsed.tldr.contains('\n'));
+        assert!(parsed.tldr.chars().count() <= jcode_tui_messages::SWARM_INLINE_BODY_MAX_CHARS);
+        assert!(parsed.body.contains("More details here."));
+    }
+
+    #[test]
+    fn swarm_delivery_display_message_collapses_injected_dm() {
+        let long = "x".repeat(400);
+        let msg = super::swarm_delivery_display_message(&format!("DM from fox: {long}"))
+            .expect("dm delivery");
+        assert_eq!(msg.role, "swarm");
+        assert_eq!(msg.title.as_deref(), Some("DM from fox"));
+        let parsed =
+            jcode_tui_messages::parse_collapsible_swarm_content(&msg.content).expect("collapsed");
+        assert_eq!(parsed.body, long);
+
+        let chan = super::swarm_delivery_display_message("#parser from owl: hi").expect("channel");
+        assert_eq!(chan.title.as_deref(), Some("#parser · owl"));
+        assert_eq!(chan.content, "hi");
+
+        assert!(super::swarm_delivery_display_message("DM from my boss: please review").is_none());
+        assert!(super::swarm_delivery_display_message("hello there").is_none());
     }
 
     #[test]
@@ -404,7 +661,7 @@ mod tests {
                 channel: None,
                 tldr: None,
             },
-            "🐝 **Swarm await finished**\n\nAll members done. All 2 members are done: fox, wolf\n\nMember statuses:\n  ✓ fox (completed)\n  ✓ wolf (completed)\n\nCompletion reports:\n\n--- fox (completed) ---\nParser tests pass.",
+            "🐝 **Swarm await finished**\n\nAll members done. All 2 members are done: fox, wolf\n\nMember statuses:\n  ✓ fox (completed)\n  ✓ wolf (completed)\n\nRecent outputs:\n\n--- fox (completed) ---\nParser tests pass.",
             false,
         );
 

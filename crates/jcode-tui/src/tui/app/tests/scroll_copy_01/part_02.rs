@@ -73,6 +73,57 @@ fn test_ctrl_l_renders_clear_screen_with_history_in_scrollback() {
 }
 
 #[test]
+fn test_ctrl_l_keeps_fresh_view_after_new_prompt_and_output() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.push_display_message(DisplayMessage::user("OLD PROMPT MARKER"));
+    app.push_display_message(DisplayMessage::assistant("OLD RESPONSE MARKER"));
+    let backend = ratatui::backend::TestBackend::new(80, 25);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    render_and_snap(&app, &mut terminal);
+
+    app.push_display_message(DisplayMessage::user("FRESH PROMPT MARKER"));
+    app.is_processing = true;
+    app.streaming.streaming_text = "FRESH STREAM MARKER".to_string();
+    let streaming = render_and_snap(&app, &mut terminal);
+    assert!(streaming.contains("FRESH STREAM MARKER"), "{streaming}");
+    assert!(!streaming.contains("OLD PROMPT MARKER"), "{streaming}");
+    assert!(!streaming.contains("OLD RESPONSE MARKER"), "{streaming}");
+
+    app.streaming.streaming_text.clear();
+    app.is_processing = false;
+    app.push_display_message(DisplayMessage::assistant("FRESH ANSWER MARKER"));
+    for (width, height) in [(80, 25), (60, 40), (100, 20)] {
+        terminal.backend_mut().resize(width, height);
+        terminal.autoresize().unwrap();
+        let after = render_and_snap(&app, &mut terminal);
+        assert!(!after.contains("OLD PROMPT MARKER"), "{after}");
+        assert!(!after.contains("OLD RESPONSE MARKER"), "{after}");
+        assert!(after.contains("FRESH ANSWER MARKER"), "{after}");
+        let prompt_row = after
+            .lines()
+            .position(|line| line.contains("FRESH PROMPT MARKER"));
+        assert!(
+            prompt_row.is_some_and(|row| row <= 2),
+            "fresh prompt stays at top: {after}"
+        );
+    }
+
+    app.scroll_up(usize::MAX);
+    let history = render_and_snap(&app, &mut terminal);
+    assert!(history.contains("OLD PROMPT MARKER"), "{history}");
+    app.follow_chat_bottom();
+    let restored = render_and_snap(&app, &mut terminal);
+    assert!(!restored.contains("OLD PROMPT MARKER"), "{restored}");
+    assert!(restored.contains("FRESH ANSWER MARKER"), "{restored}");
+}
+
+#[test]
 fn test_empty_prompt_up_down_browses_previous_prompts() {
     let mut app = create_test_app();
     app.display_messages = vec![
@@ -100,6 +151,30 @@ fn test_empty_prompt_up_down_browses_previous_prompts() {
         .unwrap();
     assert!(app.input.is_empty());
     assert_eq!(app.cursor_pos, 0);
+}
+
+#[test]
+fn test_ctrl_l_fresh_prompt_remains_visible_with_pinned_todos() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = scroll_render_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    app.pinned_todos_payload = Some(
+        serde_json::json!({"todos": [
+            pinned_band_todo("active", "Current task", "in_progress")
+        ]})
+        .to_string(),
+    );
+    app.push_display_message(DisplayMessage::assistant("OLD RESPONSE MARKER"));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    app.push_display_message(DisplayMessage::user("FRESH PROMPT MARKER"));
+    let after = render_and_snap(&app, &mut terminal);
+    assert!(after.contains("Current task"), "{after}");
+    assert!(after.contains("FRESH PROMPT MARKER"), "{after}");
+    assert!(!after.contains("OLD RESPONSE MARKER"), "{after}");
 }
 
 #[test]
@@ -385,6 +460,8 @@ fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
     app.queued_messages
         .push(super::commands::build_poke_message(&[
             crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "keep going".to_string(),
@@ -395,6 +472,8 @@ fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             },
         ]));
 
@@ -489,7 +568,9 @@ fn test_local_copy_badge_shortcut_accepts_alt_uppercase_encoding() {
     app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
         .unwrap();
 
-    let copied = clipboard.text().expect("code block should reach the clipboard");
+    let copied = clipboard
+        .text()
+        .expect("code block should reach the clipboard");
     assert!(
         copied.contains("println!(\"hello\");"),
         "clipboard should carry the code block: {copied:?}"
@@ -523,7 +604,9 @@ fn test_remote_copy_badge_shortcut_supported() {
     rt.block_on(app.handle_remote_key(KeyCode::Char('S'), KeyModifiers::ALT, &mut remote))
         .unwrap();
 
-    let copied = clipboard.text().expect("code block should reach the clipboard");
+    let copied = clipboard
+        .text()
+        .expect("code block should reach the clipboard");
     assert!(
         copied.contains("println!(\"hello\");"),
         "clipboard should carry the code block: {copied:?}"

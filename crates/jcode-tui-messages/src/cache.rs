@@ -1,5 +1,5 @@
 use crate::DisplayMessage;
-use jcode_config_types::{DiagramDisplayMode, DiffDisplayMode};
+use jcode_config_types::{DiagramDisplayMode, DiffDisplayMode, LatexRenderingMode};
 use ratatui::layout::Alignment;
 use ratatui::text::{Line, Span};
 use std::collections::{HashMap, VecDeque};
@@ -18,6 +18,7 @@ struct MessageCacheKey {
     show_agentgrep_output: bool,
     show_bash_output: bool,
     tool_call_details: bool,
+    latex_rendering: LatexRenderingMode,
 }
 
 #[derive(Default)]
@@ -57,6 +58,18 @@ fn message_cache() -> &'static Mutex<MessageCacheState> {
     MESSAGE_CACHE.get_or_init(|| Mutex::new(MessageCacheState::default()))
 }
 
+/// Release cached rendered lines without altering source messages. Existing
+/// callers retain their own lines, and the next render rebuilds missing entries.
+pub fn clear_message_cache() {
+    let Some(cache) = MESSAGE_CACHE.get() else {
+        return;
+    };
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *cache = MessageCacheState::default();
+}
+
 const MESSAGE_CACHE_LIMIT: usize = 2048;
 
 /// Runtime-sensitive inputs that affect message rendering but are not intrinsic to a message.
@@ -69,6 +82,7 @@ pub struct MessageCacheContext {
     pub show_agentgrep_output: bool,
     pub show_bash_output: bool,
     pub tool_call_details: bool,
+    pub latex_rendering: LatexRenderingMode,
 }
 
 pub fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
@@ -120,6 +134,7 @@ where
         show_agentgrep_output: context.show_agentgrep_output,
         show_bash_output: context.show_bash_output,
         tool_call_details: context.tool_call_details,
+        latex_rendering: context.latex_rendering,
     };
 
     let mut cache = match message_cache().lock() {
@@ -138,6 +153,44 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_message_cache_releases_owned_lines_and_capacity() {
+        let key = MessageCacheKey {
+            width: 80,
+            diff_mode: DiffDisplayMode::default(),
+            message_hash: 9,
+            content_len: 100,
+            diagram_mode: DiagramDisplayMode::default(),
+            centered: false,
+            mermaid_epoch: 0,
+            mermaid_aspect_bucket: None,
+            show_agentgrep_output: true,
+            show_bash_output: true,
+            tool_call_details: true,
+            latex_rendering: LatexRenderingMode::Image,
+        };
+        let mut isolated_cache = MessageCacheState::default();
+        isolated_cache.insert(key.clone(), vec![Line::from("image")]);
+        let unicode_key = MessageCacheKey {
+            latex_rendering: LatexRenderingMode::Unicode,
+            ..key.clone()
+        };
+        assert!(isolated_cache.get(&unicode_key).is_none());
+        assert!(isolated_cache.get(&key).is_some());
+        let weak = {
+            let mut cache = message_cache().lock().unwrap();
+            cache.insert(key.clone(), vec![Line::from("derived text".repeat(100))]);
+            Arc::downgrade(cache.entries.get(&key).unwrap())
+        };
+        clear_message_cache();
+        assert!(weak.upgrade().is_none());
+        let cache = message_cache().lock().unwrap();
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.entries.capacity(), 0);
+        assert!(cache.order.is_empty());
+        assert_eq!(cache.order.capacity(), 0);
+    }
 
     #[test]
     fn centered_wrap_width_caps_centered_width() {

@@ -218,7 +218,7 @@ fn guided_setup(services: &[GoogleService], no_browser: bool) -> Result<()> {
     let mut ticks = 0u32;
     match setup::wait_for_client_json(&dirs, since, DOWNLOAD_WAIT, || {
         ticks += 1;
-        if ticks % 30 == 0 {
+        if ticks.is_multiple_of(30) {
             eprintln!("  Still waiting ({}s)...", ticks);
         }
         true

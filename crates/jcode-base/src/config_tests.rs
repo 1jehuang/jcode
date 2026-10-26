@@ -14,6 +14,20 @@ fn restore_env_var(key: &str, previous: Option<OsString>) {
     }
 }
 
+#[test]
+fn hibernation_environment_override_accepts_seconds_and_zero_but_not_invalid_values() {
+    let _lock = crate::storage::lock_test_env();
+    let key = "JCODE_HIBERNATION_IDLE_SECS";
+    let previous = std::env::var_os(key);
+    for (value, expected) in [("60", 60), (" 0 ", 0), ("-1", 1800), ("invalid", 1800)] {
+        crate::env::set_var(key, value);
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.session.hibernation_idle_secs, expected, "{value}");
+    }
+    restore_env_var(key, previous);
+}
+
 struct GeminiConfigEnv {
     _home: tempfile::TempDir,
     previous: Vec<(&'static str, Option<OsString>)>,
@@ -154,6 +168,19 @@ fn swarm_spawn_mode_defaults_to_inline() {
 }
 
 #[test]
+fn swarm_stall_watchdog_defaults_and_parses() {
+    let defaults = Config::default().agents;
+    assert_eq!(defaults.swarm_stall_after_secs, 600);
+    assert!(!defaults.swarm_stall_nudge);
+
+    let cfg: Config =
+        toml::from_str("[agents]\nswarm_stall_after_secs = 0\nswarm_stall_nudge = true\n")
+            .expect("stall watchdog settings should parse");
+    assert_eq!(cfg.agents.swarm_stall_after_secs, 0);
+    assert!(cfg.agents.swarm_stall_nudge);
+}
+
+#[test]
 fn swarm_max_concurrent_agents_defaults_to_safe_live_worker_budget() {
     // Keep enough parallelism for deep fan-out without allowing recursive ad hoc
     // spawns to grow until the 1000-member hard cap exhausts machine memory.
@@ -189,6 +216,18 @@ fn auto_poke_feature_defaults_on_and_parses_false() {
     let cfg: Config =
         toml::from_str("[features]\nauto_poke = false\n").expect("features.auto_poke should parse");
     assert!(!cfg.features.auto_poke);
+}
+
+#[test]
+fn todo_gate_digest_defaults_off_and_requires_explicit_opt_in() {
+    assert!(!Config::default().features.todo_gate_digest);
+    let omitted: Config = toml::from_str("[features]\nauto_poke = true\n").unwrap();
+    assert!(!omitted.features.todo_gate_digest);
+    let enabled: Config = toml::from_str("[features]\ntodo_gate_digest = true\n").unwrap();
+    assert!(enabled.features.todo_gate_digest);
+    assert!(enabled.features.auto_poke);
+    let disabled: Config = toml::from_str("[features]\ntodo_gate_digest = false\n").unwrap();
+    assert!(!disabled.features.todo_gate_digest);
 }
 
 #[test]
@@ -256,6 +295,50 @@ fn latex_rendering_environment_override_accepts_aliases() {
     cfg.apply_env_overrides();
     assert_eq!(cfg.display.latex_rendering, LatexRenderingMode::Image);
     restore_env_var("JCODE_LATEX_RENDERING", previous);
+}
+
+/// The /latex command persists through set_latex_rendering, which is a
+/// read-modify-write over the real config.toml. Pin the whole roundtrip at
+/// this layer: write, then parse the file back and confirm the mode and an
+/// unrelated sibling setting both survive, so a future refactor cannot make
+/// the setter rewrite the file without keeping other keys.
+#[test]
+fn set_latex_rendering_roundtrips_through_config_toml() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let previous_latex = std::env::var_os("JCODE_LATEX_RENDERING");
+    crate::env::remove_var("JCODE_LATEX_RENDERING");
+
+    // Seed a non-default sibling key so the test can catch a rewrite that
+    // drops it.
+    let seed = temp.path().join("config.toml");
+    std::fs::write(
+        &seed,
+        "[display]\ncentered = false\nlatex_rendering = \"unicode\"\n",
+    )
+    .expect("seed config");
+
+    Config::set_latex_rendering(LatexRenderingMode::None).expect("save mode");
+
+    let raw = std::fs::read_to_string(&seed).expect("read config back");
+    assert!(
+        raw.contains("latex_rendering = \"none\""),
+        "mode must be persisted, got: {raw}"
+    );
+    assert!(
+        raw.contains("centered = false"),
+        "unrelated display keys must survive the rewrite, got: {raw}"
+    );
+
+    let reloaded = Config::load_strict().expect("config parses after the write");
+    assert_eq!(reloaded.display.latex_rendering, LatexRenderingMode::None);
+    assert!(!reloaded.display.centered);
+
+    restore_env_var("JCODE_LATEX_RENDERING", previous_latex);
+    restore_env_var("JCODE_HOME", previous_home);
+    Config::invalidate_cache();
 }
 
 #[test]
@@ -660,6 +743,8 @@ fn tool_config_acp_profile_allows_core_coding_plus_batch() {
     assert!(allowed.contains("agentgrep"));
     assert!(allowed.contains("batch"));
     assert!(allowed.contains("mcp"));
+    assert!(allowed.contains("edit"));
+    assert!(!allowed.contains("replace"));
     assert!(!allowed.contains("swarm"));
     assert!(!allowed.contains("subagent"));
     assert!(!allowed.contains("side_panel"));
@@ -688,6 +773,8 @@ fn tool_config_minimal_profile_allows_core_coding_tools() {
     assert!(allowed.contains("apply_patch"));
     assert!(allowed.contains("agentgrep"));
     assert!(!allowed.contains("browser"));
+    assert!(allowed.contains("edit"));
+    assert!(!allowed.contains("replace"));
     assert!(!allowed.contains("swarm"));
 }
 
@@ -1578,82 +1665,63 @@ fn config_reload_generation_increments_on_cache_invalidation() {
 }
 
 #[test]
-fn swarm_root_effort_config_defaults_and_independent_modes() {
+fn swarm_root_effort_config_defaults_and_validation() {
     let defaults = Config::default();
-    assert_eq!(defaults.agents.root_effort_for_swarm(false), "max");
-    assert_eq!(defaults.agents.root_effort_for_swarm(true), "max");
-    let cfg: Config = toml::from_str(
-        "[agents]\nswarm_root_effort = 'low'\nswarm_deep_root_effort = ' High '\nswarm_effort = 'medium'\n",
-    ).unwrap();
-    assert_eq!(cfg.agents.root_effort_for_swarm(false), "low");
-    assert_eq!(cfg.agents.root_effort_for_swarm(true), "high");
+    assert_eq!(defaults.agents.root_effort_for_swarm(), "low");
+    let cfg: Config =
+        toml::from_str("[agents]\nswarm_root_effort = ' High '\nswarm_effort = 'medium'\n")
+            .unwrap();
+    assert_eq!(cfg.agents.root_effort_for_swarm(), "high");
     assert_eq!(cfg.agents.swarm_effort.as_deref(), Some("medium"));
-    assert!(cfg.display_string().contains("Swarm root effort: low"));
-    assert!(
-        cfg.display_string()
-            .contains("Deep swarm root effort: high")
-    );
+    assert!(cfg.display_string().contains("Swarm root effort: high"));
+    assert!(!cfg.display_string().contains("Deep swarm"));
     let serialized = toml::to_string(&cfg).unwrap();
     let round_trip: Config = toml::from_str(&serialized).unwrap();
-    assert_eq!(round_trip.agents.root_effort_for_swarm(true), "high");
+    assert_eq!(round_trip.agents.root_effort_for_swarm(), "high");
 
     for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
         let cfg: Config =
             toml::from_str(&format!("[agents]\nswarm_root_effort = '{level}'")).unwrap();
-        assert_eq!(cfg.agents.root_effort_for_swarm(false), level);
-        assert_eq!(cfg.agents.root_effort_for_swarm(true), "max");
+        assert_eq!(cfg.agents.root_effort_for_swarm(), level);
     }
     for invalid in ["", "swarm", "swarm-deep", "turbo"] {
-        let cfg: Config = toml::from_str(&format!("[agents]\nswarm_root_effort = '{invalid}'\nswarm_deep_root_effort = '{invalid}'\nswarm_effort = 'low'")).unwrap();
-        assert_eq!(cfg.agents.root_effort_for_swarm(false), "max");
-        assert_eq!(cfg.agents.root_effort_for_swarm(true), "max");
+        let cfg: Config = toml::from_str(&format!(
+            "[agents]\nswarm_root_effort = '{invalid}'\nswarm_effort = 'low'"
+        ))
+        .unwrap();
+        assert_eq!(cfg.agents.root_effort_for_swarm(), "low");
         assert_eq!(cfg.agents.swarm_effort.as_deref(), Some("low"));
     }
+    // Legacy configs that still set the removed deep key keep parsing.
+    let legacy: Config = toml::from_str("[agents]\nswarm_deep_root_effort = 'high'\n").unwrap();
+    assert_eq!(legacy.agents.root_effort_for_swarm(), "low");
 }
 
 #[test]
 fn swarm_root_effort_env_overrides_and_shared_resolution() {
     let _guard = crate::storage::lock_test_env();
-    let keys = ["JCODE_SWARM_ROOT_EFFORT", "JCODE_SWARM_DEEP_ROOT_EFFORT"];
-    let previous = keys.map(std::env::var_os);
+    let key = "JCODE_SWARM_ROOT_EFFORT";
+    let previous = std::env::var_os(key);
     let fingerprint = config_env_fingerprint();
-    crate::env::set_var(keys[0], "low");
-    crate::env::set_var(keys[1], "high");
+    crate::env::set_var(key, "high");
     assert_ne!(config_env_fingerprint(), fingerprint);
     let mut cfg = Config::default();
     cfg.apply_env_overrides();
-    assert_eq!(cfg.agents.root_effort_for_swarm(false), "low");
-    assert_eq!(cfg.agents.root_effort_for_swarm(true), "high");
-    assert_eq!(
-        crate::prompt::swarm_root_reasoning_effort("swarm"),
-        Some("low")
-    );
-    assert_eq!(
-        crate::prompt::swarm_root_reasoning_effort(" Swarm-Deep "),
-        Some("high")
-    );
+    assert_eq!(cfg.agents.root_effort_for_swarm(), "high");
     assert_eq!(crate::prompt::swarm_root_reasoning_effort("low"), None);
-    crate::env::set_var(keys[0], "none");
+    assert_eq!(
+        crate::prompt::swarm_root_reasoning_effort("swarm-deep"),
+        None
+    );
+    crate::env::set_var(key, "none");
     assert_eq!(
         crate::prompt::swarm_root_reasoning_effort("swarm"),
         Some("none")
     );
-    // Config changes must not turn orchestration off or misrepresent its effort.
-    for mode in ["swarm", "swarm-deep"] {
-        let mut split = crate::prompt::SplitSystemPrompt::default();
-        crate::prompt::append_swarm_effort_directive(&mut split, Some(mode));
-        assert!(split.dynamic_part.contains("swarm"));
-        assert!(!split.dynamic_part.contains("maximum reasoning effort"));
-    }
-    for key in keys {
-        crate::env::set_var(key, " ");
-    }
+    crate::env::set_var(key, " ");
     cfg.apply_env_overrides();
     assert_eq!(cfg.agents.swarm_root_effort, None);
-    assert_eq!(cfg.agents.swarm_deep_root_effort, None);
-    for (key, value) in keys.into_iter().zip(previous) {
-        restore_env_var(key, value);
-    }
+    restore_env_var(key, previous);
 }
 
 #[test]

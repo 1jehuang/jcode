@@ -505,8 +505,8 @@ fn onboarding_golden_walks_failure_and_async_states() {
 }
 
 /// Golden render of the "Telemetry settings" sub-page reached from the import
-/// summary. Three stacked options with dim consequence captions, defaulting to
-/// "Send everything".
+/// summary. A preselected Continue button on top, then one checkbox per
+/// telemetry category with dim captions, prompts and transcripts first.
 #[test]
 fn onboarding_golden_telemetry_settings_page() {
     use crate::external_auth::ExternalAuthReviewCandidate;
@@ -524,19 +524,21 @@ fn onboarding_golden_telemetry_settings_page() {
     let text = render_onboarding_text(&app, 80, 34);
     dump("Telemetry settings page", &text);
     assert!(text.contains("Telemetry settings"), "title: {text}");
-    assert!(
-        text.contains("Share full transcripts (30-day retention)"),
-        "option 1: {text}"
-    );
-    assert!(
-        text.contains("Includes prompts, model responses, reasoning, code, and tool"),
-        "caption 1: {text}"
-    );
-    assert!(
-        text.contains("No prompts or transcripts"),
-        "option 2: {text}"
-    );
-    assert!(text.contains("Send nothing"), "option 3: {text}");
+    let continue_at = text.find("Continue").expect("Continue button");
+    let content_at = text
+        .find("Prompts and transcripts")
+        .expect("content row");
+    assert!(continue_at < content_at, "Continue sits above the checkboxes: {text}");
+    for label in [
+        "Basic usage stats",
+        "Crash reports",
+        "Feature usage",
+        "Token and cost usage",
+        "Connected accounts",
+    ] {
+        assert!(text.contains(label), "{label}: {text}");
+    }
+    assert!(text.contains("○") && text.contains("●"), "dots: {text}");
     assert!(text.contains("/telemetry"), "later-change hint: {text}");
     // The import summary is hidden while the sub-page is open.
     assert!(

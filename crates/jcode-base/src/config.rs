@@ -5,13 +5,14 @@
 
 pub use jcode_config_types::{
     AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
-    CompactionMode, CrossProviderFailoverMode, DiagramDisplayMode, DiagramPanePosition,
-    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
-    KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
-    MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
-    NamedProviderType, NativeScrollbarConfig, NotificationsConfig, PowerConfig, ProviderConfig,
-    ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode,
-    SwarmStripLayout, TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig, CustomWebSearchMethod,
+    DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
+    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
+    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
+    NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
+    NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig,
+    SessionConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
+    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -26,8 +27,106 @@ const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
     Duration::from_millis(500)
 };
 
+#[cfg(test)]
+#[test]
+fn kagi_websearch_documented_config_parses() {
+    let docs = include_str!("../../../docs/kagi-web-search.md");
+    let example = docs
+        .split("```toml\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let config: Config = toml::from_str(example).unwrap();
+    assert_eq!(config.websearch.engine, WebSearchEngine::Kagi);
+    assert!(!config.websearch.native_enabled());
+    assert!(config.websearch.fallback_engines.is_empty());
+    assert_eq!(config.websearch.kagi_api_key_env, "KAGI_API_KEY");
+    let encoded = toml::to_string(&config.websearch).unwrap();
+    let decoded: WebSearchConfig = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded.engine, WebSearchEngine::Kagi);
+    assert_eq!(decoded.kagi_api_key_env, "KAGI_API_KEY");
+}
+
+#[cfg(test)]
+#[test]
+fn custom_websearch_config_toml_roundtrip() {
+    let input = r#"
+engine = "custom"
+prefer_native = false
+fallback_engines = []
+[custom]
+endpoint = "https://search.example.test/api"
+method = "POST"
+query_param = "search"
+count_param = "limit"
+params = { format = "json" }
+body = { options = { safe = true } }
+headers = { Accept = "application/json" }
+header_env = { Authorization = "SEARCH_AUTH" }
+results_pointer = "/data/hits"
+title_pointer = "/name"
+url_pointer = "/link"
+snippet_pointer = "/summary"
+"#;
+    let config: WebSearchConfig = toml::from_str(input).unwrap();
+    assert_eq!(config.engine, WebSearchEngine::Custom);
+    assert!(!config.native_enabled());
+    assert_eq!(
+        WebSearchEngine::parse("custom"),
+        Some(WebSearchEngine::Custom)
+    );
+    assert!(WebSearchEngine::Custom.is_local());
+    assert_eq!(WebSearchEngine::Custom.as_str(), "custom");
+    let encoded = toml::to_string(&config).unwrap();
+    let decoded: WebSearchConfig = toml::from_str(&encoded).unwrap();
+    assert_eq!(
+        serde_json::to_value(config).unwrap(),
+        serde_json::to_value(decoded).unwrap()
+    );
+    let no_count: CustomWebSearchConfig =
+        toml::from_str("endpoint = 'https://example.test'").unwrap();
+    assert!(no_count.count_param.is_none());
+    assert_eq!(no_count.method, CustomWebSearchMethod::Get);
+    assert!(WebSearchConfig::default().custom.is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn agents_jev_models_parse_and_default_unset() {
+    let config: AgentsConfig = toml::from_str(
+        r#"
+memory_jev_model = "typesafe/jev-1.14"
+browser_jev_model = "typesafe/jev-1.14"
+voice_jev_model = "typesafe/jev-1.14"
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.memory_jev_model.as_deref(),
+        Some("typesafe/jev-1.14")
+    );
+    assert_eq!(
+        config.browser_jev_model.as_deref(),
+        Some("typesafe/jev-1.14")
+    );
+    assert_eq!(config.voice_jev_model.as_deref(), Some("typesafe/jev-1.14"));
+    let defaults = AgentsConfig::default();
+    assert!(defaults.memory_jev_model.is_none());
+    assert!(defaults.browser_jev_model.is_none());
+    assert!(defaults.voice_jev_model.is_none());
+}
+
 const CONFIG_ENV_KEYS: &[&str] = &[
+    "JCODE_HIBERNATION_IDLE_SECS",
+    "JCODE_HIBERNATION_MODE",
+    "JCODE_REQUEST_COMPRESSION",
     "HOME",
+    "JCODE_COMMIT_LOG_KEY",
+    "JCODE_RESUME_PROJECT_SCOPE",
+    "JCODE_SWARM_STALL_AFTER_SECS",
+    "JCODE_SWARM_STALL_NUDGE",
     "JCODE_ACP_PROFILE",
     "JCODE_ACP_TOOL_PROFILE",
     "JCODE_ACTIVE_SESSIONS_MANAGER",
@@ -126,6 +225,14 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_MEMORY_EMBEDDING_MODEL",
     "JCODE_MEMORY_ENABLED",
     "JCODE_MEMORY_JEV_PROVIDER",
+    "JCODE_BROWSER_JEV_PROVIDER",
+    "JCODE_VOICE_JEV_PROVIDER",
+    "JCODE_LAYA_BASE_URL",
+    "LAYA_BASE_URL",
+    "LAYA_API_KEY",
+    "JCODE_MEMORY_JEV_MODEL",
+    "JCODE_BROWSER_JEV_MODEL",
+    "JCODE_VOICE_JEV_MODEL",
     "JCODE_ENABLE_MERMAID",
     "JCODE_MEMORY_MODEL",
     "JCODE_MEMORY_SIDECAR_ENABLED",
@@ -183,7 +290,6 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SWARM_ENABLED",
     "JCODE_SWARM_EFFORT",
     "JCODE_SWARM_ROOT_EFFORT",
-    "JCODE_SWARM_DEEP_ROOT_EFFORT",
     "JCODE_SWARM_MODEL",
     "JCODE_SWARM_MAX_CONCURRENT_AGENTS",
     "JCODE_SWARM_SPAWN_MODE",
@@ -489,6 +595,9 @@ pub fn on_config_reloaded(listener: fn()) {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    /// Idle session memory hibernation policy.
+    pub session: SessionConfig,
+
     /// Daemon behavior for autonomous wake requests.
     pub server: ServerConfig,
 
@@ -554,6 +663,9 @@ pub struct Config {
 
     /// Power-management configuration (prevent sleep while streaming)
     pub power: PowerConfig,
+
+    /// macOS menu bar session indicator
+    pub menubar: MenubarConfig,
 
     /// Auto-review configuration
     pub autoreview: AutoReviewConfig,
@@ -630,7 +742,7 @@ impl Default for AcpConfig {
 pub enum McpToolsMode {
     /// Never change the cached tool list for MCP changes. Providers with
     /// native deferred loading (Claude, OpenAI gpt-5.4+) get MCP tools as
-    /// deferred definitions; others get the fixed `mcp_search`/`mcp_call`
+    /// deferred definitions; others get the fixed `mcp` search/call
     /// surface, with new tools described in the transcript.
     #[default]
     Auto,
@@ -684,9 +796,9 @@ pub struct ToolConfig {
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
-    /// Opt-in Codemode: expose a `codemode` tool that runs model-written
+    /// Codemode: expose a `codemode` tool that runs model-written
     /// JavaScript in an embedded QuickJS sandbox able to call every other
-    /// tool (including MCP tools). Off by default.
+    /// tool (including MCP tools). Enabled by default.
     pub codemode: bool,
 }
 
@@ -699,7 +811,7 @@ impl Default for ToolConfig {
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
-            codemode: false,
+            codemode: true,
         }
     }
 }
@@ -764,7 +876,6 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "replace",
                     "apply_patch",
                     "agentgrep",
                     "ls",
@@ -782,7 +893,6 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "replace",
                     "apply_patch",
                     "agentgrep",
                     "ls",
@@ -841,6 +951,10 @@ pub struct DictationConfig {
     /// microphone and prints raw mono 16 kHz s16le PCM to stdout. Empty means
     /// auto-detect (pw-record, parecord, arecord, rec, ffmpeg).
     pub recorder: String,
+    /// Keyboards `jcode companion` watches for Copilot-key push-to-talk
+    /// (Linux evdev nodes, preferably stable `/dev/input/by-id/...` paths).
+    /// Empty disables the companion's global voice listener.
+    pub global_devices: Vec<std::path::PathBuf>,
 }
 
 impl Default for DictationConfig {
@@ -852,6 +966,7 @@ impl Default for DictationConfig {
             timeout_secs: 90,
             vocabulary: Vec::new(),
             recorder: String::new(),
+            global_devices: Vec::new(),
         }
     }
 }

@@ -75,6 +75,12 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           for package in sdk/npm/*; do
+            name=$(node -p "require('./$package/package.json').name")
+            version=$(node -p "require('./$package/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published, skipping"
+              continue
+            fi
             npm publish "$package" --access public --provenance
           done
 

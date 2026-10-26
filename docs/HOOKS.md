@@ -10,6 +10,7 @@ sessions appear*); lifecycle hooks tell you *what is happening inside them*.
 ```toml
 # ~/.jcode/config.toml
 [hooks]
+turn_start    = "~/bin/jcode-turn-busy"       # observer
 turn_end      = "~/bin/jcode-turn-notify"     # observer
 session_start = ""                            # observer
 session_end   = ""                            # observer
@@ -20,10 +21,30 @@ pre_tool_timeout_ms = 5000
 post_tool_feedback_timeout_ms = 10000
 ```
 
+All eight command keys (`pre_tool_transform`, `turn_start`, `turn_end`,
+`session_start`, `session_end`, `pre_tool`, `post_tool`, and
+`post_tool_feedback`) accept either a command string or an array of strings.
+Independent plugins can share an event without a dispatcher:
+
+```toml
+[hooks]
+turn_end = ["~/bin/jcode-turn-notify", "~/bin/jcode-event-log"]
+pre_tool = ["~/bin/jcode-tool-policy", "~/bin/jcode-audit-policy"]
+```
+
+Empty or whitespace-only commands are skipped. Observer commands are spawned
+in declaration order but run independently, so completion order is unspecified.
+Gate commands run sequentially in declaration order, even after a block, and
+the first blocking result is returned. Transformers and feedback hooks also
+run sequentially in declaration order, as described below.
+
 Env overrides (always win; empty value disables a config hook):
-`JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
+`JCODE_HOOK_TURN_START`, `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
 `JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`,
-`JCODE_HOOK_POST_TOOL_FEEDBACK`, `JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS`.
+`JCODE_HOOK_POST_TOOL_FEEDBACK`, `JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS`,
+`JCODE_HOOK_PRE_TOOL_TRANSFORM`, `JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS`.
+Command overrides accept a command string or a TOML array of strings, for
+example `JCODE_HOOK_TURN_END='["notify-one", "notify-two"]'`.
 
 ## Common contract
 
@@ -35,7 +56,7 @@ Env overrides (always win; empty value disables a config hook):
 
 | Variable | Meaning |
 | --- | --- |
-| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
+| `JCODE_HOOK_EVENT` | `turn_start`, `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool`, `post_tool_feedback`, `pre_tool_transform` |
 | `JCODE_HOOK_SESSION_ID` | Session the event belongs to |
 | `JCODE_HOOK_CWD` | Session working directory |
 | `JCODE_HOOK_PAYLOAD` | JSON object mirroring all fields (capped at 16 KB) |
@@ -43,18 +64,36 @@ Env overrides (always win; empty value disables a config hook):
 
 ## Observer hooks
 
-`turn_end`, `session_start`, `session_end`, and `post_tool` are
-**observers**: spawned detached, fire-and-forget. They can never block or slow
-the agent; failures are only logged.
+`turn_start`, `turn_end`, `session_start`, `session_end`, and `post_tool` are
+**observers**: spawned detached, fire-and-forget. The agent does not wait for
+their completion; failures are only logged.
+
+### `turn_start`
+
+Fires before model generation and the first tool call in the `chat` entrypoint
+(which uses the streaming turn loop) and one-shot `run` path. Extra fields:
+`JCODE_HOOK_MODEL` and `JCODE_HOOK_SOURCE` (`chat` or `run`, respectively).
+
+There are no distinct `resume` or `ambient` source values dispatched by the
+current implementation. Those labels in older config comments are not a
+runtime guarantee.
 
 ### `turn_end`
 
 Fires when an agent turn completes (streaming turn path, which covers TUI,
-desktop, swarm workers, and headless sessions).
+desktop, swarm workers, and headless sessions, plus one-shot `jcode run`).
 
 Extra fields: `JCODE_HOOK_STATUS` (`ok`/`error`), `JCODE_HOOK_DURATION_MS`,
 `JCODE_HOOK_MODEL`, `JCODE_HOOK_LAST_ASSISTANT_TEXT` (first 4000 chars),
+`JCODE_HOOK_PROMPT_TOKENS`, `JCODE_HOOK_INPUT_TOKENS`,
+`JCODE_HOOK_OUTPUT_TOKENS`, `JCODE_HOOK_CACHE_READ_TOKENS`,
+`JCODE_HOOK_CACHE_WRITE_TOKENS`, and
 `JCODE_HOOK_ERROR` (on failure).
+
+Token fields are summed from assistant messages in the current turn. `PROMPT_TOKENS` is the provider-reported full prompt size when available; `INPUT_TOKENS` is the raw provider-reported input count.
+These values are not normalized across providers; for example, cached input may be included in the OpenAI input count
+but is reported separately by Anthropic. Cache fields are omitted when no
+assistant message in the turn reports that metric.
 
 ### `session_start` / `session_end`
 
@@ -125,6 +164,32 @@ exit 0
   chars) is returned to the model as the tool error, so the model can adapt.
 - **Anything else fails open** with a logged warning: other exit codes,
   timeout (`pre_tool_timeout_ms`, default 5s), missing binary, spawn errors.
+
+### JSON output (Codex/Claude compatible)
+
+On exit 0 a gate may print one JSON object on stdout. Non-JSON stdout is
+ignored, so plain exit-code scripts keep working. Recognized fields:
+
+```json
+{
+  "hookSpecificOutput": {
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "rm -rf is not allowed",
+    "updatedInput": { "command": "ls" },
+    "additionalContext": "note shown to the model"
+  },
+  "systemMessage": "also shown to the model"
+}
+```
+
+- `permissionDecision: "deny"` (or legacy top-level `"decision": "block"`
+  with `reason`) blocks the call with that reason.
+- `permissionDecision: "ask"` also blocks, with a "requires user approval"
+  reason. jcode has no interactive approval prompt for hooks yet.
+- `updatedInput` (an object) replaces the tool input. With several gates,
+  later gates receive the rewritten input. A block discards rewrites.
+- `additionalContext` and `systemMessage` are appended to the tool result
+  (or block error) under a `[pre_tool context]` marker.
 
 Fail-open is deliberate: a broken policy script should degrade to "no policy"
 rather than brick every session. If you need fail-closed semantics, make the

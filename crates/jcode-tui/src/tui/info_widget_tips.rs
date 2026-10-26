@@ -20,7 +20,7 @@ fn all_tips() -> Vec<Tip> {
         "Ambient cycles can email you a summary and you can reply with directives for the next run",
         "Alt+B moves a long-running tool to the background - the agent continues and can check on it later with the `bg` tool",
         "Most terminals can be configured to copy text on highlight - no Ctrl+C needed. Check your terminal's settings for 'copy on select'",
-        "Alt+G (or /diff) cycles diff mode: Off, Inline, Pinned, File. Shift+Tab cycles favorited models. Pinned shows all diffs in a side pane. File shows the full file with changes highlighted, synced to your scroll position",
+        "Alt+G shows the git commit log of your project. /diff cycles diff mode: Off, Inline, Pinned, File. Shift+Tab cycles favorited models. Pinned shows all diffs in a side pane. File shows the full file with changes highlighted, synced to your scroll position",
     ];
     if crate::config::config().features.mermaid {
         tips.insert(3, "```mermaid code blocks render as diagrams");
@@ -119,8 +119,22 @@ pub(super) fn render_tips_widget(inner: Rect) -> super::frame::Framed {
         })
         .collect();
 
-    super::frame::Framed::body(lines).title(Line::from(vec![
-        Span::styled("💡 ", Style::default().fg(rgb(255, 210, 80))),
-        super::frame::label("Did you know?"),
-    ]))
+    super::frame::Framed::body(lines)
+        .title(Line::from(vec![
+            Span::styled("💡 ", Style::default().fg(rgb(255, 210, 80))),
+            super::frame::label("Did you know?"),
+        ]))
+        .footer(super::frame::dim(format!("rotates {TIP_CYCLE_SECONDS}s")))
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    #[test]
+    fn tip_footer_explains_rotation_not_content() {
+        let card = render_tips_widget(Rect::new(0, 0, 40, 10));
+        assert_eq!(card.footer.unwrap().to_string(), "rotates 15s");
+        assert!(!card.lines.is_empty());
+    }
 }

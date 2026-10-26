@@ -12,6 +12,67 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[test]
+fn ndjson_preserves_provider_reported_service_tier_without_inferring_it() {
+    let mut state = NdjsonRunState::default();
+    assert_eq!(state.served_service_tier, None);
+    let mut output = Vec::new();
+    for (requested, served) in [
+        (Some("ultrafast"), "default"),
+        (Some("priority"), "priority"),
+        (None, "default"),
+    ] {
+        emit_ndjson_event(
+            &mut output,
+            &mut state,
+            crate::protocol::ServerEvent::ServiceTierReported {
+                requested: requested.map(str::to_owned),
+                tier: served.to_owned(),
+            },
+        )
+        .expect("emit tier metadata");
+        assert_eq!(state.requested_service_tier.as_deref(), requested);
+        assert_eq!(state.served_service_tier.as_deref(), Some(served));
+    }
+    let events: Vec<serde_json::Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0],
+        serde_json::json!({
+            "type": "service_tier", "requested": "ultrafast", "tier": "default",
+            "report_status": "reported_mismatch"
+        })
+    );
+    assert!(events[2]["requested"].is_null());
+}
+
+#[test]
+fn ndjson_service_tier_status_never_infers_confirmation() {
+    for (requested, reported, expected) in [
+        (None, None, "not_reported"),
+        (Some("ultrafast"), Some("auto"), "unresolved"),
+        (Some("ultrafast"), Some("default"), "reported_mismatch"),
+        (Some("ultrafast"), Some("ultrafast"), "reported_match"),
+        (Some("fast"), Some("priority"), "reported_match"),
+        (Some("off"), Some("standard"), "reported_match"),
+        (None, Some("default"), "reported_match"),
+        (Some("flex"), Some("default"), "reported_mismatch"),
+        (Some("future-tier"), Some("default"), "reported_mismatch"),
+    ] {
+        let state = NdjsonRunState {
+            requested_service_tier: requested.map(str::to_string),
+            served_service_tier: reported.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(state.service_tier_report_status(), expected);
+        assert!(!state.service_tier_report_status().contains("confirmed"));
+    }
+}
+
+#[test]
 fn server_reload_report_preserves_json_fields_and_exit_status_contract() {
     let cases = [
         (false, false, false, false),
@@ -541,6 +602,311 @@ fn test_todo(
     }
 }
 
+fn dependency_todo(id: &str, dependencies: &[&str]) -> crate::todo::TodoItem {
+    let mut todo = test_todo(id, "pending", "high", None, None);
+    todo.waiting_on = dependencies.iter().map(|id| (*id).to_string()).collect();
+    todo
+}
+
+#[tokio::test]
+async fn external_blocker_cli_suppresses_only_blocked_work_and_reports_durable_review() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+    let mut blocked = dependency_todo("acceptance", &[]);
+    blocked.external_blocker = Some(crate::todo::TodoExternalBlocker {
+        reason: "Coordinator acceptance".into(),
+        review_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+    });
+    let (actionable, resumed) =
+        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
+    assert!(actionable.is_empty());
+    assert!(resumed.is_none(), "durable scheduler owns the review wake");
+    let notice = run_external_blocker_notice(&[blocked.clone()]).unwrap();
+    assert!(notice.contains("Coordinator acceptance") && notice.contains("review"));
+    let mixed = vec![blocked.clone(), dependency_todo("independent", &[])];
+    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &mixed, true).await;
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(actionable[0].id, "independent");
+    blocked.external_blocker.as_mut().unwrap().review_at =
+        chrono::Utc::now() - chrono::Duration::seconds(1);
+    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &[blocked], true).await;
+    assert_eq!(
+        actionable.len(),
+        1,
+        "deadline restores reassessment, never completes"
+    );
+    assert_eq!(actionable[0].status, "pending");
+}
+
+#[tokio::test]
+async fn run_await_dependency_waits_without_poking_and_resumes_on_terminal_or_timeout() {
+    let _guard = crate::storage::lock_test_env();
+    for timed_out in [false, true] {
+        let key = format!("cli-await-{}", uuid::Uuid::new_v4());
+        let id = crate::todo::await_dependency::dependency_id(&key, 1);
+        let path = crate::storage::runtime_dir()
+            .join(crate::todo::await_dependency::STATE_DIR)
+            .join(format!("{key}.json"));
+        let mut state = serde_json::json!({
+            "key": key, "session_id": "cli-await", "swarm_id": "swarm",
+            "target_status": ["completed"], "requested_ids": ["worker"],
+            "created_at_unix_ms": 1, "deadline_unix_ms": u64::MAX,
+            "background": true, "notify": true, "wake": true, "final_response": null
+        });
+        crate::storage::write_json_fast(&path, &state).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+        let todos = vec![dependency_todo("waiting", &[&id])];
+        let mut mixed = todos.clone();
+        mixed.push(dependency_todo("independent", &[]));
+        let (actionable, _) = prepare_run_todo_follow_up(&manager, "cli-await", &mixed, true).await;
+        assert_eq!(actionable.len(), 1);
+        assert_eq!(actionable[0].id, "independent");
+        assert_eq!(run_actionable_todos(&todos, &[], "foreign").len(), 1);
+        let mut followup = std::pin::pin!(prepare_run_todo_follow_up(
+            &manager,
+            "cli-await",
+            &todos,
+            true
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut followup)
+                .await
+                .is_err()
+        );
+        let saved: serde_json::Value = crate::storage::read_json(&path).unwrap();
+        assert_eq!(
+            saved["wake"], false,
+            "CLI owns the continuation, not a second daemon turn"
+        );
+        if timed_out {
+            state["deadline_unix_ms"] = 0.into();
+        } else {
+            state["final_response"] =
+                serde_json::json!({"completed":true,"summary":"worker finished"});
+        }
+        crate::storage::write_json_fast(&path, &state).unwrap();
+        let (actionable, resumed) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut followup)
+                .await
+                .unwrap();
+        assert_eq!(actionable.len(), 1);
+        assert!(resumed.unwrap().contains(&id));
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn run_dependency_mixed_work_stays_actionable_and_scoped() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+    let (finish, wait) = tokio::sync::oneshot::channel();
+    let task = manager
+        .spawn("test", "cli-owned", |_| async move {
+            let _ = wait.await;
+            Ok(crate::background::TaskResult::completed(Some(0)))
+        })
+        .await;
+    let todos = vec![
+        dependency_todo("waiting", &[&task.task_id]),
+        dependency_todo("independent", &[]),
+    ];
+    let (actionable, resumed) =
+        prepare_run_todo_follow_up(&manager, "cli-owned", &todos, true).await;
+    assert!(resumed.is_none());
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(actionable[0].id, "independent");
+    let followup = build_run_auto_poke_follow_up_from_todos(&actionable, false, None);
+    let Some(RunAutoPokeFollowUp::Incomplete { count, message }) = followup else {
+        panic!("independent work must remain actionable");
+    };
+    assert_eq!(count, 1);
+    let message = run_actionable_poke_message(message, &todos, &actionable);
+    assert!(message.contains("Actionable todos:\n- independent:"));
+    assert!(message.contains("Leave todos waiting"));
+    assert!(crate::todo::is_auto_poke_message(&message));
+    let mut completed = dependency_todo("completed", &[&task.task_id]);
+    completed.status = "completed".to_string();
+    let (finished, _) = prepare_run_todo_follow_up(&manager, "cli-owned", &[completed], true).await;
+    assert_eq!(
+        finished.len(),
+        1,
+        "finished todos must retain completion validation"
+    );
+    let (foreign, resumed) =
+        prepare_run_todo_follow_up(&manager, "other-session", &todos, true).await;
+    assert_eq!(
+        foreign.len(),
+        2,
+        "another session's task cannot block this run"
+    );
+    assert!(resumed.is_none());
+    finish.send(()).unwrap();
+    manager
+        .wait(&task.task_id, std::time::Duration::from_secs(2), false)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn run_dependency_all_waits_resume_with_terminal_status_and_output() {
+    for failed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+        let (finish, wait) = tokio::sync::oneshot::channel();
+        let task = manager
+            .spawn_with_notify(
+                "test",
+                None,
+                "cli-owned",
+                true,
+                true,
+                move |path| async move {
+                    let _ = wait.await;
+                    tokio::fs::write(path, "dependency output sentinel").await?;
+                    Ok(if failed {
+                        crate::background::TaskResult::failed(
+                            Some(17),
+                            "dependency failure sentinel",
+                        )
+                    } else {
+                        crate::background::TaskResult::completed(Some(0))
+                    })
+                },
+            )
+            .await;
+        let todos = vec![dependency_todo("waiting", &[&task.task_id])];
+        let mut followup = std::pin::pin!(prepare_run_todo_follow_up(
+            &manager,
+            "cli-owned",
+            &todos,
+            true
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut followup)
+                .await
+                .is_err(),
+            "all-wait work must not poke the model or enter completion gates"
+        );
+        assert!(!manager.status(&task.task_id).await.unwrap().wake);
+        finish.send(()).unwrap();
+        let (actionable, resumed) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), &mut followup)
+                .await
+                .unwrap();
+        assert_eq!(actionable.len(), 1);
+        let message = resumed.expect("completion resumes the model");
+        assert!(message.contains("dependency output sentinel"));
+        assert!(message.contains(if failed { "Failed" } else { "Completed" }));
+        if failed {
+            assert!(message.contains("dependency failure sentinel"));
+        }
+        assert!(message.contains("Do not retry failed tasks automatically"));
+    }
+}
+
+#[tokio::test]
+async fn run_dependency_waits_any_but_does_not_resume_still_blocked_todo() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+    let (finish_a, wait_a) = tokio::sync::oneshot::channel();
+    let a = manager
+        .spawn("test", "cli", |_| async move {
+            let _ = wait_a.await;
+            Ok(crate::background::TaskResult::completed(Some(0)))
+        })
+        .await;
+    let (finish_b, wait_b) = tokio::sync::oneshot::channel();
+    let b = manager
+        .spawn("test", "cli", |_| async move {
+            let _ = wait_b.await;
+            Ok(crate::background::TaskResult::completed(Some(0)))
+        })
+        .await;
+    let todos = vec![dependency_todo("both", &[&a.task_id, &b.task_id])];
+    let mut followup = std::pin::pin!(prepare_run_todo_follow_up(&manager, "cli", &todos, true));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut followup)
+            .await
+            .is_err()
+    );
+    finish_b.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut followup)
+            .await
+            .is_err(),
+        "one finished dependency does not unblock a todo with another running dependency"
+    );
+    finish_a.send(()).unwrap();
+    let (_, resumed) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut followup)
+        .await
+        .unwrap();
+    let message = resumed.unwrap();
+    assert!(message.contains(&a.task_id));
+    assert!(message.contains(&b.task_id));
+}
+
+#[tokio::test]
+async fn run_dependency_unknown_stale_and_cancelled_do_not_wait_forever() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+    let task = manager
+        .spawn("test", "cli", |_| async move {
+            std::future::pending::<()>().await;
+            Ok(crate::background::TaskResult::completed(Some(0)))
+        })
+        .await;
+    let mut stale = manager.status(&task.task_id).await.unwrap();
+    stale.task_id = "legacy-task".to_string();
+    stale.owner_pid = None;
+    stale.owner_instance = None;
+    tokio::fs::write(
+        manager.status_path_for(&stale.task_id),
+        serde_json::to_vec(&stale).unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut orphan = stale.clone();
+    orphan.task_id = "orphan-task".to_string();
+    orphan.owner_pid = Some(999_999_999);
+    orphan.owner_instance = Some("dead-owner".to_string());
+    tokio::fs::write(
+        manager.status_path_for(&orphan.task_id),
+        serde_json::to_vec(&orphan).unwrap(),
+    )
+    .await
+    .unwrap();
+    let todos = vec![
+        dependency_todo("unknown", &["missing"]),
+        dependency_todo("stale", &["legacy-task"]),
+        dependency_todo("orphan", &["orphan-task"]),
+    ];
+    let (actionable, resumed) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        prepare_run_todo_follow_up(&manager, "cli", &todos, true),
+    )
+    .await
+    .unwrap();
+    assert_eq!(actionable.len(), 3);
+    assert!(resumed.is_none());
+    assert_eq!(
+        manager.status("orphan-task").await.unwrap().status,
+        crate::bus::BackgroundTaskStatus::Failed
+    );
+    let todos = vec![dependency_todo("cancelled", &[&task.task_id])];
+    let mut followup = std::pin::pin!(prepare_run_todo_follow_up(&manager, "cli", &todos, true));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut followup)
+            .await
+            .is_err()
+    );
+    manager.cancel(&task.task_id).await.unwrap();
+    let (_, resumed) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut followup)
+        .await
+        .unwrap();
+    assert!(resumed.unwrap().to_lowercase().contains("cancel"));
+}
+
 #[test]
 fn run_auto_poke_followup_targets_below_threshold_todos() {
     let todos = vec![
@@ -782,7 +1148,7 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
         build_run_auto_poke_follow_up_from_todos(
             &open,
             false,
-            take_run_gate_digest_if_turn_ended(session, false, &open),
+            take_run_gate_digest_if_turn_ended(session, false, &open, true),
         ),
         Some(RunAutoPokeFollowUp::Incomplete { .. })
     ));
@@ -804,7 +1170,7 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
     match build_run_auto_poke_follow_up_from_todos(
         &done,
         false,
-        take_run_gate_digest_if_turn_ended(session, false, &done),
+        take_run_gate_digest_if_turn_ended(session, false, &done, true),
     ) {
         Some(RunAutoPokeFollowUp::GateDigest { message }) => {
             assert!(message.starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
@@ -857,6 +1223,22 @@ fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
             .is_empty()
     );
     assert!(take_run_gate_digest(session, false).is_none());
+
+    crate::todo::append_gate_observations(
+        session,
+        &[crate::todo::GateObservation {
+            kind: crate::todo::GateObservationKind::IntentUnderstanding,
+            group: None,
+            state: Some("partial".into()),
+        }],
+    )
+    .unwrap();
+    assert!(take_run_gate_digest_if_turn_ended(session, false, &[], false).is_none());
+    assert!(
+        crate::todo::load_gate_observations(session)
+            .unwrap()
+            .is_empty()
+    );
 
     match previous_home {
         Some(value) => crate::env::set_var("JCODE_HOME", value),
@@ -1584,6 +1966,151 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
         .expect("restore session");
 
     assert_eq!(resumed.session_id(), original_session_id);
+}
+
+#[tokio::test]
+async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&[
+        "JCODE_HOME",
+        "JCODE_RUN_AUTO_POKE",
+        "JCODE_RUN_AUTO_POKE_MAX_TURNS",
+    ]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    // A generous global cap must not override the per-state cap.
+    crate::env::set_var("JCODE_RUN_AUTO_POKE_MAX_TURNS", "10");
+    for enabled in [true, false] {
+        crate::env::set_var("JCODE_RUN_AUTO_POKE", if enabled { "1" } else { "0" });
+        for mode in ["plain", "capture", "ndjson"] {
+            let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+            let registry = Registry::new(provider.clone()).await;
+            let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+            crate::todo::save_todos(
+                agent.session_id(),
+                &[test_todo("open", "pending", "high", None, None)],
+            )
+            .unwrap();
+            match mode {
+                "plain" => run_single_message_command_plain_with_auto_poke(&mut agent, "go")
+                    .await
+                    .unwrap(),
+                "capture" => {
+                    run_single_message_command_capture_with_auto_poke(&mut agent, "go")
+                        .await
+                        .unwrap();
+                }
+                _ => run_single_message_command_ndjson(&mut agent, provider, "go")
+                    .await
+                    .unwrap(),
+            }
+            let session = crate::session::Session::load(agent.session_id()).unwrap();
+            let followups = session
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == crate::message::Role::User
+                        && message.content.iter().any(|block| {
+                            matches!(block,
+                                crate::message::ContentBlock::Text { text, .. }
+                                    if crate::todo::is_auto_poke_message(text)
+                            )
+                        })
+                })
+                .count();
+            assert_eq!(
+                followups,
+                if enabled { 3 } else { 0 },
+                "{mode}, enabled={enabled}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn run_dependency_resumes_same_session_in_all_output_modes() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&[
+        "JCODE_HOME",
+        "JCODE_RUN_AUTO_POKE",
+        "JCODE_RUN_AUTO_POKE_MAX_TURNS",
+    ]);
+    let temp = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("JCODE_RUN_AUTO_POKE", "1");
+    crate::env::set_var("JCODE_RUN_AUTO_POKE_MAX_TURNS", "2");
+    for (mode, json, ndjson) in [
+        ("plain", false, false),
+        ("capture", true, false),
+        ("ndjson", false, true),
+    ] {
+        let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+        let session_id = agent.session_id().to_string();
+        let (finish, wait) = tokio::sync::oneshot::channel();
+        let task = crate::background::global()
+            .spawn_with_notify("test", None, &session_id, true, true, |path| async move {
+                let _ = wait.await;
+                tokio::fs::write(path, "CLI completion output sentinel").await?;
+                Ok(crate::background::TaskResult::completed(Some(0)))
+            })
+            .await;
+        crate::todo::save_todos(&session_id, &[dependency_todo("waiting", &[&task.task_id])])
+            .unwrap();
+        {
+            let mut run = std::pin::pin!(run_single_message_with_agent(
+                &mut agent, provider, "go", json, ndjson
+            ));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), &mut run)
+                    .await
+                    .is_err(),
+                "{mode} must remain alive while the dependency runs"
+            );
+            assert!(
+                !crate::background::global()
+                    .status(&task.task_id)
+                    .await
+                    .unwrap()
+                    .wake,
+                "{mode} should own continuation rather than scheduling a daemon wake"
+            );
+            finish.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut run)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let session = crate::session::Session::load(&session_id).unwrap();
+        let inputs: Vec<_> = session
+            .messages
+            .iter()
+            .filter(|message| message.role == crate::message::Role::User)
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                crate::message::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Session/runtime context may also be persisted as user-role content.
+        // Count our continuations, not those unrelated injected reminders.
+        let completions: Vec<_> = inputs
+            .iter()
+            .filter(|text| text.contains("[auto] Background dependency"))
+            .collect();
+        assert_eq!(completions.len(), 1, "{mode} must resume exactly once");
+        assert!(
+            completions[0].contains("CLI completion output sentinel"),
+            "{mode}"
+        );
+        assert!(
+            !inputs
+                .iter()
+                .any(|text| crate::todo::is_auto_poke_message(text)),
+            "{mode} must not spend an incomplete retry or completion gate on the wait"
+        );
+    }
 }
 
 #[tokio::test]

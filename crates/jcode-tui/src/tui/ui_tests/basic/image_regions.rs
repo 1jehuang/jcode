@@ -350,6 +350,9 @@ fn test_prefix_reuse_edit_recomputes_region_height_not_stale() {
             DisplayMessage::assistant("rendered"),
         ],
         messages_version: 1,
+        // Tool images now start collapsed. Exercise the expanded geometry
+        // path explicitly so this still detects stale cached image heights.
+        image_expand_level: Some(crate::tui::ImageExpandLevel::Large),
         side_pane_images: vec![anchored_tool_image_with(
             "region-tool-grow",
             IMG_REGION_WIDE_PNG_B64,
@@ -368,6 +371,7 @@ fn test_prefix_reuse_edit_recomputes_region_height_not_stale() {
             DisplayMessage::assistant("rendered"),
         ],
         messages_version: 2,
+        image_expand_level: Some(crate::tui::ImageExpandLevel::Large),
         side_pane_images: vec![anchored_tool_image_with(
             "region-tool-grow",
             IMG_REGION_TALL_PNG_B64,

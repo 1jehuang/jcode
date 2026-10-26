@@ -3,7 +3,7 @@
 #[test]
 fn telemetry_pill_opens_settings_page_and_commits_choice() {
     use crate::external_auth::ExternalAuthReviewCandidate;
-    use crate::tui::app::onboarding_flow::{ImportReview, TelemetryLevel};
+    use crate::tui::app::onboarding_flow::ImportReview;
 
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
@@ -23,18 +23,27 @@ fn telemetry_pill_opens_settings_page_and_commits_choice() {
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
 
-        // The page opens defaulted to "Send everything".
+        // The page opens with Continue focused, content sharing unchecked,
+        // and every other category checked.
         match app.onboarding_phase() {
             Some(OnboardingPhase::Login {
                 import: Some(review),
-            }) => assert_eq!(review.telemetry, Some(TelemetryLevel::Everything)),
+            }) => {
+                let page = review.telemetry.expect("telemetry page open");
+                assert_eq!(page.cursor, 0);
+                if !crate::telemetry::opt_out_forced_by_env() {
+                    assert_eq!(page.checked, [false, true, true, true, true, true]);
+                }
+            }
             other => panic!("expected telemetry page open, got {other:?}"),
         }
         // The import countdown is paused while the page is open, so the screen
         // cannot commit the import out from under the user.
         assert!(!app.onboarding_flow.as_ref().unwrap().decision_timed_out());
 
-        // Enter commits "Send everything": usage on, content sharing on.
+        // `a` checks everything, then Enter on Continue commits: usage on,
+        // content sharing on.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('a')));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
         if !crate::telemetry::opt_out_forced_by_env() {
             assert!(crate::telemetry::is_enabled());
@@ -46,7 +55,7 @@ fn telemetry_pill_opens_settings_page_and_commits_choice() {
         .join("no_telemetry");
         assert!(
             !no_telemetry_marker.exists(),
-            "Send everything must remove the persisted opt-out marker"
+            "Checking everything must remove the persisted opt-out marker"
         );
         // We are back on the summary screen with the import still pending.
         match app.onboarding_phase() {
@@ -55,6 +64,11 @@ fn telemetry_pill_opens_settings_page_and_commits_choice() {
             }) => {
                 assert!(review.telemetry.is_none());
                 assert!(!review.choosing);
+                assert_eq!(
+                    review.summary_pill,
+                    crate::tui::app::onboarding_flow::SummaryPill::Continue,
+                    "saving telemetry settings refocuses Continue"
+                );
             }
             other => panic!("expected import summary, got {other:?}"),
         }
@@ -92,10 +106,14 @@ fn telemetry_page_send_nothing_disables_telemetry_and_esc_goes_back() {
             assert!(crate::telemetry::is_enabled());
         }
 
-        // Reopen, walk down to "Send nothing", commit.
+        // Reopen (Continue focused), uncheck everything with `n`, then
+        // toggle the first category back on and off to exercise Space.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('t')));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char(' ')));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char(' ')));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Up));
         // In the dependency build used by this crate, telemetry-core is not
         // compiled with cfg(test), so the in-app opt-out event would otherwise
         // use the real delivery path. Keep the UI preconditions above free of
@@ -113,7 +131,7 @@ fn telemetry_page_send_nothing_disables_telemetry_and_esc_goes_back() {
         .join("no_telemetry");
         assert!(
             no_telemetry_marker.exists(),
-            "Send nothing must persist the opt-out marker"
+            "Unchecking everything must persist the opt-out marker"
         );
     });
 }

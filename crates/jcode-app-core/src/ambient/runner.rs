@@ -115,6 +115,7 @@ impl AmbientRunnerHandle {
                 images: Vec::new(),
                 urgent: false,
                 source: SoftInterruptSource::User,
+                client_id: None,
             });
             logging::info(&format!(
                 "{} message injected into active ambient cycle: {}",
@@ -295,6 +296,9 @@ impl AmbientRunnerHandle {
                                 ScheduleTarget::Session { session_id } => {
                                     ("session", Some(session_id.clone()), None)
                                 }
+                                ScheduleTarget::TodoReview { session_id, .. } => {
+                                    ("todo_review", Some(session_id.clone()), None)
+                                }
                                 ScheduleTarget::Spawn { parent_session_id } => {
                                     ("spawn", None, Some(parent_session_id.clone()))
                                 }
@@ -384,6 +388,22 @@ impl AmbientRunnerHandle {
         Self::wait_for_request_done(&mut client, request_id).await
     }
 
+    async fn notify_live_todo_review(
+        &self,
+        session_id: &str,
+        message: &str,
+        item: &ScheduledItem,
+    ) -> anyhow::Result<()> {
+        let mut client = crate::server::Client::connect().await?;
+        // Connecting yields to todo writers. Revalidate the exact generation
+        // immediately before injection so an already-cleared review stays inert.
+        if !ambient::scheduled_todo_review_is_current(item) {
+            return Ok(());
+        }
+        let request_id = client.notify_session(session_id, message).await?;
+        Self::wait_for_request_done(&mut client, request_id).await
+    }
+
     async fn resume_dead_session_with_reminder(
         &self,
         provider: &Arc<dyn Provider>,
@@ -400,6 +420,10 @@ impl AmbientRunnerHandle {
         let mut agent = Agent::new(cycle_provider, registry);
         agent.set_debug(session.is_debug);
         agent.restore_session(session_id)?;
+
+        if !ambient::scheduled_todo_review_is_current(item) {
+            return Ok(());
+        }
 
         let reminder = ambient::format_scheduled_session_message(item);
         let _ = agent
@@ -432,7 +456,11 @@ impl AmbientRunnerHandle {
                 child.compaction = parent.compaction.clone();
                 child.provider_key = parent.provider_key.clone();
                 child.route_api_method = parent.route_api_method.clone();
-                child.model = parent.model.clone();
+                child.model = parent
+                    .effective_agent_model("ambient", crate::config::Config::load().ambient.model)
+                    .filter(|model| model != "inherit")
+                    .or_else(|| parent.model.clone());
+                child.agent_model_overrides = parent.agent_model_overrides.clone();
                 child.subagent_model = parent.subagent_model.clone();
                 child.improve_mode = parent.improve_mode;
                 child.autoreview_enabled = parent.autoreview_enabled;
@@ -496,11 +524,21 @@ impl AmbientRunnerHandle {
         provider: &Arc<dyn Provider>,
         item: &ScheduledItem,
     ) -> anyhow::Result<()> {
+        if !ambient::scheduled_todo_review_is_current(item) {
+            return Ok(());
+        }
         match &item.target {
             ScheduleTarget::Ambient => Ok(()),
-            ScheduleTarget::Session { session_id } => {
+            ScheduleTarget::Session { session_id }
+            | ScheduleTarget::TodoReview { session_id, .. } => {
                 let reminder = ambient::format_scheduled_session_message(item);
-                match self.notify_live_session(session_id, &reminder).await {
+                let delivery = if matches!(item.target, ScheduleTarget::TodoReview { .. }) {
+                    self.notify_live_todo_review(session_id, &reminder, item)
+                        .await
+                } else {
+                    self.notify_live_session(session_id, &reminder).await
+                };
+                match delivery {
                     Ok(()) => {
                         logging::info(&format!(
                             "Ambient runner: delivered scheduled task {} to live session {}",

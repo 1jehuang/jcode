@@ -1,3 +1,7 @@
+#[path = "ui_prepare/assistant_aux.rs"]
+mod assistant_aux;
+use assistant_aux::*;
+
 use super::*;
 use crate::tui::ui::{self, WrappedLineMap};
 
@@ -39,79 +43,6 @@ fn assistant_aux_cache() -> &'static std::sync::Mutex<AssistantAuxCacheState> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<AssistantAuxCacheState>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(AssistantAuxCacheState::default()))
-}
-
-/// Compute (and cache) the auxiliary raw-line-map data for an assistant message.
-/// `cached` is the already-rendered (and possibly cached) display lines for the
-/// message; `align` and `centered` describe the current display mode.
-fn assistant_aux_data(
-    msg: &DisplayMessage,
-    cached: &[Line<'static>],
-    content_width: u16,
-    centered: bool,
-    diff_mode: crate::config::DiffDisplayMode,
-    align: ratatui::layout::Alignment,
-) -> std::sync::Arc<AssistantAuxData> {
-    let build = || {
-        let content_lines =
-            markdown::render_markdown_with_width(&msg.content, Some(content_width as usize));
-        let content_line_count = content_lines.len().min(cached.len());
-        let logical_plain_lines: Vec<String> =
-            if content_prefers_display_as_logical_lines(&msg.content) {
-                cached
-                    .iter()
-                    .take(content_line_count)
-                    .map(ui::line_plain_text)
-                    .collect()
-            } else {
-                markdown::render_markdown(&msg.content)
-                    .into_iter()
-                    .map(|line| ui::line_plain_text(&align_if_unset(line, align)))
-                    .collect()
-            };
-        AssistantAuxData {
-            content_line_count,
-            logical_plain_lines,
-        }
-    };
-
-    if cfg!(test) {
-        return std::sync::Arc::new(build());
-    }
-
-    let key = AssistantAuxKey {
-        message_hash: msg.stable_cache_hash(),
-        content_len: msg.content.len(),
-        content_width,
-        centered,
-        diff_mode,
-        cached_len: cached.len(),
-    };
-
-    {
-        let cache = match assistant_aux_cache().lock() {
-            Ok(c) => c,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(data) = cache.entries.get(&key) {
-            return data.clone();
-        }
-    }
-
-    let data = std::sync::Arc::new(build());
-    let mut cache = match assistant_aux_cache().lock() {
-        Ok(c) => c,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if cache.entries.insert(key.clone(), data.clone()).is_none() {
-        cache.order.push_back(key);
-        while cache.order.len() > ASSISTANT_AUX_CACHE_LIMIT {
-            if let Some(oldest) = cache.order.pop_front() {
-                cache.entries.remove(&oldest);
-            }
-        }
-    }
-    data
 }
 
 fn content_prefers_display_as_logical_lines(content: &str) -> bool {
@@ -249,7 +180,9 @@ pub(super) fn compute_image_regions(
             // follows so a wrapped/truncated placeholder can never claim
             // non-blank lines below it.
             let available = (1 + blank_run[idx + 1]).min(u16::MAX as usize) as u16;
-            let height = rows.max(1).min(available);
+            // Zero-height markers anchor collapsed tool-image labels for
+            // click-to-expand without creating a drawable image region.
+            let height = rows.min(available);
             image_regions.push(ImageRegion {
                 abs_line_idx: idx,
                 end_line: idx + height as usize,
@@ -695,6 +628,7 @@ pub(super) fn prepare_messages(
         inline_images_visible: app.inline_images_visible(),
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
+        latex_rendering: crate::config::config().display.latex_rendering,
     };
 
     super::note_full_prep_request();
@@ -1042,6 +976,11 @@ pub(crate) fn invalidate_header_prep_cache() {
     if let Ok(mut cache) = header_prep_cache().lock() {
         *cache = None;
     }
+    // Prepared frames embed the header. Clearing only the header sub-cache
+    // leaves an exact full-frame hit displaying old account dots and quotas.
+    if let Ok(mut cache) = full_prep_cache().lock() {
+        *cache = FullPrepCacheState::default();
+    }
 }
 
 /// Hash of the header inputs that are cheap to read every frame. Anything
@@ -1066,11 +1005,18 @@ fn header_prep_signature(app: &dyn TuiState, width: u16) -> u64 {
     app.connected_clients().hash(&mut hasher);
     app.server_sessions().len().hash(&mut hasher);
     app.working_dir().hash(&mut hasher);
+    // The directory row renders `(branch)`. The branch arrives from the async
+    // git probe, so without this the header kept the branch-less row until an
+    // unrelated field changed (or the 30s TTL lapsed), and a `git switch` did
+    // not show in the header at all.
+    app.git_branch().hash(&mut hasher);
     // Credential changes alter the auth inventory lines. Hashing the auth
     // generation (cheap atomic load) means `/login` and account edits repaint
     // the header on the very next frame instead of waiting out the TTL, which
     // is what lets the TTL itself be sized for slow background drift.
     crate::auth::auth_status_generation().hash(&mut hasher);
+    header::account_router_generation().hash(&mut hasher);
+    app.startup_oauth_account_label().hash(&mut hasher);
     // The goal badge renders the focused side-panel page title when a goal
     // page is focused; keying on it keeps focus changes instant.
     if let Some(page) = app.side_panel().focused_page() {
@@ -1135,6 +1081,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         images_signature: app.side_pane_images_signature(),
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
+        latex_rendering: crate::config::config().display.latex_rendering,
     };
     let msg_count = app.display_messages().len();
     let cache_lookup_start = Instant::now();
@@ -1397,6 +1344,15 @@ fn render_message_into(
             .as_ref()
             .is_some_and(|tool| tools_ui::canonical_tool_name(&tool.name) == "todo")
     {
+        // Hidden messages still occupy a position in the transcript cache.
+        // Without this zero-length boundary, incremental updates compare later
+        // messages against the wrong indices and can truncate earlier content.
+        acc.segments.push((
+            msg.stable_cache_hash(),
+            acc.lines.len(),
+            acc.raw_plain_lines.len(),
+            acc.user_prompt_texts.len(),
+        ));
         return;
     }
     let align = default_message_alignment(role, centered);
@@ -1726,27 +1682,32 @@ fn render_message_into(
                 acc.copy_targets
                     .push(offset_copy_target(target, error_start_line));
             }
-            let raw_line = acc.raw_plain_lines.len();
-            acc.raw_plain_lines.push(msg.content.clone());
-            let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
-            let prefix_width =
-                unicode_width::UnicodeWidthStr::width(if centered { "✗ " } else { "  ✗ " });
-            acc.lines.push(
-                Line::from(vec![
-                    Span::styled(
-                        if centered { "✗ " } else { "  ✗ " },
-                        Style::default().fg(Color::Red),
-                    ),
-                    Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
-                ])
-                .alignment(align),
-            );
-            acc.line_raw_overrides.push(Some(WrappedLineMap {
-                raw_line,
-                start_col: 0,
-                end_col: raw_width,
-            }));
-            acc.line_copy_offsets.push(prefix_width);
+            // Multi-line diagnostics (cloud failures, error chains) keep one
+            // logical line per row instead of collapsing into a single row.
+            let prefix = if centered { "✗ " } else { "  ✗ " };
+            let continuation = if centered { "  " } else { "    " };
+            let prefix_width = unicode_width::UnicodeWidthStr::width(prefix);
+            for (index, text) in msg.content.lines().enumerate() {
+                let raw_line = acc.raw_plain_lines.len();
+                acc.raw_plain_lines.push(text.to_string());
+                let raw_width = unicode_width::UnicodeWidthStr::width(text);
+                acc.lines.push(
+                    Line::from(vec![
+                        Span::styled(
+                            if index == 0 { prefix } else { continuation },
+                            Style::default().fg(Color::Red),
+                        ),
+                        Span::styled(text.to_string(), Style::default().fg(Color::Red)),
+                    ])
+                    .alignment(align),
+                );
+                acc.line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: raw_width,
+                }));
+                acc.line_copy_offsets.push(prefix_width);
+            }
         }
         _ => {}
     }
@@ -2376,6 +2337,11 @@ pub(super) fn prepare_body(
     let display_width = width.saturating_sub(4) as usize;
 
     let messages = app.display_messages();
+    let images_start = Instant::now();
+    // Images anchored to transcript messages render inline right after the
+    // message that produced them (tool result or user prompt).
+    let anchored_images = super::inline_image_ui::resolve_anchored_items_cached(app);
+    let images_ms = images_start.elapsed().as_millis();
     let ctx = BodyRenderCtx {
         app,
         width,
@@ -2383,17 +2349,35 @@ pub(super) fn prepare_body(
         prompt_number_offset: app.compacted_hidden_user_prompts(),
         total_prompts: app.display_user_message_count(),
         pending_count: input_ui::pending_prompt_count(app),
-        // Images anchored to transcript messages render inline right after the
-        // message that produced them (tool result or user prompt).
-        anchored_images: super::inline_image_ui::resolve_anchored_items_cached(app),
+        anchored_images,
         inline_images_visible: app.inline_images_visible(),
         messages,
         swarm_members: app.swarm_members_for_transcript(),
     };
+    let ctx_ms = images_start.elapsed().as_millis() - images_ms;
 
+    let render_start = Instant::now();
     let mut acc = BodyAcc::default();
+    let mut role_ms: std::collections::BTreeMap<&str, (u128, usize)> = Default::default();
+    let mut slowest: (u128, usize, &str) = (0, 0, "");
+    let mut tool_ms: std::collections::BTreeMap<String, (u128, usize)> = Default::default();
     for (msg_idx, msg) in messages.iter().enumerate() {
+        let msg_start = Instant::now();
         render_message_into(&ctx, &mut acc, msg, msg_idx);
+        let us = msg_start.elapsed().as_micros();
+        if let Some(tool) = msg.tool_data.as_ref() {
+            let entry = tool_ms
+                .entry(tools_ui::canonical_tool_name(&tool.name).to_string())
+                .or_default();
+            entry.0 += us;
+            entry.1 += 1;
+        }
+        let entry = role_ms.entry(msg.effective_role()).or_default();
+        entry.0 += us;
+        entry.1 += 1;
+        if us > slowest.0 {
+            slowest = (us, msg_idx, msg.effective_role());
+        }
     }
 
     // Streaming output is appended after the message boundaries are recorded so
@@ -2423,6 +2407,8 @@ pub(super) fn prepare_body(
         }
     }
 
+    let render_ms = render_start.elapsed().as_millis();
+    let wrap_start = Instant::now();
     let mut prepared = wrap_lines_with_map(
         acc.lines,
         &acc.raw_plain_lines,
@@ -2435,6 +2421,32 @@ pub(super) fn prepare_body(
         &acc.copy_targets,
         &acc.segments,
     );
+    let wrap_ms = wrap_start.elapsed().as_millis();
+    if images_ms + ctx_ms + render_ms + wrap_ms >= 100 {
+        crate::logging::info(&format!(
+            "[TIMING] prepare_body: messages={}, images={images_ms}ms, ctx={ctx_ms}ms, render={render_ms}ms, wrap={wrap_ms}ms, wrapped_lines={}, by_role=[{}], by_tool=[{}], slowest={}us@{}({})",
+            messages.len(),
+            prepared.wrapped_lines.len(),
+            role_ms
+                .iter()
+                .map(|(role, (us, n))| format!("{role}:{}ms/{n}", us / 1000))
+                .collect::<Vec<_>>()
+                .join(" "),
+            {
+                let mut tools: Vec<_> = tool_ms.iter().collect();
+                tools.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+                tools
+                    .iter()
+                    .take(6)
+                    .map(|(tool, (us, n))| format!("{tool}:{}ms/{n}", us / 1000))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
+            slowest.0,
+            slowest.1,
+            slowest.2
+        ));
+    }
     stamp_mermaid_pending(&mut prepared, mermaid_epoch_before);
     prepared
 }

@@ -184,6 +184,8 @@ fn test_ctrl_mouse_scroll_over_tool_side_panel_zooms_images() {
 fn test_mouse_scroll_events_are_classified_as_scroll_only() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::File;
+    // The File diff pane is only drawn once an edit exists to show.
+    app.display_edit_tool_message_count = 1;
 
     crate::tui::ui::record_layout_snapshot(
         Rect::new(0, 0, 40, 20),
@@ -604,7 +606,8 @@ fn test_is_scroll_only_key_detects_navigation_inputs() {
         KeyModifiers::empty()
     ));
 
-    assert!(super::input::is_scroll_only_key(
+    // Alt+G opens the commit log overlay, which needs a full redraw.
+    assert!(!super::input::is_scroll_only_key(
         &app,
         KeyCode::Char('g'),
         KeyModifiers::ALT
@@ -623,6 +626,61 @@ fn test_is_scroll_only_key_detects_navigation_inputs() {
 }
 
 #[test]
+fn test_alt_g_opens_and_closes_commit_log_overlay() {
+    let mut app = create_test_app();
+    // Build a throwaway repo with several commits. CI checks out with
+    // `fetch-depth: 1`, so the jcode checkout itself has a single commit and
+    // scrolling down one row would clamp back to 0.
+    let repo = tempfile::tempdir().expect("tempdir");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args([
+                "-c",
+                "user.name=jcode test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    for n in 0..3 {
+        git(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            &format!("commit {n}"),
+        ]);
+    }
+    app.session.working_dir = Some(repo.path().to_string_lossy().to_string());
+    let diff_mode_before = app.diff_mode;
+
+    assert!(super::input::handle_navigation_shortcuts(
+        &mut app,
+        KeyCode::Char('g'),
+        KeyModifiers::ALT
+    ));
+    assert_eq!(
+        app.diff_mode, diff_mode_before,
+        "Alt+G no longer cycles diffs"
+    );
+    let overlay = app.commit_log_overlay.as_ref().expect("overlay opens");
+    assert!(overlay.error.is_none(), "{:?}", overlay.error);
+    assert!(!overlay.entries.is_empty());
+
+    app.handle_commit_log_key(KeyCode::Char('j')).unwrap();
+    assert_eq!(app.commit_log_overlay.as_ref().unwrap().scroll, 1);
+    app.handle_commit_log_key(KeyCode::Esc).unwrap();
+    assert!(app.commit_log_overlay.is_none());
+}
+
+#[test]
 fn test_fuzzy_command_suggestions() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/mdl");
@@ -633,18 +691,21 @@ fn test_fuzzy_command_suggestions() {
 fn test_swarm_effort_autocomplete_and_help() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/effort swarm");
-    for mode in ["swarm", "swarm-deep"] {
-        let command = format!("/effort {mode}");
-        let (_, label) = suggestions
+    let (_, label) = suggestions
+        .iter()
+        .find(|(cmd, _)| cmd == "/effort swarm")
+        .expect("swarm mode should be suggested");
+    assert_eq!(*label, super::effort_display_label("swarm"));
+    assert!(label.contains("[Beta]"));
+    assert!(
+        !suggestions
             .iter()
-            .find(|(cmd, _)| cmd == &command)
-            .expect("both swarm modes should be suggested");
-        assert_eq!(*label, super::effort_display_label(mode));
-        assert!(label.contains("[Beta]"));
-    }
+            .any(|(cmd, _)| cmd == "/effort swarm-deep")
+    );
     let help = app.command_help("effort").expect("effort help");
     assert!(help.contains("swarm_root_effort"));
-    assert!(help.contains("swarm_deep_root_effort"));
+    assert!(!help.contains("swarm_deep_root_effort"));
+    assert!(help.contains("Use swarms to get things done in parallel."));
     assert!(!help.contains("run at max reasoning"));
 }
 
@@ -1127,6 +1188,8 @@ fn test_context_command_reports_session_context_snapshot() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                stage: None,
+                details: None,
                 group: None,
                 id: "one".to_string(),
                 content: "Inspect context summary".to_string(),
@@ -1137,6 +1200,8 @@ fn test_context_command_reports_session_context_snapshot() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(77)),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -1401,7 +1466,7 @@ fn test_agents_command_opens_agent_picker() {
         picker
             .entries
             .iter()
-            .any(|entry| entry.name == "Code review")
+            .any(|entry| entry.name == "Code review [session]")
     );
     assert!(picker.entries.iter().any(|entry| matches!(
         entry.action,
@@ -1483,7 +1548,7 @@ fn test_agent_model_picker_inherit_row_uses_provider_default_when_inherited_mode
             .expect("agent model picker should open");
         let inherit_entry = picker.entries.first().expect("inherit row should exist");
 
-        assert_eq!(inherit_entry.name, "inherit (provider default)");
+        assert_eq!(inherit_entry.name, "use global default [session]");
         assert!(matches!(
             inherit_entry.action,
             crate::tui::PickerAction::AgentModelChoice {

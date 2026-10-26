@@ -65,6 +65,8 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         let req = Request::Subscribe {
             system_prompt: None,
             supports_pdf_panels: false,
+            supports_user_response: false,
+            supports_server_failover: false,
             id,
             working_dir: working_dir.clone(),
             selfdev,
@@ -80,6 +82,8 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         let Request::Subscribe {
             system_prompt: _,
             supports_pdf_panels: _,
+            supports_user_response: _,
+            supports_server_failover: _,
             id: decoded_id,
             working_dir: decoded_working_dir,
             selfdev: decoded_selfdev,

@@ -2,23 +2,45 @@ name: Release
 
 env:
   JCODE_CI: "1"
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RELEASE_REPAIR: ${{ inputs.recovery || 'none' }}
+  RELEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
   # CI builds without the local parallel-frontend rustc wrapper from
   # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
   CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
   CARGO_INCREMENTAL: "0"
+  # Optimize published binaries fully without changing local/selfdev profiles.
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+  # Preserve stable/nightly selected below rather than adopting a JR toolchain.
+  JUSTRUST_TOOLCHAIN: system
+  # Keep packaging paths deterministic and CI installation noninteractive.
+  JUSTRUST_SLOTS: "0"
+  JUSTRUST_NO_TELEMETRY: "1"
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      recovery:
+        description: Reviewed source repair (only v0.96.0 or v0.97.0)
+        type: choice
+        default: none
+        options: [none, windows-listener]
   push:
     tags:
       - 'v*'
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -33,17 +55,73 @@ jobs:
     # dependency skips its dependents.
     if: github.repository == '1jehuang/jcode'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Exact-commit CI includes a native Windows test job with a 150-minute cap.
+    timeout-minutes: 190
+    outputs:
+      tag_sha: ${{ steps.source.outputs.tag_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Validate release source
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_PROVENANCE_PATH: ${{ runner.temp }}/release-provenance.json
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release tag" >&2; exit 1; }
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$WORKFLOW_REF" != refs/heads/master ]; then
+            echo "Recovery must use the reviewed workflow on master" >&2; exit 1
+          fi
+          tag_sha=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          if [ "$EVENT_NAME" = push ] && [ "$tag_sha" != "$WORKFLOW_SHA" ]; then
+            echo "Release tag no longer matches the triggering commit" >&2; exit 1
+          fi
+          echo "tag_sha=$tag_sha" >> "$GITHUB_OUTPUT"
+          git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
+          git checkout --detach "$tag_sha"
+          python3 "$RUNNER_TEMP/recovery.py" "$RELEASE_TAG" "$RELEASE_REPAIR" "$WORKFLOW_SHA"
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            python3 "$RUNNER_TEMP/recovery.py" --check-public-state "$RELEASE_TAG"
+          fi
+
+      - name: Require successful exact-commit CI for unpatched source
+        if: env.RELEASE_REPAIR == 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          TAG_SHA: ${{ steps.source.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/check_release_ci.py" > "$RUNNER_TEMP/check-release-ci.py"
+          python3 "$RUNNER_TEMP/check-release-ci.py" "$TAG_SHA" --repo "$GITHUB_REPOSITORY" --timeout 10800
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify frozen dependency resolution
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/release-cargo-metadata.json"
+          git diff --exit-code -- Cargo.lock
+
       # Render a human-readable changelog for the release body (issue #435):
       # changelog/v<version>.json when present, otherwise grouped commit
       # subjects since the previous tag, always ending with the compare link.
       - name: Generate release notes
-        run: scripts/generate_release_notes.sh "${GITHUB_REF_NAME}" > release_notes.md
+        shell: bash
+        run: |
+          scripts/generate_release_notes.sh "$RELEASE_TAG" > release_notes.md
+          if [ "$RELEASE_REPAIR" != none ]; then
+            # shellcheck disable=SC2016 # Markdown backticks are literal prose.
+            printf '\n## Release source recovery\n\nBuilt from existing tag `%s` with reviewed `%s` repair from workflow commit `%s`. The tag and version are unchanged. This is patched tag source, not the exact tagged tree. Release-only installer tooling is pinned to the same workflow commit. See `release-provenance.json` for source hashes and build run.\n' "$RELEASE_TAG" "$RELEASE_REPAIR" "$GITHUB_SHA" >> release_notes.md
+          fi
 
       # Stage platform assets on a draft. The final job publishes every
       # successfully completed asset and records unavailable platforms.
@@ -53,27 +131,85 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             # quick-release.sh can race this job after pushing the tag. If it
             # creates the draft first, verify that release and continue.
-            if ! gh release create "${GITHUB_REF_NAME}" \
+            if ! gh release create "${RELEASE_TAG}" \
               --draft \
-              --title "${GITHUB_REF_NAME}" \
+              --title "${RELEASE_TAG}" \
               --notes-file release_notes.md; then
               sleep 2
-              gh release view "${GITHUB_REF_NAME}" >/dev/null
+              gh release view "${RELEASE_TAG}" >/dev/null
             fi
           fi
-          gh release edit "${GITHUB_REF_NAME}" --notes-file release_notes.md
+          gh release edit "${RELEASE_TAG}" --notes-file release_notes.md
+
+  recovery-preflight:
+    name: Recovery companion preflight (${{ matrix.target }})
+    needs: create-release
+    if: github.event_name == 'workflow_dispatch' && inputs.recovery == 'windows-listener'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      JUSTRUST_DISABLE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: amd64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            arch: amd64_arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-release.outputs.tag_sha }}
+          fetch-depth: 0
+      - name: Apply reviewed release source recovery
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_PROVENANCE_PATH: ${{ runner.temp }}/release-provenance.json
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
+          python3 "$RUNNER_TEMP/recovery.py" "$RELEASE_TAG" "$RELEASE_REPAIR" "$WORKFLOW_SHA"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: recovery-companion-${{ matrix.target }}
+      - name: Install pinned justrust
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+      - name: Check and test exact repaired companion source
+        shell: pwsh
+        run: |
+          & justrust check --local --locked -p jcode-companion --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & justrust test --local --locked -p jcode-companion --lib --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify preflight preserved Cargo.lock
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
 
   build-linux-macos:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    needs: create-release
+    needs: [create-release, recovery-preflight]
+    if: ${{ always() && needs.create-release.result == 'success' && (needs.recovery-preflight.result == 'success' || needs.recovery-preflight.result == 'skipped') }}
     # Each matrix architecture is independent. A failed Linux or macOS target
     # must not suppress assets produced by the other successful targets.
     continue-on-error: true
-    timeout-minutes: 60
+    # v0.97.0 Intel macOS took 59m17s at optimization level 3. Keep headroom
+    # for healthy cold-cache builds without changing any acceptance checks.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -98,9 +234,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.create-release.outputs.tag_sha }}
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           submodules: recursive
           fetch-depth: 0
+
+      - name: Apply reviewed release source recovery
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_PROVENANCE_PATH: ${{ runner.temp }}/release-provenance.json
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
+          python3 "$RUNNER_TEMP/recovery.py" "$RELEASE_TAG" "$RELEASE_REPAIR" "$WORKFLOW_SHA"
 
       - name: Configure SSH for cargo git dependencies
         uses: webfactory/ssh-agent@v0.9.0
@@ -140,6 +287,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq mold
 
+      - name: Install pinned justrust
+        if: matrix.compat_container != true
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+
+      # Hosted cannot preserve our ARM64 emulated-TLS build yet, and native
+      # macOS hosted routing is not enabled. Keep the selected runner toolchain.
       - name: Build release binary
         if: matrix.compat_container != true
         shell: bash
@@ -161,14 +315,14 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             # Rebuild std with emulated TLS too; see the nightly install step
             # above for why Termux needs this.
-            cargo +nightly build -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
+            RUSTUP_TOOLCHAIN=nightly justrust build --local --locked -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
           else
-            cargo build --release --target ${{ matrix.target }}
+            justrust build --local --locked --release --target ${{ matrix.target }}
           fi
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_CI_BUILD: "1"
-          JCODE_BUILD_SEMVER: ${{ github.ref_name }}
+          JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
 
       - name: Build portable Linux x86_64 release binary
         if: matrix.compat_container == true
@@ -177,8 +331,12 @@ jobs:
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_CI_BUILD: "1"
-          JCODE_BUILD_SEMVER: ${{ github.ref_name }}
+          JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
           JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
+
+      - name: Verify release build preserved Cargo.lock
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
 
       - name: Package binary
         if: matrix.compat_container != true
@@ -186,6 +344,16 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
           chmod +x dist/${{ matrix.artifact }}
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # The linker's ad-hoc signature uses cargo's hashed output name
+            # (`jcode-<hash>`) as the code-signing identifier, so every release
+            # looked like a different program. macOS Tahoe's "Allow in the Menu
+            # Bar" keys unbundled executables on that identity, which added a new
+            # jcode toggle per update and reset the menu bar item's placement
+            # (#621). Re-sign ad-hoc with a stable identifier.
+            codesign --force --sign - --identifier com.jcode.cli dist/${{ matrix.artifact }}
+            codesign -dv dist/${{ matrix.artifact }} 2>&1 | grep -qx 'Identifier=com.jcode.cli'
+          fi
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
 
       - name: Upload artifact
@@ -201,15 +369,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" "dist/${{ matrix.artifact }}.tar.gz" --clobber
+          gh release upload "${RELEASE_TAG}" "dist/${{ matrix.artifact }}.tar.gz" --clobber
 
   build-windows:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    needs: create-release
-    # Windows is an optional release platform. Build failures stay visible, but
-    # must not prevent successful Linux/macOS artifacts from becoming public.
-    continue-on-error: true
+    needs: [create-release, recovery-preflight]
+    if: ${{ always() && needs.create-release.result == 'success' && (needs.recovery-preflight.result == 'success' || needs.recovery-preflight.result == 'skipped') }}
+    env:
+      # Pinned alpha.17 measurement crashed on Windows x64 requesting 30 GiB.
+      # Disable measurement only: the CLI still executes local Cargo and returns
+      # its exit status. Native Windows hosted routing is unsupported. All
+      # compile, launch, installer, signing and publication gates remain active.
+      JUSTRUST_DISABLE: "1"
+    # Both Windows architectures are required by the final complete-asset gate.
+    # A compile failure must stop signing rather than cascading into missing files.
     # Windows x64 release smoke tests compile the e2e harness after the release
     # binary. GitHub-hosted Windows runners sometimes exceed 25 minutes, which
     # cancels otherwise healthy releases before artifacts can be uploaded.
@@ -231,7 +405,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.create-release.outputs.tag_sha }}
           fetch-depth: 0
+
+      - name: Apply reviewed release source recovery
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_PROVENANCE_PATH: ${{ runner.temp }}/release-provenance.json
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
+          python3 "$RUNNER_TEMP/recovery.py" "$RELEASE_TAG" "$RELEASE_REPAIR" "$WORKFLOW_SHA"
 
       - name: Configure MSVC build environment (x64)
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -259,6 +444,11 @@ jobs:
           key: ${{ matrix.target }}
           cache-all-crates: "true"
 
+      - name: Install pinned justrust
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+
+      # Native Windows hosted routing is not enabled. Preserve the MSVC runner.
       - name: Build release binary
         shell: pwsh
         run: |
@@ -269,17 +459,22 @@ jobs:
             }
           }
 
-          $cargoArgs = @("build", "--release", "--target", "${{ matrix.target }}")
+          $cargoArgs = @("build", "--local", "--locked", "--release", "--target", "${{ matrix.target }}")
           $extraArgs = "${{ matrix.cargo_args }}"
           if (-not [string]::IsNullOrWhiteSpace($extraArgs)) {
             $cargoArgs += $extraArgs -split ' '
           }
 
-          & cargo @cargoArgs
+          & justrust @cargoArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_CI_BUILD: "1"
-          JCODE_BUILD_SEMVER: ${{ github.ref_name }}
+          JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
+
+      - name: Verify release build preserved Cargo.lock
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
 
       - name: Verify built Windows binary launches
         shell: pwsh
@@ -294,7 +489,7 @@ jobs:
         run: |
           & ./.github/scripts/verify_windows_install.ps1 `
             -ArtifactExePath "target/${{ matrix.target }}/release/jcode.exe" `
-            -Version "${{ github.ref_name }}"
+            -Version "${{ env.RELEASE_TAG }}"
 
       - name: Stage unsigned binary for signing
         shell: pwsh
@@ -333,10 +528,14 @@ jobs:
     name: Sign and publish Windows assets
     runs-on: windows-latest
     needs: [create-release, build-windows]
-    # Missing signing configuration or a signing outage suppresses Windows
-    # assets for this release without blocking Linux and macOS publication.
-    continue-on-error: true
+    # Signing failures keep the complete release draft, including recovery runs.
+    # The optional recovery-preflight ancestor is skipped for normal releases.
+    # Override implicit success() so that skip does not suppress signing, while
+    # still requiring both direct dependencies to succeed.
+    if: always() && needs.create-release.result == 'success' && needs.build-windows.result == 'success'
     timeout-minutes: 30
+    outputs:
+      signing_enabled: ${{ steps.signing.outputs.enabled }}
     permissions:
       contents: write
       id-token: write
@@ -349,6 +548,21 @@ jobs:
       WINDOWS_SIGNING_CERTIFICATE_PROFILE: ${{ vars.WINDOWS_SIGNING_CERTIFICATE_PROFILE }}
       WINDOWS_SIGNING_REQUIRED: ${{ vars.WINDOWS_SIGNING_REQUIRED }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-release.outputs.tag_sha }}
+          fetch-depth: 0
+
+      - name: Apply reviewed release source recovery
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_PROVENANCE_PATH: ${{ runner.temp }}/release-provenance.json
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
+          python3 "$RUNNER_TEMP/recovery.py" "$RELEASE_TAG" "$RELEASE_REPAIR" "$WORKFLOW_SHA"
+
       - name: Download unsigned Windows binaries
         uses: actions/download-artifact@v4
         with:
@@ -446,12 +660,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload "${env:GITHUB_REF_NAME}" dist/jcode-windows-x86_64.exe dist/jcode-windows-x86_64.tar.gz dist/jcode-windows-aarch64.exe dist/jcode-windows-aarch64.tar.gz --clobber
+          gh release upload "${env:RELEASE_TAG}" dist/jcode-windows-x86_64.exe dist/jcode-windows-x86_64.tar.gz dist/jcode-windows-aarch64.exe dist/jcode-windows-aarch64.tar.gz --clobber
 
   build-freebsd:
     name: Build (x86_64-unknown-freebsd)
     runs-on: ubuntu-latest
-    needs: create-release
+    needs: [create-release, recovery-preflight]
+    if: ${{ always() && needs.create-release.result == 'success' && (needs.recovery-preflight.result == 'success' || needs.recovery-preflight.result == 'skipped') }}
     # GitHub has no native FreeBSD runners, so build inside a FreeBSD VM
     # (QEMU via vmactions), same approach as freebsd-smoke.yml (issues #416,
     # #433). Best-effort: a flaky VM build must not block the rest of the
@@ -461,7 +676,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.create-release.outputs.tag_sha }}
           fetch-depth: 0
+
+      - name: Apply reviewed release source recovery
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_PROVENANCE_PATH: ${{ runner.temp }}/release-provenance.json
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
+          python3 "$RUNNER_TEMP/recovery.py" "$RELEASE_TAG" "$RELEASE_REPAIR" "$WORKFLOW_SHA"
 
       - name: Build release binary in FreeBSD VM
         uses: vmactions/freebsd-vm@v1
@@ -485,14 +711,23 @@ jobs:
             echo "::endgroup::"
 
             export CARGO_TERM_COLOR=always
+            # The VM does not inherit the runner's workflow environment.
+            export CARGO_PROFILE_RELEASE_OPT_LEVEL="${{ env.CARGO_PROFILE_RELEASE_OPT_LEVEL }}"
             # CARGO_BUILD_JOBS keeps memory in check; aws-lc-sys is memory hungry.
             export CARGO_BUILD_JOBS=3
             export JCODE_RELEASE_BUILD=1
             export JCODE_CI_BUILD=1
-            export JCODE_BUILD_SEMVER="${{ github.ref_name }}"
+            export JCODE_BUILD_SEMVER="${{ env.RELEASE_TAG }}"
+
+            # VM source sync omits .git. Keep the baseline outside the source tree.
+            lock_snapshot=$(mktemp /tmp/jcode-release-Cargo.lock.XXXXXX)
+            trap 'rm -f "$lock_snapshot"' EXIT
+            cp Cargo.lock "$lock_snapshot"
 
             echo "::group::cargo build (jcode binary)"
+            # justrust has no FreeBSD client or hosted worker yet.
             cargo build --locked --release -p jcode --bin jcode
+            cmp "$lock_snapshot" Cargo.lock
             echo "::endgroup::"
 
             echo "::group::Verify binary launches"
@@ -515,13 +750,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" "dist/jcode-freebsd-x86_64.tar.gz" --clobber
+          gh release upload "${RELEASE_TAG}" "dist/jcode-freebsd-x86_64.tar.gz" --clobber
 
   release:
     name: Finalize release
     needs: [create-release, build-linux-macos, publish-windows, build-freebsd]
     # Every platform is independent. Wait until all jobs reach a terminal state,
-    # then publish whichever assets succeeded. Only draft creation is mandatory.
+    # then require all platform assets before publishing. Partial sets stay draft.
     if: ${{ always() && needs.create-release.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -532,7 +767,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          ref: ${{ needs.create-release.outputs.tag_sha }}
+          fetch-depth: 0
+
+      - name: Apply reviewed release source recovery
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_PROVENANCE_PATH: ${{ runner.temp }}/release-provenance.json
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
+          python3 "$RUNNER_TEMP/recovery.py" "$RELEASE_TAG" "$RELEASE_REPAIR" "$WORKFLOW_SHA"
 
       - uses: actions/download-artifact@v4
         continue-on-error: true
@@ -584,7 +830,7 @@ jobs:
             echo "No completed release assets found" >&2
             exit 1
           fi
-          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
 
       - name: Record platform availability
         shell: bash
@@ -653,6 +899,8 @@ jobs:
                   digest = hashlib.sha256(path.read_bytes()).hexdigest()
                   out.write(f"{digest}  {path.name}\n")
           PY
+          cp "$RUNNER_TEMP/release-provenance.json" release-provenance.json
+          sha256sum release-provenance.json >> SHA256SUMS
           cat SHA256SUMS
 
       # Per-platform assets were already attached to the draft by their build
@@ -661,15 +909,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" SHA256SUMS --clobber
+          gh release upload "${RELEASE_TAG}" SHA256SUMS release-provenance.json --clobber
 
       - name: Add platform availability to release notes
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          WINDOWS_SIGNING_ENABLED: ${{ needs.publish-windows.outputs.signing_enabled }}
         run: |
           set -euo pipefail
-          gh release view "${GITHUB_REF_NAME}" --json body --jq .body > release_notes.md
+          gh release view "${RELEASE_TAG}" --json body --jq .body > release_notes.md
           python3 - << 'PY'
           import os
           import re
@@ -690,6 +939,11 @@ jobs:
           def status(name: str) -> str:
               return "available" if os.environ[name] == "true" else "not available in this release"
 
+          windows_signature = (
+              "Authenticode signatures verified for both Windows architectures."
+              if os.environ.get("WINDOWS_SIGNING_ENABLED") == "true"
+              else "Windows executables are **unsigned**. Azure Artifact Signing is not configured and the repository's existing `WINDOWS_SIGNING_REQUIRED=false` override allowed unsigned publication. Windows may show publisher or SmartScreen warnings."
+          )
           availability = textwrap.dedent(f"""
               {start}
               ## Platform availability
@@ -701,22 +955,69 @@ jobs:
               - Windows x86_64: {status('WINDOWS_X86_64_AVAILABLE')}
               - Windows ARM64: {status('WINDOWS_AARCH64_AVAILABLE')}
               - FreeBSD x86_64: {status('FREEBSD_X86_64_AVAILABLE')}
+
+              {windows_signature}
               {end}
           """).strip("\n")
           path.write_text(f"{body}\n\n{availability}\n", encoding="utf-8")
           PY
-          gh release edit "${GITHUB_REF_NAME}" --notes-file release_notes.md
+          gh release edit "${RELEASE_TAG}" --notes-file release_notes.md
+
+      - name: Verify staged assets before publication
+        if: env.RELEASE_REPAIR == 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          TAG_SHA: ${{ needs.create-release.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/verify_public_release.py" > "$RUNNER_TEMP/verify-public-release.py"
+          python3 "$RUNNER_TEMP/verify-public-release.py" "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --sha "$TAG_SHA" --allow-draft
 
       - name: Publish completed release
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          if [ "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft)" = "true" ]; then
-            gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
-          else
-            echo "Release ${GITHUB_REF_NAME} is already public; leaving it public."
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            python3 "$RUNNER_TEMP/recovery.py" --check-public-state "$RELEASE_TAG"
           fi
+          if [ "$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh release edit "${RELEASE_TAG}" --draft=false --latest
+          else
+            echo "Release ${RELEASE_TAG} is already public; leaving it public."
+          fi
+
+      - name: Verify public assets and exact source provenance
+        if: env.RELEASE_REPAIR == 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          TAG_SHA: ${{ needs.create-release.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/verify_public_release.py" > "$RUNNER_TEMP/verify-public-release.py"
+          python3 "$RUNNER_TEMP/verify-public-release.py" "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --sha "$TAG_SHA"
+
+      - name: Smoke test public Linux installer in an isolated home
+        if: env.RELEASE_REPAIR == 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_home="$(mktemp -d "$RUNNER_TEMP/jcode-install.XXXXXX")"
+          HOME="$install_home" XDG_CONFIG_HOME="$install_home/.config" \
+            JCODE_HOME="$install_home/.jcode" JCODE_INSTALL_DIR="$install_home/.local/bin" \
+            JCODE_VERSION="$RELEASE_TAG" JCODE_SKIP_SERVER_RELOAD=1 JCODE_NO_TELEMETRY=1 \
+            bash scripts/install.sh
+          reported_version="$("$install_home/.local/bin/jcode" --version)"
+          printf '%s\n' "$reported_version"
+          [[ "$reported_version" == "jcode $RELEASE_TAG "* ]] || {
+            echo "Installed binary does not match published version" >&2
+            exit 1
+          }
 
       # Releases created with GITHUB_TOKEN do not trigger `release: published`,
       # but workflow_dispatch is allowed. Queue the dedicated, per-tag
@@ -727,14 +1028,14 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run discord-release.yml --ref "$DEFAULT_BRANCH" -f "tag=${GITHUB_REF_NAME}"
+        run: gh workflow run discord-release.yml --ref "$DEFAULT_BRANCH" -f "tag=${RELEASE_TAG}"
 
       - name: Update Homebrew formula
         env:
           HOMEBREW_DEPLOY_KEY: ${{ secrets.HOMEBREW_DEPLOY_KEY }}
         if: env.HOMEBREW_DEPLOY_KEY != '' && env.HOMEBREW_READY == 'true'
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${RELEASE_TAG}"
           VERSION_NUM="${VERSION#v}"
 
           LINUX_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
@@ -840,7 +1141,7 @@ jobs:
             done
           }
 
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${RELEASE_TAG}"
           VERSION_NUM="${VERSION#v}"
 
           LINUX_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
@@ -914,6 +1215,7 @@ jobs:
           retry 3 5 git push origin master
 
       - name: Close issues included in the published release
+        if: github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -923,7 +1225,7 @@ jobs:
           gh issue list --label "$label" --state open --json number --jq '.[].number' | while read -r issue; do
             [ -n "$issue" ] || continue
             gh issue close "$issue" \
-              --comment "Released in [${GITHUB_REF_NAME}](https://github.com/${repo}/releases/tag/${GITHUB_REF_NAME}). Run \`jcode update\` to get it." \
+              --comment "Released in [${RELEASE_TAG}](https://github.com/${repo}/releases/tag/${RELEASE_TAG}). Run \`jcode update\` to get it." \
               --reason completed
             gh issue edit "$issue" --remove-label "$label" || true
           done

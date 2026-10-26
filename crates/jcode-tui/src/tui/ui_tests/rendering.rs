@@ -130,7 +130,7 @@ fn test_render_swarm_await_as_compact_rail_free_summary() {
 fn test_render_swarm_await_wake_message_as_compact_rail_free_summary() {
     crate::tui::markdown::set_center_code_blocks(false);
     let msg = DisplayMessage::background_task(
-        "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: sabertooth\n\nMember statuses:\n  ✓ sabertooth (completed)\n\nCompletion reports:\n\n--- sabertooth (completed) ---\nAwait UI demo complete."
+        "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: sabertooth\n\nMember statuses:\n  ✓ sabertooth (completed)\n\nRecent outputs:\n\n--- sabertooth (completed) ---\nAwait UI demo complete."
             .to_string(),
     );
 
@@ -284,9 +284,25 @@ Modified via apply_patch
     );
 
     let lines = render_swarm_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let collapsed: Vec<String> = lines.iter().map(extract_line_text).collect();
+    assert_eq!(
+        collapsed.len(),
+        1,
+        "plain multi-line swarm content must render as one row by default: {collapsed:?}"
+    );
+    assert!(
+        !collapsed[0].contains("persist_swarm_state_for"),
+        "collapsed row must not dump the diff: {collapsed:?}"
+    );
+
+    let expanded_content = jcode_tui_messages::toggle_collapsible_swarm_content(
+        &jcode_tui_messages::collapse_long_swarm_content(&msg.content),
+    )
+    .expect("toggle");
+    let msg = DisplayMessage::swarm("File activity · rose", expanded_content);
+    let lines = render_swarm_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
     let first_pad = rendered[0].chars().take_while(|c| *c == ' ').count();
-
     assert!(
         first_pad >= 8,
         "centered file activity notification should preserve a visible left gutter: {rendered:?}"

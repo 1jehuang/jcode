@@ -106,6 +106,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         None,
         None,
         false,
+        None,
         false,
         &mut client_selfdev,
         &mut client_session_id,
