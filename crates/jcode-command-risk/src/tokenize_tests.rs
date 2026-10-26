@@ -179,3 +179,42 @@ fn parentheses_split_subshell_and_command_substitution_bodies() {
         vec![vec!["x=$"], vec!["rm", "-rf", "~"], vec!["echo", "ok"]]
     );
 }
+
+#[test]
+fn redirect_destinations_are_marked_and_fd_prefixes_are_not_words() {
+    // Every destination is a redirect target, so it is never an operand.
+    for (command, destination) in [
+        ("rm -rf x 2>/dev/null", "/dev/null"),
+        ("rm -rf x 2> /dev/null", "/dev/null"),
+        ("rm -rf x >> log.txt", "log.txt"),
+        ("rm -rf x < /dev/null", "/dev/null"),
+        ("rm -rf x &>/dev/null", "/dev/null"),
+    ] {
+        let tokens = tokenize(command);
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.is_redirect_target && t.text == destination),
+            "{command}: {tokens:?}"
+        );
+        assert!(
+            !tokens.iter().any(|t| t.text == "2"),
+            "{command} keeps the fd prefix as a word: {tokens:?}"
+        );
+    }
+
+    // An input redirect is a destination but never truncates.
+    let input = tokenize("rm -rf x < /dev/null");
+    assert!(
+        !input
+            .iter()
+            .any(|t| t.is_truncating_redirect_target && t.text == "/dev/null")
+    );
+
+    // A space before the operator makes the number a real argument.
+    assert!(
+        tokenize("rm -rf x 2 >/dev/null")
+            .iter()
+            .any(|t| t.text == "2" && !t.is_redirect_target)
+    );
+}
