@@ -34,7 +34,7 @@ Unknown fields, absolute paths, traversal, symlinks and reserved control paths
 are rejected. Requests are limited to 8 KiB. `reason` is optional, bounded
 metadata. It is not persisted or reflected in status output. Do not include
 secrets in it. Environment injection controls such as `PATH`, `HOME`, `LD_*`,
-`BASH_ENV`, and `JCODE_*` are denied.
+`BASH_ENV`, `SSH_*`, and `JCODE_*` are denied.
 
 The credential allowlist is fixed:
 
@@ -62,6 +62,8 @@ The request is read from stdin, not a command argument. The caller must set both
 destination. The command rejects missing, returned, stale, zero-epoch, future,
 or expired leases and invalid repository roots. The receiver independently
 requires the same session epoch and repository to be owned on the remote host.
+Expiry or disconnection revokes local access, not resources already copied:
+cloud files and credentials remain there until explicitly removed or rotated.
 
 Every callback response is bounded, nonsecret JSON, for example:
 

@@ -6,10 +6,9 @@ use super::swarm_mutation_state::{
 use super::turn_failover::process_server_initiated_message;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
-    broadcast_swarm_plan, broadcast_swarm_status,
-    create_headless_session, fanout_session_event, persist_swarm_state_for, record_swarm_event,
-    record_swarm_event_for_session, remove_background_tool_signal,
-    remove_session_channel_subscriptions, remove_session_from_swarm,
+    broadcast_swarm_plan, broadcast_swarm_status, create_headless_session, fanout_session_event,
+    persist_swarm_state_for, record_swarm_event, record_swarm_event_for_session,
+    remove_background_tool_signal, remove_session_channel_subscriptions, remove_session_from_swarm,
     remove_session_interrupt_queue, set_member_task_label, truncate_detail, update_member_status,
     update_member_status_with_report,
 };
@@ -777,9 +776,7 @@ pub(super) async fn spawn_swarm_agent(
         }
     }?;
 
-    if is_headless_fallback
-        && let Some(lane_id) = lane_id.as_deref()
-    {
+    if is_headless_fallback && let Some(lane_id) = lane_id.as_deref() {
         let brief =
             super::swarm_todo_link::seed_spawn_lane(req_session_id, &new_session_id, lane_id)?;
         startup_message = Some(super::swarm_todo_link::spawn_lane_message(

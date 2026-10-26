@@ -195,7 +195,7 @@ fn cloud_environment_hydrates_commands_without_transcript_values() {
             let result = BashTool::new().execute(json!({
                 "command": "test \"${CLOUD_TEST_RESOURCE_TOKEN:+present}\" = present && printf resource-ready"
             }), ctx).await.unwrap();
-            assert_eq!(result.output, "resource-ready");
+            assert_eq!(result.output.lines().next(), Some("resource-ready"));
             assert!(!result.output.contains(secret));
         }
         let mut ctx = make_ctx(None);

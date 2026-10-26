@@ -104,6 +104,7 @@ pub fn validate_resource(resource: &Resource) -> Result<()> {
             // Shell/runtime injection knobs are not environment dependencies.
             ensure!(
                 !name.starts_with("JCODE_")
+                    && !name.starts_with("SSH_")
                     && !name.starts_with("LD_")
                     && !name.starts_with("DYLD_")
                     && !matches!(
@@ -381,7 +382,11 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
             libc::openat(
                 dir.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
                 0o600,
             )
         };
@@ -510,12 +515,12 @@ pub fn load_environment(root: &Path) -> Result<BTreeMap<String, String>> {
     }
     Ok(vars)
 }
-fn validate_environment_value(value: &str) -> Result<()> {
+pub fn validate_environment_value(value: &str) -> Result<()> {
     ensure!(
         !value.contains('\0') && value.len() <= MAX_PAYLOAD_BYTES / 2,
         "invalid environment value"
     );
-    Ok(())
+    validate_project_bytes(value.as_bytes())
 }
 
 pub fn save_environment(root: &Path, name: &str, value: &str) -> Result<bool> {
@@ -705,6 +710,13 @@ mod tests {
         assert!(parse_request(br#"{"action":"status"}"#).is_ok());
         assert!(parse_request(br#"{"action":"sync"}"#).is_ok());
         assert!(validate_project_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----").is_err());
+        assert!(validate_environment_value("-----BEGIN OPENSSH PRIVATE KEY-----").is_err());
+        assert!(
+            validate_resource(&Resource::EnvVar {
+                name: "SSH_PRIVATE_KEY".into()
+            })
+            .is_err()
+        );
         assert!(credential_paths("ssh").is_err());
         assert!(parse_request(br#"{"action":"fetch","resource":{"kind":"env_var","name":"TOKEN","value":"secret"}}"#).is_err());
     }

@@ -98,6 +98,7 @@ fn collect(root: &Path, request: &Request, source: Source) -> Result<Payload> {
                     .ok()
                     .or_else(|| env::load_environment(root).ok()?.get(name).cloned())
                     .context("variable unavailable")?;
+                env::validate_environment_value(&value)?;
                 vec![value.into_bytes()]
             }
             Resource::Credential { name } => {
@@ -375,7 +376,7 @@ fn validate_payload(payload: &Payload) -> Result<(PathBuf, Vec<Vec<u8>>)> {
                         && !bytes.contains(&0),
                     "invalid environment"
                 );
-                std::str::from_utf8(&bytes)?;
+                env::validate_environment_value(std::str::from_utf8(&bytes)?)?;
             }
             Resource::Credential { name } => {
                 let paths = env::credential_paths(name)?;
@@ -522,6 +523,41 @@ mod tests {
         assert!(!root.join("good").exists());
         assert!(!root.join(".jcode").exists());
     }
+    #[test]
+    #[cfg(unix)]
+    fn rejects_private_key_environment_before_publishing_project_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let file = Resource::ProjectFile {
+            path: "allowed".into(),
+        };
+        let variable = Resource::EnvVar {
+            name: "SERVICE_TOKEN".into(),
+        };
+        let payload = Payload {
+            version: 1,
+            source: Source::LocalPush {},
+            root: root.to_str().unwrap().into(),
+            requirements: vec![file.clone(), variable.clone()],
+            entries: vec![
+                Entry {
+                    resource: file,
+                    slot: 0,
+                    data: env::encode_bytes(b"ordinary content"),
+                },
+                Entry {
+                    resource: variable,
+                    slot: 0,
+                    data: env::encode_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----"),
+                },
+            ],
+        };
+        assert!(receive(payload).is_err());
+        assert!(!root.join("allowed").exists());
+        assert!(!root.join(".jcode").exists());
+    }
+
     #[test]
     #[cfg(unix)]
     fn bounded_transport_times_out_blocked_pipes_and_descendants() {
