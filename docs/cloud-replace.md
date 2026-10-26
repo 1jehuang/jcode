@@ -8,6 +8,12 @@ and checks ownership without replacing cloud files or creating a backup. Use
 `jcode cloud move`. `--remote-binary`, `--transport`, and `--json` are supported.
 Both machines need a version of jcode supporting this command.
 
+Inside a local Jcode session, use `/cloud replace` to see usage,
+`/cloud replace --dry-run` to preview, and `/cloud replace --yes` to apply.
+Append `--host <ssh-alias>` for a specific destination. The command waits for
+the current turn to finish and uses the session's local working directory.
+It does not move the conversation, close Jcode, or discard drafts.
+
 ```sh
 jcode cloud replace --dry-run
 jcode cloud replace --yes

@@ -18,11 +18,21 @@ use super::{App, CloudHandoff, DisplayMessage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CloudCommand {
-    Move { host: Option<String> },
+    Move {
+        host: Option<String>,
+    },
+    Replace {
+        host: Option<String>,
+        yes: bool,
+        dry_run: bool,
+    },
+    ReplaceUsage,
     Return,
     Where,
     Cancel,
-    Prepare { host: Option<String> },
+    Prepare {
+        host: Option<String>,
+    },
 }
 
 pub(super) fn parse_cloud_command(trimmed: &str) -> Option<CloudCommand> {
@@ -33,6 +43,27 @@ pub(super) fn parse_cloud_command(trimmed: &str) -> Option<CloudCommand> {
             Some("cancel") => Some(CloudCommand::Cancel),
             Some("status") | Some("where") => Some(CloudCommand::Where),
             Some("back") | Some("return") => Some(CloudCommand::Return),
+            Some("replace") => {
+                let (mut host, mut yes, mut dry_run) = (None, false, false);
+                while let Some(word) = words.next() {
+                    match word {
+                        "--yes" if !yes => yes = true,
+                        "--dry-run" if !dry_run => dry_run = true,
+                        "--host" if host.is_none() => {
+                            let Some(value) = words.next().filter(|s| !s.starts_with('-')) else {
+                                return Some(CloudCommand::ReplaceUsage);
+                            };
+                            host = Some(value.to_string());
+                        }
+                        _ => return Some(CloudCommand::ReplaceUsage),
+                    }
+                }
+                Some(if yes || dry_run {
+                    CloudCommand::Replace { host, yes, dry_run }
+                } else {
+                    CloudCommand::ReplaceUsage
+                })
+            }
             Some(host) => Some(CloudCommand::Move {
                 host: Some(host.to_string()),
             }),
@@ -68,6 +99,18 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
     let Some(command) = parse_cloud_command(trimmed) else {
         return false;
     };
+    if command == CloudCommand::ReplaceUsage {
+        app.push_display_message(DisplayMessage::system(
+            "Preview with /cloud replace --dry-run, then apply with /cloud replace --yes. Optional: --host <ssh-alias>. Replaces cloud code with local working files, saves a backup, and keeps this session here.",
+        ));
+        return true;
+    }
+    if matches!(command, CloudCommand::Replace { .. }) && crate::tui::is_ssh_remote() {
+        app.push_display_message(DisplayMessage::error(
+            "Run /cloud replace from your local session. Use /local to return from the cloud first.".to_string(),
+        ));
+        return true;
+    }
     if command == CloudCommand::Cancel {
         let message = if app.pending_cloud_handoff.take().is_some() {
             "Pending cloud handoff canceled."
@@ -109,9 +152,15 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
             prepared: false,
             progress: None,
         });
-        app.push_display_message(DisplayMessage::system(
-            "Cloud handoff queued for the next idle turn boundary. The current turn continues here. Use /cloud cancel to cancel.",
-        ));
+        let message = if matches!(
+            app.pending_cloud_handoff.as_ref().map(|p| &p.command),
+            Some(CloudCommand::Replace { .. })
+        ) {
+            "Cloud repository replacement queued for the next idle turn boundary. This session stays here. Use /cloud cancel to cancel."
+        } else {
+            "Cloud handoff queued for the next idle turn boundary. The current turn continues here. Use /cloud cancel to cancel."
+        };
+        app.push_display_message(DisplayMessage::system(message));
         // A queued-command dispatcher may still be restoring the composer draft.
         // Only the next tick may prepare or transfer, after that state is visible.
         return true;
@@ -176,6 +225,21 @@ fn start_cloud_command(
                 cmd.args(["--host", host]);
             }
         }
+        CloudCommand::Replace { host, yes, dry_run } => {
+            let cwd = super::commands::active_working_dir(app).or_else(|| {
+                (!app.is_remote)
+                    .then(|| std::env::current_dir().ok())
+                    .flatten()
+            });
+            let Some(cwd) = cwd.filter(|path| path.is_dir()) else {
+                app.push_display_message(DisplayMessage::error(
+                    "Cannot replace cloud code: this session's local working directory is unavailable.",
+                ));
+                return true;
+            };
+            configure_replacement(&mut cmd, host.as_deref(), *yes, *dry_run, &cwd);
+        }
+        CloudCommand::ReplaceUsage => unreachable!("usage does not spawn"),
         CloudCommand::Cancel => unreachable!("cancel does not spawn"),
         CloudCommand::Where => {
             cmd.args(["where", "--session", session_id]);
@@ -264,6 +328,25 @@ fn start_cloud_command(
             .filter(|_| matches!(command, CloudCommand::Prepare { .. })),
     });
     true
+}
+
+fn configure_replacement(
+    cmd: &mut std::process::Command,
+    host: Option<&str>,
+    yes: bool,
+    dry_run: bool,
+    cwd: &std::path::Path,
+) {
+    cmd.args(["replace", "--json"]).current_dir(cwd);
+    if yes {
+        cmd.arg("--yes");
+    }
+    if dry_run {
+        cmd.arg("--dry-run");
+    }
+    if let Some(host) = host {
+        cmd.args(["--host", host]);
+    }
 }
 
 pub(super) enum CloudEvent {
@@ -366,7 +449,9 @@ impl App {
             return None;
         }
         let changed_session = pending.session_id != super::commands::active_session_id(self);
-        if changed_session || self.has_unsent_handoff_work(None) {
+        let would_lose_work = !matches!(pending.command, CloudCommand::Replace { .. })
+            && self.has_unsent_handoff_work(None);
+        if changed_session || would_lose_work {
             self.pending_cloud_handoff = None;
             let reason = if changed_session {
                 "the active session changed. Retry /cloud or /local from the session you want to move".to_string()
@@ -712,6 +797,42 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
         );
         return;
     }
+    if let CloudCommand::Replace { dry_run, .. } = job.command {
+        let report = serde_json::from_slice::<serde_json::Value>(&output.stdout);
+        if let Ok(report) = report
+            && let Some(root) = report["repo_root"].as_str().filter(|s| !s.is_empty())
+            && report["dry_run"].as_bool() == Some(dry_run)
+        {
+            let text = if dry_run {
+                format!(
+                    "Cloud replacement preview passed for {root}. Nothing replaced. Apply with /cloud replace --yes{}.",
+                    match &job.command {
+                        CloudCommand::Replace {
+                            host: Some(host), ..
+                        } => format!(" --host {host}"),
+                        _ => String::new(),
+                    }
+                )
+            } else {
+                let backup = report["backup_path"]
+                    .as_str()
+                    .unwrap_or("none (checkout was absent)");
+                format!(
+                    "Cloud repository replaced from local working files: {root}\nBackup: {backup}\nThis session stays here. No conversation or provider login was moved."
+                )
+            };
+            app.push_display_message(DisplayMessage::system(text));
+        } else {
+            show_cloud_failure(
+                app,
+                &job.trimmed,
+                &job.session_id,
+                output.status.code(),
+                "Cloud replacement returned an invalid response. Inspect the cloud checkout and backup directories before retrying.",
+            );
+        }
+        return;
+    }
     if matches!(
         job.command,
         CloudCommand::Move { .. } | CloudCommand::Return
@@ -755,7 +876,10 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
     }
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     match command {
-        CloudCommand::Cancel | CloudCommand::Prepare { .. } => {
+        CloudCommand::Cancel
+        | CloudCommand::Prepare { .. }
+        | CloudCommand::Replace { .. }
+        | CloudCommand::ReplaceUsage => {
             unreachable!("handled before transfer completion")
         }
         CloudCommand::Where => {
@@ -813,6 +937,172 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_requires_explicit_flags_and_never_parses_as_a_host() {
+        for text in [
+            "/cloud replace",
+            "/cloud replace --force",
+            "/cloud replace --host",
+            "/cloud replace --yes --host --dry-run",
+            "/cloud replace --yes extra",
+        ] {
+            assert_eq!(
+                parse_cloud_command(text),
+                Some(CloudCommand::ReplaceUsage),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            parse_cloud_command("/cloud replace --dry-run --host box"),
+            Some(CloudCommand::Replace {
+                host: Some("box".into()),
+                yes: false,
+                dry_run: true,
+            })
+        );
+        assert_eq!(
+            parse_cloud_command("/cloud replace --yes"),
+            Some(CloudCommand::Replace {
+                host: None,
+                yes: true,
+                dry_run: false,
+            })
+        );
+    }
+
+    #[test]
+    fn replacement_usage_does_not_start_or_queue_work() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let session = super::super::commands::active_session_id(&app);
+        assert!(handle_cloud_command(&mut app, "/cloud replace", &session));
+        assert!(app.cloud_job.is_none());
+        assert!(app.pending_cloud_handoff.is_none());
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("--dry-run")
+        );
+    }
+
+    #[test]
+    fn replacement_waits_for_idle_and_preserves_drafts() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let session = super::super::commands::active_session_id(&app);
+        app.is_processing = true;
+        app.input = "keep my draft".into();
+        app.queued_messages.push("keep queued prompt".into());
+        handle_cloud_command(&mut app, "/cloud replace --yes", &session);
+        assert!(app.pending_cloud_handoff.is_some());
+        assert!(app.take_ready_cloud_handoff().is_none());
+        app.is_processing = false;
+        assert!(matches!(
+            app.take_ready_cloud_handoff().unwrap().command,
+            CloudCommand::Replace { .. }
+        ));
+        assert_eq!(app.input, "keep my draft");
+        assert_eq!(app.queued_messages, ["keep queued prompt"]);
+        assert!(!app.should_quit);
+        assert!(app.cloud_handoff_requested.is_none());
+    }
+
+    #[test]
+    fn replacement_child_uses_local_directory_without_session_transfer_flags() {
+        let mut cmd = std::process::Command::new("jcode");
+        configure_replacement(
+            &mut cmd,
+            Some("box"),
+            true,
+            false,
+            std::path::Path::new("/project with spaces"),
+        );
+        assert_eq!(
+            cmd.get_current_dir().unwrap(),
+            std::path::Path::new("/project with spaces")
+        );
+        let args: Vec<_> = cmd.get_args().map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(args, ["replace", "--json", "--yes", "--host", "box"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn replacement_completion_stays_local_and_shows_backup() {
+        for dry_run in [false, true] {
+            let mut app = crate::tui::app::tests::create_test_app();
+            let command = CloudCommand::Replace {
+                host: Some("box".into()),
+                yes: !dry_run,
+                dry_run,
+            };
+            let tx = fake_job(&mut app, command);
+            let response = serde_json::json!({"repo_root":"/project", "backup_path":"/project.backup", "dry_run":dry_run});
+            tx.send(CloudEvent::Done(Ok(output(true, &response.to_string()))))
+                .unwrap();
+            assert!(app.poll_cloud_job());
+            assert!(!app.should_quit);
+            assert!(app.cloud_handoff_requested.is_none());
+            let text = &app.display_messages.last().unwrap().content;
+            assert!(
+                text.contains(if dry_run {
+                    "--yes --host box"
+                } else {
+                    "/project.backup"
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn replacement_invalid_response_cannot_claim_success() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let tx = fake_job(
+            &mut app,
+            CloudCommand::Replace {
+                host: None,
+                yes: true,
+                dry_run: false,
+            },
+        );
+        tx.send(CloudEvent::Done(Ok(output(true, "{}")))).unwrap();
+        app.poll_cloud_job();
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("invalid response")
+        );
+        assert!(!app.should_quit);
+        assert!(app.cloud_handoff_requested.is_none());
+    }
+
+    #[test]
+    fn replacement_is_discoverable_in_slash_suggestions() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.input = "/cloud ".into();
+        let suggestions = app.get_suggestions_for("/cloud ");
+        assert!(
+            suggestions
+                .iter()
+                .any(|(name, _)| name == "/cloud replace --dry-run")
+        );
+        for input in [
+            "/cloud ",
+            "/cloud replace",
+            "/cloud replace ",
+            "/cloud replace --",
+        ] {
+            assert!(
+                !app.get_suggestions_for(input)
+                    .iter()
+                    .any(|(name, _)| name.ends_with("--yes"))
+            );
+        }
+    }
 
     #[test]
     fn cloud_recovery_is_bounded_and_keeps_command_and_cause() {

@@ -219,7 +219,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
     RegisteredCommand::public(
         "/cloud",
-        "Move this session to a cloud machine and keep working",
+        "Move this session to cloud, or /cloud replace to copy local code",
     ),
     RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
@@ -563,6 +563,29 @@ impl App {
 
         let prefix = input.to_lowercase();
         let prefix_trimmed = prefix.trim_end();
+
+        if prefix.starts_with("/cloud ") {
+            let mut candidates = vec![
+                (
+                    "/cloud replace".into(),
+                    "Show safe repository replacement commands",
+                ),
+                (
+                    "/cloud replace --dry-run".into(),
+                    "Preview replacing cloud code with local files",
+                ),
+                ("/cloud status".into(), "Show session location"),
+                ("/cloud cancel".into(), "Cancel a pending cloud command"),
+            ];
+            // Typing the command or a trailing space must never add consent.
+            if prefix.starts_with("/cloud replace --y") {
+                candidates.push((
+                    "/cloud replace --yes".into(),
+                    "Replace cloud code, preserving the old checkout in a backup",
+                ));
+            }
+            return self.rank_suggestions(input.trim_end(), candidates);
+        }
 
         if prefix.starts_with("/reset ") {
             return self.rank_suggestions(
