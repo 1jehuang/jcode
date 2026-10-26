@@ -12,10 +12,10 @@ pub fn release_semver(value: &str) -> Option<String> {
     if components.len() != 3 || components.iter().any(|part| !numeric_component(part)) {
         return None;
     }
-    if let Some(number) = preview {
-        if core != "1.0.0" || !numeric_component(number) || number == "0" {
-            return None;
-        }
+    if let Some(number) = preview
+        && (core != "1.0.0" || !numeric_component(number) || number == "0")
+    {
+        return None;
     }
     Some(value.to_string())
 }
