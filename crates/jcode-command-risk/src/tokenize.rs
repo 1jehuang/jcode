@@ -14,6 +14,9 @@ pub struct Token {
     pub receives_pipe: bool,
     /// True for `>` / `>|` redirect destinations, which are truncated on open.
     pub is_truncating_redirect_target: bool,
+    /// True for any redirect destination (`>`, `>>`, `>&`, `<`). The shell
+    /// consumes it, so it is never an operand of the command.
+    pub is_redirect_target: bool,
     /// True for control operators like `&&`, which are never path targets.
     pub is_operator: bool,
 }
@@ -24,6 +27,7 @@ impl Token {
             text: text.into(),
             receives_pipe: false,
             is_truncating_redirect_target: false,
+            is_redirect_target: false,
             is_operator: false,
         }
     }
@@ -98,7 +102,8 @@ pub fn tokenize(command: &str) -> Vec<Token> {
     let mut current = String::new();
     let mut has_content = false;
     let mut chars = command.chars().peekable();
-    let mut pending_redirect = false;
+    // `Some(truncates)` while a redirect operator waits for its destination.
+    let mut pending_redirect: Option<bool> = None;
 
     macro_rules! flush {
         () => {
@@ -106,9 +111,9 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                 let mut token = Token::word(std::mem::take(&mut current));
                 #[allow(unused_assignments)]
                 {
-                    if pending_redirect {
-                        token.is_truncating_redirect_target = true;
-                        pending_redirect = false;
+                    if let Some(truncates) = pending_redirect.take() {
+                        token.is_redirect_target = true;
+                        token.is_truncating_redirect_target = truncates;
                     }
                     has_content = false;
                 }
@@ -176,11 +181,20 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                 tokens.push(op);
             }
             '>' => {
+                // `2>err` / `2>>err` / `2>&1`: the leading digits name a file
+                // descriptor, so they are redirect syntax and must never be
+                // classified as an operand of the command (#932).
+                if has_content && current.chars().all(|digit| digit.is_ascii_digit()) {
+                    current.clear();
+                    has_content = false;
+                }
                 flush!();
                 // `>>` appends and does not truncate, so it is far less
-                // destructive; only a single `>` clobbers.
+                // destructive; only a single `>` clobbers. Both name a
+                // destination, which is never an operand.
                 if chars.peek() == Some(&'>') {
                     chars.next();
+                    pending_redirect = Some(false);
                 } else if chars.peek() == Some(&'&') {
                     // `>&N` / `>&-` duplicate or close a file descriptor and
                     // never name a file to truncate. Consume the FD word.
@@ -196,16 +210,37 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                     }
                     if fd.is_empty() {
                         // `>& file` (bash: redirect stdout+stderr) truncates.
-                        pending_redirect = true;
+                        pending_redirect = Some(true);
                     }
                 } else {
                     if chars.peek() == Some(&'|') {
                         chars.next();
                     }
-                    pending_redirect = true;
+                    pending_redirect = Some(true);
                 }
             }
-            '<' => flush!(),
+            '<' => {
+                if has_content && current.chars().all(|digit| digit.is_ascii_digit()) {
+                    current.clear();
+                    has_content = false;
+                }
+                flush!();
+                // `<file` names a path the shell reads, never an operand of
+                // the command (#932). `<<` and `<<<` are heredoc and herestring
+                // delimiters, handled by the heredoc pass.
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    while let Some(&d) = chars.peek() {
+                        if d.is_ascii_digit() || d == '-' {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                } else if chars.peek() != Some(&'<') {
+                    pending_redirect = Some(false);
+                }
+            }
             _ => {
                 has_content = true;
                 current.push(c);
