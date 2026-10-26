@@ -31,7 +31,7 @@ Three situations still break, and jcode handles each explicitly:
 | Situation | Fix | Where |
 | --- | --- | --- |
 | Terminal ignores the request (Terminal.app) | Switch terminals, or map Shift+Return to `\033[13;2u` by hand | `/terminal-setup` explains |
-| tmux does not forward extended keys | Write `extended-keys` settings to `~/.tmux.conf` | `/terminal-setup` applies |
+| tmux does not forward extended keys | Add `extended-keys` settings to the existing `~/.tmux.conf` or XDG tmux config | `/terminal-setup` applies and reports the path to reload |
 | WezTerm needs an opt-in flag | Set `enable_kitty_keyboard = true` | `/terminal-setup` applies |
 
 ## `/terminal-setup`
@@ -40,6 +40,11 @@ Run it when Shift+Enter submits instead of inserting a newline. It queries the
 terminal for real support rather than assuming, then either confirms the chord
 already works, applies the needed configuration, or explains why configuration
 cannot help.
+
+For tmux, `/terminal-setup` checks `~/.tmux.conf` first, then the configured
+XDG tmux config (or `~/.config/tmux/tmux.conf`). It updates the file tmux would
+use rather than creating a competing `~/.tmux.conf`, and reports the exact path
+and `tmux source-file` command.
 
 The query matters: writing the activation escape sequence almost always
 "succeeds" even on terminals that ignore it, so

@@ -63,7 +63,7 @@ impl SetupTarget {
     pub fn activation_note(self) -> &'static str {
         match self {
             Self::AppleTerminal => "Quit and reopen Terminal.app to pick up the key mapping.",
-            Self::Tmux => "Run `tmux source ~/.tmux.conf`, then restart jcode.",
+            Self::Tmux => "Reload the tmux config file shown above, then restart jcode.",
             Self::WezTerm => "Restart WezTerm to pick up the config change.",
         }
     }
@@ -149,6 +149,29 @@ pub fn tmux_config_path(home: &Path) -> PathBuf {
     home.join(".tmux.conf")
 }
 
+fn tmux_config_path_with_xdg(
+    home: &Path,
+    xdg_config_home: Option<&Path>,
+) -> std::io::Result<PathBuf> {
+    let default_path = tmux_config_path(home);
+    if default_path.try_exists()? {
+        return Ok(default_path);
+    }
+
+    let default_xdg_config_home = home.join(".config");
+    for xdg_config_home in [
+        xdg_config_home.unwrap_or(&default_xdg_config_home),
+        &default_xdg_config_home,
+    ] {
+        let xdg_path = xdg_config_home.join("tmux/tmux.conf");
+        if xdg_path.try_exists()? {
+            return Ok(xdg_path);
+        }
+    }
+
+    Ok(default_path)
+}
+
 /// Path to the user's WezTerm config.
 pub fn wezterm_config_path(home: &Path) -> PathBuf {
     home.join(".wezterm.lua")
@@ -232,8 +255,18 @@ pub fn supports_modified_enter_reporting() -> Option<bool> {
 
 /// Configure tmux so a capable outer terminal's Shift+Enter reaches jcode.
 pub fn apply_tmux(home: &Path) -> std::io::Result<Applied> {
-    let path = tmux_config_path(home);
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    apply_tmux_with_xdg(home, xdg_config_home.as_deref())
+}
+
+fn apply_tmux_with_xdg(home: &Path, xdg_config_home: Option<&Path>) -> std::io::Result<Applied> {
+    let path = tmux_config_path_with_xdg(home, xdg_config_home)?;
+    let existed = path.try_exists()?;
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(existing) => existing,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err),
+    };
     match tmux_config_with_block(&existing) {
         None => Ok(Applied::AlreadyConfigured),
         Some(updated) => {
@@ -242,7 +275,16 @@ pub fn apply_tmux(home: &Path) -> std::io::Result<Applied> {
             }
             std::fs::write(&path, updated)?;
             Ok(Applied::Changed {
-                detail: format!("Updated {}", path.display()),
+                detail: format!(
+                    "{} {}\nRun `tmux source-file {}` to reload it.",
+                    if existed {
+                        "Appended settings to"
+                    } else {
+                        "Created new file"
+                    },
+                    path.display(),
+                    path.display()
+                ),
             })
         }
     }
@@ -336,7 +378,7 @@ mod tests {
     fn apply_routes_each_target_to_its_own_fix() {
         let home = tempfile::tempdir().expect("tempdir");
         assert!(matches!(
-            apply(SetupTarget::Tmux, home.path()).expect("tmux"),
+            apply_tmux_with_xdg(home.path(), None).expect("tmux"),
             Applied::Changed { .. }
         ));
         assert!(std::fs::metadata(tmux_config_path(home.path())).is_ok());
@@ -350,16 +392,18 @@ mod tests {
     #[test]
     fn applying_tmux_setup_creates_config_then_becomes_a_no_op() {
         let home = tempfile::tempdir().expect("tempdir");
-        let first = apply_tmux(home.path()).expect("first apply");
-        assert!(matches!(first, Applied::Changed { .. }), "got {first:?}");
-
+        let first = apply_tmux_with_xdg(home.path(), None).expect("first apply");
+        let Applied::Changed { detail } = first else {
+            panic!("expected config creation, got {first:?}");
+        };
+        assert!(detail.contains("Created new file"));
         let written = std::fs::read_to_string(tmux_config_path(home.path())).expect("read config");
         assert!(written.contains("set -s extended-keys on"));
         assert!(written.contains("csi-u"));
 
         // Re-running must not duplicate the block.
         assert_eq!(
-            apply_tmux(home.path()).expect("second apply"),
+            apply_tmux_with_xdg(home.path(), None).expect("second apply"),
             Applied::AlreadyConfigured
         );
         assert_eq!(
@@ -373,7 +417,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmux_config_path(home.path()), "set -g mouse on\n").expect("seed");
 
-        apply_tmux(home.path()).expect("apply");
+        apply_tmux_with_xdg(home.path(), None).expect("apply");
 
         let written = std::fs::read_to_string(tmux_config_path(home.path())).expect("read");
         assert!(
@@ -381,6 +425,43 @@ mod tests {
             "must not clobber existing settings: {written}"
         );
         assert!(written.contains("extended-keys on"));
+    }
+
+    #[test]
+    fn applying_tmux_setup_uses_existing_xdg_config_instead_of_creating_a_second_file() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let xdg_config = home.path().join(".config/tmux/tmux.conf");
+        std::fs::create_dir_all(xdg_config.parent().expect("parent")).expect("create config dir");
+        std::fs::write(&xdg_config, "set -g mouse on\n").expect("seed XDG config");
+
+        let result = apply_tmux_with_xdg(home.path(), None).expect("apply");
+
+        let Applied::Changed { detail } = result else {
+            panic!("expected config update, got {result:?}");
+        };
+        assert!(!home.path().join(".tmux.conf").exists());
+        assert!(detail.contains("Appended settings to"));
+        assert!(detail.contains(xdg_config.to_str().expect("UTF-8 path")));
+        assert!(detail.contains("tmux source-file"));
+        let written = std::fs::read_to_string(&xdg_config).expect("read XDG config");
+        assert!(written.contains("set -g mouse on"));
+        assert!(written.contains("extended-keys on"));
+    }
+
+    #[test]
+    fn applying_tmux_setup_does_not_overwrite_a_config_that_cannot_be_read_as_text() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = tmux_config_path(home.path());
+        let original = [0xff, 0xfe, 0xfd];
+        std::fs::write(&path, original).expect("seed invalid UTF-8 config");
+
+        assert_eq!(
+            apply_tmux_with_xdg(home.path(), None)
+                .expect_err("invalid UTF-8 must stop the update")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read(path).expect("read original bytes"), original);
     }
 
     #[test]
@@ -511,6 +592,20 @@ mod tests {
         assert_eq!(
             apple_terminal_plist_path(home),
             Path::new("/home/u/Library/Preferences/com.apple.Terminal.plist")
+        );
+    }
+
+    #[test]
+    fn tmux_config_path_uses_xdg_config_home_when_present() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let xdg = tempfile::tempdir().expect("XDG config home");
+        let xdg_config = xdg.path().join("tmux/tmux.conf");
+        std::fs::create_dir_all(xdg_config.parent().expect("parent")).expect("create config dir");
+        std::fs::write(&xdg_config, "set -g mouse on\n").expect("seed XDG config");
+
+        assert_eq!(
+            tmux_config_path_with_xdg(home.path(), Some(xdg.path())).expect("resolve config"),
+            xdg_config
         );
     }
 
