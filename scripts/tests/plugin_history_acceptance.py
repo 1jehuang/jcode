@@ -42,6 +42,11 @@ def marketplace(root, name=MARKET, source="./bundle", version="1.0.0", plugin_na
     bundle = root / "bundle"
     document(bundle / ".claude-plugin/plugin.json", {
         "name": plugin_name, "version": version, "description": "Offline acceptance fixture",
+        "commands": {
+            "echo": {"source": "commands/echo.md", "description": "Mapped file command"},
+            "inline": {"content": "PLUGIN_INLINE_BODY_SENTINEL_452783\n$ARGUMENTS\n",
+                       "description": "Mapped inline command", "argumentHint": "[message]"},
+        },
     })
     agents = bundle / "agents"
     agents.mkdir(parents=True, exist_ok=True)
@@ -303,7 +308,8 @@ class Acceptance:
         self.tester(tid, "keys:esc")
         self.check("actual isolated TUI /plugin frame lists the registered local fixture")
         for invocation, body in (("probe", "PLUGIN_SKILL_BODY_SENTINEL_813742"),
-                                 ("echo", "PLUGIN_COMMAND_BODY_SENTINEL_253619")):
+                                 ("echo", "PLUGIN_COMMAND_BODY_SENTINEL_253619"),
+                                 ("inline", "PLUGIN_INLINE_BODY_SENTINEL_452783")):
             before = len(f.captures)
             self.tester(tid, "message:/" + PLUGIN + ":" + invocation + " PLUGIN_ARGUMENT_SENTINEL_176429")
             self.wait(lambda: len(f.captures) > before and not self.tester(tid, "state", True)["processing"],
@@ -311,7 +317,7 @@ class Acceptance:
             payload = json.dumps(f.captures[-1])
             require(body in payload and "PLUGIN_ARGUMENT_SENTINEL_176429" in payload,
                     "plugin slash invocation did not activate its actual body and arguments")
-        self.check("actual TUI slash invocation expands plugin skills and legacy commands into provider payloads")
+        self.check("actual TUI slash invocation expands skills and mapped source/inline commands into provider payloads")
 
         for prompt in (FIRST, SECOND):
             before = len(f.captures)

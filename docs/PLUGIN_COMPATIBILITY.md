@@ -22,7 +22,7 @@ jcode plugin marketplace remove market
 jcode plugin validate /absolute/path/to/plugin
 ```
 
-A marketplace contains `.claude-plugin/marketplace.json`. A plugin contains `.claude-plugin/plugin.json`. Marketplace sources can be local directories or supported Git sources. Remote acquisition needs Git and network access. Unsupported source options, including pinned refs/subdirectories, are rejected rather than silently ignored.
+A marketplace contains `.claude-plugin/marketplace.json`. A plugin contains `.claude-plugin/plugin.json`. Marketplace sources can be local directories or supported Git sources. Remote acquisition needs Git and network access. URL/GitHub source objects accept `ref` and a verified 40-character lowercase commit `sha`; SHA takes precedence. `git-subdir` selects a contained repository path without symlink components. Unsupported source options are rejected rather than silently ignored.
 
 TUI argument forms include `/plugin install example@market --scope project` and `/plugin marketplace add owner/repo`. These slash forms split on whitespace; use the CLI with shell quoting for paths containing spaces. The CLI accepts `--json` and `--scope` before or after subcommands. Mutation scope defaults to `user`; it is not inferred from an existing installation.
 
@@ -66,15 +66,32 @@ SSH attachments keep recall in memory for that attachment. The legacy global pro
 
 ## Remaining Claude compatibility gaps
 
-- Plugin dependencies are not auto-installed. Nonempty manifest dependencies are rejected. Package managers and server executables are not installed for you.
-- Named-object/inline-content command declarations are not implemented. Markdown command shell interpolation such as inline shell execution is not performed; supported placeholder replacement only produces instruction text. Model/tool/permission frontmatter does not reproduce Claude's command or agent execution policy.
+- Dependencies accept basic string identities and `{name, marketplace?}` objects. Install/update stages catalog and manifest dependency closures before publishing a single registry update. Missing/cyclic graphs fail atomically. Only the root marketplace's cross-market allowlist grants trust; an already enabled same-scope dependency may be reused. Explicit disabled choices are not overridden. Unsatisfied enabled roots stop contributing and appear in Errors. Version ranges remain explicitly unsupported. Package managers and server executables are not installed for you.
+- Named-object command declarations support contained `source` files or inline `content`, exclusively. Description and advisory allowed-tools metadata are retained; argument hints/model declarations do not establish execution policy. Markdown command shell interpolation is not performed; supported placeholder replacement only produces instruction text. Model/tool/permission frontmatter does not reproduce Claude's command or agent execution policy.
 - Stop and other unsupported hook events, prompt/agent/HTTP hooks and asynchronous hooks are skipped with diagnostics. Hook defaults use Jcode's hook timeout policy, not a claimed Claude timeout match.
 - Provider-specific `userConfig`, plugin consent/configuration prompts, plugin OAuth provisioning, MCPB bundles and a persistent `CLAUDE_PLUGIN_DATA` contract are not implemented as Claude-compatible workflows. Existing Jcode MCP capabilities do not establish plugin-specific parity for them.
 - LSP socket/non-stdio transport is rejected. Persistent workspace servers, automatic installation, restart policies and the full configurable timeout/workspace lifecycle are not implemented.
-- Managed installs, complete Claude registry migration, dependency metadata, broad CLI aliases/actions, `--all` operations and automatic mutation-scope selection are outside this implementation. Existing read-only discovery of Claude-store skills is not full registry lifecycle interoperability.
+- Managed installs, complete Claude registry migration, dependency version-range enforcement, broad CLI aliases/actions, `--all` operations and automatic mutation-scope selection are outside this implementation. Existing read-only discovery of Claude-store skills is not full registry lifecycle interoperability.
 - Marketplace-root special skill scanning and the full Claude activation/error-state UI are not verified or reproduced. Output styles/themes and other undeclared component kinds are not covered by the implemented-components table.
 
 The comparison target was the installed Claude Code 2.1.310 artifact. See [the REA evidence ledger](claude-plugin-rea.md) for source locators and limits. Its static extraction and help captures did not exercise live plugin installation or UI behavior.
+
+## Expanded acceptance: command maps, pinned sources and dependencies
+
+Coordinator build `295129p18r` produced `869d64058-dirty-063e4fe32ea3`, fingerprint `063e4fe32ea3b81d`, SHA-256 `e7b1dfac006ae4bbb7c247f4ef6723d394e5153b7885a9ddf71657e11c784ad4`. On October 26, tasks `542122vpb5` and `534160e1bh` passed all 14 workflow checks and 10 additional public CLI checks, respectively, with no skips. The workflow rerun now verifies both mapped source and inline command bodies in actual provider requests, plus the unchanged strict rewind/session-isolation assertions.
+
+Evidence: `/Users/siavash/.jcode/scratch/jpi-0yicmcbr/plugin-history-report.json` and `/Users/siavash/.jcode/scratch/jpi-2jxue2z3/plugin-parity-report.json`. Both private environments reaped their daemon and stopped the fake provider without cleanup errors. Git acceptance used private URL rewriting and file-only transport, with no network access or user configuration changes.
+
+The additional checks cover tag pins, exact SHA precedence, branch updates, contained Git subdirectories, failed-source rollback, string/object catalog-plus-manifest transitive closure, project isolation, narrower disabled masks, preservation of explicit disablement, missing/cyclic update rollback and root-only cross-market trust. Integrated task `285516n9fu` passed 78 base plugin tests, 15 TUI plugin tests and 3 app-core plugin MCP tests, including the Errors-tab dependency snapshot test.
+
+Dependency handling deliberately fails and rolls back untrusted/missing manifest-only edges, where recovered Claude code sometimes warns and skips. Disabled-choice precedence is conservative, not claimed identical to an untraced Claude mutation path. Version ranges remain unsupported. Git acquisition uses full clones rather than claiming Claude's sparse/partial optimization.
+
+Run the additional private acceptance with:
+
+```bash
+python3 scripts/tests/plugin_parity_acceptance.py \
+  --binary /Users/siavash/Projects/jcode/target/selfdev/jcode --execute
+```
 
 ## Runtime acceptance status
 
