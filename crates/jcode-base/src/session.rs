@@ -1097,6 +1097,34 @@ request in this new forked session, using the inherited conversation only as con
         );
     }
 
+    /// Create a new session that forks (clones) `parent`'s conversation.
+    ///
+    /// Copies the transcript, compaction state, system prompt, working
+    /// directory, model/provider selection, and autoreview/autojudge flags
+    /// from `parent`, then appends a fork notice so the forked agent treats
+    /// the next prompt as fresh work rather than continuing the parent's
+    /// in-flight turn. The returned session is marked `Closed` and is not
+    /// saved; callers are responsible for calling `save()`.
+    pub fn fork_from(parent: &Session) -> Session {
+        let parent_id = parent.id.clone();
+        let mut child = Session::create(Some(parent_id.clone()), None);
+        child.replace_messages(parent.messages.clone());
+        child.compaction = parent.compaction.clone();
+        child.system_prompt = parent.system_prompt.clone();
+        child.working_dir = parent.working_dir.clone();
+        child.model = parent.model.clone();
+        child.provider_key = parent.provider_key.clone();
+        child.subagent_model = parent.subagent_model.clone();
+        child.autoreview_enabled = parent.autoreview_enabled;
+        child.autojudge_enabled = parent.autojudge_enabled;
+        child.status = SessionStatus::Closed;
+        // The parent agent keeps ownership of any in-flight request; tell the
+        // forked agent so it treats the next prompt as fresh work instead of
+        // continuing (and duplicating) the parent's current turn.
+        child.append_fork_notice(&parent_id, parent.display_name());
+        child
+    }
+
     /// Mark this session as a canary tester
     pub fn set_canary(&mut self, build_hash: &str) {
         self.is_canary = true;
