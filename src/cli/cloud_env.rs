@@ -415,6 +415,13 @@ fn validate_payload(payload: &Payload) -> Result<(PathBuf, Vec<Vec<u8>>)> {
 }
 
 fn receive(payload: Payload) -> Result<Status> {
+    // Shared group members may push concurrently. Serialize the complete
+    // preflight/publication sequence, then revalidate leases under the lock.
+    // Per-resource publication remains no-clobber and retries remain safe.
+    // Invalid input must not create even private lock metadata. Recheck under
+    // the lock as another receiver may have changed state while we waited.
+    let (candidate_root, _) = validate_payload(&payload)?;
+    let _hydration = env::lock_workspace_hydration(&candidate_root)?;
     let (root, decoded) = validate_payload(&payload)?;
     let mut applied = 0;
     let mut skipped = 0;
@@ -490,6 +497,53 @@ pub(super) fn sync_saved(root: &Path, target: &super::Target) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(unix)]
+    fn concurrent_workspace_receives_publish_once() {
+        let _guard = storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let statuses = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let root = &root;
+                let barrier = &barrier;
+                handles.push(scope.spawn(move || {
+                    let resource = Resource::ProjectFile {
+                        path: "shared.env".into(),
+                    };
+                    barrier.wait();
+                    receive(Payload {
+                        version: 1,
+                        source: Source::LocalPush {},
+                        root: root.to_str().unwrap().into(),
+                        requirements: vec![resource.clone()],
+                        entries: vec![Entry {
+                            resource,
+                            slot: 0,
+                            data: env::encode_bytes(b"test-value"),
+                        }],
+                    })
+                    .unwrap()
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(statuses.iter().all(|s| s.ok));
+        assert_eq!(statuses.iter().map(|s| s.applied).sum::<usize>(), 1);
+        assert_eq!(statuses.iter().map(|s| s.skipped).sum::<usize>(), 7);
+        assert_eq!(env::load_manifest(&root).unwrap().requirements.len(), 1);
+        assert_eq!(
+            env::read_private(&root, Path::new("shared.env")).unwrap(),
+            b"test-value"
+        );
+    }
+
     #[test]
     fn rejects_payload_before_writing() {
         let temp = tempfile::tempdir().unwrap();
