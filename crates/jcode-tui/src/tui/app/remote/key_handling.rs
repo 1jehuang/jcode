@@ -1096,7 +1096,10 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             if crate::tui::is_ssh_remote()
                 && matches!(
                     app_mod::commands_cloud::parse_cloud_command(trimmed),
-                    Some(app_mod::commands_cloud::CloudCommand::Move { .. })
+                    Some(
+                        app_mod::commands_cloud::CloudCommand::Move { .. }
+                            | app_mod::commands_cloud::CloudCommand::MoveSelected { .. }
+                    )
                 )
             {
                 app.push_display_message(DisplayMessage::error(
@@ -1106,7 +1109,10 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             }
             if matches!(
                 app_mod::commands_cloud::parse_cloud_command(trimmed),
-                Some(app_mod::commands_cloud::CloudCommand::Move { .. })
+                Some(
+                    app_mod::commands_cloud::CloudCommand::Move { .. }
+                        | app_mod::commands_cloud::CloudCommand::MoveSelected { .. }
+                )
             ) {
                 // A fresh session is not on disk until its first message, and
                 // `jcode cloud move` loads it from disk. The daemon holds the

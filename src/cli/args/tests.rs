@@ -2,6 +2,53 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn cloud_move_selection_defaults_to_swarm_and_independent_sessions_are_explicit() {
+    let args = Args::try_parse_from(["jcode", "cloud", "move"]).unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Cloud(CloudCommand::Move {
+        include_sessions, session_only: false, ..
+    })) if include_sessions.is_empty())
+    );
+
+    let args = Args::try_parse_from([
+        "jcode",
+        "cloud",
+        "move",
+        "--include-session",
+        "first",
+        "--include-session",
+        "second",
+        "--dry-run",
+    ])
+    .unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Cloud(CloudCommand::Move {
+        include_sessions, session_only: false, dry_run: true, ..
+    })) if include_sessions == ["first", "second"])
+    );
+
+    let args = Args::try_parse_from(["jcode", "cloud", "move", "--session-only"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Cloud(CloudCommand::Move {
+            session_only: true,
+            ..
+        }))
+    ));
+    assert!(
+        Args::try_parse_from([
+            "jcode",
+            "cloud",
+            "move",
+            "--session-only",
+            "--include-session",
+            "other"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn update_channel_cli_is_explicit_and_limited_to_preview_and_stable() {
     for channel in ["preview", "stable"] {
         let args = Args::try_parse_from(["jcode", "update", "--channel", channel]).unwrap();
