@@ -1030,6 +1030,44 @@ mod tests {
     }
 
     #[test]
+    fn open_calls_output_order_is_deterministic() {
+        let ids = ["call_c", "call_a", "call_d", "call_b"];
+        let mut messages = vec![msg(
+            Role::Assistant,
+            ids.iter()
+                .map(|id| ContentBlock::ToolUse {
+                    id: (*id).into(),
+                    name: "bash".into(),
+                    input: json!({}),
+                    thought_signature: None,
+                })
+                .collect(),
+        )];
+        // Results land after every call is open, in a different order.
+        messages.push(msg(
+            Role::User,
+            ["call_b", "call_d", "call_a", "call_c"]
+                .iter()
+                .map(|id| ContentBlock::ToolResult {
+                    tool_use_id: (*id).into(),
+                    content: "out".into(),
+                    is_error: None,
+                })
+                .collect(),
+        ));
+        let first = build_responses_input(&messages);
+        for _ in 0..50 {
+            assert_eq!(build_responses_input(&messages), first);
+        }
+        let order: Vec<&str> = first
+            .iter()
+            .filter(|i| i["type"] == json!("function_call_output"))
+            .map(|i| i["call_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(order, ids.to_vec());
+    }
+
+    #[test]
     fn tool_reference_without_deferred_definition_is_ignored() {
         let messages = vec![msg(
             Role::User,
