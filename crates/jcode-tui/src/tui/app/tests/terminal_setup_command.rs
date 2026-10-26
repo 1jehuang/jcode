@@ -186,28 +186,155 @@ fn decoded_shift_enter_inserts_a_newline_instead_of_submitting() {
 
 #[test]
 fn terminal_setup_command_is_dispatched_and_reports_something_actionable() {
-    let mut app = create_test_app();
-    app.set_input_for_test("/terminal-setup");
-    app.submit_input();
+    const CHILD: &str = "JCODE_TEST_TERMINAL_SETUP_CHILD";
+    const VERIFIED: &str = "TERMINAL_SETUP_DISPATCH_VERIFIED";
+    if std::env::var_os(CHILD).is_none() {
+        // HOME and terminal detection must not leak into concurrent tests or
+        // let this command rewrite the developer's actual terminal config.
+        #[cfg(unix)]
+        let targets = ["Apple_Terminal", "WezTerm", "tmux"];
+        // Windows resolves HOME via a known folder, not the HOME variable.
+        // Keep its dispatch check on the non-writing manual-guidance path.
+        #[cfg(not(unix))]
+        let targets = ["Apple_Terminal"];
+        for target in targets {
+            let home = tempfile::tempdir().expect("isolated terminal home");
+            let test_name = std::thread::current().name().unwrap().to_owned();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", &test_name, "--nocapture"])
+                .env_clear()
+                .env(CHILD, target)
+                .env("HOME", home.path())
+                .env("JCODE_HOME", home.path().join(".jcode"))
+                .env("TMPDIR", home.path())
+                .env("TERM", "dumb")
+                .env("TERM_PROGRAM", target);
+            if target == "tmux" {
+                command.env("TMUX", "test-fixture");
+            }
+            #[cfg(windows)]
+            if let Some(system_root) = std::env::var_os("SystemRoot") {
+                command.env("SystemRoot", system_root);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                // Safety: setsid is async-signal-safe and prevents the child
+                // from querying the developer's controlling terminal.
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+            let output = command.output().expect("isolated terminal command test");
+            assert!(
+                output.status.success(),
+                "{target} command regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(VERIFIED),
+                "{target} child did not execute the command assertions"
+            );
+        }
+        return;
+    }
 
-    let last = app
-        .display_messages()
-        .last()
-        .expect("/terminal-setup must produce a message")
-        .clone();
-    assert!(
-        !last.content.contains("Unknown"),
-        "the command must be registered, got: {}",
-        last.content
+    fn dispatch() -> String {
+        let mut app = create_test_app();
+        app.set_input_for_test("/terminal-setup");
+        app.submit_input();
+        let content = app
+            .display_messages()
+            .last()
+            .expect("/terminal-setup must produce a message")
+            .content
+            .clone();
+        assert!(
+            !content.contains("Unknown"),
+            "unregistered command: {content}"
+        );
+        content
+    }
+
+    let target = std::env::var(CHILD).unwrap();
+    #[cfg(unix)]
+    assert_eq!(
+        dirs::home_dir(),
+        Some(std::path::PathBuf::from(std::env::var_os("HOME").unwrap())),
+        "refuse to dispatch against a home outside the isolated fixture"
     );
-    // Whatever the outcome, the user must learn how Shift+Enter behaves here.
-    assert!(
-        last.content.contains("Shift+Enter") || last.content.contains("Terminal.app"),
-        "message should explain the Shift+Enter situation: {}",
-        last.content
-    );
+    let first = dispatch();
+    assert!(first.contains("Shift+Enter"), "missing guidance: {first}");
+    if target != "Apple_Terminal" {
+        use crate::tui::terminal_setup::{TMUX_CONFIG_BLOCK, WEZTERM_CONFIG_LINE};
+
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let path = home.join(if target == "tmux" {
+            ".tmux.conf"
+        } else {
+            ".wezterm.lua"
+        });
+        assert!(first.contains(&format!("Configured {target}")), "{first}");
+        let created = std::fs::read_to_string(&path).unwrap();
+        if target == "tmux" {
+            assert_eq!(created, TMUX_CONFIG_BLOCK);
+        } else {
+            assert!(created.contains(WEZTERM_CONFIG_LINE));
+            assert!(created.trim_end().ends_with("return config"));
+        }
+        assert!(dispatch().contains("already configured for Shift+Enter"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), created);
+
+        let custom = if target == "tmux" {
+            "set -g mouse on\n"
+        } else {
+            "return { font_size = 12 }\n"
+        };
+        std::fs::write(&path, custom).unwrap();
+        let manual = dispatch();
+        assert!(manual.contains("Shift+Enter"), "{manual}");
+        let updated = std::fs::read_to_string(&path).unwrap();
+        if target == "tmux" {
+            assert!(updated.starts_with(custom));
+            assert!(updated.ends_with(TMUX_CONFIG_BLOCK));
+        } else {
+            assert!(manual.contains(WEZTERM_CONFIG_LINE), "{manual}");
+            assert_eq!(updated, custom);
+        }
+
+        let invalid = b"user settings\n\xff\n";
+        std::fs::write(&path, invalid).unwrap();
+        let error = dispatch();
+        assert!(
+            error.starts_with(&format!("Failed to update {target} configuration:")),
+            "{error}"
+        );
+        assert!(error.contains("UTF-8"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), invalid);
+
+        // A directory is another read error, never an absent/empty config.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("sentinel"), "keep").unwrap();
+        let error = dispatch();
+        assert!(
+            error.starts_with(&format!("Failed to update {target} configuration:")),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("sentinel")).unwrap(),
+            "keep"
+        );
+    }
+    println!("{VERIFIED}:{target}");
 }
-
 
 #[test]
 fn terminal_setup_is_offered_in_the_command_palette() {
