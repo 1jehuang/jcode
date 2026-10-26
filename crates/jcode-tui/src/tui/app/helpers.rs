@@ -233,6 +233,41 @@ pub(super) fn ctrl_bracket_fallback_to_esc(code: &mut KeyCode, modifiers: &mut K
 #[cfg(not(target_os = "macos"))]
 pub(super) fn ctrl_bracket_fallback_to_esc(_code: &mut KeyCode, _modifiers: &mut KeyModifiers) {}
 
+/// Treat a bare Ctrl+M as Enter.
+///
+/// Ctrl+M is the terminal's carriage return. Under tmux extended keys,
+/// `tmux send-keys C-m` arrives as `CSI 109;5u` rather than a bare CR, so tools
+/// that submit through tmux (OpenRig's `rig send`) would type a message but never
+/// send it. Ctrl+M has no jcode binding, so map it back to Enter.
+pub(super) fn ctrl_m_to_enter(code: &mut KeyCode, modifiers: &mut KeyModifiers) {
+    if *modifiers == KeyModifiers::CONTROL && matches!(*code, KeyCode::Char('m' | 'M')) {
+        *code = KeyCode::Enter;
+        *modifiers = KeyModifiers::NONE;
+    }
+}
+
+#[cfg(test)]
+mod ctrl_m_tests {
+    use super::ctrl_m_to_enter;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn bare_ctrl_m_is_enter_and_other_ctrl_chords_are_not() {
+        let (mut code, mut mods) = (KeyCode::Char('m'), KeyModifiers::CONTROL);
+        ctrl_m_to_enter(&mut code, &mut mods);
+        assert_eq!((code, mods), (KeyCode::Enter, KeyModifiers::NONE));
+
+        // Ctrl+Shift+M keeps its own meaning, and Ctrl+J stays untouched.
+        let (mut code, mut mods) = (KeyCode::Char('m'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        ctrl_m_to_enter(&mut code, &mut mods);
+        assert_eq!(code, KeyCode::Char('m'));
+
+        let (mut code, mut mods) = (KeyCode::Char('j'), KeyModifiers::CONTROL);
+        ctrl_m_to_enter(&mut code, &mut mods);
+        assert_eq!(code, KeyCode::Char('j'));
+    }
+}
+
 /// Debug command file path
 pub(super) fn debug_cmd_path() -> PathBuf {
     if let Ok(path) = std::env::var("JCODE_DEBUG_CMD_PATH") {
