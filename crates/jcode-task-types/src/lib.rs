@@ -437,6 +437,28 @@ pub struct TodoExternalBlocker {
     pub review_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A concrete action that only the user can safely or authoritatively perform.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoUserAction {
+    #[serde(deserialize_with = "deserialize_nonempty_action_field")]
+    pub action: String,
+    #[serde(deserialize_with = "deserialize_nonempty_action_field")]
+    pub reason: String,
+}
+
+fn deserialize_nonempty_action_field<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "user action and reason must be nonempty",
+        ));
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub content: String,
@@ -478,6 +500,9 @@ pub struct TodoItem {
     pub waiting_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_blocker: Option<TodoExternalBlocker>,
+    /// Absolutely requires user action. No timer or automatic retry is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_user_action: Option<TodoUserAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
     /// Optional execution stage. Stages run in order: stage 2 starts only

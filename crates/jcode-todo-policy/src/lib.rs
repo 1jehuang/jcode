@@ -16,7 +16,7 @@ pub use followup::{
     ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy,
     INCOMPLETE_TODO_MAX_ATTEMPTS, IncompleteTodoBudget, MAX_GATE_ATTEMPTS, TodoEffects,
     TodoSnapshot, is_incomplete_todo, todo_has_external_blocker, todo_has_external_blocker_at,
-    todo_waits_on_running_task,
+    todo_requires_user_action, todo_waits_on_running_task,
 };
 
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
@@ -35,7 +35,7 @@ pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
     FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
     IterationMaturity, TodoExternalBlocker, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem,
-    TodoPlan, TodoPlanChange, TodoPlanField,
+    TodoPlan, TodoPlanChange, TodoPlanField, TodoUserAction,
 };
 
 /// Return the canonical todo status for model-written status vocabulary.
@@ -678,7 +678,7 @@ pub fn build_actionable_poke_message(actionable: &[TodoItem]) -> String {
     message
 }
 
-const ACTIONABLE_POKE_WAIT_GUIDANCE: &str = "Leave todos waiting on still-running background tasks alone until their dependencies finish. Leave externally blocked todos alone until their review deadlines or an explicit blocker update.";
+const ACTIONABLE_POKE_WAIT_GUIDANCE: &str = "Leave todos waiting on still-running background tasks alone until their dependencies finish. Leave externally blocked todos alone until their review deadlines or an explicit blocker update. Leave todos marked Absolutely requires user action alone until the user performs the required action and the condition is cleared. Continue independent actionable work.";
 
 /// Longest list of named todos a gate continuation will spell out, so a big
 /// plan cannot turn one nudge into a wall of text.

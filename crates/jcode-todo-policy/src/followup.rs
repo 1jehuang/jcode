@@ -106,6 +106,11 @@ pub fn todo_has_external_blocker(todo: &TodoItem) -> bool {
     todo_has_external_blocker_at(todo, chrono::Utc::now())
 }
 
+/// Terminal todos never require user intervention, including legacy snapshots.
+pub fn todo_requires_user_action(todo: &TodoItem) -> bool {
+    is_incomplete_todo(todo) && todo.requires_user_action.is_some()
+}
+
 /// Persistent side effects a decision requires. Apply them whether or not a
 /// follow-up was produced: an empty digest still consumes the observation log.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,7 +285,8 @@ impl FollowUpPolicy {
             .iter()
             .copied()
             .filter(|todo| {
-                !todo_has_external_blocker(todo)
+                !todo_requires_user_action(todo)
+                    && !todo_has_external_blocker(todo)
                     && !todo_waits_on_running_task(todo, |id| {
                         snapshot
                             .running_background_tasks

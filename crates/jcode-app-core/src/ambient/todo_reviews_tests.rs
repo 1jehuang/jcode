@@ -17,11 +17,40 @@ fn blocked(id: &str) -> TodoItem {
         id: id.into(),
         content: id.into(),
         status: "pending".into(),
+        requires_user_action: None,
         external_blocker: Some(TodoExternalBlocker {
             reason: "Coordinator acceptance of frozen source".into(),
             review_at: chrono::Utc::now() + chrono::Duration::minutes(20),
         }),
         ..Default::default()
+    }
+}
+
+#[test]
+fn requires_user_action_cancels_reviews_and_rejects_claimed_stale_wakes() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
+    let dir = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let mut todo = blocked("approval");
+    reconcile_todo_reviews("owner", std::slice::from_ref(&todo)).unwrap();
+    let mut claimed = AmbientManager::new().unwrap().queue().items()[0].clone();
+    let due = chrono::Utc::now() - chrono::Duration::seconds(1);
+    todo.external_blocker.as_mut().unwrap().review_at = due;
+    if let ScheduleTarget::TodoReview { blocker, .. } = &mut claimed.target {
+        blocker.review_at = due;
+    }
+    todo.requires_user_action = Some(crate::todo::TodoUserAction {
+        action: "Approve transfer".into(),
+        reason: "Only the owner can authorize it".into(),
+    });
+    crate::todo::save_todos("owner", std::slice::from_ref(&todo)).unwrap();
+    assert!(!scheduled_todo_review_is_current(&claimed));
+    reconcile_stored_todo_reviews("owner").unwrap();
+    assert!(AmbientManager::new().unwrap().queue().is_empty());
+    for _ in 0..3 {
+        reconcile_stored_todo_reviews("owner").unwrap();
+        assert!(AmbientManager::new().unwrap().queue().is_empty());
     }
 }
 

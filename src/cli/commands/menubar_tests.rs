@@ -98,6 +98,7 @@ fn session_menu_item_title_loads_persisted_todo_title() {
             completion_confidence: None,
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
+            requires_user_action: None,
             external_blocker: None,
             waiting_on: Vec::new(),
             assigned_to: None,

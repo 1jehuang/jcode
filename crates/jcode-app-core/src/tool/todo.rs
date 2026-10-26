@@ -23,6 +23,14 @@ mod external_blocker_tests;
 fn validate_external_blockers(previous: &[TodoItem], todos: &[TodoItem]) -> Result<()> {
     let now = chrono::Utc::now();
     for todo in todos {
+        if let Some(required) = &todo.requires_user_action {
+            if required.action.trim().is_empty() || required.reason.trim().is_empty() {
+                bail!(
+                    "requires_user_action.action and requires_user_action.reason must both be nonempty for todo {}",
+                    todo.id
+                );
+            }
+        }
         if let Some(blocker) = &todo.external_blocker {
             if blocker.reason.trim().is_empty() {
                 bail!(
@@ -1173,7 +1181,7 @@ impl Tool for TodoTool {
          Keep the todo pending/in_progress. Pokes pause until review_at and a durable \
          scheduler wakes this session to reassess, not assume resolution or completion. \
          Clear external_blocker with null when unblocked. Use this instead of a separate \
-         schedule call for todo blocker reviews."
+         schedule call for todo blocker reviews. Set requires_user_action to {action, reason} only when a specific action solely the user can safely or authoritatively perform is absolutely necessary and there is no safe authorized agent alternative. Never use it for convenience, difficulty, or work the agent can perform. Label: Absolutely requires user action. Both fields must be nonempty. This pauses automatic retries without scheduling a review. Set null when resolved. Independent todos remain actionable."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1224,6 +1232,16 @@ impl Tool for TodoTool {
                                 "type": ["array", "null"],
                                 "items": {"type": "string"},
                                 "description": "Existing background task IDs or swarm await_members dependency IDs in this session. Block only while pending, never after completion or timeout. Enables completion notify/wake. [] or null clears."
+                            },
+                            "requires_user_action": {
+                                "type": ["object", "null"],
+                                "required": ["action", "reason"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "action": {"type": "string", "minLength": 1, "description": "Specific action solely the user can safely or authoritatively perform."},
+                                    "reason": {"type": "string", "minLength": 1, "description": "Why absolutely necessary and no safe authorized agent alternative exists, not convenience or difficulty."}
+                                },
+                                "description": "Absolutely requires user action. Pauses automatic retries without a review timer. null clears. Replaces external_blocker, preserves useful dependencies."
                             },
                             "external_blocker": {
                                 "type": ["object", "null"],
@@ -1363,6 +1381,8 @@ impl Tool for TodoTool {
             schema["properties"]["todos"]["items"]["properties"]["waiting_on"].clone();
         schema["properties"]["update"]["items"]["properties"]["external_blocker"] =
             schema["properties"]["todos"]["items"]["properties"]["external_blocker"].clone();
+        schema["properties"]["update"]["items"]["properties"]["requires_user_action"] =
+            schema["properties"]["todos"]["items"]["properties"]["requires_user_action"].clone();
         let mut item = schema["properties"]
             .as_object_mut()
             .unwrap()
@@ -1403,6 +1423,11 @@ impl Tool for TodoTool {
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
             for todo in &mut todos {
                 if !crate::todo::is_incomplete_todo(todo) {
+                    todo.external_blocker = None;
+                    todo.requires_user_action = None;
+                } else if todo.requires_user_action.is_some() {
+                    // The user-only condition has no timed review. Existing task
+                    // and todo dependencies remain useful once the user acts.
                     todo.external_blocker = None;
                 }
             }
@@ -2482,6 +2507,7 @@ mod tests {
             })
             .await;
         let item = TodoItem {
+            requires_user_action: None,
             external_blocker: None,
             waiting_on: vec![task.task_id.clone()],
             ..Default::default()
@@ -2497,6 +2523,7 @@ mod tests {
             .is_err()
         );
         let unknown = TodoItem {
+            requires_user_action: None,
             external_blocker: None,
             waiting_on: vec!["missing-task".into()],
             ..Default::default()
@@ -2569,6 +2596,7 @@ mod tests {
         crate::storage::write_json_fast(&path, &state).unwrap();
         let manager = crate::background::BackgroundTaskManager::new();
         let item = TodoItem {
+            requires_user_action: None,
             external_blocker: None,
             waiting_on: vec![id.clone()],
             ..Default::default()
@@ -2579,6 +2607,7 @@ mod tests {
                 .is_err()
         );
         let invalid = TodoItem {
+            requires_user_action: None,
             external_blocker: None,
             waiting_on: vec!["await-unknown-1".into()],
             ..Default::default()
@@ -2685,6 +2714,7 @@ mod tests {
                 content: "old".into(),
                 status: "completed".into(),
                 priority: "high".into(),
+                requires_user_action: None,
                 external_blocker: None,
                 waiting_on: vec!["removed-bg-task".into()],
                 ..Default::default()

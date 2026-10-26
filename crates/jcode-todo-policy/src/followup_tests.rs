@@ -32,6 +32,67 @@ fn kind(decision: &Decision) -> Option<FollowUpKind> {
 }
 
 #[test]
+fn requires_user_action_pauses_retries_but_not_independent_work() {
+    let mut blocked = todo("user-only", "pending");
+    blocked.requires_user_action = Some(crate::TodoUserAction {
+        action: "Complete identity verification".into(),
+        reason: "Only the account owner may verify their identity".into(),
+    });
+    assert!(todo_requires_user_action(&blocked));
+    let mut state = snapshot(vec![blocked]);
+    state.long_session_review_due = true;
+    let mut policy = FollowUpPolicy::new(true);
+    for _ in 0..10 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    state.long_session_review_due = false;
+    state.todos.push(todo("independent", "pending"));
+    let followup = policy.decide(&state).follow_up.unwrap();
+    assert!(followup.message.contains("independent"));
+    assert!(!followup.message.contains("user-only"));
+    state.todos.pop();
+    state.todos[0].requires_user_action = None;
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+    for status in ["completed", "cancelled", "done"] {
+        state.todos[0].status = status.into();
+        state.todos[0].requires_user_action = Some(crate::TodoUserAction::default());
+        assert!(!todo_requires_user_action(&state.todos[0]));
+    }
+}
+
+#[test]
+fn requires_user_action_serialization_rejects_missing_or_blank_fields() {
+    let legacy =
+        serde_json::json!({"id":"a", "content":"A", "status":"pending", "priority":"high"});
+    assert!(
+        serde_json::from_value::<TodoItem>(legacy.clone())
+            .unwrap()
+            .requires_user_action
+            .is_none()
+    );
+    for required in [
+        serde_json::json!({"action":"", "reason":"owner only"}),
+        serde_json::json!({"action":"verify", "reason":" \n\t"}),
+        serde_json::json!({"action":"verify"}),
+        serde_json::json!({"reason":"owner only"}),
+    ] {
+        let mut value = legacy.clone();
+        value["requires_user_action"] = required;
+        assert!(serde_json::from_value::<TodoItem>(value).is_err());
+    }
+    let mut value = legacy;
+    value["requires_user_action"] = serde_json::json!({"action":"verify", "reason":"owner only"});
+    let item: TodoItem = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(item).unwrap()["requires_user_action"],
+        value["requires_user_action"]
+    );
+}
+
+#[test]
 fn external_blocker_pauses_only_blocked_todos_without_spending_review_budget() {
     let now = chrono::Utc::now();
     let mut blocked = todo("await acceptance", "pending");
@@ -98,6 +159,7 @@ fn external_blocker_requires_typed_finite_deadline_and_preserves_legacy_todos() 
 fn running_dependencies_pause_without_consuming_budget_or_reviews() {
     let mut policy = FollowUpPolicy::new(true);
     let mut state = snapshot(vec![TodoItem {
+        requires_user_action: None,
         external_blocker: None,
         waiting_on: vec!["build".into()],
         ..todo("validate", "in_progress")
@@ -131,6 +193,7 @@ fn mixed_dependencies_poke_only_actionable_todos() {
     let mut policy = FollowUpPolicy::new(true);
     let mut state = snapshot(vec![
         TodoItem {
+            requires_user_action: None,
             external_blocker: None,
             waiting_on: vec!["build".into()],
             ..todo("blocked-validation", "pending")
@@ -152,6 +215,7 @@ fn mixed_dependencies_poke_only_actionable_todos() {
 #[test]
 fn dependencies_only_block_when_runtime_confirms_running() {
     let todo = TodoItem {
+        requires_user_action: None,
         external_blocker: None,
         waiting_on: vec!["first".into(), "second".into()],
         ..todo("work", "pending")
