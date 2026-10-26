@@ -197,6 +197,7 @@ impl OpenAITransportMode {
 
 #[derive(Debug)]
 enum OpenAIStreamFailure {
+    OpaqueWsRejection,
     FallbackToHttps(anyhow::Error),
     Other(anyhow::Error),
 }

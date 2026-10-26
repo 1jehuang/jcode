@@ -210,8 +210,14 @@ async fn persistent_terminal_public_case(
                 _ => break,
             }
         }
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        // Model discovery may independently connect before the fresh response
+        // socket. Do not mistake that HTTP GET for the recovery WebSocket.
+        let mut ws = loop {
+            let (tcp, _) = listener.accept().await.unwrap();
+            if let Ok(ws) = tokio_tungstenite::accept_async(tcp).await {
+                break ws;
+            }
+        };
         let fresh: Value =
             serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert!(fresh.get("previous_response_id").is_none(), "{fresh}");

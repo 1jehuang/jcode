@@ -1,6 +1,7 @@
 use super::openai_stream_cancellation::while_consumer_open;
 use super::openai_stream_runtime::{
-    stream_response, stream_response_websocket_persistent, try_persistent_ws_continuation,
+    recover_opaque_ws_rejection, stream_response, stream_response_websocket_persistent,
+    try_persistent_ws_continuation,
 };
 use super::*;
 
@@ -409,6 +410,16 @@ impl Provider for OpenAIProvider {
                     let saw_output = attempt_guard.finish().await;
 
                     match continuation_result {
+                        PersistentWsResult::OpaqueWsRejection => {
+                            recover_opaque_ws_rejection(
+                                Arc::clone(&credentials),
+                                account_label.clone(),
+                                request.clone(),
+                                &tx,
+                            )
+                            .await;
+                            return;
+                        }
                         PersistentWsResult::TerminalError => return,
                         PersistentWsResult::Success => {
                             log_openai_stream_lifecycle(
@@ -633,6 +644,16 @@ impl Provider for OpenAIProvider {
                     }
 
                     match result {
+                        Err(OpenAIStreamFailure::OpaqueWsRejection) => {
+                            recover_opaque_ws_rejection(
+                                Arc::clone(&credentials),
+                                account_label.clone(),
+                                request.clone(),
+                                &tx,
+                            )
+                            .await;
+                            return;
+                        }
                         Ok(()) => {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Info,

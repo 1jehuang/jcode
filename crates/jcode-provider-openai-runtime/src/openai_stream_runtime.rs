@@ -8,6 +8,116 @@ use super::*;
 mod openai_ws_cancel_recovery;
 use openai_ws_cancel_recovery::{RecoverableAttempt, RecoveryPhase, has_unanswered_tool_calls};
 
+// Deliberately recognize the raw wire shape, not the parser's lossy message.
+fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    if value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.starts_with("response."))
+    {
+        *response_started = true;
+    }
+    !*response_started
+        && value
+            == serde_json::json!({
+                "type": "error", "error": {"type": "invalid_request_error", "message": "Invalid request"}
+            })
+}
+
+#[test]
+fn opaque_rejection_requires_exact_shape_and_no_response_activity() {
+    let generic = serde_json::json!({"type":"error","error":{"type":"invalid_request_error","message":"Invalid request"}});
+    assert!(opaque_ws_rejection(&generic.to_string(), &mut false));
+    for key in ["code", "param", "detail"] {
+        let mut detailed = generic.clone();
+        detailed["error"][key] = Value::Null;
+        assert!(!opaque_ws_rejection(&detailed.to_string(), &mut false));
+    }
+    for kind in [
+        "response.created",
+        "response.output_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.function_call_arguments.delta",
+    ] {
+        let mut started = false;
+        assert!(!opaque_ws_rejection(
+            &serde_json::json!({"type":kind}).to_string(),
+            &mut started
+        ));
+        assert!(!opaque_ws_rejection(&generic.to_string(), &mut started));
+    }
+}
+
+/// This is intentionally outside the generic retry loop. Even a transient
+/// failure of this single HTTPS attempt must not schedule another replay.
+pub(super) async fn recover_opaque_ws_rejection(
+    credentials: Arc<RwLock<CodexCredentials>>,
+    account_label: Option<String>,
+    request: Value,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) {
+    emit_status_detail(tx, "opaque websocket rejection: trying HTTPS once").await;
+    jcode_base::logging::warn(
+        "OpenAI opaque websocket rejection before response: one full-request HTTPS recovery",
+    );
+    let (recovery_tx, mut recovery_rx) = mpsc::channel(100);
+    let recovery = stream_response(
+        jcode_provider_core::fresh_transport_client(),
+        credentials,
+        account_label,
+        request,
+        "https recovery: opaque websocket rejection".into(),
+        recovery_tx,
+    );
+    tokio::pin!(recovery);
+    let mut failed = false;
+    let mut failure_detail = None;
+    let mut finished = false;
+    loop {
+        tokio::select! {
+            _ = tx.closed() => return,
+            result = &mut recovery, if !finished => {
+                if let Err(error) = result {
+                    failed = true;
+                    failure_detail = Some(format!("{error:?}"));
+                }
+                finished = true;
+            }
+            event = recovery_rx.recv() => match event {
+                Some(Ok(StreamEvent::Error { message, .. })) => {
+                    failed = true;
+                    failure_detail = Some(message);
+                    break;
+                },
+                Some(Err(error)) => {
+                    failed = true;
+                    failure_detail = Some(error.to_string());
+                    break;
+                },
+                Some(event) => { if tx.send(event).await.is_err() { return; } }
+                None => break,
+            }
+        }
+    }
+    jcode_base::logging::info(&format!(
+        "OpenAI opaque websocket HTTPS recovery finished: success={} failure={}",
+        !failed,
+        failure_detail.as_deref().unwrap_or("none")
+    ));
+    if failed {
+        emit_status_detail(tx, "opaque websocket rejection: HTTPS recovery failed").await;
+        let _ = tx
+            .send(Ok(StreamEvent::Error {
+                message: "invalid_request_error: Invalid request".into(),
+                retry_after_secs: None,
+            }))
+            .await;
+    }
+}
+
 /// Usage of the account these credentials authenticate as, plus its label for
 /// logs. Unbound sessions keep the credentials they loaded, so the global
 /// active login can be a different account with different quota.
@@ -655,6 +765,7 @@ pub(super) fn is_ws_upgrade_required(err: &WsError) -> bool {
 
 /// Result of trying to continue on a persistent WebSocket connection
 pub(super) enum PersistentWsResult {
+    OpaqueWsRejection,
     Success,
     /// A terminal API error was forwarded to the consumer. Do not replay it.
     TerminalError,
@@ -694,7 +805,9 @@ pub(super) async fn try_persistent_ws_continuation(
     // and can later erase a replacement connection belonging to another turn.
     if matches!(
         result,
-        PersistentWsResult::Failed(_) | PersistentWsResult::TerminalError
+        PersistentWsResult::Failed(_)
+            | PersistentWsResult::TerminalError
+            | PersistentWsResult::OpaqueWsRejection
     ) {
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
@@ -1258,6 +1371,7 @@ async fn continue_persistent_ws_locked(
     let mut last_api_activity_at = stream_started;
     let mut saw_api_activity = false;
     let mut logged_first_server_event = false;
+    let mut response_started = false;
     let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&continuation_request);
 
     loop {
@@ -1327,6 +1441,9 @@ async fn continue_persistent_ws_locked(
                         })
                 {
                     *recovery_phase = RecoveryPhase::Completed;
+                }
+                if opaque_ws_rejection(&text, &mut response_started) {
+                    return PersistentWsResult::OpaqueWsRejection;
                 }
                 if !logged_first_server_event {
                     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::Streaming)
@@ -1774,6 +1891,7 @@ async fn stream_response_websocket_authenticated(
     let mut response_output = Vec::new();
     let connected_at = Instant::now();
     let mut logged_first_server_event = false;
+    let mut response_started = false;
     let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&request_event);
 
     loop {
@@ -1834,6 +1952,9 @@ async fn stream_response_websocket_authenticated(
             Ok(message) => match message {
                 WsMessage::Text(text) => {
                     let text = text.to_string();
+                    if opaque_ws_rejection(&text, &mut response_started) {
+                        return Err(OpenAIStreamFailure::OpaqueWsRejection);
+                    }
                     if !logged_first_server_event {
                         emit_connection_phase(&tx, ConnectionPhase::Streaming).await;
                         jcode_base::logging::info(&format!(
