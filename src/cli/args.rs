@@ -746,13 +746,22 @@ pub(crate) enum CloudCommand {
     Replace {
         #[command(flatten)]
         target: CloudMoveTarget,
+        /// Confirm replacing the cloud checkout after preserving a backup.
+        #[arg(long)]
+        yes: bool,
+        /// Validate the incoming snapshot and destination without replacing files.
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         json: bool,
     },
 
     /// Internal: receive a repository-only replacement archive.
     #[command(hide = true)]
-    ReplaceReceive,
+    ReplaceReceive {
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Move a live session (transcript, repo state, env notes) to a cloud host
     /// and keep working there. Your local files stay editable. Git reconciles

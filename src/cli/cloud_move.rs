@@ -2271,8 +2271,13 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             .filter(|s| !s.trim().is_empty()),
     };
     match command {
-        C::Replace { target, json } => replace::run(&target_of(target), json),
-        C::ReplaceReceive => replace::receive(),
+        C::Replace {
+            target,
+            yes,
+            dry_run,
+            json,
+        } => replace::run(&target_of(target), yes, dry_run, json),
+        C::ReplaceReceive { dry_run } => replace::receive(dry_run),
         C::Ephemeral { action } => super::cloud_ephemeral::run_cli(action),
         C::Sessions { .. } => unreachable!("handled by the cloud sessions dispatcher"),
         C::Prepare { target, json } => {

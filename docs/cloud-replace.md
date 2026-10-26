@@ -1,9 +1,17 @@
 # Replace a cloud checkout without moving a conversation
 
-Run `jcode cloud replace` from inside your local Git repository. Use `--host
-<ssh-alias>` to choose a host, or use the same configured/managed destination as
+Run `jcode cloud replace --dry-run` to preview, then `jcode cloud replace --yes`
+from inside your local Git repository to apply. Explicit `--yes` is required
+before the cloud checkout can be changed. Dry-run validates the incoming snapshot
+and checks ownership without replacing cloud files or creating a backup. Use
+`--host <ssh-alias>` to choose a host, or use the same configured/managed destination as
 `jcode cloud move`. `--remote-binary`, `--transport`, and `--json` are supported.
 Both machines need a version of jcode supporting this command.
+
+```sh
+jcode cloud replace --dry-run
+jcode cloud replace --yes
+```
 
 The repository is restored at its local absolute root path on the cloud host.
 An absent checkout is created. An existing checkout is first moved, in its
@@ -29,3 +37,5 @@ again just before replacement, and replacement operations are serialized. Do not
 start another session during replacement: daemon session startup does not share
 the replacement lock. An SSH failure can leave a completed replacement whose
 response was lost. Inspect the checkout and its sibling backups before retrying.
+Symlink destinations, linked Git worktrees, home directories, Jcode state
+directories and their ancestors are rejected to protect unrelated state.

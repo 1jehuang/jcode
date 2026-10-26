@@ -1,8 +1,14 @@
 //! Repository-only replacement deliberately bypasses all session/auth transfer paths.
 use super::*;
 
-pub(super) fn run(target: &Target, json: bool) -> Result<()> {
-    let host = prepare_host(target)?;
+pub(super) fn run(target: &Target, yes: bool, dry_run: bool, json: bool) -> Result<()> {
+    if !yes && !dry_run {
+        bail!(
+            "cloud replace requires --yes to replace the cloud checkout; use --dry-run to preview first"
+        );
+    }
+    let host = target.resolve_host()?;
+    target.preflight(&host)?;
     target
         .run_remote(&host, &["cloud", "replace-receive", "--help"], None)
         .context("cloud host needs a jcode version supporting cloud replace")?;
@@ -19,12 +25,21 @@ pub(super) fn run(target: &Target, json: bool) -> Result<()> {
     let archive = stage.path().join("replace.tar.gz");
     tar_dir(stage.path(), &archive, &["repo.json", "id", "repo.bundle"])?;
     // Not retried: a lost response must not initiate another replacement.
-    let output = target.run_remote(&host, &["cloud", "replace-receive"], Some(&archive))?;
+    let mut args = vec!["cloud", "replace-receive"];
+    if dry_run {
+        args.push("--dry-run");
+    }
+    let output = target.run_remote(&host, &args, Some(&archive))?;
     let report: serde_json::Value = serde_json::from_slice(&output).context(
         "replacement response lost or invalid; inspect cloud checkout and backups before retrying",
     )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if dry_run {
+        println!(
+            "Dry run OK: {} can be replaced on `{host}`. No cloud working files changed.",
+            repo.root
+        );
     } else {
         println!(
             "Replaced {} on `{host}`. Backup: {}. No session or credentials moved.",
@@ -96,8 +111,21 @@ fn reject_owners(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install(repo: &RepoManifest, bundle: &Path, id: &str) -> Result<Option<PathBuf>> {
-    let root = Path::new(&repo.root);
+fn resolved_path(path: &Path) -> Result<PathBuf> {
+    match path.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().context("repository path has no parent")?;
+            let name = path
+                .file_name()
+                .context("repository path has no filename")?;
+            Ok(resolved_path(parent)?.join(name))
+        }
+        Err(error) => Err(error).context("cannot resolve replacement destination"),
+    }
+}
+
+fn validate_destination(root: &Path) -> Result<()> {
     if !root.is_absolute()
         || root.parent().is_none()
         || root.file_name().is_none()
@@ -107,6 +135,35 @@ fn install(repo: &RepoManifest, bundle: &Path, id: &str) -> Result<Option<PathBu
     {
         bail!("invalid replacement repository path");
     }
+    match root.symlink_metadata() {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("replacement destination must be a directory, not a symlink or file");
+            }
+            if let Ok(metadata) = root.join(".git").symlink_metadata()
+                && (!metadata.is_dir() || metadata.file_type().is_symlink())
+            {
+                bail!("cannot replace a linked worktree or repository with external Git metadata");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("cannot inspect replacement destination"),
+    }
+    let resolved = resolved_path(root)?;
+    for protected in [dirs::home_dir(), storage::jcode_dir().ok()]
+        .into_iter()
+        .flatten()
+    {
+        if resolved_path(&protected)?.starts_with(&resolved) {
+            bail!("cannot replace a home or Jcode state directory, or one of its ancestors");
+        }
+    }
+    Ok(())
+}
+
+fn install(repo: &RepoManifest, bundle: &Path, id: &str) -> Result<Option<PathBuf>> {
+    let root = Path::new(&repo.root);
+    validate_destination(root)?;
     reject_owners(root)?;
     let parent = root.parent().unwrap();
     std::fs::create_dir_all(parent)?;
@@ -137,6 +194,7 @@ fn install(repo: &RepoManifest, bundle: &Path, id: &str) -> Result<Option<PathBu
         &prepared.path().join("no-ignored-files"),
         id,
     )?;
+    validate_destination(root)?;
     reject_owners(root)?;
     let backup = if root.symlink_metadata().is_ok() {
         let backup = parent.join(format!(
@@ -163,7 +221,7 @@ fn install(repo: &RepoManifest, bundle: &Path, id: &str) -> Result<Option<PathBu
     Ok(backup)
 }
 
-pub(super) fn receive() -> Result<()> {
+pub(super) fn receive(dry_run: bool) -> Result<()> {
     let stage = tempfile::tempdir()?;
     let archive = stage.path().join("incoming.tar.gz");
     let mut file = std::fs::File::create(&archive)?;
@@ -177,10 +235,24 @@ pub(super) fn receive() -> Result<()> {
     if !repo.ignored_files.is_empty() || repo.origin_url.is_some() {
         bail!("repository-only replacement cannot import ignored files or origin credentials");
     }
-    let backup = install(&repo, &stage.path().join("repo.bundle"), &id)?;
+    let backup = if dry_run {
+        validate_destination(Path::new(&repo.root))?;
+        reject_owners(Path::new(&repo.root))?;
+        let mut preview = repo.clone();
+        preview.root = stage.path().join("preview").to_string_lossy().into_owned();
+        restore_repo(
+            &preview,
+            &stage.path().join("repo.bundle"),
+            &stage.path().join("no-ignored-files"),
+            &id,
+        )?;
+        None
+    } else {
+        install(&repo, &stage.path().join("repo.bundle"), &id)?
+    };
     println!(
         "{}",
-        serde_json::json!({"repo_root": repo.root, "backup_path": backup})
+        serde_json::json!({"repo_root": repo.root, "backup_path": backup, "dry_run": dry_run})
     );
     Ok(())
 }
@@ -188,6 +260,34 @@ pub(super) fn receive() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_requires_confirmation_before_contacting_cloud() {
+        let error = run(&Target::default(), false, false, false).unwrap_err();
+        assert!(error.to_string().contains("--yes"));
+    }
+
+    #[test]
+    fn replacement_rejects_protected_and_linked_paths() {
+        assert!(validate_destination(Path::new("/")).is_err());
+        assert!(validate_destination(Path::new("relative/repo")).is_err());
+        assert!(validate_destination(Path::new("/tmp/../repo")).is_err());
+        assert!(validate_destination(&storage::jcode_dir().unwrap()).is_err());
+        if let Some(home) = dirs::home_dir() {
+            assert!(validate_destination(&home).is_err());
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(checkout.join(".git"), "gitdir: elsewhere").unwrap();
+        assert!(validate_destination(&checkout).is_err());
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("symlink");
+            std::os::unix::fs::symlink(&checkout, &link).unwrap();
+            assert!(validate_destination(&link).is_err());
+        }
+    }
 
     // Ownership discovery uses process-global storage. Run filesystem cases in
     // a child with a private home rather than changing env in parallel tests.
