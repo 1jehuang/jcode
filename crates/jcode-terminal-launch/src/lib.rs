@@ -106,6 +106,22 @@ pub const CLIENT_TERMINAL_ENV_VARS: &[&str] = &[
     "HERDR_BIN_PATH",
     "HERDR_SESSION",
     "HERDR_AGENT",
+    // OpenRig seat identity. One shared server hosts many seats, so who is
+    // sending (`rig send` From:) must follow the connecting client, never the
+    // environment the server process happened to be started with.
+    "OPENRIG_SESSION_NAME",
+    "OPENRIG_NODE_ID",
+    "OPENRIG_OCCUPANT_GENERATION",
+    "OPENRIG_RUNTIME",
+    "OPENRIG_HOME",
+    "OPENRIG_URL",
+    "OPENRIG_PORT",
+    "OPENRIG_DB",
+    "OPENRIG_ACTIVITY_HOOK_TOKEN",
+    "OPENRIG_TRANSCRIPTS_ENABLED",
+    "OPENRIG_TRANSCRIPTS_PATH",
+    "OPENRIG_TRANSCRIPTS_LINES",
+    "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     // Terminal emulators
     "TERM",
     "TERM_PROGRAM",

@@ -916,6 +916,17 @@ impl BashTool {
         let has_stdin_channel = ctx.stdin_request_tx.is_some();
 
         let mut command = build_shell_command(&params.command);
+        crate::hooks::apply_client_env_pairs(
+            |k, v| match v {
+                Some(v) => {
+                    command.env(k, v);
+                }
+                None => {
+                    command.env_remove(k);
+                }
+            },
+            &crate::hooks::client_env_for_tools(),
+        );
         command.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
         command.envs(crate::session_env::session_env(&ctx.session_id));
         command
@@ -1148,6 +1159,17 @@ impl BashTool {
         let display_name = summarize_background_command(params.intent.as_deref(), &params.command);
 
         let mut cmd = build_detached_shell_wrapper(&params.command);
+        crate::hooks::apply_client_env_pairs(
+            |k, v| match v {
+                Some(v) => {
+                    cmd.env(k, v);
+                }
+                None => {
+                    cmd.env_remove(k);
+                }
+            },
+            &crate::hooks::client_env_for_tools(),
+        );
         cmd.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
         cmd.envs(crate::session_env::session_env(&ctx.session_id));
         cmd.env("JCODE_SESSION_ID", &ctx.session_id);
@@ -1290,9 +1312,8 @@ impl BashTool {
         let working_dir = ctx.working_dir.clone();
         let cloud_environment = cloud_command_environment(working_dir.as_deref())?;
         let session_id_env = ctx.session_id.clone();
-        // Capture before handing work to the manager. Its closure can start
-        // after a caller has already replaced or cleared these overrides.
-        let session_environment = crate::session_env::session_env(&ctx.session_id);
+        // Capture before spawning: task-locals do not follow tokio::spawn.
+        let client_env_pairs = crate::hooks::client_env_for_tools();
         let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
@@ -1309,6 +1330,17 @@ impl BashTool {
                     #[cfg(all(test, not(windows)))]
                     tests::wait_for_session_env_launch_gate(&session_id_env).await;
 					let mut cmd = build_shell_command(&command);
+					crate::hooks::apply_client_env_pairs(
+						|k, v| match v {
+							Some(v) => {
+								cmd.env(k, v);
+							}
+							None => {
+								cmd.env_remove(k);
+							}
+						},
+						&client_env_pairs,
+					);
 					cmd.envs(cloud_environment);
 					cmd.envs(session_environment);
 					cmd.env("JCODE_SESSION_ID", &session_id_env);

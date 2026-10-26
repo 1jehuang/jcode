@@ -1570,15 +1570,11 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
-                let tool_handle =
-                    crate::runtime_activity::spawn_session(&self.session.id, async move {
-                        registry_clone
-                            .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
-                            .await
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Session transfer in progress; tool not accepted")
-                    })?;
+                let tool_handle = crate::hooks::spawn_with_client_env(async move {
+                    registry_clone
+                        .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
+                        .await
+                });
 
                 // Reset background signal before waiting
                 self.background_tool_signal.reset();

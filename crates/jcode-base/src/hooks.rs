@@ -222,6 +222,48 @@ where
     CLIENT_TERMINAL_ENV.scope(env, future).await
 }
 
+/// The current request's client identity (terminal and OpenRig seat) as env
+/// pairs, to be applied to tool subprocesses. Empty outside a request scope.
+/// Capture this before moving work into a spawned task: task-locals do not
+/// follow `tokio::spawn`.
+pub fn client_env_for_tools() -> Vec<(String, String)> {
+    CLIENT_TERMINAL_ENV
+        .try_with(|env| env.clone())
+        .unwrap_or_default()
+}
+
+/// Spawn `future` on a task that keeps the current client identity scope.
+///
+/// Task-locals do not follow `tokio::spawn`, so a tool run in a spawned task on
+/// a shared server would otherwise see the server process env (another seat's
+/// OpenRig identity). Use this for any spawn that can run tools or hooks.
+pub fn spawn_with_client_env<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let env = client_env_for_tools();
+    tokio::spawn(CLIENT_TERMINAL_ENV.scope(env, future))
+}
+
+/// Replace server-inherited client identity on a subprocess with `env`.
+pub fn apply_client_env_pairs(
+    mut set: impl FnMut(&str, Option<&str>),
+    env: &[(String, String)],
+) {
+    if env.is_empty() {
+        return;
+    }
+    for key in jcode_terminal_launch::CLIENT_TERMINAL_ENV_VARS {
+        set(key, None);
+    }
+    for (key, value) in env {
+        if jcode_terminal_launch::CLIENT_TERMINAL_ENV_VARS.contains(&key.as_str()) {
+            set(key, Some(value));
+        }
+    }
+}
+
 /// The configured commands for `event`, in declaration order.
 pub fn hook_commands(event: &str) -> Vec<String> {
     if hooks_suppressed() {
