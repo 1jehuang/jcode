@@ -35,6 +35,30 @@ fn blocked_todos_have_distinct_phase_and_lane_pips() {
 }
 
 #[test]
+fn blocked_marker_overrides_live_worker_and_clears_when_review_is_due() {
+    let mut item = assigned(todo("1", "Activation", "in_progress", Some(1)), "fox");
+    item.external_blocker = Some(crate::todo::TodoExternalBlocker {
+        reason: "Need user authorization".into(),
+        review_at: chrono::Utc::now() + chrono::Duration::hours(1),
+    });
+    let mut worker = agent("fox", "running", Some("Working"), Some(1));
+    worker.todo_statuses = vec!["in_progress".into(), "pending".into()];
+    let workers = [worker];
+    let statuses = lane_item_statuses(&[&item], &workers);
+    assert_eq!(statuses, vec![("blocked", false)]);
+    let strip = lane_strip_spans(&statuses, 2);
+    assert_eq!(strip[0].content, "⊳");
+    assert_eq!(strip[0].style.fg, Some(rgb(225, 165, 90)));
+    assert!(!Line::from(strip).to_string().contains(LIVE_DOT_SENTINEL));
+
+    item.external_blocker.as_mut().unwrap().review_at =
+        chrono::Utc::now() - chrono::Duration::seconds(1);
+    assert_eq!(todo_pip_status(&item), "in_progress");
+    assert_eq!(lane_item_statuses(&[&item], &workers).len(), 2);
+    assert_ne!(pip_span(&item).content, "⊳");
+}
+
+#[test]
 fn shortcut_badges_are_hidden_and_respect_lane_width() {
     let mut item = assigned(todo("1", "Read types", "in_progress", Some(1)), "fox");
     item.group = Some("Parser".into());
