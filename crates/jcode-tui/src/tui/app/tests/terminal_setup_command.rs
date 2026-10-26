@@ -195,8 +195,8 @@ fn terminal_setup_command_is_dispatched_and_reports_something_actionable() {
     const CHILD: &str = "JCODE_TEST_TERMINAL_SETUP_CHILD";
     const VERIFIED: &str = "TERMINAL_SETUP_DISPATCH_VERIFIED";
     if std::env::var_os(CHILD).is_none() {
-        // HOME and terminal detection must not leak into concurrent tests or
-        // let this command rewrite the developer's actual terminal config.
+        // HOME, cwd and terminal detection must not leak into concurrent tests
+        // or let app initialization inspect the caller's repository/config.
         #[cfg(unix)]
         let targets = ["Apple_Terminal", "WezTerm", "tmux"];
         // Windows resolves HOME via a known folder, not the HOME variable.
@@ -214,6 +214,9 @@ fn terminal_setup_command_is_dispatched_and_reports_something_actionable() {
                 .env("HOME", home.path())
                 .env("JCODE_HOME", home.path().join(".jcode"))
                 .env("TMPDIR", home.path())
+                .current_dir(home.path())
+                .env("GIT_CEILING_DIRECTORIES", home.path())
+                .env("GIT_OPTIONAL_LOCKS", "0")
                 .env("TERM", "dumb")
                 .env("TERM_PROGRAM", target);
             if target == "tmux" {
@@ -270,10 +273,16 @@ fn terminal_setup_command_is_dispatched_and_reports_something_actionable() {
     }
 
     let target = std::env::var(CHILD).unwrap();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        home.canonicalize().unwrap(),
+        "refuse to initialize the app inside the caller's repository"
+    );
     #[cfg(unix)]
     assert_eq!(
         dirs::home_dir(),
-        Some(std::path::PathBuf::from(std::env::var_os("HOME").unwrap())),
+        Some(home.clone()),
         "refuse to dispatch against a home outside the isolated fixture"
     );
     let first = dispatch();
@@ -281,7 +290,6 @@ fn terminal_setup_command_is_dispatched_and_reports_something_actionable() {
     if target != "Apple_Terminal" {
         use crate::tui::terminal_setup::{TMUX_CONFIG_BLOCK, WEZTERM_CONFIG_LINE};
 
-        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
         let path = home.join(if target == "tmux" {
             ".tmux.conf"
         } else {
