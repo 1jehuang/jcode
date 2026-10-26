@@ -21,11 +21,15 @@ The existing `justrust status --json` command is the data API. The harness does
 not parse human-readable build output, infer CPU usage from process counts,
 start builds, or change compiler/cache settings.
 
-Selection prefers an exact agent-session match, then a build within the current
-repository, then another active build with its own repository label. A recent
-completion with scope metadata is shown only for a matching session/repository.
-The row disappears when idle. Successful and failed completions have different
-colors and expire after eight seconds.
+Only builds from this agent session or within the current repository are
+eligible. Selection prefers an exact agent-session match, then a repository
+match. The additional-build count includes only eligible builds. Unrelated
+active builds and completions without matching scope are never displayed.
+The row disappears when no matching build or recent completion exists.
+Successful and failed completions have different colors and remain for ten
+minutes, including their final elapsed time. The last matching completion is
+cached across unrelated builds and temporary status-query failures. A new
+matching active build takes precedence.
 
 The additive justrust status API supplies `agent_session`, `ncpu`, `cpu_cores`
 and `sampled_at`. Older versions remain usable, but unavailable CPU metrics are
@@ -37,7 +41,8 @@ not fabricated. With a known machine size and no valid CPU sample, the row says
 Queries are asynchronous and have a two-second deadline, a 512 KiB response
 limit, and at most one in-flight query per client. Normal refresh is once per
 second. Missing executables, failed queries and invalid responses clear the
-cached row and use a ten-second retry interval. Cached active results expire
+cached active row and use a ten-second retry interval, but preserve a matching
+completed result until its ten-minute expiry. Cached active results expire
 after five seconds. No query runs in the render path.
 
 For an SSH-attached harness, the row is suppressed rather than showing local

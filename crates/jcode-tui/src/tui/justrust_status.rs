@@ -12,6 +12,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSE: usize = 512 * 1024;
+const COMPLETION_RETENTION: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct Snapshot {
@@ -58,7 +59,7 @@ struct Estimate {
     remaining: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Finished {
     #[serde(default)]
     cwd: String,
@@ -155,9 +156,12 @@ fn relevance(
 
 impl Snapshot {
     fn row(&self, session: Option<&str>, repo: Option<&str>, age: Duration) -> Option<StatusRow> {
-        let active = self
+        let matching = self
             .active
             .iter()
+            .filter(|run| relevance(run.agent_session.as_deref(), &run.cwd, session, repo) > 0);
+        let matching_count = matching.clone().count();
+        let active = matching
             .max_by_key(|run| relevance(run.agent_session.as_deref(), &run.cwd, session, repo));
         if let Some(run) = active {
             let mut text = format!(
@@ -196,8 +200,8 @@ impl Snapshot {
                     duration((estimate.remaining - age.as_secs_f64()).max(0.0))
                 ));
             }
-            if self.active.len() > 1 {
-                text.push_str(&format!(" · +{} builds", self.active.len() - 1));
+            if matching_count > 1 {
+                text.push_str(&format!(" · +{} builds", matching_count - 1));
             }
             return Some(StatusRow {
                 text,
@@ -205,14 +209,15 @@ impl Snapshot {
             });
         }
         let run = self.recent.as_ref()?;
-        if !run.ago.is_finite() || run.ago < 0.0 || run.ago + age.as_secs_f64() > 8.0 {
+        if !run.ago.is_finite()
+            || run.ago < 0.0
+            || run.ago + age.as_secs_f64() > COMPLETION_RETENTION.as_secs_f64()
+        {
             return None;
         }
-        // Old justrust releases omit completion scope. Never present another
-        // session's completion as this one's when scope information is present.
-        if (run.agent_session.is_some() || !run.cwd.is_empty())
-            && relevance(run.agent_session.as_deref(), &run.cwd, session, repo) == 0
-        {
+        // Scope is required even with older producers: unknown ownership must
+        // not expose another session's completion.
+        if relevance(run.agent_session.as_deref(), &run.cwd, session, repo) == 0 {
             return None;
         }
         Some(StatusRow {
@@ -267,6 +272,7 @@ pub(crate) struct Poller {
     received: Option<Instant>,
     next_poll: Option<Instant>,
     row: Option<StatusRow>,
+    last_finished: Option<(Finished, Instant)>,
 }
 
 impl Poller {
@@ -285,6 +291,7 @@ impl Poller {
         if !enabled {
             self.row = None;
             self.snapshot = None;
+            self.last_finished = None;
             self.pending = None;
             return self.row != previous;
         }
@@ -297,6 +304,13 @@ impl Poller {
                     } else {
                         RETRY_INTERVAL
                     };
+                    if let Some(run) = snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.recent.as_ref())
+                        && relevance(run.agent_session.as_deref(), &run.cwd, session, repo) > 0
+                    {
+                        self.last_finished = Some((run.clone(), now));
+                    }
                     self.snapshot = snapshot;
                     self.received = Some(now);
                     self.pending = None;
@@ -319,6 +333,15 @@ impl Poller {
                 .then(|| snapshot.row(session, repo, age))
                 .flatten()
         });
+        if self.row.is_none()
+            && let Some((run, received)) = &self.last_finished
+        {
+            self.row = Snapshot {
+                active: Vec::new(),
+                recent: Some(run.clone()),
+            }
+            .row(session, repo, now.saturating_duration_since(*received));
+        }
         if self.pending.is_none()
             && self.next_poll.is_none_or(|next| now >= next)
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
@@ -340,7 +363,9 @@ mod tests {
     #[test]
     fn old_waybar_api_remains_usable_without_resource_fields() {
         let snapshot: Snapshot = serde_json::from_str(r#"{"active":[{"cwd":"/repo/engine","args":["test","--lib"],"place":"hosted","elapsed":51,"live":{"phase":"testing"}}],"recent":null}"#).unwrap();
-        let row = snapshot.row(None, None, Duration::ZERO).unwrap();
+        let row = snapshot
+            .row(None, Some("/repo/engine"), Duration::ZERO)
+            .unwrap();
         assert_eq!(
             row.text,
             "justrust [remote/hosted] test engine · 51s · testing"
@@ -358,7 +383,46 @@ mod tests {
             row.text
                 .contains("test rewrite · 1m40s · 7.8/96 cores · compiling 2/10")
         );
-        assert!(row.text.ends_with("+2 builds"));
+        assert!(row.text.ends_with("+1 builds"));
+    }
+
+    #[test]
+    fn unrelated_builds_are_hidden_and_not_counted() {
+        let snapshot: Snapshot = serde_json::from_str(
+            r#"{"active":[{"cwd":"/other","agent_session":"theirs"},{"cwd":"/repo/app2"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            snapshot
+                .row(Some("ours"), Some("/repo/app"), Duration::ZERO)
+                .is_none()
+        );
+        assert!(snapshot.row(None, None, Duration::ZERO).is_none());
+        let scoped: Snapshot = serde_json::from_str(r#"{"active":[{"cwd":"/repo/app/subcrate","args":["check"],"agent_session":"theirs"},{"cwd":"/other"}]}"#).unwrap();
+        let row = scoped
+            .row(Some("ours"), Some("/repo/app"), Duration::ZERO)
+            .unwrap();
+        assert!(row.text.contains("check subcrate"));
+        assert!(!row.text.contains("builds"));
+    }
+
+    #[test]
+    fn unrelated_active_build_does_not_hide_scoped_completion() {
+        let snapshot: Snapshot = serde_json::from_str(r#"{"active":[{"cwd":"/other"}],"recent":{"cwd":"/repo/app","wall":1,"ok":true,"ago":0}}"#).unwrap();
+        assert_eq!(
+            snapshot
+                .row(Some("ours"), Some("/repo/app"), Duration::ZERO)
+                .unwrap()
+                .tone,
+            Tone::Success
+        );
+        let unknown: Snapshot =
+            serde_json::from_str(r#"{"recent":{"wall":1,"ok":true,"ago":0}}"#).unwrap();
+        assert!(
+            unknown
+                .row(Some("ours"), Some("/repo/app"), Duration::ZERO)
+                .is_none()
+        );
     }
 
     #[test]
@@ -380,7 +444,7 @@ mod tests {
         );
         assert!(
             snapshot
-                .row(Some("ours"), None, Duration::from_secs(7))
+                .row(Some("ours"), None, COMPLETION_RETENTION)
                 .is_none()
         );
         let row = snapshot.row(Some("ours"), None, Duration::ZERO).unwrap();
@@ -391,17 +455,43 @@ mod tests {
     #[test]
     fn unknown_cores_are_not_presented_as_zero() {
         let snapshot: Snapshot = serde_json::from_str(
-            r#"{"active":[{"label":"engine test","place":"local","ncpu":16}]}"#,
+            r#"{"active":[{"cwd":"/repo/engine","label":"engine test","place":"local","ncpu":16}]}"#,
         )
         .unwrap();
         assert!(
             snapshot
-                .row(None, None, Duration::ZERO)
+                .row(None, Some("/repo/engine"), Duration::ZERO)
                 .unwrap()
                 .text
                 .contains("?/16 cores")
         );
         assert_eq!(clean("evil\n\u{1b}[31m"), "evil[31m");
+    }
+
+    #[test]
+    fn matching_completion_survives_unrelated_updates_and_expires() {
+        let (sender, receiver) = oneshot::channel();
+        sender.send(Some(serde_json::from_str::<Snapshot>(r#"{"recent":{"cwd":"/repo/app","args":["test"],"wall":51,"ok":true,"ago":1,"agent_session":"ours"}}"#).unwrap())).unwrap();
+        let mut poller = Poller {
+            pending: Some(receiver),
+            ..Default::default()
+        };
+        poller.refresh(Some("ours"), Some("/repo/app"), true);
+        assert!(poller.row().unwrap().text.contains("finished in 51s"));
+        let (sender, receiver) = oneshot::channel();
+        sender.send(Some(serde_json::from_str::<Snapshot>(r#"{"active":[{"cwd":"/other"}],"recent":{"cwd":"/other","wall":1,"ok":false,"ago":0}}"#).unwrap())).unwrap();
+        poller.pending = Some(receiver);
+        poller.refresh(Some("ours"), Some("/repo/app"), true);
+        assert!(poller.row().unwrap().text.contains("finished in 51s"));
+        poller.snapshot = None;
+        poller.last_finished.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(60);
+        poller.refresh(Some("ours"), Some("/repo/app"), true);
+        assert!(poller.row().is_some());
+        poller.refresh(Some("theirs"), Some("/other"), true);
+        assert!(poller.row().is_none());
+        poller.last_finished.as_mut().unwrap().1 = Instant::now() - COMPLETION_RETENTION;
+        poller.refresh(Some("ours"), Some("/repo/app"), true);
+        assert!(poller.row().is_none());
     }
 
     #[test]
