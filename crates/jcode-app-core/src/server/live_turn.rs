@@ -166,7 +166,7 @@ pub(super) async fn spawn_tracked_live_turn(
         // publish `running`, which this turn's later `ready`/`failed` would
         // then overwrite, hiding the newer turn and suppressing its
         // coordinator completion notification.
-        let reservation = agent;
+        let mut reservation = agent;
         let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
         if pending > 0 {
             let _ = event_tx.send(ServerEvent::SoftInterruptQueue { pending });
@@ -188,6 +188,13 @@ pub(super) async fn spawn_tracked_live_turn(
                 let _ = event_tx.send(ServerEvent::Done { id: 0 });
             }
             Err(error) => {
+                let message = crate::util::format_error_chain(&error);
+                if let Err(persist_error) = reservation.persist_turn_error(&message) {
+                    crate::logging::error(&format!(
+                        "Could not persist failed live turn for {}: {:#}",
+                        session_id, persist_error
+                    ));
+                }
                 crate::logging::error(&format!(
                     "Server-initiated turn failed for live session {}: {}",
                     session_id, error
@@ -206,12 +213,12 @@ pub(super) async fn spawn_tracked_live_turn(
                 .await;
                 let _ = event_tx.send(ServerEvent::TurnStopped {
                     reason: stop_reason,
-                    message: crate::util::format_error_chain(&error),
+                    message: message.clone(),
                     provider_stop_reason: None,
                 });
                 let _ = event_tx.send(ServerEvent::Error {
                     id: 0,
-                    message: crate::util::format_error_chain(&error),
+                    message,
                     retry_after_secs: None,
                 });
             }

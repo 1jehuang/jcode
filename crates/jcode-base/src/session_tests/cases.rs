@@ -1511,6 +1511,55 @@ fn test_summarize_tool_calls_includes_tool_only_assistant_messages() {
 }
 
 #[test]
+fn failed_wake_error_survives_roundtrip_without_provider_context_pollution() {
+    let mut session = Session::create(None, None);
+    session.add_message_with_display_role(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "wake worker".into(),
+            cache_control: None,
+        }],
+        Some(StoredDisplayRole::System),
+    );
+    let wake_time = session.messages[0].timestamp.unwrap();
+    let error =
+        "request failed: invalid_request_error: No tool call found for function call output";
+    session.record_replay_display_message("error", None, error);
+    session.replay_events[0].timestamp = wake_time + chrono::Duration::seconds(1);
+
+    let reloaded: Session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+    assert_eq!(reloaded.messages.len(), 1);
+    let rendered = render_messages(&reloaded);
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(rendered[0].content, "wake worker");
+    assert_eq!(rendered[1].role, "error");
+    assert_eq!(rendered[1].content, error);
+    assert_eq!(rendered[1].stored_index, None);
+
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "next turn".into(),
+            cache_control: None,
+        }],
+    );
+    session.messages[1].timestamp = Some(wake_time + chrono::Duration::seconds(2));
+    session.record_replay_display_message("error", None, "second failure");
+    session.replay_events[1].timestamp = wake_time + chrono::Duration::seconds(3);
+    // Unrelated replay records must not get duplicated into ordinary history.
+    session.record_replay_display_message("system", None, "replay-only notice");
+    let rendered = render_messages(&session);
+    assert_eq!(
+        rendered
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wake worker", error, "next turn", "second failure"]
+    );
+    assert_eq!(session.messages.len(), 2);
+}
+
+#[test]
 fn test_render_messages_honors_system_display_role_override() {
     let mut session = Session::create_with_id(
         "session_display_role_test".to_string(),
