@@ -125,6 +125,9 @@ pdf = ["dep:jcode-pdf"]
 test-support = ["jcode-base/test-support"]
 
 [dev-dependencies]
+# The application consumes a corpus registered by the executable. Only its
+# own documentation tests need to embed the real corpus directly.
+jcode-docs-data = { path = "../jcode-docs-data" }
 # Paused-time browser tests must compile when this package is tested alone,
 # without inheriting test-util from another workspace package's dev-dependencies.
 tokio = { version = "1", features = ["test-util"] }
