@@ -196,6 +196,87 @@ fn live_telemetry_and_tasks_share_one_compact_lane_row() {
 }
 
 #[test]
+fn inline_worker_states_have_only_one_activity_indicator() {
+    let mut item = laned("Verify output", "in_progress", 1, "Validation");
+    item.assigned_to = Some("fox".into());
+    for phase in [
+        "running",
+        "running_tool",
+        "thinking",
+        "streaming",
+        "waiting",
+    ] {
+        let mut worker = agent("fox", "running", None, Some(12));
+        worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+            phase: phase.into(),
+            elapsed_ms: 12_000,
+            tool_name: Some("bash".into()),
+            tool_intent: Some("Inspect generated artifact".into()),
+            ..Default::default()
+        });
+        if phase == "waiting" {
+            worker.wait_reason = Some("Waiting for background task".into());
+        }
+        let rows = render(&[item.clone()], &[worker.clone()], 180);
+        let lane = &rows[1];
+        assert!(lane.trim_start().starts_with('●'), "{phase}: {lane}");
+        assert_eq!(
+            lane.matches(LIVE_DOT_SENTINEL).count(),
+            usize::from(phase != "waiting"),
+            "{phase}: {lane}"
+        );
+        if matches!(phase, "running" | "running_tool") {
+            assert!(
+                lane.contains("Inspect generated artifact"),
+                "{phase}: {lane}"
+            );
+        }
+        if phase == "waiting" {
+            assert!(lane.contains("Waiting for background task"), "{lane}");
+            assert!(
+                !lane.contains("Inspect generated artifact"),
+                "stale intent: {lane}"
+            );
+        }
+        for width in 0..120 {
+            assert_fits(&render(&[item.clone()], &[worker.clone()], width), width);
+        }
+    }
+}
+
+#[test]
+fn inline_tool_intent_is_single_line_and_bounded() {
+    let mut item = laned("Verify output", "in_progress", 1, "Validation");
+    item.assigned_to = Some("fox".into());
+    let mut worker = agent("fox", "running", None, Some(12));
+    worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+        phase: "running_tool".into(),
+        tool_name: Some("bash".into()),
+        tool_intent: Some("Inspect\n  generated\t界 artifact".into()),
+        ..Default::default()
+    });
+    let rows = render(&[item.clone()], &[worker.clone()], 180);
+    assert!(
+        rows[1].contains("Inspect generated 界 artifact"),
+        "{rows:?}"
+    );
+    worker.live_status.as_mut().unwrap().tool_intent = Some("Inspect 界 artifact ".repeat(100));
+    for width in 0..180 {
+        let rows = render(&[item.clone()], &[worker.clone()], width);
+        assert_fits(&rows, width);
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains('\n') && !row.contains('\t'))
+        );
+        if width >= 120 {
+            assert!(rows[1].contains("Inspect 界 artifact"), "{width}: {rows:?}");
+            // A long intent may shorten the title to its reserved eight cells.
+            assert!(rows[1].contains(" │ Verify"), "{width}: {rows:?}");
+        }
+    }
+}
+
+#[test]
 fn user_action_overrides_live_workers_and_has_two_cell_phase_and_lane_pips() {
     let mut item = assigned(
         todo("action", "Authorize 界", "in_progress", Some(1)),
