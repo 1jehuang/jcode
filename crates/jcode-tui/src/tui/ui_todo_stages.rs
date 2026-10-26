@@ -894,14 +894,6 @@ pub(crate) fn push_stage_lines(
             continue;
         }
         let statuses = lane_item_statuses(&items, agents);
-        let mut inline_agents = agents.to_vec();
-        for agent in &mut inline_agents {
-            if let Some(live) = &mut agent.live_status {
-                // Task titles are already on this row. Keep the compact tool
-                // name, not another potentially long intent before the titles.
-                live.tool_intent = None;
-            }
-        }
         let mut telemetry = Vec::new();
         if items.iter().any(|todo| {
             todo.assigned_to.as_deref().is_some_and(|owner| {
@@ -910,14 +902,20 @@ pub(crate) fn push_stage_lines(
                     .any(|agent| agent.matches(owner) && agent.live_status.is_some())
             })
         }) {
-            push_lane_status_lines(&mut telemetry, &items, &inline_agents, "", inner_width);
+            push_lane_status_lines(&mut telemetry, &items, agents, "", inner_width);
         }
         if !telemetry.is_empty() {
             let pip_width = statuses
                 .iter()
                 .map(|(status, _)| status_pip_span(status).content.width())
                 .sum::<usize>();
-            let mut row = lane_strip_spans(&statuses, pip_width.min(inner_width / 3));
+            // Progress pips stay static when the same row already has a live
+            // activity indicator beside the worker's status.
+            let static_statuses: Vec<_> = statuses
+                .iter()
+                .map(|(status, _)| (*status, false))
+                .collect();
+            let mut row = lane_strip_spans(&static_statuses, pip_width.min(inner_width / 3));
             if let Some(padding) = row.last_mut() {
                 padding.content = " ".into();
             }

@@ -148,7 +148,7 @@ fn live_telemetry_and_tasks_share_one_compact_lane_row() {
         phase: "running_tool".into(),
         elapsed_ms: 481_000,
         tool_name: Some("bash".into()),
-        tool_intent: Some("Long intent belongs in the worker view".into()),
+        tool_intent: Some("Run focused tests".into()),
         input_tokens: Some(61_000),
         output_tokens: Some(159),
         output_tps_milli: Some(26_900),
@@ -162,6 +162,7 @@ fn live_telemetry_and_tasks_share_one_compact_lane_row() {
         "Rewrite slow tests",
         LIVE_DOT_SENTINEL,
         "bash",
+        "Run focused tests",
         "8m",
         "26.9 tps",
         "↑61k",
@@ -172,7 +173,16 @@ fn live_telemetry_and_tasks_share_one_compact_lane_row() {
         assert!(lane.contains(label), "missing {label}: {rows:?}");
     }
     assert_eq!(lane.matches('🦊').count(), 1, "{lane}");
-    assert!(!lane.contains("websocket") && !lane.contains("Long intent"));
+    assert!(
+        lane.trim_start().starts_with('●'),
+        "static progress pip: {lane}"
+    );
+    assert_eq!(
+        lane.matches(LIVE_DOT_SENTINEL).count(),
+        1,
+        "one activity spinner: {lane}"
+    );
+    assert!(!lane.contains("websocket"));
     assert!(
         !lane.trim_start().contains("  "),
         "no column padding: {lane}"
