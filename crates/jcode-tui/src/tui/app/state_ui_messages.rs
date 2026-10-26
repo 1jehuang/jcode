@@ -224,10 +224,11 @@ impl App {
         &self.background_task_rows
     }
 
-    /// Disk state survives a TUI reload and also overrides a retained running
-    /// row when completion arrived before the UI consumed its notification.
-    pub(super) fn todo_waits_on_background_task(&self, todo: &crate::todo::TodoItem) -> bool {
-        crate::todo::todo_has_external_blocker(todo)
+    /// User-only blockers and live waits suppress all automatic continuations.
+    /// Disk state survives a TUI reload and overrides stale retained UI rows.
+    pub(super) fn todo_is_paused_for_auto_followup(&self, todo: &crate::todo::TodoItem) -> bool {
+        crate::todo::todo_requires_user_action(todo)
+            || crate::todo::todo_has_external_blocker(todo)
             || crate::todo::todo_waits_on_running_task(todo, |task_id| {
                 self.running_todo_await_dependency(task_id)
                     || self.running_todo_background_dependency(task_id).is_some()
@@ -283,12 +284,12 @@ impl App {
             .then_some(status)
     }
 
-    pub(super) fn all_open_todos_wait_on_background_tasks(&self) -> bool {
+    pub(super) fn all_open_todos_are_paused(&self) -> bool {
         let open = super::commands::incomplete_poke_todos(self);
         !open.is_empty()
             && open
                 .iter()
-                .all(|todo| self.todo_waits_on_background_task(todo))
+                .all(|todo| self.todo_is_paused_for_auto_followup(todo))
     }
 
     fn retain_latest_background_tasks(&mut self) {
