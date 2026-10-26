@@ -25,7 +25,7 @@
 /// Runs in a forked child because installing a controlling terminal is
 /// process-global and must not leak into the rest of the test binary.
 #[cfg(unix)]
-fn decode_key_event_via_pty(bytes: &[u8]) -> Option<(crossterm::event::KeyCode, u8)> {
+fn decode_key_event_via_pty(bytes: &[u8]) -> (crossterm::event::KeyCode, u8) {
     use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
 
@@ -42,6 +42,18 @@ fn decode_key_event_via_pty(bytes: &[u8]) -> Option<(crossterm::event::KeyCode, 
         )
     };
     assert_eq!(rc, 0, "failed to allocate a pty");
+
+    // Configure the PTY before feeding input, not only after the child starts.
+    // Otherwise ICRNL can turn a queued CR into LF, which crossterm decodes as
+    // Ctrl+J once the child enables raw mode.
+    // Safety: device is a valid PTY fd; termios is initialized before use.
+    unsafe {
+        let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+        assert_eq!(libc::tcgetattr(device, mode.as_mut_ptr()), 0);
+        let mut mode = mode.assume_init();
+        libc::cfmakeraw(&mut mode);
+        assert_eq!(libc::tcsetattr(device, libc::TCSANOW, &mode), 0);
+    }
 
     // A pipe carries the decoded result back from the child.
     let mut result_pipe: [libc::c_int; 2] = [-1, -1];
@@ -67,15 +79,11 @@ fn decode_key_event_via_pty(bytes: &[u8]) -> Option<(crossterm::event::KeyCode, 
         let payload = match crossterm::terminal::enable_raw_mode() {
             Ok(()) => match crossterm::event::read() {
                 Ok(crossterm::event::Event::Key(key)) => {
-                    let tag = match key.code {
-                        crossterm::event::KeyCode::Enter => 1u8,
-                        _ => 0u8,
-                    };
-                    format!("{tag},{}", key.modifiers.bits())
+                    format!("{:?},{}", key.code, key.modifiers.bits())
                 }
-                _ => "0,0".to_string(),
+                other => format!("unexpected read result: {other:?}"),
             },
-            Err(_) => "0,0".to_string(),
+            Err(err) => format!("cannot enable raw mode: {err}"),
         };
         // Safety: writing to a valid pipe fd, then exiting immediately.
         unsafe {
@@ -100,19 +108,24 @@ fn decode_key_event_via_pty(bytes: &[u8]) -> Option<(crossterm::event::KeyCode, 
     // Safety: read end is a valid fd owned by this scope.
     let mut read_end = unsafe { std::fs::File::from_raw_fd(result_pipe[0]) };
     let mut payload = String::new();
-    let _ = read_end.read_to_string(&mut payload);
+    read_end
+        .read_to_string(&mut payload)
+        .expect("read pty result");
     // Safety: reaping the child we just forked.
     unsafe {
         let mut status: libc::c_int = 0;
-        libc::waitpid(pid, &mut status, 0);
+        assert_eq!(libc::waitpid(pid, &mut status, 0), pid, "reap pty child");
+        assert_eq!(status, 0, "pty child failed: {status}");
     }
 
-    let (tag, bits) = payload.split_once(',')?;
-    let code = match tag.trim() {
-        "1" => crossterm::event::KeyCode::Enter,
-        _ => return None,
-    };
-    Some((code, bits.trim().parse().ok()?))
+    let (code, bits) = payload
+        .split_once(',')
+        .unwrap_or_else(|| panic!("invalid pty result: {payload:?}"));
+    assert_eq!(code, "Enter", "unexpected decoded key: {payload}");
+    (
+        crossterm::event::KeyCode::Enter,
+        bits.parse().expect("key modifiers"),
+    )
 }
 
 #[test]
@@ -122,11 +135,7 @@ fn shift_enter_csi_u_sequence_decodes_to_enter_plus_shift() {
 
     // Exactly the bytes `terminal_setup` writes into terminal configurations.
     let sequence = crate::tui::terminal_setup::SHIFT_ENTER_CSI_U;
-    let Some((code, bits)) = decode_key_event_via_pty(sequence.as_bytes()) else {
-        // A sandbox without pty support should skip rather than fail loudly.
-        eprintln!("skipping: pty decode unavailable in this environment");
-        return;
-    };
+    let (code, bits) = decode_key_event_via_pty(sequence.as_bytes());
 
     assert_eq!(code, KeyCode::Enter);
     let modifiers = KeyModifiers::from_bits_truncate(bits);
@@ -144,10 +153,7 @@ fn bare_carriage_return_decodes_without_shift() {
 
     // The flip side, and the reason setup is needed at all: without the
     // protocol, Shift+Enter arrives as a bare CR carrying no modifier bits.
-    let Some((code, bits)) = decode_key_event_via_pty(b"\r") else {
-        eprintln!("skipping: pty decode unavailable in this environment");
-        return;
-    };
+    let (code, bits) = decode_key_event_via_pty(b"\r");
 
     assert_eq!(code, KeyCode::Enter);
     assert!(
