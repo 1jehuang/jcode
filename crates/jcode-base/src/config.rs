@@ -445,6 +445,36 @@ pub fn config() -> &'static Config {
     config
 }
 
+/// Whether todo quality-gate observations and end-of-turn review are enabled.
+/// The environment variable is an explicit opt-in and only the value `1`
+/// enables it; otherwise the config value controls the feature.
+pub fn todo_quality_review_enabled() -> bool {
+    todo_quality_review_enabled_for(
+        config().features.todo_quality_review,
+        std::env::var("JCODE_TODO_QUALITY_REVIEW").ok().as_deref(),
+    )
+}
+
+fn todo_quality_review_enabled_for(configured: bool, env_value: Option<&str>) -> bool {
+    configured || env_value == Some("1")
+}
+
+#[cfg(test)]
+mod todo_quality_review_tests {
+    use super::*;
+
+    #[test]
+    fn todo_quality_review_is_opt_in_by_default() {
+        assert!(!FeatureConfig::default().todo_quality_review);
+        let parsed: Config = toml::from_str("[features]\ntodo_quality_review = true").unwrap();
+        assert!(parsed.features.todo_quality_review);
+        assert!(!todo_quality_review_enabled_for(false, None));
+        assert!(!todo_quality_review_enabled_for(false, Some("0")));
+        assert!(todo_quality_review_enabled_for(false, Some("1")));
+        assert!(todo_quality_review_enabled_for(true, None));
+    }
+}
+
 fn describe_config_reload(
     forced: bool,
     previous: &ConfigCacheFingerprint,

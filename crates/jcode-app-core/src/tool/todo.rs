@@ -1556,8 +1556,11 @@ impl Tool for TodoTool {
                 let stored_plan = load_plan(&ctx.session_id).unwrap_or_default();
                 let goals = prune_orphaned_goals(merge_goals(&stored_goals, params.goals), &todos);
                 let plan = merge_plan(&stored_plan, params.plan);
-                let (observations, nudges) =
-                    record_reframe_observations(&plan, &goals, &todos, &previous);
+                let (observations, nudges) = if crate::config::todo_quality_review_enabled() {
+                    record_reframe_observations(&plan, &goals, &todos, &previous)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 for observation in &observations {
                     let kind = match observation.kind {
                         GateObservationKind::IntentUnderstanding => {
