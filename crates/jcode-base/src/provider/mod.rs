@@ -12,6 +12,7 @@ use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
 pub mod catalog_scheduler;
 pub mod chatgpt_web;
 pub mod chatgpt_web_instance;
+mod conversation_lifecycle;
 pub mod copilot;
 mod credit_failover;
 pub mod cursor;
@@ -3171,6 +3172,10 @@ impl Provider for MultiProvider {
         }
 
         Arc::new(provider)
+    }
+
+    async fn reset_conversation_state(&self) -> Result<()> {
+        self.reset_existing_conversation_state().await
     }
 
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {

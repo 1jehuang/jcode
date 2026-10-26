@@ -1,4 +1,5 @@
 use super::*;
+use jcode_tui_style::theme::warning_color;
 use ratatui::widgets::{Block, BorderType, Borders};
 use unicode_width::UnicodeWidthStr;
 
@@ -195,7 +196,7 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
         entry.action,
         crate::tui::PickerAction::AgentProfiles | crate::tui::PickerAction::AgentProfileChoice(_)
     )) {
-        return Some(" INSTRUCTION PROFILE · THIS SESSION ONLY · Enter choose/apply · Esc cancel · no global default");
+        return Some(" INSTRUCTION PROFILE · THIS SESSION ONLY · Enter choose sources · Esc cancel · no global default");
     }
     if picker.kind == crate::tui::PickerKind::Account {
         use crate::tui::{AccountPickerAction, PickerAction};
@@ -449,6 +450,90 @@ fn fuzzy_match_positions(pattern: &str, text: &str) -> Vec<usize> {
 /// the command-suggestion limit).
 const MODEL_BROWSER_VISIBLE_LIMIT: usize = 16;
 
+/// Profile options are a draft step of the existing picker, never model routes.
+pub(super) fn agent_profile_source_lines(
+    picker: &crate::tui::InlineInteractiveState,
+    available_rows: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    use crate::tui::PickerAction;
+    let dim = Style::default().fg(dim_color());
+    let accent = Style::default().fg(rgb(255, 213, 128));
+    let Some(apply) = picker.entries.iter().find(|entry| matches!(entry.action, PickerAction::AgentProfileApply(_))) else {
+        return Vec::new();
+    };
+    let PickerAction::AgentProfileApply(name) = &apply.action else { return Vec::new(); };
+    let mut lines = Vec::new();
+    let mut append = |text: &str, style| {
+        lines.extend(profile_source_wrap(text, width).into_iter().map(|line| Line::from(Span::styled(line, style))));
+    };
+    append(&format!("Instruction sources: {name} · this session only"), accent);
+    append("Profile alone by default. Optional Jcode-loaded Markdown stays OFF unless selected.", dim);
+    append("Base instructions, tool protocol, skills and runtime context remain.", dim);
+    if let Some(option) = apply.active_option() {
+        if !option.provider.is_empty() {
+            append(&option.provider, dim);
+        }
+        if !option.detail.is_empty() {
+            append(&option.detail, Style::default().fg(warning_color()));
+        }
+    }
+    let footer = "↑↓ navigate · Space toggle · Enter select/apply · Esc cancel · no global default";
+    // Preserve room for the focused row and controls even on short terminals.
+    lines.truncate(available_rows.saturating_sub(4));
+    let sources = picker.entries.len().saturating_sub(2);
+    let visible = available_rows.saturating_sub(lines.len() + 3).min(sources);
+    let selected = picker.selected.min(picker.entries.len().saturating_sub(1));
+    if visible > 0 {
+        let start = selected.min(sources.saturating_sub(1)).saturating_sub(visible.saturating_sub(1))
+            .min(sources.saturating_sub(visible));
+        for row in start..start + visible {
+            let entry = &picker.entries[row];
+            let focused = row == selected;
+            let style = if focused { accent } else { dim };
+            let detail = if matches!(entry.action, PickerAction::AgentProfileSource(_)) {
+                entry.active_option().map(|option| format!(" · {}", option.detail)).unwrap_or_default()
+            } else { String::new() };
+            lines.push(Line::from(Span::styled(
+                format!("{} {}{detail}", if focused { "▸" } else { " " }, entry.name), style,
+            )));
+        }
+    }
+    for row in sources..picker.entries.len() {
+        if lines.len() >= available_rows { break; }
+        lines.push(Line::from(Span::styled(
+            format!("{} {}", if row == selected { "▸" } else { " " }, picker.entries[row].name),
+            if row == selected { accent } else { dim },
+        )));
+    }
+    if lines.len() < available_rows {
+        lines.push(Line::from(Span::styled(footer, dim.italic())));
+    }
+    lines
+}
+
+fn profile_source_wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            if !line.is_empty() && display_width(&line) + 1 + display_width(word) > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() { line.push(' '); }
+            for ch in word.chars() {
+                if display_width(&line) + unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) > width && !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                }
+                line.push(ch);
+            }
+        }
+        if !line.is_empty() { lines.push(line); }
+    }
+    lines
+}
+
 /// The reasoning-level step of `/model`: a header naming the model and route,
 /// then one row per level.
 fn model_effort_step_lines(
@@ -536,6 +621,9 @@ pub(super) fn model_suggestion_lines(
 ) -> Vec<Line<'static>> {
     if available_rows == 0 {
         return Vec::new();
+    }
+    if picker.is_agent_profile_sources() {
+        return agent_profile_source_lines(picker, available_rows, 120);
     }
     if let Some(step) = picker.effort_step.as_deref() {
         return model_effort_step_lines(picker, step, available_rows);
@@ -737,6 +825,16 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
     let height = area.height as usize;
     let width = area.width as usize;
     if height <= 2 || width <= 2 {
+        return;
+    }
+    if picker.is_agent_profile_sources() {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(rgb(85, 85, 110)));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(agent_profile_source_lines(picker, inner.height as usize, inner.width as usize)), inner);
         return;
     }
 

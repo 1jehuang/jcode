@@ -9,8 +9,11 @@ use std::sync::{Arc, Mutex};
 const CUSTOM_PROMPT: &str = "  Custom instructions, unchanged.\n";
 const RECOVERY_REMINDER: &str = "Resume from the last saved step after provider overload.";
 
+#[path = "prompting_profile_tests.rs"]
+mod profile_tests;
+
 #[test]
-fn profile_is_additive_to_normal_override_and_own_provider_prompts() {
+fn profile_isolates_normal_override_and_own_provider_prompts() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     for own_system_prompt in [false, true] {
         for override_prompt in [None, Some(""), Some(CUSTOM_PROMPT)] {
@@ -24,17 +27,14 @@ fn profile_is_additive_to_normal_override_and_own_provider_prompts() {
             agent.session.agent_profile = Some(crate::agent_profile::AgentProfile {
                 name: "writer".into(),
                 instructions: "PROFILE_SENTINEL\n".into(),
+                instruction_sources: Vec::new(),
             });
             let after = agent.build_system_prompt_split(None);
-            let separator = if before.static_part.is_empty() {
-                ""
-            } else {
-                "\n\n"
-            };
-            assert_eq!(
-                after.static_part,
-                format!("{}{separator}PROFILE_SENTINEL\n", before.static_part)
-            );
+            assert_eq!(after.static_part.matches("PROFILE_SENTINEL").count(), 1);
+            assert!(!after.static_part.contains(CUSTOM_PROMPT.trim()));
+            if !own_system_prompt {
+                assert!(after.static_part.contains("You are Jcode."));
+            }
             assert_eq!(after.dynamic_part, before.dynamic_part);
             assert_eq!(agent.session.system_prompt.as_deref(), override_prompt);
             agent.session.agent_profile = None;
@@ -50,6 +50,9 @@ fn profile_is_additive_to_normal_override_and_own_provider_prompts() {
 struct PromptCaptureProvider {
     requests: Arc<Mutex<Vec<(String, String)>>>,
     own_system_prompt: bool,
+    tool_requests: Arc<Mutex<Vec<Vec<ToolDefinition>>>>,
+    lifecycle: Arc<Mutex<Vec<&'static str>>>,
+    resume_hints: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 #[async_trait]
@@ -67,11 +70,17 @@ impl Provider for PromptCaptureProvider {
     async fn complete_split(
         &self,
         _: &[Message],
-        _: &[ToolDefinition],
+        tools: &[ToolDefinition],
         system_static: &str,
         system_dynamic: &str,
-        _: Option<&str>,
+        resume: Option<&str>,
     ) -> Result<EventStream> {
+        self.lifecycle.lock().unwrap().push("request");
+        self.tool_requests.lock().unwrap().push(tools.to_vec());
+        self.resume_hints
+            .lock()
+            .unwrap()
+            .push(resume.map(str::to_owned));
         self.requests
             .lock()
             .unwrap()
@@ -82,6 +91,11 @@ impl Provider for PromptCaptureProvider {
                 stop_reason: Some("end_turn".into()),
             }),
         ])))
+    }
+
+    async fn reset_conversation_state(&self) -> Result<()> {
+        self.lifecycle.lock().unwrap().push("reset");
+        Ok(())
     }
 
     fn name(&self) -> &str {

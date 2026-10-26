@@ -582,6 +582,23 @@ impl ClaudeCodeProvider {
 
 #[async_trait]
 impl Provider for ClaudeCodeProvider {
+    async fn reset_conversation_state(&self) -> Result<()> {
+        let _turn_guard = self.turn_lock.lock().await;
+        let mut state = self.state.lock().await;
+        let child = state.child.take();
+        state.resume_id = None;
+        state.seeded = false;
+        // The Agent may still supply the last SessionId it observed. It must
+        // never resurrect the discarded branch, even after this child exits.
+        state.hint_spent = true;
+        if let Some(child) = child {
+            child.shutdown().await;
+        }
+        let mut results = self.result_rx.lock().await;
+        while results.try_recv().is_ok() {}
+        Ok(())
+    }
+
     async fn complete(
         &self,
         messages: &[Message],

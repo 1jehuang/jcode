@@ -99,6 +99,21 @@ pub trait Provider: Send + Sync {
     /// input through this hook or wait for a network warmup to finish.
     async fn prewarm(&self, _tools: &[ToolDefinition], _system_static: &str) {}
 
+    /// Discard upstream conversation handles before a new foreground turn.
+    ///
+    /// The caller must first finish or cancel the foreground stream, then await
+    /// this hook before requesting another completion. Stateful providers must
+    /// discard live conversation handles, resume cursors and seeded-history flags,
+    /// including stale resume hints supplied by the caller. Model selection,
+    /// credentials, account pins and other user settings must remain unchanged.
+    /// Orchestrators must reset every instantiated runtime, including inactive
+    /// ones that could otherwise resume the discarded history after a switch.
+    /// A failing implementation must not permit stale continuation on a later
+    /// completion. Stateless providers need no special handling.
+    async fn reset_conversation_state(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Send messages and get a streaming response.
     /// resume_session_id: Optional session ID to resume a previous conversation (provider-specific).
     async fn complete(

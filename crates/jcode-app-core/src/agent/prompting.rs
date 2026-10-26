@@ -13,10 +13,22 @@ impl Agent {
         profile: Option<crate::agent_profile::AgentProfile>,
     ) -> anyhow::Result<()> {
         let previous = std::mem::replace(&mut self.session.agent_profile, profile);
+        let previous_provider_session_id = self.session.provider_session_id.take();
         if let Err(error) = self.session.save() {
             self.session.agent_profile = previous;
+            self.session.provider_session_id = previous_provider_session_id;
             return Err(error);
         }
+        // Native runtimes and response cursors may retain the old system text.
+        // Commit first, then gate the next provider request on a full reset.
+        self.provider_session_id = None;
+        if !self.provider_conversation_reset_pending {
+            self.preserve_compaction_on_provider_reset = true;
+        }
+        self.provider_conversation_reset_pending = true;
+        self.locked_tools = None;
+        self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
         Ok(())
     }
 
@@ -168,6 +180,9 @@ impl Agent {
         &self,
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
+        if let Some(profile) = &self.session.agent_profile {
+            return self.build_profile_system_prompt_split(profile, memory_prompt);
+        }
         let mut split = self.build_jcode_system_prompt_split(memory_prompt);
         if self.provider.uses_own_system_prompt() {
             // The provider brings its own prompt, tools and instruction files.
@@ -184,12 +199,76 @@ impl Agent {
             .collect::<Vec<_>>()
             .join("\n\n");
         }
-        if let Some(profile) = &self.session.agent_profile {
+        split
+    }
+
+    fn build_profile_system_prompt_split(
+        &self,
+        profile: &crate::agent_profile::AgentProfile,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
+        use crate::instruction_sources::{InstructionSourceKind, formatted_content};
+        let working_dir = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new);
+        let sources = &profile.instruction_sources;
+        let mut split = crate::prompt::build_system_prompt_split_with_instruction_sources(
+            &self.prompt_skills_snapshot,
+            self.session.is_canary,
+            memory_prompt,
+            working_dir,
+            sources,
+        )
+        .0;
+        if self.provider.uses_own_system_prompt() {
+            // These providers still manage their own native instruction files.
+            // Only Jcode-controlled sources are governed by this allowlist.
+            split.static_part = self
+                .session
+                .working_dir
+                .as_deref()
+                .map(crate::prompt::own_prompt_session_context)
+                .unwrap_or_default();
+            for kind in [
+                InstructionSourceKind::AgentsMd,
+                InstructionSourceKind::SystemPrompt,
+                InstructionSourceKind::PromptOverlay,
+                InstructionSourceKind::PreferredTools,
+            ] {
+                let content = if kind == InstructionSourceKind::SystemPrompt {
+                    crate::instruction_sources::first_content(sources, kind).map(str::to_owned)
+                } else {
+                    formatted_content(sources, kind).0
+                };
+                if let Some(content) = content {
+                    if !split.static_part.is_empty() {
+                        split.static_part.push_str("\n\n");
+                    }
+                    split.static_part.push_str(&content);
+                }
+            }
+        }
+        // While profiled, the old full override is an optional additive source.
+        // Turning the profile off restores its original full-override semantics.
+        if let Some(content) =
+            formatted_content(sources, InstructionSourceKind::SessionSystemPrompt).0
+        {
             if !split.static_part.is_empty() {
                 split.static_part.push_str("\n\n");
             }
-            split.static_part.push_str(&profile.instructions);
+            split.static_part.push_str(&content);
         }
+        if !split.static_part.is_empty() {
+            split.static_part.push_str("\n\n");
+        }
+        split.static_part.push_str(&profile.instructions);
+        self.append_current_turn_system_reminder(&mut split);
+        crate::prompt::append_swarm_effort_directive(
+            &mut split,
+            self.provider.reasoning_effort().as_deref(),
+        );
         split
     }
 

@@ -285,6 +285,10 @@ impl Provider for JcodeProvider {
         self.inner.native_result_sender()
     }
 
+    async fn reset_conversation_state(&self) -> Result<()> {
+        self.inner.reset_conversation_state().await
+    }
+
     fn drain_startup_notices(&self) -> Vec<String> {
         self.inner.drain_startup_notices()
     }

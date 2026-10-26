@@ -69,6 +69,11 @@ fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
 
 #[async_trait]
 impl Provider for OpenAIProvider {
+    async fn reset_conversation_state(&self) -> Result<()> {
+        self.clear_persistent_ws("conversation history replaced").await;
+        Ok(())
+    }
+
     /// Saved-account binding (model picker `openai-oauth@label` routes) is the
     /// same per-window pin `/accounts switch` and failover use.
     fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {

@@ -267,6 +267,10 @@ async fn handle_remote_key_internal(
         }
     }
 
+    if app.showing_agent_profile_sources() {
+        return app.handle_agent_profile_sources_key(code, modifiers, remote).await;
+    }
+
     if let Some(ref picker) = app.inline_interactive_state
         && !picker.preview
     {
@@ -284,15 +288,14 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
                 Some(crate::tui::PickerAction::AgentProfileChoice(name)) => {
-                    let already_current = name.is_some() && picker.selected_entry().is_some_and(|entry| entry.is_current);
-                    app.inline_interactive_state = None;
                     app.agent_profile_picker_request_id = None;
-                    if already_current {
-                        app.set_status_notice("Instruction profile unchanged; use /agent reload to refresh its snapshot");
+                    if let Some(name) = name {
+                        app.open_agent_profile_sources(name);
                         return Ok(());
                     }
+                    app.inline_interactive_state = None;
                     app_mod::agent_profiles::send_agent_profile_command(
-                        app, remote, vec![name.unwrap_or_else(|| "off".into())],
+                        app, remote, vec!["off".into()],
                     ).await;
                     return Ok(());
                 }

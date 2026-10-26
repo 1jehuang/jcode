@@ -100,6 +100,9 @@ pub(super) fn picker_account_provider_scope(picker: &InlineInteractiveState) -> 
         | PickerAction::AgentTarget(_)
         | PickerAction::AgentProfiles
         | PickerAction::AgentProfileChoice(_)
+        | PickerAction::AgentProfileSource(_)
+        | PickerAction::AgentProfileApply(_)
+        | PickerAction::AgentProfileCancel
         | PickerAction::AgentModelChoice { .. }
         | PickerAction::SubagentModelChoice { .. } => None,
     })

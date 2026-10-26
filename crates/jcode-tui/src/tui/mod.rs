@@ -1812,6 +1812,9 @@ pub enum PickerAction {
     AgentTarget(AgentModelTarget),
     AgentProfiles,
     AgentProfileChoice(Option<String>),
+    AgentProfileSource(String),
+    AgentProfileApply(String),
+    AgentProfileCancel,
     AgentModelChoice {
         target: AgentModelTarget,
         clear_override: bool,
@@ -1898,10 +1901,12 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
         | PickerAction::RemoteImportDecision { .. }
         | PickerAction::AgentTarget(_)
         | PickerAction::AgentProfiles
+        | PickerAction::AgentProfileCancel
         | PickerAction::AgentModelChoice { .. }
         | PickerAction::SubagentModelChoice { .. }
         | PickerAction::LogoutAll => 0,
         PickerAction::AgentProfileChoice(name) => name.as_ref().map_or(0, String::capacity),
+        PickerAction::AgentProfileSource(id) | PickerAction::AgentProfileApply(id) => id.capacity(),
         PickerAction::Account(
             AccountPickerAction::Switch { provider_id, label }
             | AccountPickerAction::SetDefault { provider_id, label },
@@ -1969,8 +1974,12 @@ fn estimate_picker_entry_bytes(entry: &PickerEntry) -> usize {
 }
 
 impl InlineInteractiveState {
+    pub fn is_agent_profile_sources(&self) -> bool {
+        self.entries.iter().any(|entry| matches!(entry.action, PickerAction::AgentProfileApply(_)))
+    }
+
     pub fn schema(&self) -> InlineInteractiveSchema {
-        if self.entries.iter().any(|entry| matches!(entry.action, PickerAction::AgentProfileChoice(_))) {
+        if self.is_agent_profile_sources() || self.entries.iter().any(|entry| matches!(entry.action, PickerAction::AgentProfileChoice(_))) {
             InlineInteractiveSchema {
                 layout: InlineInteractiveLayout::ThreeColumn,
                 primary_label: "INSTRUCTION PROFILE [SESSION]",

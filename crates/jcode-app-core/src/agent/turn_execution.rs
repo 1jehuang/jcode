@@ -620,6 +620,22 @@ impl Agent {
             let disabled = config.disabled.iter().cloned().collect();
             tools.retain(|tool| !self.registry.tool_is_disabled(&disabled, &tool.name));
         }
+        if let Some(profile) = &self.session.agent_profile {
+            let swarm_prompt = crate::instruction_sources::first_content(
+                &profile.instruction_sources,
+                crate::instruction_sources::InstructionSourceKind::SwarmPrompt,
+            )
+            .unwrap_or(crate::prompt::DEFAULT_SWARM_PROMPT)
+            .trim();
+            for tool in &mut tools {
+                if tool.name == "swarm" {
+                    tool.description =
+                        crate::tool::communicate::CommunicateTool::description_with_prompt(
+                            swarm_prompt,
+                        );
+                }
+            }
+        }
         tools
     }
 
@@ -1133,7 +1149,18 @@ impl Agent {
         // A failed load must leave the current Agent and its concurrency lease
         // alive. Close it only after the replacement is ready to install.
         self.mark_closed();
-        // Restore provider_session_id for Claude CLI session resume
+        // Old profiled sessions may have an upstream additive-prompt snapshot.
+        // Reset even when the new allowlist happens to match the old profile.
+        let preserve_profile_compaction =
+            !self.provider_conversation_reset_pending || self.preserve_compaction_on_provider_reset;
+        let profile_reset_pending = self.provider_conversation_reset_pending
+            || self.session.agent_profile.is_some()
+            || session.agent_profile.is_some();
+        if profile_reset_pending {
+            session.provider_session_id = None;
+        }
+        self.provider_conversation_reset_pending = profile_reset_pending;
+        // Restore provider_session_id for ordinary Claude CLI session resume.
         self.provider_session_id = session.provider_session_id.clone();
         self.session = session;
         self.refresh_agents_md_snapshot();
@@ -1146,6 +1173,8 @@ impl Agent {
 
         let reset_start = Instant::now();
         self.reset_runtime_state_for_session_change();
+        self.preserve_compaction_on_provider_reset =
+            profile_reset_pending && preserve_profile_compaction;
         let restored_soft_interrupts = self.restore_persisted_soft_interrupts();
         let reset_ms = reset_start.elapsed().as_millis();
 

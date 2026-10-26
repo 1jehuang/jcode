@@ -12,6 +12,9 @@ use jcode_provider_claude_code_runtime::settings::{ClaudeCodeInstance, ClaudeCod
 use jcode_provider_core::{AccountPin, AccountProviderKind, NativeToolResult, Provider};
 use serde_json::{Value, json};
 
+#[path = "cases/profile_sources.rs"]
+mod profile_sources;
+
 struct Fake {
     _dir: tempfile::TempDir,
     root: PathBuf,
