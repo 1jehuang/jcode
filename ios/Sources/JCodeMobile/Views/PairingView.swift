@@ -107,7 +107,9 @@ struct PairingView: View {
                 if let payload = PairURI.parse(scanned) {
                     host = payload.gateway.host
                     port = String(payload.gateway.port)
-                    secure = payload.gateway.secure
+                    if payload.scheme != nil {
+                        secure = payload.gateway.secure
+                    }
                     code = payload.code
                     pair()
                 } else {

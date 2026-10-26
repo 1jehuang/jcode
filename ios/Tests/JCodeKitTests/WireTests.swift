@@ -34,8 +34,10 @@ import Testing
 @Test func pairURIDefaultsToHTTPAndParsesOptionalScheme() {
     let legacy = PairURI.parse("jcode://pair?host=mybox&code=987654")
     #expect(legacy?.gateway.secure == false)
+    #expect(legacy?.scheme == nil)
     let secure = PairURI.parse("jcode://pair?host=mybox&code=987654&scheme=https")
     #expect(secure?.gateway.secure == true)
+    #expect(secure?.scheme == "https")
     let ws = PairURI.parse("jcode://pair?host=mybox&code=987654&scheme=wss")
     #expect(ws?.gateway.secure == true)
 }
@@ -57,7 +59,16 @@ import Testing
     #expect(decoded == credential)
     #expect(decoded.gateway.secure)
 
-    let legacyJSON = #"{"host":"oldbox","port":7643,"token":"token","serverName":"jcode","serverVersion":"1","pairedAt":0}"#
+    let legacyJSON = """
+        {
+          "host": "oldbox",
+          "port": 7643,
+          "token": "token",
+          "serverName": "jcode",
+          "serverVersion": "1",
+          "pairedAt": 0
+        }
+        """
     let legacy = Data(legacyJSON.utf8)
     let oldCredential = try JSONDecoder().decode(ServerCredential.self, from: legacy)
     #expect(oldCredential.secure == false)

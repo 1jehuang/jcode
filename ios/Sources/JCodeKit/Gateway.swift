@@ -48,10 +48,12 @@ public enum PairURI {
     public struct Payload: Equatable, Sendable {
         public var gateway: Gateway
         public var code: String
+        public var scheme: String?
 
-        public init(gateway: Gateway, code: String) {
+        public init(gateway: Gateway, code: String, scheme: String? = nil) {
             self.gateway = gateway
             self.code = code
+            self.scheme = scheme
         }
     }
 
@@ -75,7 +77,8 @@ public enum PairURI {
         else { return nil }
         return Payload(
             gateway: Gateway(host: host, port: port, secure: scheme == "https" || scheme == "wss"),
-            code: code
+            code: code,
+            scheme: scheme
         )
     }
 }
