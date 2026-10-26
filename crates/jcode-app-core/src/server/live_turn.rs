@@ -323,3 +323,165 @@ mod stop_reason_tests {
         assert!(catch_live_turn_panic(async { Ok(()) }).await.0.is_ok());
     }
 }
+
+#[cfg(test)]
+mod durable_error_tests {
+    use super::*;
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
+    use crate::session::Session;
+    use crate::tool::Registry;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    const FAILURE: &str = "invalid_request_error: No tool call found for function call output with call_id call_missing";
+
+    #[derive(Default)]
+    struct FailingProvider(AtomicU64);
+
+    #[async_trait::async_trait]
+    impl Provider for FailingProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!(FAILURE).context("mock HTTP 400"))
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self::default())
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn failed_wake_error_is_durable_before_live_terminal_event() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        let provider = Arc::new(FailingProvider::default());
+        let mut agent = Agent::new(provider.clone(), Registry::empty());
+        agent.set_memory_enabled(false);
+        let session_id = agent.session_id().to_string();
+        let agent = Arc::new(Mutex::new(agent));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let member = SwarmMember {
+            session_id: session_id.clone(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: true,
+            status: "ready".into(),
+            detail: None,
+            friendly_name: Some("failing-worker".into()),
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".into(),
+            joined_at: Instant::now(),
+            last_status_change: Instant::now(),
+            is_headless: true,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+            task_label: None,
+        };
+        let members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(VecDeque::new()));
+        let event_counter = Arc::new(AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(16);
+        let swarm = LiveTurnSwarmContext::new(
+            &members,
+            &swarms_by_id,
+            &event_history,
+            &event_counter,
+            &swarm_event_tx,
+        );
+        assert!(
+            spawn_tracked_live_turn(
+                &session_id,
+                agent.clone().lock_owned().await,
+                "wake worker".into(),
+                None,
+                None,
+                None,
+                swarm,
+            )
+            .await
+        );
+
+        let mut stopped = false;
+        let error_message = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match event_rx.recv().await.expect("live turn event stream") {
+                    ServerEvent::TurnStopped {
+                        reason, message, ..
+                    } => {
+                        assert_eq!(reason, crate::protocol::TurnStopReason::Failure);
+                        assert!(message.contains(FAILURE));
+                        stopped = true;
+                    }
+                    ServerEvent::Error { id, message, .. } => {
+                        assert_eq!(id, 0);
+                        break message;
+                    }
+                    ServerEvent::Done { .. } => panic!("failed live turn emitted Done"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("failed live turn must terminate");
+        assert!(stopped);
+        assert_eq!(error_message, format!("mock HTTP 400: {FAILURE}"));
+        assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+        assert_eq!(members.read().await[&session_id].status, "failed");
+
+        // Loading as soon as Error arrives must already show the error. This
+        // exercises the actual spawn path, not only the persistence helper.
+        let loaded = Session::load(&session_id).unwrap();
+        assert_eq!(loaded.replay_events.len(), 1);
+        assert!(
+            !serde_json::to_string(&loaded.messages)
+                .unwrap()
+                .contains(FAILURE)
+        );
+        let history = crate::session::render_messages(&loaded);
+        let failure = history
+            .iter()
+            .position(|message| message.role == "error")
+            .unwrap();
+        assert_eq!(history[failure].content, error_message);
+        assert_eq!(history[failure - 1].content, "wake worker");
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| message.role == "error")
+                .count(),
+            1
+        );
+        // Join the agent reservation before dropping the isolated test home.
+        drop(agent.lock().await);
+    }
+}
