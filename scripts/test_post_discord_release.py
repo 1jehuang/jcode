@@ -57,6 +57,13 @@ class DiscordReleaseTests(unittest.TestCase):
         self.assertIn("https://example.test/releases/v1.0.0-preview.12", message)
         self.assertIn("jcode update --channel preview", message)
         self.assertIn("jcode update --channel stable", message)
+        self.assertIn("current stable has no `--channel` option", message)
+        self.assertIn("Download your OS/architecture", message)
+        self.assertIn("SHA256SUMS", message)
+        self.assertIn("extract the entire archive", message)
+        self.assertIn("full path", message)
+        self.assertIn("reinstall stable", message)
+        self.assertIn("stable `v1.0.0` tag", message)
         self.assertNotIn("@everyone", message)
         self.assertLessEqual(len(message), MODULE.DISCORD_LIMIT)
 

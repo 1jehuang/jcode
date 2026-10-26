@@ -37,6 +37,13 @@ def validate(repository, sha, tag):
         raise ValueError("Expected v1.0.0-preview.N")
 
 
+def require_preview_window(repository):
+    pages = json.loads(gh("api", "--paginate", "--slurp",
+                         f"repos/{repository}/git/matching-refs/tags/v1.0.0"))
+    if any(ref.get("ref") == "refs/tags/v1.0.0" for page in pages for ref in page):
+        raise ValueError("v1.0.0 stable tag exists, preview publishing has ended")
+
+
 def require_head(repository, sha):
     if api(f"repos/{repository}/git/ref/heads/master")["object"]["sha"] != sha:
         raise ValueError("master advanced, refusing stale preview")
@@ -57,6 +64,7 @@ def publish(repository, sha, tag, directory):
     files = inventory(directory)
     # Recheck CI after the builds as well as before them. No stale/rerun evidence.
     authorize(repository, sha, timeout=0)
+    require_preview_window(repository)
     require_head(repository, sha)
     checksum = Path(directory) / "SHA256SUMS"
     checksum.write_text("".join(f"{hashlib.sha256(files[name].read_bytes()).hexdigest()}  {name}\n"
@@ -71,7 +79,18 @@ def publish(repository, sha, tag, directory):
        "-f", f"ref=refs/tags/{tag}", "-f", f"sha={sha}")
     notes = (f"Opt-in v1 preview built from master commit {sha}.\n\n"
              "Experimental binaries, not a stable release. Windows preview binaries are unsigned. "
-             "Use the stable channel for production. Preview numbers may have gaps.\n")
+             "Use the stable channel for production. Preview numbers may have gaps.\n\n"
+             "## First-time preview setup\n\n"
+             "Existing stable versions do not support `--channel`. Download the archive for your "
+             "OS and architecture from this release, verify it against `SHA256SUMS`, and extract "
+             "the entire archive into its own directory (keep all Linux companion files together). "
+             "Run the extracted binary explicitly, using its full path, rather than the old stable "
+             "`jcode` on PATH. For Windows, use the extracted `.exe`.\n\n"
+             "From that preview binary, run `jcode update --channel preview` (substitute its "
+             "full path for `jcode`) to persist the opt-in channel and receive future previews. "
+             "To roll back, run the preview binary with `update --channel stable`, or reinstall "
+             "the current stable release. Stable users are never moved to previews automatically.\n\n"
+             "This preview series ends when the `v1.0.0` stable tag is created.\n")
     gh("release", "create", tag, "--repo", repository, "--verify-tag", "--draft",
        "--prerelease", "--latest=false", "--title", tag, "--notes", notes,
        *[str(files[name]) for name in sorted(files)], str(checksum))
@@ -87,6 +106,7 @@ def publish(repository, sha, tag, directory):
         raise ValueError("Draft assets incomplete, refusing publication")
     if api(f"repos/{repository}/git/ref/tags/{tag}")["object"]["sha"] != sha:
         raise ValueError("Preview tag changed during staging")
+    require_preview_window(repository)
     # This MUST remain the final check immediately before the visibility change.
     require_head(repository, sha)
     gh("release", "edit", tag, "--repo", repository, "--draft=false", "--prerelease", "--latest=false")
@@ -102,6 +122,7 @@ def main():
     args = parser.parse_args()
     validate(args.repo, args.sha, args.tag)
     if args.action == "check-head":
+        require_preview_window(args.repo)
         require_head(args.repo, args.sha)
     else:
         publish(args.repo, args.sha, args.tag, args.assets)

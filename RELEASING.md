@@ -4,12 +4,25 @@ Official releases have two gates: **successful CI for the exact tagged commit** 
 
 ## Opt-in v1 preview channel
 
-The separate `.github/workflows/preview.yml` pipeline is **disabled by default**.
-An administrator can enable it with repository Actions variable
-`JCODE_V1_PREVIEW_ENABLED=true`. Set it to `false` or remove it to disable new
-preview builds. This does not enable previews for users. Users must explicitly
-run `jcode update --channel preview`, and can return with
-`jcode update --channel stable`.
+The separate `.github/workflows/preview.yml` pipeline is **enabled by default** on
+canonical master. No repository variable setup is required. For an emergency
+opt-out, set repository Actions variable `JCODE_V1_PREVIEW_ENABLED=false` and
+cancel any running preview workflow. Removing the variable or setting it to
+anything other than the literal `false` restores publication. The publisher also
+stops automatically once the exact stable `v1.0.0` tag exists, including builds
+already in flight. At v1 launch, keep the variable `false` and retire this
+preview workflow. Publication being enabled does not opt users in.
+
+**First-time bootstrap:** current stable binaries do not implement `--channel`.
+Download the matching OS/architecture archive from a preview's GitHub release,
+verify it against `SHA256SUMS`, and extract the entire archive into a separate
+directory. Keep the Linux wrapper, `.bin`, and any shared libraries together.
+Run the extracted binary explicitly by its full path (the `.exe` on Windows),
+not the old stable `jcode` on PATH. Using that preview binary's path in place of
+`jcode`, run `jcode update --channel preview` to persist the opt-in. Future
+preview updates can use the same command. To roll back, run the preview binary
+with `update --channel stable`, or reinstall the current stable release. Stable
+users are never automatically upgraded to previews.
 
 Each push to canonical `1jehuang/jcode`'s `master` starts a cancellable **15-minute
 quiet period**. A newer push cancels the old wait and any obsolete builds. After

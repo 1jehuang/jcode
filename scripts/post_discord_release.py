@@ -48,8 +48,13 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
             f"## v1 Preview · opt-in: {tag}\n"
             "Experimental preview, not a stable release. Stable users are not upgraded automatically.\n"
             f"Download binaries and notes: <{url}>\n"
-            "Opt in explicitly: `jcode update --channel preview`\n"
-            "Return to stable: `jcode update --channel stable`"
+            "First time: current stable has no `--channel` option. Download your OS/architecture "
+            "archive above, verify `SHA256SUMS`, extract the entire archive, and run the extracted "
+            "binary by its full path (keep Linux companion files together).\n"
+            "From that preview binary, opt in: `jcode update --channel preview` "
+            "(replace `jcode` with its full path).\n"
+            "Return to stable: `jcode update --channel stable`, or reinstall stable. "
+            "Preview publication ends at the stable `v1.0.0` tag."
         )
     title = f"## {tag}" + (f" — {name}" if name and name != tag else "")
     notes = release_notes_for_discord(body)

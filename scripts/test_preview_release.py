@@ -70,6 +70,11 @@ class PreviewPublicationTests(unittest.TestCase):
         self.assertIn("--prerelease", create)
         self.assertIn("--latest=false", create)
         self.assertIn("--verify-tag", create)
+        notes = create[create.index("--notes") + 1]
+        for instruction in ("Existing stable versions do not support", "SHA256SUMS",
+                            "extract the entire archive", "full path", "update --channel preview",
+                            "update --channel stable", "v1.0.0"):
+            self.assertIn(instruction, notes)
         self.assertEqual(self.calls[-2], ("head", preview.REPOSITORY, SHA))
         self.assertEqual(self.calls[-1][:3], ("release", "edit", TAG))
         self.assertIn("--latest=false", self.calls[-1])
@@ -141,6 +146,31 @@ class PreviewPublicationTests(unittest.TestCase):
             with self.subTest(repo=repo, sha=sha, tag=tag), self.assertRaises(ValueError):
                 preview.validate(repo, sha, tag)
 
+    def test_stable_v1_tag_stops_preview_without_confusing_preview_tags(self):
+        for refs, stopped in ((["refs/tags/v1.0.0"], True),
+                              (["refs/tags/v1.0.0-preview.3"], False), ([], False)):
+            response = [[{"ref": ref} for ref in refs]]
+            with self.subTest(refs=refs), patch.object(preview, "gh", return_value=json.dumps(response)):
+                if stopped:
+                    with self.assertRaisesRegex(ValueError, "preview publishing has ended"):
+                        preview.require_preview_window(preview.REPOSITORY)
+                else:
+                    preview.require_preview_window(preview.REPOSITORY)
+
+    def test_v1_sunset_during_staging_leaves_draft_unpublished(self):
+        with (patch.object(preview, "require_preview_window",
+                           side_effect=[None, ValueError("preview publishing has ended")]),
+              self.assertRaisesRegex(ValueError, "preview publishing has ended")):
+            self.publish()
+        self.assertFalse(any(call[:2] == ("release", "edit") for call in self.calls))
+
+    def test_stable_v1_tag_before_build_prevents_any_publication(self):
+        with (patch.object(preview, "require_preview_window",
+                           side_effect=ValueError("preview publishing has ended")),
+              self.assertRaisesRegex(ValueError, "preview publishing has ended")):
+            self.publish()
+        self.assertEqual(self.calls, [])
+
     def test_head_mismatch_fails_closed(self):
         with patch.object(preview, "api", return_value={"object": {"sha": "b" * 40}}):
             with self.assertRaisesRegex(ValueError, "master advanced"):
@@ -157,7 +187,7 @@ class PreviewWorkflowTests(unittest.TestCase):
         self.assertNotIn("release:", triggers)
         self.assertIn("cancel-in-progress: true", workflow)
         self.assertIn("group: v1-preview-master", workflow)
-        self.assertIn("vars.JCODE_V1_PREVIEW_ENABLED == 'true'", workflow)
+        self.assertIn("vars.JCODE_V1_PREVIEW_ENABLED != 'false'", workflow)
         self.assertLess(workflow.index("run: sleep 900"), workflow.index("check_release_ci.py"))
         self.assertIn('check_release_ci.py "$GITHUB_SHA"', workflow)
         self.assertIn('JCODE_BUILD_SEMVER: v1.0.0-preview.${{ github.run_number }}', workflow)
