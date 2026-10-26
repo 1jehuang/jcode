@@ -36,6 +36,12 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
+fn debug_command_authorized(command: &str, general_debug_control: bool) -> bool {
+    let (namespace, command) = parse_namespaced_command(command);
+    general_debug_control
+        || (namespace == "server" && super::group_transfer::is_production_command(command))
+}
+
 #[derive(Default)]
 pub(super) struct ClientDebugState {
     pub(super) active_id: Option<String>,
@@ -382,7 +388,7 @@ pub(super) async fn handle_debug_client(
                 command,
                 session_id: requested_session,
             } => {
-                if !debug_control_allowed() {
+                if !debug_command_authorized(&command, debug_control_allowed()) {
                     let event = ServerEvent::Error {
                         id,
                         message: "Debug control is disabled. Set JCODE_DEBUG_CONTROL=1, enable display.debug_socket, or start the shared server from a self-dev session.".to_string(),

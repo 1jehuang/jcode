@@ -55,6 +55,32 @@ struct PrepareRequest {
     expected: GroupTransferBundle,
 }
 
+/// The owner-only local socket is also the production cloud-control transport.
+/// Keep its exemption from general debug control deliberately narrower than a
+/// prefix match: unknown actions and malformed payloads never gain admission.
+pub(super) fn is_production_command(command: &str) -> bool {
+    let Some((action, json)) = command
+        .strip_prefix("group_transfer:")
+        .and_then(|rest| rest.split_once(':'))
+    else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    if !payload.is_object() {
+        return false;
+    }
+    match action {
+        "inspect" => serde_json::from_value::<GroupTransferSelection>(payload).is_ok(),
+        "prepare" => serde_json::from_value::<PrepareRequest>(payload).is_ok(),
+        "abort" | "reserve" | "import" | "check_import" => {
+            serde_json::from_value::<GroupTransferBundle>(payload).is_ok()
+        }
+        _ => false,
+    }
+}
+
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('.')
