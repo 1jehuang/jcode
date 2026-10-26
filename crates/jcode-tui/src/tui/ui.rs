@@ -2557,7 +2557,7 @@ fn transcript_definitely_overflows(messages: &[DisplayMessage], available_rows: 
         let role = message.effective_role();
         // Tool results can be hidden (notably pinned todos). These three roles
         // do not add the usual inter-message separator either.
-        if rows > 0 && !matches!(role, "tool" | "meta" | "swarm") {
+        if rows > 0 && messages::needs_message_separator(message) {
             rows = rows.saturating_add(1);
         }
         rows = rows.saturating_add(match role {

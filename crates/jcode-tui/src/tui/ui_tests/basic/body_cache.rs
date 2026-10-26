@@ -1224,3 +1224,45 @@ fn test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain() {
         std::env::remove_var("JCODE_PDFTOCAIRO_COMMAND");
     }
 }
+
+#[test]
+fn test_cache_miss_footer_attaches_in_full_and_incremental_layout() {
+    let base_state = TestState {
+        display_messages: vec![
+            DisplayMessage::user("question"),
+            DisplayMessage::assistant("answer"),
+        ],
+        messages_version: 1,
+        ..Default::default()
+    };
+    let mut messages = base_state.display_messages.clone();
+    messages.push(DisplayMessage::system(
+        "ℹ️ KV cache miss [low read]: ~4K tokens resent",
+    ));
+    messages.push(DisplayMessage::user("next question"));
+    let grown_state = TestState {
+        display_messages: messages,
+        messages_version: 2,
+        ..Default::default()
+    };
+    for width in [20, 80] {
+        let base = Arc::new(super::prepare::prepare_body(&base_state, width, false));
+        let incremental = super::prepare::prepare_body_incremental(&grown_state, width, base, 2);
+        let full = super::prepare::prepare_body(&grown_state, width, false);
+        let plain = |prepared: &super::PreparedMessages| {
+            prepared
+                .wrapped_lines
+                .iter()
+                .map(super::line_plain_text)
+                .collect::<Vec<_>>()
+        };
+        let full_lines = plain(&full);
+        assert_eq!(plain(&incremental), full_lines);
+        let footer = full_lines
+            .iter()
+            .position(|line| line.starts_with("╰ "))
+            .unwrap();
+        assert_eq!(full_lines[footer - 1].trim(), "answer");
+        assert!(full_lines[footer + 1].trim().is_empty());
+    }
+}

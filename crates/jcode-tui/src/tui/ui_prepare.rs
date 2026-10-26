@@ -1358,9 +1358,7 @@ fn render_message_into(
     let align = default_message_alignment(role, centered);
 
     if (acc.body_has_content || !acc.lines.is_empty())
-        && role != "tool"
-        && role != "meta"
-        && role != "swarm"
+        && super::messages::needs_message_separator(msg)
     {
         acc.push_blank();
     }

@@ -518,10 +518,10 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
     out
 }
 
-/// KV cache notices describe the response directly above them, so render
-/// them as a dim `╰` corner hanging off that response rather than a
-/// standalone notice that reads as a header for what follows.
-fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'static>>> {
+fn kv_cache_footer_body(msg: &DisplayMessage) -> Option<&str> {
+    if msg.effective_role() != "system" {
+        return None;
+    }
     let content = msg.content.trim();
     let body = content
         .trim_start_matches("⚠️")
@@ -530,11 +530,28 @@ fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'
     if !(body.starts_with("KV cache miss") || body.starts_with("KV cache refresh")) {
         return None;
     }
-    let warn = content.starts_with("⚠️");
+    Some(body)
+}
+
+/// Cache diagnostics belong to the preceding message, not a new transcript block.
+pub(super) fn is_kv_cache_footer(msg: &DisplayMessage) -> bool {
+    kv_cache_footer_body(msg).is_some()
+}
+
+/// Keep the same separator policy in full/incremental layout and overflow estimates.
+pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
+    !matches!(msg.effective_role(), "tool" | "meta" | "swarm") && !is_kv_cache_footer(msg)
+}
+
+/// KV cache notices hang directly off the preceding response. Amber distinguishes
+/// misses from ordinary dim timing metadata, matching the cache widget.
+fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'static>>> {
+    let body = kv_cache_footer_body(msg)?;
+    let is_miss = body.starts_with("KV cache miss");
     let summary = kv_cache_footer_summary(body);
     let body = summary.as_deref().unwrap_or(body);
-    let prefix = "╰ ";
-    let max = (width as usize).saturating_sub(prefix.len() + 1).max(1);
+    let prefix = if width >= 2 { "╰ " } else { "" };
+    let max = (width as usize).saturating_sub(unicode_width::UnicodeWidthStr::width(prefix));
     let text = if unicode_width::UnicodeWidthStr::width(body) > max {
         let mut out = String::new();
         let mut used = 0;
@@ -546,13 +563,15 @@ fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'
             used += w;
             out.push(ch);
         }
-        out.push('…');
+        if max > 0 {
+            out.push('…');
+        }
         out
     } else {
         body.to_string()
     };
-    let color = if warn {
-        system_message_color()
+    let color = if is_miss || msg.content.trim().starts_with("⚠️") {
+        Color::Rgb(255, 200, 100)
     } else {
         dim_color()
     };
@@ -5263,7 +5282,7 @@ mod kv_cache_footer_tests {
             Some("15.6K KV cache miss · low read · prefix unchanged · 22% hit")
         );
         let message = super::DisplayMessage::system(format!("ℹ️ {body}"));
-        for width in [12_u16, 30, 80, 120] {
+        for width in [0_u16, 1, 2, 3, 12, 30, 80, 120] {
             let lines = super::render_kv_cache_footer(&message, width).unwrap();
             assert_eq!(lines.len(), 1);
             assert!(lines[0].width() <= usize::from(width));
@@ -5276,6 +5295,33 @@ mod kv_cache_footer_tests {
             !super::kv_cache_footer_summary(unrelated)
                 .unwrap()
                 .contains("prefix unchanged")
+        );
+    }
+
+    #[test]
+    fn cache_miss_footer_is_amber_and_only_system_notices_attach() {
+        let body = "KV cache miss [low read]: ~4K tokens resent";
+        let message = super::DisplayMessage::system(format!("ℹ️ {body}"));
+        assert!(!super::needs_message_separator(&message));
+        let lines = super::render_kv_cache_footer(&message, 80).unwrap();
+        assert_eq!(
+            lines[0].spans[1].style.fg,
+            Some(super::Color::Rgb(255, 200, 100))
+        );
+        let assistant = super::DisplayMessage::assistant(body);
+        assert!(super::needs_message_separator(&assistant));
+        assert!(super::render_kv_cache_footer(&assistant, 80).is_none());
+        assert!(super::needs_message_separator(
+            &super::DisplayMessage::system("ordinary notice")
+        ));
+        let refresh =
+            super::DisplayMessage::system("KV cache refresh [compaction]: ~4K tokens resent");
+        assert!(!super::needs_message_separator(&refresh));
+        assert_eq!(
+            super::render_kv_cache_footer(&refresh, 80).unwrap()[0].spans[1]
+                .style
+                .fg,
+            Some(super::dim_color())
         );
     }
 
