@@ -139,6 +139,7 @@ jobs:
           python3 tests/test_public_release_builds.py
           python3 tests/test_release_ci.py
           python3 scripts/test_quick_release.py
+          python3 scripts/test_preview_release.py
           python3 tests/test_verify_public_release.py
           python3 tests/test_watch_release_run.py
           bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh scripts/quick-release.sh

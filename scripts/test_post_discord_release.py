@@ -47,6 +47,40 @@ class DiscordReleaseTests(unittest.TestCase):
     def setUp(self) -> None:
         WebhookHandler.response_status = 200
 
+    def test_formats_preview_as_explicit_opt_in_with_download_and_commands(self) -> None:
+        message = MODULE.format_message(
+            tag="v1.0.0-preview.12", name="v1 preview", body="@everyone stable notes",
+            url="https://example.test/releases/v1.0.0-preview.12",
+        )
+        self.assertIn("v1 Preview · opt-in", message)
+        self.assertIn("not a stable release", message)
+        self.assertIn("https://example.test/releases/v1.0.0-preview.12", message)
+        self.assertIn("jcode update --channel preview", message)
+        self.assertIn("jcode update --channel stable", message)
+        self.assertNotIn("@everyone", message)
+        self.assertLessEqual(len(message), MODULE.DISCORD_LIMIT)
+
+    def test_preview_announcement_requires_public_prerelease(self) -> None:
+        for flags in ({"draft": True, "prerelease": True},
+                      {"draft": False, "prerelease": False}):
+            with (self.subTest(flags=flags),
+                  mock.patch.object(MODULE, "fetch_release", return_value=flags),
+                  mock.patch.object(MODULE, "post_to_discord") as post,
+                  self.assertRaises(RuntimeError)):
+                MODULE.announce_release(repository="owner/repo", tag="v1.0.0-preview.12",
+                                        token="token", webhook_url="https://discord.test/webhook")
+            post.assert_not_called()
+
+    def test_preview_reuses_tag_specific_duplicate_prevention(self) -> None:
+        tag = "v1.0.0-preview.12"
+        release = {"draft": False, "prerelease": True,
+                   "body": MODULE.announcement_marker(tag)}
+        with (mock.patch.object(MODULE, "fetch_release", return_value=release),
+              mock.patch.object(MODULE, "post_to_discord") as post):
+            self.assertIsNone(MODULE.announce_release(repository="owner/repo", tag=tag,
+                              token="token", webhook_url="https://discord.test/webhook"))
+        post.assert_not_called()
+
     def test_formats_release_and_removes_platform_availability(self) -> None:
         body = """## Highlights
 

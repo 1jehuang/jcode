@@ -43,6 +43,14 @@ def release_notes_for_discord(body: str) -> str:
 
 
 def format_message(*, tag: str, name: str, body: str, url: str) -> str:
+    if re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", tag):
+        return (
+            f"## v1 Preview · opt-in: {tag}\n"
+            "Experimental preview, not a stable release. Stable users are not upgraded automatically.\n"
+            f"Download binaries and notes: <{url}>\n"
+            "Opt in explicitly: `jcode update --channel preview`\n"
+            "Return to stable: `jcode update --channel stable`"
+        )
     title = f"## {tag}" + (f" — {name}" if name and name != tag else "")
     notes = release_notes_for_discord(body)
     message = title if not notes else f"{title}\n{notes}"
@@ -158,6 +166,9 @@ def announce_release(
     release = fetch_release(repository=repository, tag=tag, token=token)
     if release.get("draft"):
         raise RuntimeError(f"Refusing to announce draft release {tag}")
+    if (re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", tag)
+            and release.get("prerelease") is not True):
+        raise RuntimeError(f"Refusing preview announcement for non-prerelease {tag}")
 
     body = release.get("body") or ""
     if already_announced(body, tag):

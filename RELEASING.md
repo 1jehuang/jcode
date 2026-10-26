@@ -2,6 +2,60 @@
 
 Official releases have two gates: **successful CI for the exact tagged commit** and **a complete platform asset set before publication**. Local preparation can save build time, but it does not bypass either gate. `.github/workflows/release.yml` owns final publication.
 
+## Opt-in v1 preview channel
+
+The separate `.github/workflows/preview.yml` pipeline is **disabled by default**.
+An administrator can enable it with repository Actions variable
+`JCODE_V1_PREVIEW_ENABLED=true`. Set it to `false` or remove it to disable new
+preview builds. This does not enable previews for users. Users must explicitly
+run `jcode update --channel preview`, and can return with
+`jcode update --channel stable`.
+
+Each push to canonical `1jehuang/jcode`'s `master` starts a cancellable **15-minute
+quiet period**. A newer push cancels the old wait and any obsolete builds. After
+the quiet period, the workflow rejects superseded SHAs and uses the same
+`scripts/check_release_ci.py` exact-commit push-CI gate as stable releases. It
+builds six required archives: Linux, macOS, and Windows, each x86_64 and aarch64.
+Linux x86_64 reuses the glibc 2.17 compatibility builder, Linux ARM64 preserves
+emulated TLS, and macOS retains stable ad-hoc signing identity. Windows preview
+binaries are currently **unsigned experimental builds**, not signed stable
+releases. FreeBSD is not included in the preview platform set.
+
+The binary version is `v1.0.0-preview.N`, supplied through the existing
+`JCODE_BUILD_SEMVER` release-build environment, without changing Cargo package
+versions. Every native binary must report that preview version before upload.
+`N` is the workflow run number, so cancellations/failures leave intentional gaps.
+Rerunning a workflow does not allocate another number. If its tag already exists,
+publication refuses to overwrite it. Push a new commit to obtain a new number.
+
+Only after **all six builds succeed**, the publisher rechecks exact-SHA CI,
+creates a new tag on that SHA using only `GITHUB_TOKEN`, and stages all archives
+plus `SHA256SUMS` on a draft prerelease. It verifies the complete remote asset
+inventory and sizes, then checks the current master SHA **immediately before**
+publishing with `--prerelease --latest=false`. A failed, cancelled, stale, or
+incomplete attempt cannot publish. An interrupted attempt may leave its own
+unpublished draft/tag, which is not reused or silently deleted.
+
+Preview publishing never updates stable download metadata, Cargo versions,
+package registries, Homebrew, or the stable release pipeline. Stable `release.yml`
+excludes preview tags at both its tag trigger and its entry job, including manual
+dispatches. `GITHUB_TOKEN`-created tags/releases do not recursively trigger
+workflows. Following successful publication only, an explicit dispatch invokes
+the existing Discord announcement workflow. Previews use a separate clearly
+labeled **v1 Preview · opt-in** message containing the release download link,
+opt-in command, and stable-return command. Stable announcement formatting is
+unchanged, and per-tag concurrency and recorded announcement markers still
+prevent normal duplicate posts.
+
+Run the publication and workflow regression checks without network writes:
+
+```bash
+python3 scripts/test_preview_release.py
+python3 -m unittest -v scripts/test_post_discord_release.py
+python3 tests/test_release_ci.py
+actionlint -shellcheck= .github/workflows/preview.yml .github/workflows/release.yml
+```
+
 ## Normal release procedure
 
 1. Prepare and commit the version bump in `Cargo.toml`, `Cargo.lock`, and the changelog. Commit any source changes before preparing a cached fast-release binary.

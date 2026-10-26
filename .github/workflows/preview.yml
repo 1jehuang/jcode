@@ -1,0 +1,200 @@
+name: V1 preview
+
+on:
+  push:
+    branches: [master]
+
+# A new master push cancels the sleep, CI wait, and any obsolete builds.
+# No tag/release/workflow_run trigger, and only GITHUB_TOKEN may publish.
+concurrency:
+  group: v1-preview-master
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  JCODE_CI: "1"
+  JCODE_RELEASE_BUILD: "1"
+  JCODE_CI_BUILD: "1"
+  JCODE_BUILD_SEMVER: v1.0.0-preview.${{ github.run_number }}
+  CARGO_BUILD_RUSTC_WRAPPER: ""
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+  JUSTRUST_TOOLCHAIN: system
+  JUSTRUST_SLOTS: "0"
+  JUSTRUST_NO_TELEMETRY: "1"
+
+jobs:
+  quiet-and-ci:
+    if: github.repository == '1jehuang/jcode' && vars.JCODE_V1_PREVIEW_ENABLED == 'true' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 205
+    steps:
+      - name: Require 15 quiet minutes on master
+        run: sleep 900
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reject superseded master commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_release.py check-head --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER"
+      - name: Require successful exact-commit source CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check_release_ci.py "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" --timeout 10800
+
+  build:
+    needs: quiet-and-ci
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 100
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: jcode-linux-x86_64
+            compat: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: jcode-linux-aarch64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: jcode-macos-aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: jcode-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: jcode-windows-x86_64
+            msvc: amd64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: jcode-windows-aarch64
+            msvc: amd64_arm64
+            cargo_args: --no-default-features --features pdf
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: ${{ matrix.msvc }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@nightly
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        with:
+          targets: aarch64-unknown-linux-gnu
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: preview-${{ matrix.target }}
+      - name: Install pinned justrust
+        if: matrix.compat != true
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+      - name: Build portable Linux x86_64 using stable packaging
+        if: matrix.compat == true
+        shell: bash
+        run: bash scripts/build_linux_compat.sh dist
+        env:
+          JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
+      - name: Build native preview
+        if: matrix.compat != true
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          EXTRA_ARGS: ${{ matrix.cargo_args }}
+          # Native macOS/Windows and ARM emulated TLS require local builds.
+          JUSTRUST_DISABLE: "1"
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = aarch64-unknown-linux-gnu ]; then
+            # Preserve stable release's Termux-compatible emulated TLS contract.
+            export RUSTFLAGS='-Z tls-model=emulated'
+            RUSTUP_TOOLCHAIN=nightly justrust build --local --locked -Z build-std=std,panic_abort --release --target "$TARGET" -p jcode --bin jcode
+          else
+            read -r -a extra_args <<< "$EXTRA_ARGS"
+            justrust build --local --locked --release --target "$TARGET" -p jcode --bin jcode "${extra_args[@]}"
+          fi
+      - name: Package native binary
+        if: matrix.compat != true
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          extension=""
+          if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
+          cp "target/$TARGET/release/jcode$extension" "dist/$ARTIFACT$extension"
+          if [ "$RUNNER_OS" = macOS ]; then
+            codesign --force --sign - --identifier com.jcode.cli "dist/$ARTIFACT"
+            codesign -dv "dist/$ARTIFACT" 2>&1 | grep -qx 'Identifier=com.jcode.cli'
+          fi
+          "dist/$ARTIFACT$extension" --no-update --no-selfdev --version | tee "$RUNNER_TEMP/preview-version.txt"
+          grep -F "$JCODE_BUILD_SEMVER" "$RUNNER_TEMP/preview-version.txt"
+          tar czf "dist/$ARTIFACT.tar.gz" -C dist "$ARTIFACT$extension"
+      - name: Verify portable preview version
+        if: matrix.compat == true
+        shell: bash
+        run: |
+          dist/jcode-linux-x86_64 --no-update --no-selfdev --version | tee "$RUNNER_TEMP/preview-version.txt"
+          grep -F "$JCODE_BUILD_SEMVER" "$RUNNER_TEMP/preview-version.txt"
+      - name: Verify locked source
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [quiet-and-ci, build]
+    if: github.repository == '1jehuang/jcode' && vars.JCODE_V1_PREVIEW_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: preview-jcode-*
+          merge-multiple: true
+          path: dist
+      - name: Publish complete preview only if master is still current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_release.py publish --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER" --assets dist
+
+  announce:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      # GITHUB_TOKEN suppresses release events. Reuse the announcement workflow's
+      # per-tag concurrency and marker-based duplicate prevention explicitly.
+      - name: Dispatch opt-in preview announcement
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run discord-release.yml --repo "$GITHUB_REPOSITORY" --ref master -f "tag=$JCODE_BUILD_SEMVER"
