@@ -8,6 +8,7 @@ struct PairingView: View {
 
     @State private var host = ""
     @State private var port = String(Gateway.defaultPort)
+    @State private var secure = false
     @State private var code = ""
     @State private var isPairing = false
     @State private var errorMessage: String?
@@ -33,6 +34,12 @@ struct PairingView: View {
                             .keyboardType(.URL)
                         field("Port", text: $port, placeholder: "7643")
                             .keyboardType(.numberPad)
+                        Toggle("Use secure connection (HTTPS/WSS)", isOn: $secure)
+                            .font(.subheadline)
+                            .tint(Theme.mint)
+                            .accessibilityHint(
+                                "Use a TLS-terminating gateway for encrypted connections"
+                            )
                         field("Pairing code", text: $code, placeholder: "123456")
                             .keyboardType(.numberPad)
                     }
@@ -100,6 +107,7 @@ struct PairingView: View {
                 if let payload = PairURI.parse(scanned) {
                     host = payload.gateway.host
                     port = String(payload.gateway.port)
+                    secure = payload.gateway.secure
                     code = payload.code
                     pair()
                 } else {
@@ -166,7 +174,8 @@ struct PairingView: View {
 
     private func pair() {
         guard let portValue = UInt16(port) else { return }
-        let gateway = Gateway(host: host.trimmingCharacters(in: .whitespaces), port: portValue)
+        let gateway = Gateway(
+            host: host.trimmingCharacters(in: .whitespaces), port: portValue, secure: secure)
         let pairCode = code
         isPairing = true
         errorMessage = nil
