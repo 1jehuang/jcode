@@ -905,19 +905,21 @@ pub(crate) fn push_stage_lines(
             push_lane_status_lines(&mut telemetry, &items, agents, "", inner_width);
         }
         if !telemetry.is_empty() {
-            let pip_width = statuses
-                .iter()
-                .map(|(status, _)| status_pip_span(status).content.width())
-                .sum::<usize>();
+            // Column budgets depend only on terminal width, never changing
+            // worker names, task counts, token totals, or live status text.
+            let pip_width = 6.min((inner_width / 10).max(1));
+            let worker_width = 24.min(inner_width / 4);
             // Progress pips stay static when the same row already has a live
             // activity indicator beside the worker's status.
             let static_statuses: Vec<_> = statuses
                 .iter()
                 .map(|(status, _)| (*status, false))
                 .collect();
-            let mut row = lane_strip_spans(&static_statuses, pip_width.min(inner_width / 3));
+            let mut row = lane_strip_spans(&static_statuses, pip_width);
             if let Some(padding) = row.last_mut() {
-                padding.content = " ".into();
+                // Retain the unused pip cells, replacing only the separator.
+                let pad = padding.content.width().saturating_sub(1);
+                padding.content = " ".repeat(pad).into();
             }
             let name = lane_name_spans(
                 lane.group.as_deref(),
@@ -925,10 +927,10 @@ pub(crate) fn push_stage_lines(
                 &items,
                 agents,
             );
-            row.extend(
-                super::truncate_line_with_ellipsis_to_width(&Line::from(name), inner_width / 3)
-                    .spans,
-            );
+            let name = super::truncate_line_with_ellipsis_to_width(&Line::from(name), worker_width);
+            let name_padding = worker_width.saturating_sub(name.width());
+            row.extend(name.spans);
+            row.push(Span::raw(" ".repeat(name_padding)));
             row.push(Span::raw(" · "));
             let room = inner_width.saturating_sub(width_of(&row));
             let mut status = Vec::new();
@@ -951,10 +953,14 @@ pub(crate) fn push_stage_lines(
                     }
                 }
             }
-            let status_budget = room.saturating_sub((MIN_TITLE_CELLS + 3).min(room / 3));
+            // Reserve a third of the remaining row for the task title and
+            // pad short statuses so the title never slides left or right.
+            let status_budget = room.saturating_sub(3) * 2 / 3;
             let status =
                 super::truncate_line_with_ellipsis_to_width(&Line::from(status), status_budget);
+            let status_padding = status_budget.saturating_sub(status.width());
             row.extend(status.spans);
+            row.push(Span::raw(" ".repeat(status_padding)));
             let room = inner_width.saturating_sub(width_of(&row));
             if room > 3 {
                 row.push(Span::styled(" │ ", Style::default().fg(todo_meta_color())));

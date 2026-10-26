@@ -183,15 +183,54 @@ fn live_telemetry_and_tasks_share_one_compact_lane_row() {
         "one activity spinner: {lane}"
     );
     assert!(!lane.contains("websocket"));
-    assert!(
-        !lane.trim_start().contains("  "),
-        "no column padding: {lane}"
-    );
+    assert!(lane.contains("  "), "fixed columns use padding: {lane}");
     assert!(lane.find("bash").unwrap() < lane.find(" │ ").unwrap());
     for width in 1..160 {
         let rows = render(&[item.clone()], &[worker.clone()], width);
         assert_eq!(rows.len(), 2, "one lane at width {width}: {rows:?}");
         assert_fits(&rows, width);
+    }
+}
+
+#[test]
+fn inline_columns_stay_fixed_across_activity_and_name_changes() {
+    let mut item = laned("Stable task title", "in_progress", 1, "Build");
+    item.assigned_to = Some("fox".into());
+    let mut worker = agent("fox", "running", None, Some(1));
+    for width in [80, 100, 120, 180, 240] {
+        let mut expected = None;
+        for (phase, intent, name, count) in [
+            ("thinking", "", "Build", 1),
+            ("running_tool", "Run tests", "Build", 3),
+            (
+                "running_tool",
+                "Inspect 界 artifact ",
+                "Very long worker lane name that must be truncated",
+                20,
+            ),
+            ("waiting", "Waiting for background task", "Build", 1),
+        ] {
+            item.group = Some(name.into());
+            worker.todo_statuses = vec!["in_progress".into(); count];
+            worker.wait_reason = (phase == "waiting").then(|| intent.into());
+            worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+                phase: phase.into(),
+                tool_name: Some("bash".into()),
+                tool_intent: Some(intent.repeat(10)),
+                input_tokens: Some(999_999),
+                elapsed_ms: 999_000,
+                ..Default::default()
+            });
+            let rows = render(&[item.clone()], &[worker.clone()], width);
+            assert_fits(&rows, width);
+            let row = &rows[1];
+            let divider = row.find(" │ ").expect("task column divider");
+            let column = row[..divider].width();
+            assert_eq!(*expected.get_or_insert(column), column, "{width}: {row}");
+            if count == 20 {
+                assert!(row.contains('…'), "overflow must ellipsize: {row}");
+            }
+        }
     }
 }
 
