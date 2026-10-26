@@ -48,7 +48,7 @@ pub(crate) struct TodoCardAgent {
 
 impl TodoCardAgent {
     pub(crate) fn from_member(member: &crate::protocol::SwarmMemberStatus) -> Self {
-        let activity = member
+        let task_activity = member
             .todo_items
             .iter()
             .find(|item| item.status == "in_progress")
@@ -67,10 +67,24 @@ impl TodoCardAgent {
                         }
                     })
                     .or_else(|| Some(item.content.clone()))
-            })
-            .or_else(|| member.detail.clone())
-            .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
-            .filter(|text| !text.is_empty());
+            });
+        let activity = if !is_live_status(&member.status) {
+            member
+                .detail
+                .clone()
+                .filter(|detail| !detail.trim().is_empty())
+                .or_else(|| {
+                    member
+                        .runtime
+                        .live_status
+                        .as_ref()
+                        .and_then(|live| live.stop_reason.clone())
+                })
+        } else {
+            task_activity.or_else(|| member.detail.clone())
+        }
+        .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
+        .filter(|text| !text.is_empty());
         Self {
             session_id: member.session_id.clone(),
             live_status: member.runtime.live_status.clone(),
@@ -933,14 +947,11 @@ pub(super) fn push_lane_status_lines(
     indent: &str,
     width: usize,
 ) {
-    if todos
-        .iter()
-        .any(|todo| crate::todo::todo_requires_user_action(todo))
-    {
-        return; // The hand and the full action/reason replace liveness, never a spinner.
-    }
     let mut seen = std::collections::HashSet::new();
     for todo in todos {
+        if crate::todo::todo_requires_user_action(todo) || is_done(todo) {
+            continue; // Pause this item, not independent workers sharing its lane.
+        }
         let Some(agent) = todo
             .assigned_to
             .as_deref()
@@ -948,25 +959,49 @@ pub(super) fn push_lane_status_lines(
         else {
             continue;
         };
+        if agent.live_status.is_none() && todo.status != "in_progress" {
+            continue;
+        }
         if !seen.insert(agent.session_id.as_str()) {
             continue;
         }
-        let Some(mut live) = agent.live_status.clone() else {
-            continue;
-        };
-        if is_done(todo) && todos.iter().all(|todo| is_done(todo)) {
-            live.phase = "completed".into();
-            live.stop_reason = Some("lane completed".into());
+        let mut live =
+            agent
+                .live_status
+                .clone()
+                .unwrap_or_else(|| crate::protocol::SwarmLiveStatus {
+                    phase: agent.status.clone(),
+                    elapsed_ms: agent.age_secs.unwrap_or(0).saturating_mul(1000),
+                    // Legacy activity is already displayed in the heading or task row.
+                    tool_intent: None,
+                    stop_reason: (!is_live_status(&agent.status))
+                        .then(|| agent.activity.clone())
+                        .flatten(),
+                    ..Default::default()
+                });
+        if matches!(
+            agent.status.as_str(),
+            "completed" | "done" | "failed" | "crashed" | "stopped" | "cancelled"
+        ) {
+            live.phase = agent.status.clone();
+            live.stop_reason = agent.activity.clone().or(live.stop_reason);
         } else if let Some(reason) = &agent.wait_reason {
             live.phase = "waiting".into();
             live.stop_reason = Some(reason.clone());
+        } else if is_done(todo) && todos.iter().all(|todo| is_done(todo)) {
+            live.phase = "completed".into();
+            live.stop_reason = Some("lane completed".into());
         } else if !is_live_status(&agent.status) {
             live.phase = agent.status.clone();
             if live.stop_reason.is_none() {
                 live.stop_reason = agent.activity.clone();
             }
         }
-        let mut row = vec![Span::raw(format!("  {} ", agent.icon()))];
+        let mut row = vec![Span::raw(if agent.live_status.is_some() {
+            format!("  {} ", agent.icon())
+        } else {
+            "  ".to_string()
+        })];
         row.extend(
             super::super::input_ui::live_processing_status_line(
                 &live,

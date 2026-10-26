@@ -859,7 +859,7 @@ impl App {
             let (role, content) = if let Some((r, c)) = raw.split_once(':') {
                 let role = match r {
                     "user" | "assistant" | "system" | "background_task" | "tool" | "error"
-                    | "meta" => r,
+                    | "todos" | "meta" => r,
                     _ => "assistant",
                 };
                 if role == "assistant" && r != "assistant" {
@@ -871,14 +871,19 @@ impl App {
                 ("assistant", raw)
             };
 
-            self.push_display_message(DisplayMessage {
-                role: role.to_string(),
-                content: content.to_string(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            let message = if role == "todos" {
+                DisplayMessage::todos(content)
+            } else {
+                DisplayMessage {
+                    role: role.to_string(),
+                    content: content.to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                }
+            };
+            self.push_display_message(message);
             format!("OK: injected {} message ({} chars)", role, content.len())
         } else if cmd == "scroll-test" || cmd.starts_with("scroll-test:") {
             let raw = cmd.strip_prefix("scroll-test:");

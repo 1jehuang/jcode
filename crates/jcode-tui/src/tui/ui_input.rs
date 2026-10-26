@@ -702,6 +702,22 @@ pub(super) fn live_processing_status_line(
         )),
     };
     let mut spans = match status.phase.as_str() {
+        "running" => {
+            let mut spans = vec![
+                Span::styled(spinner, Style::default().fg(ai_color())),
+                Span::styled(
+                    format!(" working… {elapsed}"),
+                    Style::default().fg(dim_color()),
+                ),
+            ];
+            if let Some(activity) = &status.tool_intent {
+                spans.push(Span::styled(
+                    format!(" · {}", single_line(activity)),
+                    Style::default().fg(ai_color()),
+                ));
+            }
+            spans
+        }
         "running_tool" => running_tool_header_spans(
             spinner,
             &single_line(status.tool_name.as_deref().unwrap_or("tool")),
@@ -748,6 +764,8 @@ pub(super) fn live_processing_status_line(
                     "waiting" => "waiting",
                     "blocked" => "blocked",
                     "waiting_network" => "network disconnected, waiting to retry",
+                    "ready" => "ready",
+                    "queued" => "queued",
                     _ => "idle",
                 });
             let glyph = match status.phase.as_str() {

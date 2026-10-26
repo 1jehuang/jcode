@@ -837,3 +837,30 @@ fn pinned_todo_live_status_is_full_width_without_passive_gallery() {
     );
     crate::todo::save_todos(&app.session.id, &[]).unwrap();
 }
+
+#[test]
+fn debug_inject_todos_preserves_role_and_renders_fixture() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let mut app = create_test_app();
+    let payload = serde_json::json!({"todos":[{"id":"debug", "content":"Authorize", "status":"pending", "priority":"high", "requires_user_action":{"action":"Approve access", "reason":"Only the owner can approve"}}]});
+    let response = app.handle_debug_command(&format!("inject:todos:{payload}"));
+    assert!(
+        response.starts_with("OK: injected todos message"),
+        "{response}"
+    );
+    let message = app.display_messages.last().unwrap();
+    assert_eq!(message.role, "todos");
+    assert_eq!(message.title.as_deref(), Some("Todos"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&message.content).unwrap(),
+        payload
+    );
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(
+        text.contains("✋") && text.contains("Absolutely requires user action"),
+        "{text}"
+    );
+}

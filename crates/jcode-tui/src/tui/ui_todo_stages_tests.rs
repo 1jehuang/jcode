@@ -2,6 +2,60 @@ use super::*;
 use crate::todo::TodoItem;
 
 #[test]
+fn mixed_user_action_lane_keeps_independent_peer_visible() {
+    let mut paused = assigned(todo("paused", "Approve", "in_progress", Some(1)), "fox");
+    paused.requires_user_action = Some(crate::todo::TodoUserAction {
+        action: "Approve access".into(),
+        reason: "Owner only".into(),
+    });
+    let active = assigned(todo("active", "Test", "in_progress", Some(1)), "wolf");
+    let workers = [
+        agent("fox", "running", Some("Paused operation"), Some(1)),
+        agent("wolf", "running", Some("Run tests"), Some(2)),
+    ];
+    let mut lines = Vec::new();
+    push_lane_status_lines(&mut lines, &[&paused, &active], &workers, "", 160);
+    assert_eq!(lines.len(), 1);
+    let text = lines[0].to_string();
+    assert!(text.contains("working"), "{text}");
+    assert!(!text.contains("Paused operation") && !text.contains('🦊'));
+    assert!(text.contains(LIVE_DOT_SENTINEL));
+    for width in 0..80 {
+        let mut lines = Vec::new();
+        push_lane_status_lines(&mut lines, &[&paused, &active], &workers, "", width);
+        assert!(lines.iter().all(|line| line.width() <= width));
+    }
+}
+
+#[test]
+fn terminal_worker_reason_beats_stale_intent_with_or_without_telemetry() {
+    for status in ["failed", "stopped", "completed"] {
+        for telemetry in [false, true] {
+            let mut member: crate::protocol::SwarmMemberStatus = serde_json::from_value(serde_json::json!({
+                "session_id":"session_fox_1700000000", "friendly_name":"fox", "status":status,
+                "detail":"Actual terminal reason",
+                "todo_items":[{"content":"Stale task", "status":"in_progress", "tool_intents":[{"tool_name":"bash", "intent":"Stale running intent", "status":"running"}]}]
+            })).unwrap();
+            if telemetry {
+                member.runtime.live_status = Some(crate::protocol::SwarmLiveStatus {
+                    phase: "running_tool".into(),
+                    stop_reason: Some("Older stop reason".into()),
+                    ..Default::default()
+                });
+            }
+            let worker = TodoCardAgent::from_member(&member);
+            assert_eq!(worker.activity.as_deref(), Some("Actual terminal reason"));
+            let item = assigned(todo("1", "Task", "in_progress", Some(1)), "fox");
+            let mut lines = Vec::new();
+            push_lane_status_lines(&mut lines, &[&item], &[worker], "", 160);
+            let text = lines[0].to_string();
+            assert!(text.contains("Actual terminal reason"), "{text}");
+            assert!(!text.contains("Stale") && !text.contains(LIVE_DOT_SENTINEL));
+        }
+    }
+}
+
+#[test]
 fn lane_live_status_matches_opened_status_and_preserves_stop_precedence() {
     let mut item = assigned(todo("1", "Verify result", "in_progress", Some(1)), "fox");
     let mut worker = agent("fox", "running", Some("Verify result"), Some(1));
