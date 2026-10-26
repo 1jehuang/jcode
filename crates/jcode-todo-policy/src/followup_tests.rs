@@ -64,6 +64,34 @@ fn requires_user_action_pauses_retries_but_not_independent_work() {
 }
 
 #[test]
+fn requires_user_action_ignores_invalid_programmatic_snapshots() {
+    for (action, reason) in [
+        ("", "owner only"),
+        ("verify", ""),
+        (" \n\t", "owner only"),
+        ("verify", " \t"),
+    ] {
+        let mut item = todo("still actionable", "pending");
+        item.requires_user_action = Some(crate::TodoUserAction {
+            action: action.into(),
+            reason: reason.into(),
+        });
+        assert!(!todo_requires_user_action(&item));
+        let mut policy = FollowUpPolicy::new(true);
+        let decision = policy.decide(&snapshot(vec![item]));
+        assert_eq!(kind(&decision), Some(FollowUpKind::IncompleteTodos));
+    }
+    let mut valid = todo("owner approval", "pending");
+    valid.requires_user_action = Some(crate::TodoUserAction {
+        action: " Approve access ".into(),
+        reason: " Only the owner can authorize access ".into(),
+    });
+    assert!(todo_requires_user_action(&valid));
+    valid.status = "completed".into();
+    assert!(!todo_requires_user_action(&valid));
+}
+
+#[test]
 fn requires_user_action_serialization_rejects_missing_or_blank_fields() {
     let legacy =
         serde_json::json!({"id":"a", "content":"A", "status":"pending", "priority":"high"});

@@ -106,9 +106,13 @@ pub fn todo_has_external_blocker(todo: &TodoItem) -> bool {
     todo_has_external_blocker_at(todo, chrono::Utc::now())
 }
 
-/// Terminal todos never require user intervention, including legacy snapshots.
+/// Only valid, incomplete user-only conditions suppress work. Programmatically
+/// constructed snapshots may bypass the persisted type's field validation.
 pub fn todo_requires_user_action(todo: &TodoItem) -> bool {
-    is_incomplete_todo(todo) && todo.requires_user_action.is_some()
+    is_incomplete_todo(todo)
+        && todo.requires_user_action.as_ref().is_some_and(|required| {
+            !required.action.trim().is_empty() && !required.reason.trim().is_empty()
+        })
 }
 
 /// Persistent side effects a decision requires. Apply them whether or not a
