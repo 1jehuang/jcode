@@ -271,3 +271,78 @@ fn append_capability_line(lines: &mut Vec<String>, label: &str, names: &[&str]) 
         lines.push(format!("- {} tools available: {}", label, names.join(", ")));
     }
 }
+
+#[cfg(test)]
+mod capability_reminder_tests {
+    use super::{append_tool_capability_reminder, installed_cli_names};
+    use crate::message::ToolDefinition;
+
+    fn tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+            defer_loading: false,
+        }
+    }
+
+    #[test]
+    fn capability_reminder_surfaces_dynamic_tool_families() {
+        let mut prompt = crate::prompt::SplitSystemPrompt::default();
+        append_tool_capability_reminder(
+            &mut prompt,
+            &[
+                tool("mcp__slack__search_messages"),
+                tool("swarm"),
+                tool("read"),
+            ],
+        );
+
+        assert!(prompt.static_part.contains("MCP tools available"));
+        assert!(prompt.static_part.contains("mcp__slack__search_messages"));
+        assert!(prompt.static_part.contains("Subagents and orchestration"));
+        assert!(prompt.static_part.contains("Provider routes"));
+        assert!(prompt.static_part.contains("Other tools available: read"));
+    }
+
+    #[test]
+    fn capability_reminder_is_compact_for_empty_tool_families() {
+        let mut prompt = crate::prompt::SplitSystemPrompt::default();
+        append_tool_capability_reminder(&mut prompt, &[tool("read")]);
+
+        assert!(!prompt.static_part.contains("MCP tools available"));
+        assert!(!prompt.static_part.contains("Subagents and orchestration"));
+        assert!(prompt.static_part.contains("Other tools available: read"));
+    }
+
+    #[test]
+    fn capability_reminder_is_absent_without_tools() {
+        let mut prompt = crate::prompt::SplitSystemPrompt::default();
+        append_tool_capability_reminder(&mut prompt, &[]);
+
+        assert!(prompt.static_part.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_reminder_detects_only_executable_installed_clis() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let gws = dir.path().join("gws");
+        let playwright = dir.path().join("playwright");
+        std::fs::write(&gws, "#!/bin/sh\n").unwrap();
+        std::fs::write(&playwright, "not executable").unwrap();
+        std::fs::set_permissions(&gws, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&playwright, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            installed_cli_names(Some(dir.path().as_os_str())),
+            vec!["gws"]
+        );
+        std::fs::set_permissions(&playwright, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            installed_cli_names(Some(dir.path().as_os_str())),
+            vec!["gws", "playwright"]
+        );
+        assert!(installed_cli_names(None).is_empty());
+    }
+}
