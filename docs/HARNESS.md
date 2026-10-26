@@ -44,6 +44,26 @@ Define plans as **phases → lanes → items**, including plans with only one ph
 
 Phases execute in declared order. Lanes within a phase can run in parallel, while items within a lane run in order. Items inherit phase and lane membership from their enclosing containers. Update existing items by `id` rather than resending the hierarchy. Flat saved todo lists remain compatible internally with storage, swarm coordination, and rendering.
 
+## Absolutely requires user action
+
+`requires_user_action` is a condition on an unfinished todo, not another lifecycle status. Use it only when a specific action genuinely requires the user and no safe, authorized agent alternative exists. Examples include approval for an otherwise unauthorized side effect, account access only the user controls, or a necessary decision that cannot safely be inferred. Difficulty, a failed build, or a preference for clarification are not sufficient reasons.
+
+```json
+{
+  "update": [
+    {
+      "id": "publish",
+      "requires_user_action": {
+        "action": "Approve publishing these commits",
+        "reason": "Publishing includes unrelated local commits and requires your authorization"
+      }
+    }
+  ]
+}
+```
+
+The TUI labels this condition **✋ Absolutely requires user action** and shows the concrete action. Both `action` and `reason` must be nonempty. Keep the todo pending or in progress. Automatic continuation skips that item without scheduling timed review reminders; independent work remains actionable. Clear the condition with `"requires_user_action": null` when the user has taken the action, then reassess rather than assuming the task is complete.
+
 ## Hill-climbable measurements
 
 A hill-climbable task has a concrete objective and a repeatable way to measure progress. Instead of stopping at an assertion that the work is done, an agent can make a change, measure the result, and iterate against that feedback.
