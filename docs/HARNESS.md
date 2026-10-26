@@ -64,6 +64,12 @@ Phases execute in declared order. Lanes within a phase can run in parallel, whil
 
 The TUI labels this condition **✋ Absolutely requires user action** and shows the concrete action. Both `action` and `reason` must be nonempty. Keep the todo pending or in progress. Automatic continuation skips that item without scheduling timed review reminders; independent work remains actionable. Clear the condition with `"requires_user_action": null` when the user has taken the action, then reassess rather than assuming the task is complete.
 
+## Live worker status in todo lanes
+
+An assigned worker's todo lane shares the opened session's live status renderer: activity spinner, observed input/output tokens, streaming throughput, connection, elapsed time, and current tool intent. Missing telemetry is not guessed from context size or lifetime totals. Waiting and stopped workers show their available reason instead of a live spinner. A user-only condition pauses its item without hiding independent work in the same lane.
+
+Passive worker status is displayed with the todo lanes rather than in a second list beside the pinned todo band. Focused worker navigation and transcript controls remain available.
+
 ## Hill-climbable measurements
 
 A hill-climbable task has a concrete objective and a repeatable way to measure progress. Instead of stopping at an assertion that the work is done, an agent can make a change, measure the result, and iterate against that feedback.
