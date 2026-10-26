@@ -571,6 +571,16 @@ pub fn build_responses_input_with_logger(
 
     let mut ordered: Vec<Value> = Vec::with_capacity(normalized.len());
     let mut used_outputs: HashSet<String> = HashSet::new();
+    // Outputs that `output_map` has already placed directly after their call.
+    // The original output item still sits in `normalized` and arrives here a
+    // moment later; it is the SAME output, moved, not a duplicate. Counting it
+    // made the log line "Dropped N duplicate tool output(s)" equal the number of
+    // tool rounds in the request on every ordinary request (measured 2026-10-26
+    // on one gpt-6-astra session: 1617 of 1740 requests logged exactly
+    // N = assistant tool rounds, climbing 1,2,3... after every compaction), so
+    // the line never pointed at a real duplicate and a real one could not be
+    // seen. Only a SECOND distinct output for a call id is a duplicate.
+    let mut relocated_outputs: HashSet<String> = HashSet::new();
     let mut injected_ordered = 0usize;
     let mut dropped_duplicate_outputs = 0usize;
     let mut rewritten_orphans = 0usize;
@@ -588,6 +598,7 @@ pub fn build_responses_input_with_logger(
             if let Some(call_id) = call_id {
                 if let Some(output_item) = output_map.get(&call_id) {
                     ordered.push(output_item.clone());
+                    relocated_outputs.insert(call_id.clone());
                     used_outputs.insert(call_id);
                 } else {
                     injected_ordered += 1;
@@ -606,7 +617,11 @@ pub fn build_responses_input_with_logger(
             if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str())
                 && used_outputs.contains(call_id)
             {
-                dropped_duplicate_outputs += 1;
+                // The first arrival of a relocated output is the item we already
+                // emitted next to its call; every later arrival is a duplicate.
+                if !relocated_outputs.remove(call_id) {
+                    dropped_duplicate_outputs += 1;
+                }
                 continue;
             }
             if let Some(message_item) = orphan_tool_output_to_user_message(&item, &missing_output) {
@@ -735,6 +750,122 @@ mod tests {
             *level == OpenAiRequestLogLevel::Warn
                 && message.contains("Dropping oversized native compaction payload")
         }));
+    }
+
+    fn tool_round(id: &str) -> [ChatMessage; 2] {
+        [
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: id.to_string(),
+                    name: "bash".to_string(),
+                    input: json!({"command": "true"}),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            ChatMessage::tool_result(id, "ok", false),
+        ]
+    }
+
+    /// Every ordinary request used to log "Dropped N duplicate tool output(s)"
+    /// with N equal to the number of tool rounds: the re-ordering pass emits an
+    /// output next to its call from `output_map`, then meets the original item
+    /// in the stream and counted it as a duplicate of itself. Measured
+    /// 2026-10-26 on one gpt-6-astra session: 1617 of 1740 requests logged
+    /// exactly N = assistant tool rounds. A moved output is not a duplicate.
+    #[test]
+    fn build_responses_input_does_not_report_relocated_outputs_as_duplicates() {
+        let mut messages = vec![ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "run three things".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+        for id in ["call_1", "call_2", "call_3"] {
+            messages.extend(tool_round(id));
+        }
+        let mut logs = Vec::new();
+
+        let items = build_responses_input_with_logger(&messages, |level, message| {
+            logs.push((level, message.to_string()));
+        });
+
+        let outputs = items
+            .iter()
+            .filter(|item| item["type"] == json!("function_call_output"))
+            .count();
+        assert_eq!(outputs, 3, "one output per call: {items:?}");
+        for (i, item) in items.iter().enumerate() {
+            if item["type"] == json!("function_call") {
+                assert_eq!(
+                    items[i + 1]["call_id"],
+                    item["call_id"],
+                    "output must directly follow its call"
+                );
+            }
+        }
+        assert!(
+            !logs
+                .iter()
+                .any(|(_, message)| message.contains("duplicate tool output")),
+            "a relocated output is not a duplicate: {logs:?}"
+        );
+    }
+
+    /// The common duplicate (the same `ToolResult` persisted twice) is caught
+    /// by the first pass, which reports it as a filtered orphan; it never
+    /// reaches the re-ordering pass. The re-ordering counter is left for the
+    /// shapes the first pass cannot collapse (a `ToolUse` id replayed twice
+    /// yields a second, synthetic output). This pins where the common
+    /// duplicate is handled so the two log lines stay distinguishable.
+    #[test]
+    fn build_responses_input_filters_a_real_duplicate_result_in_the_first_pass() {
+        let mut messages = vec![ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "run one thing".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+        messages.extend(tool_round("call_1"));
+        messages.push(ChatMessage::tool_result("call_1", "ok again", false));
+        let mut logs = Vec::new();
+
+        let items = build_responses_input_with_logger(&messages, |level, message| {
+            logs.push((level, message.to_string()));
+        });
+
+        let outputs = items
+            .iter()
+            .filter(|item| item["type"] == json!("function_call_output"))
+            .count();
+        assert_eq!(outputs, 1, "the second output must be dropped: {items:?}");
+        assert!(
+            !items.iter().any(|item| item["type"] == json!("message")
+                && item["role"] == json!("user")
+                && item["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("Recovered orphaned"))),
+            "a duplicate must not be replayed as a recovered orphan: {items:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|(_, message)| message.contains("Filtered 1 orphaned tool result")),
+            "the duplicate must be reported by the first pass: {logs:?}"
+        );
+        assert!(
+            !logs
+                .iter()
+                .any(|(_, message)| message.contains("duplicate tool output")),
+            "nothing reaches the re-ordering duplicate counter: {logs:?}"
+        );
     }
 
     #[test]
