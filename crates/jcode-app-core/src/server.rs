@@ -2,6 +2,8 @@ mod account_usage;
 mod available_models_cache;
 mod available_models_dedup;
 mod await_members_state;
+pub use await_members_state::set_dependency_delivery as set_await_dependency_delivery;
+pub(crate) use await_members_state::subscribe_dependency as subscribe_await_dependency;
 mod background_tasks;
 mod client_actions;
 mod client_api;

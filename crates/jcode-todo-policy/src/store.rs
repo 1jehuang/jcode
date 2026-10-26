@@ -138,6 +138,10 @@ fn running_dependencies(
 ) -> Vec<String> {
     let mut running = std::collections::BTreeSet::new();
     for id in todos.iter().flat_map(|todo| &todo.waiting_on) {
+        if crate::await_dependency::running(&jcode_storage::runtime_dir(), id, session_id) {
+            running.insert(id.clone());
+            continue;
+        }
         if !is_safe_session_id(id) {
             continue;
         }

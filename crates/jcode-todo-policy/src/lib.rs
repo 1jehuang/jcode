@@ -2,11 +2,12 @@
 //! synthetic continuation messages (auto-poke, gate digest, ownership,
 //! completion confidence, final response), and their transcript classifiers.
 //!
-//! No storage or runtime dependencies, so the SDK and any embedding client can
-//! use the exact same policy as the TUI.
+//! Policy is independent of the agent runtime. Shared disk readers let the SDK
+//! and embedding clients use the same dependency state as the TUI.
 
 use serde::{Deserialize, Serialize};
 
+pub mod await_dependency;
 pub mod completion_report;
 pub mod followup;
 pub mod store;

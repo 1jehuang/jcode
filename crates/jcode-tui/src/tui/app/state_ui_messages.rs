@@ -228,8 +228,17 @@ impl App {
     /// row when completion arrived before the UI consumed its notification.
     pub(super) fn todo_waits_on_background_task(&self, todo: &crate::todo::TodoItem) -> bool {
         crate::todo::todo_waits_on_running_task(todo, |task_id| {
-            self.running_todo_background_dependency(task_id).is_some()
+            self.running_todo_await_dependency(task_id)
+                || self.running_todo_background_dependency(task_id).is_some()
         })
+    }
+
+    pub(super) fn running_todo_await_dependency(&self, task_id: &str) -> bool {
+        let session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&self.session.id);
+        crate::todo::await_dependency::running(&crate::storage::runtime_dir(), task_id, session_id)
     }
 
     pub(super) fn running_todo_background_dependency(

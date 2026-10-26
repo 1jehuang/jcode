@@ -459,8 +459,8 @@ pub struct TodoItem {
     pub confidence_history: Vec<ConfidenceState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
-    /// Existing background task IDs in this session. Dependencies block only
-    /// while running, never after completion (including failure/cancellation).
+    /// Existing background task or durable swarm await IDs in this session.
+    /// Dependencies block only while pending, never after completion or timeout.
     /// An empty array or null clears dependencies.
     #[serde(
         default,

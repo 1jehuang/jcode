@@ -2878,7 +2878,11 @@ fn run_actionable_todos(
         .filter(|todo| {
             !crate::todo::is_incomplete_todo(todo)
                 || !crate::todo::todo_waits_on_running_task(todo, |id| {
-                    tasks
+                    crate::todo::await_dependency::running(
+                        &crate::storage::runtime_dir(),
+                        id,
+                        session_id,
+                    ) || tasks
                         .iter()
                         .any(|task| task.task_id == id && run_task_is_waitable(task, session_id))
                 })
@@ -2912,7 +2916,7 @@ async fn prepare_run_todo_follow_up(
     todos: &[crate::todo::TodoItem],
     may_resume: bool,
 ) -> (Vec<crate::todo::TodoItem>, Option<String>) {
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
 
     let mut completion_messages = Vec::new();
     let dependencies: BTreeSet<_> = todos
@@ -2929,7 +2933,18 @@ async fn prepare_run_todo_follow_up(
         .collect();
     loop {
         let mut tasks = Vec::new();
+        let mut awaits = Vec::new();
         for id in &dependencies {
+            if crate::todo::await_dependency::running(
+                &crate::storage::runtime_dir(),
+                id,
+                session_id,
+            ) {
+                // This CLI owns continuation, just as for process-backed jobs.
+                let _ = crate::server::set_await_dependency_delivery(id, session_id, true, false);
+                awaits.push(id.clone());
+                continue;
+            }
             if let Some(task) = manager.status(id).await
                 && task.session_id == session_id
                 && task.task_id == *id
@@ -2954,8 +2969,8 @@ async fn prepare_run_todo_follow_up(
                 manager.disarm_stall_watchdog(&task.task_id).await;
             }
         }
-        let all_waiting =
-            !waiting.is_empty() && !actionable.iter().any(crate::todo::is_incomplete_todo);
+        let all_waiting = (!waiting.is_empty() || !awaits.is_empty())
+            && !actionable.iter().any(crate::todo::is_incomplete_todo);
         if !all_waiting || !may_resume {
             return (
                 actionable,
@@ -2966,17 +2981,35 @@ async fn prepare_run_todo_follow_up(
         let mut waits = futures::stream::FuturesUnordered::new();
         for task in waiting {
             let id = task.task_id.clone();
-            waits.push(async move {
-                loop {
-                    let result = manager
-                        .wait(&id, std::time::Duration::from_secs(3600), false)
-                        .await;
-                    match result {
-                        Some(result) if run_task_is_waitable(&result.task, session_id) => {}
-                        _ => return id,
+            waits.push(
+                async move {
+                    loop {
+                        let result = manager
+                            .wait(&id, std::time::Duration::from_secs(3600), false)
+                            .await;
+                        match result {
+                            Some(result) if run_task_is_waitable(&result.task, session_id) => {}
+                            _ => return id,
+                        }
                     }
                 }
-            });
+                .boxed(),
+            );
+        }
+        for id in awaits {
+            waits.push(
+                async move {
+                    while crate::todo::await_dependency::running(
+                        &crate::storage::runtime_dir(),
+                        &id,
+                        session_id,
+                    ) {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    id
+                }
+                .boxed(),
+            );
         }
         // Resume when any dependency resolves, not only the first task in the todo
         // list. Other tasks can remain in flight while newly unblocked work runs.
@@ -2998,7 +3031,13 @@ async fn prepare_run_todo_follow_up(
                 }
             }
             None => {
-                message.push_str("Task status is unavailable. Inspect or repair the stale dependency instead of waiting for it again.");
+                if let Some(state) =
+                    crate::todo::await_dependency::load(&crate::storage::runtime_dir(), &resolved)
+                {
+                    message.push_str(&format!("Swarm await result: {:?}", state.final_response));
+                } else {
+                    message.push_str("Task status is unavailable. Inspect or repair the stale dependency instead of waiting for it again.");
+                }
             }
         }
         completion_messages.push(message);

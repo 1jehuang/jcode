@@ -6,6 +6,69 @@ fn waiting_dependency_test_app() -> App {
     app
 }
 
+#[test]
+fn await_dependency_suppresses_pokes_and_survives_reload_until_terminal_or_timeout() {
+    with_temp_jcode_home(|| {
+        for timeout in [false, true] {
+            let mut app = waiting_dependency_test_app();
+            let key = format!("tui-await-{}", app.session.id);
+            let id = crate::todo::await_dependency::dependency_id(&key, 1);
+            let path = crate::storage::runtime_dir()
+                .join(crate::todo::await_dependency::STATE_DIR)
+                .join(format!("{key}.json"));
+            let _fixture = DependencyTaskFixture(path.clone());
+            let mut state = serde_json::json!({
+                "key": key, "session_id": app.session.id, "created_at_unix_ms": 1,
+                "deadline_unix_ms": u64::MAX, "background": true, "final_response": null
+            });
+            crate::storage::write_json_fast(&path, &state).unwrap();
+            let todo = dependency_todo("await-review", &id);
+            crate::todo::save_todos(&app.session.id, &[todo.clone()]).unwrap();
+            assert!(
+                app.background_task_rows.is_empty(),
+                "no process row or PID is required"
+            );
+            app.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
+            assert!(!app.schedule_auto_poke_followup_if_needed());
+            assert!(!app.schedule_turn_end_followups());
+            assert_eq!(app.auto_poke_attempts, 0);
+            assert!(app.queued_messages.is_empty());
+            let snapshot = crate::todo::store::load_snapshot(
+                &crate::storage::jcode_dir().unwrap(),
+                &app.session.id,
+            );
+            assert!(snapshot.running_background_tasks.contains(&id));
+            app.show_todo_card();
+            let payload: serde_json::Value =
+                serde_json::from_str(&app.display_messages.last().unwrap().content).unwrap();
+            assert_eq!(payload["background_tasks"][0]["label"], "Swarm await");
+            assert!(payload["background_tasks"][0]["percent"].is_null());
+            // A new client instance has no cached rows, and must still wait.
+            let mut reloaded = waiting_dependency_test_app();
+            reloaded.remote_session_id = Some(app.session.id.clone());
+            assert!(reloaded.todo_waits_on_background_task(&todo));
+            state["session_id"] = "foreign-owner".into();
+            crate::storage::write_json_fast(&path, &state).unwrap();
+            assert!(!reloaded.todo_waits_on_background_task(&todo));
+            state["session_id"] = app.session.id.clone().into();
+            if timeout {
+                state["deadline_unix_ms"] = 0.into();
+            } else {
+                state["final_response"] = serde_json::json!({"completed": true});
+            }
+            crate::storage::write_json_fast(&path, &state).unwrap();
+            assert!(!reloaded.todo_waits_on_background_task(&todo));
+            assert!(app.refresh_todo_card_if_needed());
+            assert!(app.schedule_auto_poke_followup_if_needed());
+            let snapshot = crate::todo::store::load_snapshot(
+                &crate::storage::jcode_dir().unwrap(),
+                &app.session.id,
+            );
+            assert!(!snapshot.running_background_tasks.contains(&id));
+        }
+    });
+}
+
 fn dependency_todo(id: &str, task_id: &str) -> crate::todo::TodoItem {
     crate::todo::TodoItem {
         id: id.into(),

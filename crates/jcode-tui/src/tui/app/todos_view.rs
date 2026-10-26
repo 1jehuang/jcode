@@ -157,6 +157,14 @@ impl App {
                 {
                     continue;
                 }
+                if self.running_todo_await_dependency(id) {
+                    tasks.push(crate::tui::ui::TodoCardBackgroundTask {
+                        task_id: id.clone(),
+                        label: "Swarm await".into(),
+                        percent: None,
+                    });
+                    continue;
+                }
                 let Some(status) = self.running_todo_background_dependency(id) else {
                     continue;
                 };

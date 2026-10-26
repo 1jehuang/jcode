@@ -1938,7 +1938,7 @@ impl Tool for CommunicateTool {
                 "timeout_minutes": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional timeout for await_members."
+                    "description": "Optional timeout for await_members. Returns a durable dependency ID for todo.waiting_on, which pauses dependent todos until completion or timeout."
                 },
                 "background": {
                     "type": "boolean",

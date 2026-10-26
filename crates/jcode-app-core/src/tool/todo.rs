@@ -45,7 +45,25 @@ async fn prepare_background_dependencies(
         }
     }
     let mut running = Vec::new();
+    let mut awaits = Vec::new();
     for (id, (is_new, active)) in ids {
+        if id.starts_with(crate::todo::await_dependency::ID_PREFIX) {
+            let dependency =
+                crate::todo::await_dependency::load(&crate::storage::runtime_dir(), id);
+            match dependency {
+                Some(dependency) => {
+                    if dependency.session_id != session_id {
+                        bail!("waiting_on await does not belong to this session: {id}");
+                    }
+                    if active && dependency.is_running() {
+                        awaits.push(id);
+                    }
+                }
+                None if is_new => bail!("Unknown waiting_on await dependency: {id}"),
+                None => {}
+            }
+            continue;
+        }
         let Some(task) = manager.status(id).await else {
             if is_new {
                 bail!("Unknown waiting_on background task: {id}");
@@ -63,6 +81,9 @@ async fn prepare_background_dependencies(
         if active && task.status == crate::bus::BackgroundTaskStatus::Running {
             running.push(id);
         }
+    }
+    for id in awaits {
+        crate::server::subscribe_await_dependency(id, session_id)?;
     }
     for id in running {
         // The task may finish between validation and subscription. Terminal
@@ -1116,7 +1137,7 @@ impl Tool for TodoTool {
          Mark work in_progress before starting and completed as soon as it is done. \
          Keep the live list current after meaningful steps. Use short titles, with \
          longer context in details. Organize parallel lanes within sequential phases. \
-         Set waiting_on to existing background task IDs from this session when work \
+         Set waiting_on to existing background task IDs or swarm await_members dependency IDs from this session when work \
          must wait. They block only while running, never after completion. Saving \
          enables completion notify/wake. Use [] or null to clear waiting_on."
     }
@@ -1168,7 +1189,7 @@ impl Tool for TodoTool {
                             "waiting_on": {
                                 "type": ["array", "null"],
                                 "items": {"type": "string"},
-                                "description": "Existing background task IDs in this session. Block only while running, never after completion. Enables completion notify/wake. [] or null clears."
+                                "description": "Existing background task IDs or swarm await_members dependency IDs in this session. Block only while pending, never after completion or timeout. Enables completion notify/wake. [] or null clears."
                             },
                             "status": {
                                 "type": "string",
@@ -2445,6 +2466,76 @@ mod tests {
         prepare_background_dependencies(&manager, &session, &[], &[item])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn await_dependencies_validate_before_delivery_and_accept_terminal_race() {
+        let _guard = crate::storage::lock_test_env();
+        let key = format!("todo-await-{}", uuid::Uuid::new_v4());
+        let session = "todo-await-owner";
+        let id = crate::todo::await_dependency::dependency_id(&key, 1);
+        let path = crate::storage::runtime_dir()
+            .join(crate::todo::await_dependency::STATE_DIR)
+            .join(format!("{key}.json"));
+        let mut state = json!({
+            "key": key, "session_id": session, "swarm_id": "swarm",
+            "target_status": ["completed"], "requested_ids": ["worker"],
+            "created_at_unix_ms": 1, "deadline_unix_ms": u64::MAX,
+            "background": true, "notify": false, "wake": false, "final_response": null
+        });
+        crate::storage::write_json_fast(&path, &state).unwrap();
+        let manager = crate::background::BackgroundTaskManager::new();
+        let item = TodoItem {
+            waiting_on: vec![id.clone()],
+            ..Default::default()
+        };
+        assert!(
+            prepare_background_dependencies(&manager, "foreign", &[], std::slice::from_ref(&item))
+                .await
+                .is_err()
+        );
+        let invalid = TodoItem {
+            waiting_on: vec!["await-unknown-1".into()],
+            ..Default::default()
+        };
+        assert!(
+            prepare_background_dependencies(&manager, session, &[], &[item.clone(), invalid])
+                .await
+                .is_err()
+        );
+        let unchanged: Value = crate::storage::read_json(&path).unwrap();
+        assert_eq!(unchanged["wake"], false);
+        prepare_background_dependencies(&manager, session, &[], std::slice::from_ref(&item))
+            .await
+            .unwrap();
+        let subscribed: Value = crate::storage::read_json(&path).unwrap();
+        assert_eq!(subscribed["notify"], true);
+        assert_eq!(subscribed["wake"], true);
+        state["final_response"] = json!({"completed": true, "members": [], "summary": "done", "resolved_at_unix_ms": crate::todo::await_dependency::now_unix_ms()});
+        crate::storage::write_json_fast(&path, &state).unwrap();
+        prepare_background_dependencies(&manager, session, &[], std::slice::from_ref(&item))
+            .await
+            .unwrap();
+        assert!(!crate::todo::await_dependency::running(
+            &crate::storage::runtime_dir(),
+            &id,
+            session
+        ));
+        std::fs::remove_file(path).unwrap();
+        // Historical IDs can remain on the same todo after state cleanup.
+        prepare_background_dependencies(
+            &manager,
+            session,
+            std::slice::from_ref(&item),
+            std::slice::from_ref(&item),
+        )
+        .await
+        .unwrap();
+        assert!(
+            prepare_background_dependencies(&manager, session, &[], &[item])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

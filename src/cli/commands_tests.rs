@@ -609,6 +609,64 @@ fn dependency_todo(id: &str, dependencies: &[&str]) -> crate::todo::TodoItem {
 }
 
 #[tokio::test]
+async fn run_await_dependency_waits_without_poking_and_resumes_on_terminal_or_timeout() {
+    let _guard = crate::storage::lock_test_env();
+    for timed_out in [false, true] {
+        let key = format!("cli-await-{}", uuid::Uuid::new_v4());
+        let id = crate::todo::await_dependency::dependency_id(&key, 1);
+        let path = crate::storage::runtime_dir()
+            .join(crate::todo::await_dependency::STATE_DIR)
+            .join(format!("{key}.json"));
+        let mut state = serde_json::json!({
+            "key": key, "session_id": "cli-await", "swarm_id": "swarm",
+            "target_status": ["completed"], "requested_ids": ["worker"],
+            "created_at_unix_ms": 1, "deadline_unix_ms": u64::MAX,
+            "background": true, "notify": true, "wake": true, "final_response": null
+        });
+        crate::storage::write_json_fast(&path, &state).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+        let todos = vec![dependency_todo("waiting", &[&id])];
+        let mut mixed = todos.clone();
+        mixed.push(dependency_todo("independent", &[]));
+        let (actionable, _) = prepare_run_todo_follow_up(&manager, "cli-await", &mixed, true).await;
+        assert_eq!(actionable.len(), 1);
+        assert_eq!(actionable[0].id, "independent");
+        assert_eq!(run_actionable_todos(&todos, &[], "foreign").len(), 1);
+        let mut followup = std::pin::pin!(prepare_run_todo_follow_up(
+            &manager,
+            "cli-await",
+            &todos,
+            true
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut followup)
+                .await
+                .is_err()
+        );
+        let saved: serde_json::Value = crate::storage::read_json(&path).unwrap();
+        assert_eq!(
+            saved["wake"], false,
+            "CLI owns the continuation, not a second daemon turn"
+        );
+        if timed_out {
+            state["deadline_unix_ms"] = 0.into();
+        } else {
+            state["final_response"] =
+                serde_json::json!({"completed":true,"summary":"worker finished"});
+        }
+        crate::storage::write_json_fast(&path, &state).unwrap();
+        let (actionable, resumed) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut followup)
+                .await
+                .unwrap();
+        assert_eq!(actionable.len(), 1);
+        assert!(resumed.unwrap().contains(&id));
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn run_dependency_mixed_work_stays_actionable_and_scoped() {
     let temp = tempfile::tempdir().unwrap();
     let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());

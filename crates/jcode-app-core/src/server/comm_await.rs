@@ -172,7 +172,9 @@ fn background_completion_notification(
 /// watcher captured its own copy at spawn, so re-reading before exit/finalize
 /// keeps the watcher in sync with what the requesting tool was last told.
 fn refresh_pending_state(state: &PersistedAwaitMembersState) -> Option<PersistedAwaitMembersState> {
-    load_state(&state.key).filter(PersistedAwaitMembersState::is_pending)
+    load_state(&state.key).filter(|current| {
+        current.created_at_unix_ms == state.created_at_unix_ms && current.is_pending()
+    })
 }
 
 /// Persist the terminal result, reply to any blocking socket waiters, and, when
@@ -190,9 +192,10 @@ async fn finalize_await(
     // Deliver with the latest persisted prefs: a duplicate request may have
     // changed background/notify/wake after the caller captured this copy.
     let state = refresh_pending_state(state).unwrap_or_else(|| state.clone());
-    let _ = persist_final_response(&state, completed, members.clone(), summary.clone());
+    let (state, newly_finalized) =
+        persist_final_response(&state, completed, members.clone(), summary.clone());
 
-    if state.background && (state.notify || state.wake) {
+    if newly_finalized && state.background && (state.notify || state.wake) {
         let notification = background_completion_notification(completed, &summary, &members);
         Bus::global().publish(BusEvent::SwarmAwaitCompleted(SwarmAwaitCompleted {
             session_id: state.session_id.clone(),
@@ -204,7 +207,18 @@ async fn finalize_await(
         }));
     }
 
-    respond_to_waiters(runtime, &state.key, completed, members, summary).await;
+    let result = state
+        .final_response
+        .as_ref()
+        .expect("final response was persisted");
+    respond_to_waiters(
+        runtime,
+        &state.dependency_id(),
+        result.completed,
+        result.members.clone(),
+        result.summary.clone(),
+    )
+    .await;
 }
 
 pub(super) async fn spawn_or_resume_await_members(
@@ -215,7 +229,7 @@ pub(super) async fn spawn_or_resume_await_members(
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
     await_members_runtime: AwaitMembersRuntime,
 ) {
-    let key = state.key.clone();
+    let key = state.dependency_id();
     let swarm_id = state.swarm_id.clone();
     let requested_ids = state.requested_ids.clone();
     let target_status = state.target_status.clone();
@@ -442,11 +456,15 @@ pub(super) async fn handle_comm_await_members(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
+        // A completed generation may still be draining socket waiters while
+        // this new one starts. Never share runtime ownership between them.
+        let runtime_key = state.dependency_id();
 
         // Background mode: hand off to a detached watcher and answer the tool
         // immediately so the requesting turn stays responsive. Completion is
         // delivered later via notify/wake.
         if background {
+            let dependency_id = state.dependency_id();
             if already_expired {
                 let summary = timeout_summary(&initial_statuses);
                 finalize_await(
@@ -473,7 +491,11 @@ pub(super) async fn handle_comm_await_members(
                 return;
             }
 
-            if ctx.await_members_runtime.mark_active_if_new(&key).await {
+            if ctx
+                .await_members_runtime
+                .mark_active_if_new(&runtime_key)
+                .await
+            {
                 publish_await_started_card(&state, &initial_statuses);
                 spawn_or_resume_await_members(
                     state,
@@ -486,7 +508,10 @@ pub(super) async fn handle_comm_await_members(
                 .await;
             }
 
-            let summary = background_started_summary(&initial_statuses, mode.as_deref(), wake);
+            let summary = format!(
+                "{}\n\nDependency ID: `{dependency_id}`. Set todo.waiting_on to [\"{dependency_id}\"] for work that must wait. It blocks only while this await is pending and releases on completion or timeout, including across reloads.",
+                background_started_summary(&initial_statuses, mode.as_deref(), wake)
+            );
             let _ = ctx
                 .client_event_tx
                 .send(ServerEvent::CommAwaitMembersResponse {
@@ -501,7 +526,7 @@ pub(super) async fn handle_comm_await_members(
 
         // Blocking mode: register a socket waiter that the watcher resolves.
         ctx.await_members_runtime
-            .add_waiter(&key, id, ctx.client_event_tx)
+            .add_waiter(&runtime_key, id, ctx.client_event_tx)
             .await;
 
         if already_expired {
@@ -510,7 +535,7 @@ pub(super) async fn handle_comm_await_members(
                 persist_final_response(&state, false, initial_statuses.clone(), summary.clone());
             respond_to_waiters(
                 ctx.await_members_runtime,
-                &key,
+                &runtime_key,
                 false,
                 initial_statuses,
                 summary,
@@ -519,7 +544,11 @@ pub(super) async fn handle_comm_await_members(
             return;
         }
 
-        if ctx.await_members_runtime.mark_active_if_new(&key).await {
+        if ctx
+            .await_members_runtime
+            .mark_active_if_new(&runtime_key)
+            .await
+        {
             spawn_or_resume_await_members(
                 state,
                 req_session_id,
@@ -656,7 +685,7 @@ pub(super) async fn resume_background_awaits(
             continue;
         }
 
-        let key = state.key.clone();
+        let key = state.dependency_id();
         if await_members_runtime.mark_active_if_new(&key).await {
             let req_session_id = state.session_id.clone();
             spawn_or_resume_await_members(
