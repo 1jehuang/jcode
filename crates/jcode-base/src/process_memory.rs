@@ -559,8 +559,17 @@ pub fn release_retained_heap(reason: &str) {
         ));
     }
 
+    #[cfg(all(target_os = "macos", not(feature = "jemalloc")))]
+    {
+        let released = macos_malloc_pressure_relief();
+        logging::debug(&format!(
+            "malloc_zone_pressure_relief ({reason}): released {released} bytes"
+        ));
+    }
+
     #[cfg(all(
         not(all(target_os = "linux", target_env = "gnu")),
+        not(target_os = "macos"),
         not(feature = "jemalloc")
     ))]
     {
@@ -571,6 +580,17 @@ pub fn release_retained_heap(reason: &str) {
     // unrecoverable floor (fragmentation residual); measure future growth
     // from it so retention-triggered callers stay quiet at steady state.
     record_post_trim_retention_baseline();
+}
+
+/// Ask the macOS system allocator to return all freed-but-resident pages to
+/// the OS (`malloc_zone_pressure_relief(NULL, 0)` covers every zone).
+/// Returns the number of bytes released.
+#[cfg(all(target_os = "macos", not(feature = "jemalloc")))]
+pub fn macos_malloc_pressure_relief() -> usize {
+    unsafe extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+    }
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) }
 }
 
 static LAST_HEAP_RELEASE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
