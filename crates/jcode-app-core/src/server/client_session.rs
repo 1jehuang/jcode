@@ -1808,17 +1808,38 @@ pub(super) async fn handle_resume_session(
     }
 
     let restored_ms = resume_start.elapsed().as_millis();
-    // Persist the restore (status, env snapshot) off the History critical
-    // path, but never skip it: it runs once History is sent or on any error.
-    let persist_restored = || async {
+    // On restore failure this agent has not been published as the target yet.
+    if result.is_err() {
         let mut agent_guard = agent.lock().await;
         super::run_blocking_io(|| agent_guard.persist_restored_session());
-    };
-    if result.is_err() {
-        persist_restored().await;
     }
     match result {
         Ok(_prev_status) => {
+            // Snapshot everything needed by the remainder of attachment before
+            // publishing this agent. Recovery/background work can start a turn
+            // as soon as it is registered and hold its mutex for minutes. The
+            // socket reader must not wait for that turn after sending History.
+            let (model_changed, mcp_working_dir) = {
+                let guard = agent.lock().await;
+                (
+                    ServerEvent::ModelChanged {
+                        id,
+                        model: guard.provider_model(),
+                        provider_name: Some(guard.provider_name()),
+                        context_window: Some(guard.provider_context_window() as u64),
+                        error: None,
+                        resolved_credential: guard.active_resolved_credential(),
+                        provider_oauth_email: super::provider_oauth_email(
+                            guard.provider_handle().as_ref(),
+                        ),
+                        reasoning_effort: guard.provider_reasoning_effort(),
+                        provider_oauth_account_label: guard
+                            .provider_handle()
+                            .serving_oauth_account_label(),
+                    },
+                    guard.working_dir().map(PathBuf::from),
+                )
+            };
             let old_session_id = client_session_id.clone();
             *client_session_id = session_id.clone();
             let attach_start = Instant::now();
@@ -1961,26 +1982,8 @@ pub(super) async fn handle_resume_session(
             .await;
             lap("event_sender");
 
-            // Captured before the history call, which takes the agent, so the restored
-            // route can still be reported to a client that has never been told.
-            let (
-                resumed_model,
-                resumed_provider_name,
-                resumed_context_window,
-                resumed_credential,
-                resumed_reasoning_effort,
-                resumed_oauth_account_label,
-            ) = {
-                let guard = agent.lock().await;
-                (
-                    guard.provider_model(),
-                    guard.provider_name(),
-                    guard.provider_context_window(),
-                    guard.active_resolved_credential(),
-                    guard.provider_reasoning_effort(),
-                    guard.provider_handle().serving_oauth_account_label(),
-                )
-            };
+            // Route metadata was captured before the restored agent became
+            // available to recovery workers.
 
             lap("agent_route");
             let attach_ms = attach_start.elapsed().as_millis();
@@ -2012,7 +2015,13 @@ pub(super) async fn handle_resume_session(
                 history_base,
             )
             .await;
-            persist_restored().await;
+            // Persist even if history delivery failed, but do not make inbound
+            // controls wait for a recovery turn that already owns the agent.
+            let persist_agent = Arc::clone(agent);
+            crate::runtime_activity::spawn(async move {
+                let mut guard = persist_agent.lock().await;
+                super::run_blocking_io(|| guard.persist_restored_session());
+            });
             history_result?;
             let history_sent_ms = resume_start.elapsed().as_millis();
             let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -2037,25 +2046,9 @@ pub(super) async fn handle_resume_session(
             // from its own inert provider and fall back to the generic 200K
             // default. Measured: a route whose catalog entry carries 1000000
             // displayed 200000 after every resume.
-            let _ = client_event_tx.send(ServerEvent::ModelChanged {
-                id,
-                model: resumed_model,
-                provider_name: Some(resumed_provider_name),
-                context_window: Some(resumed_context_window as u64),
-                error: None,
-                resolved_credential: resumed_credential,
-                provider_oauth_email: super::provider_oauth_email(
-                    agent.lock().await.provider_handle().as_ref(),
-                ),
-                reasoning_effort: resumed_reasoning_effort,
-                provider_oauth_account_label: resumed_oauth_account_label,
-            });
+            let _ = client_event_tx.send(model_changed);
             // Resolve project-local MCP config against the restored session's
-            // working dir, not the server process cwd (issue #420).
-            let mcp_working_dir = {
-                let agent_guard = agent.lock().await;
-                agent_guard.working_dir().map(PathBuf::from)
-            };
+            // working dir captured before publication (issue #420).
             registry
                 .register_mcp_tools_for_dir(
                     Some(client_event_tx.clone()),
