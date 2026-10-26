@@ -723,3 +723,47 @@ fn issue_1753_inert_text_stays_safe() {
         assert!(level(command).runs_immediately(), "{command:?}");
     }
 }
+
+#[test]
+fn issue_932_a_leading_cd_moves_where_relative_targets_resolve() {
+    // A relative delete after `cd` resolves against the directory the shell is
+    // actually in, not the tool call's working directory. Without the tracking
+    // these looked like ordinary deletes inside the workspace.
+    assert_eq!(level("cd /etc && rm -rf passwd"), RiskLevel::Catastrophic);
+    assert_eq!(level("cd /etc; rm -rf passwd"), RiskLevel::Catastrophic);
+    assert_eq!(
+        level("cd / && cd etc && rm -rf passwd"),
+        RiskLevel::Catastrophic
+    );
+    assert_eq!(level("cd ~/.ssh && rm -rf *"), RiskLevel::Catastrophic);
+    // `cd` with no operand goes home.
+    assert_eq!(level("cd && rm -rf Documents"), RiskLevel::Catastrophic);
+
+    // A temp-directory cleanup must not be attributed to the workspace.
+    let assessment = assess("cd /tmp && rm -rf build-xyz", &ctx());
+    assert!(
+        assessment
+            .findings
+            .iter()
+            .all(|finding| finding.target.as_deref() != Some("/home/u/proj/build-xyz")),
+        "{:?}",
+        assessment.findings
+    );
+    assert!(
+        assessment.level.runs_immediately(),
+        "{:?}",
+        assessment.findings
+    );
+
+    // A destination that cannot be resolved statically is not assumed to be
+    // the workspace either.
+    let assessment = assess("cd $UNKNOWN_DIR && rm -rf build-xyz", &ctx());
+    assert!(
+        assessment
+            .findings
+            .iter()
+            .all(|finding| finding.target.as_deref() != Some("/home/u/proj/build-xyz")),
+        "{:?}",
+        assessment.findings
+    );
+}
