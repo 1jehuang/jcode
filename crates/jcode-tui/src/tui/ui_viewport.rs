@@ -1554,6 +1554,24 @@ pub(crate) fn pinned_todo_band_lines(
             }
         }
     }
+    if width > 0
+        && viewport_height >= 3
+        && let Some(status) = app.justrust_status()
+    {
+        let color = match status.tone {
+            crate::tui::justrust_status::Tone::Active => ratatui::style::Color::Cyan,
+            crate::tui::justrust_status::Tone::Success => ratatui::style::Color::Green,
+            crate::tui::justrust_status::Tone::Failure => ratatui::style::Color::Red,
+        };
+        let line = Line::from(Span::styled(
+            format!("  {}", status.text),
+            Style::default().fg(color),
+        ));
+        lines.push(super::truncate_line_with_ellipsis_to_width(
+            &line,
+            width as usize,
+        ));
+    }
     (lines, more)
 }
 

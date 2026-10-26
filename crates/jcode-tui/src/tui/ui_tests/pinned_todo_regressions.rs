@@ -37,6 +37,50 @@ fn todo_payload() -> String {
 }
 
 #[test]
+fn justrust_status_is_below_todos_and_never_wraps() {
+    let _render_lock = viewport_snapshot_test_lock();
+    with_pinned_todos_config(|| {
+        let mut state = TestState {
+            pinned_todos_payload: Some(todo_payload()),
+            justrust_status: Some(crate::tui::justrust_status::StatusRow {
+                text: "justrust [remote/hosted] test 编译器 · 51s · 7.8/96 cores".into(),
+                tone: crate::tui::justrust_status::Tone::Active,
+            }),
+            ..Default::default()
+        };
+        for width in [1, 8, 16, 40, 80, 160] {
+            let (lines, _) = viewport::pinned_todo_band_lines(&state, width, 24);
+            assert!(lines.iter().all(|line| line.width() <= width as usize));
+            if width >= 80 {
+                assert!(lines.last().unwrap().to_string().contains("justrust"));
+                assert!(
+                    lines[..lines.len() - 1]
+                        .iter()
+                        .any(|line| line.to_string().contains("Pinned regression task"))
+                );
+            }
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .unwrap();
+        let text = terminal_text(&terminal);
+        assert_eq!(text.matches("justrust").count(), 1, "{text}");
+        assert!(text.find("Pinned regression task").unwrap() < text.find("justrust").unwrap());
+
+        state.pinned_todos_payload = None;
+        let (lines, _) = viewport::pinned_todo_band_lines(&state, 100, 24);
+        assert_eq!(lines.len(), 1, "a build row does not require todos");
+        state.justrust_status = None;
+        assert!(
+            viewport::pinned_todo_band_lines(&state, 100, 24)
+                .0
+                .is_empty()
+        );
+    });
+}
+
+#[test]
 fn pinned_todos_share_top_band_with_swarm_only_on_wide_terminals() {
     let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
