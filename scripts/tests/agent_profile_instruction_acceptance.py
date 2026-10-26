@@ -72,7 +72,8 @@ class Peer:
         return self.request("state", "state")["session_id"]
 
 class Fixture:
-    def __init__(self, binary, seconds=150):
+    def __init__(self, binary, seconds=150, plugin_data_spoof=None):
+        self.plugin_data_spoof = plugin_data_spoof
         self.binary, self.deadline = binary, time.monotonic() + seconds
         self.server = self.http = self.http_thread = self.wire = self.log = None
         self.peers, self.release = [], threading.Event()
@@ -163,6 +164,8 @@ id = "acceptance-no-inference"
                         XDG_CACHE_HOME=str(self.root / "cache"), TMPDIR=str(self.root / "tmp"),
                         JCODE_SOCKET=str(self.endpoint), JCODE_NO_TELEMETRY="1", DO_NOT_TRACK="1",
                         JCODE_NO_MENUBAR="1", TERM="xterm-256color")
+        if self.plugin_data_spoof is not None:
+            self.env['CLAUDE_PLUGIN_DATA'] = self.plugin_data_spoof
         self.wire = (self.root / "wire.jsonl").open("w")
         self.log = (self.root / "server.log").open("w")
         self.command = [str(binary), "--no-update", "--no-selfdev", "--socket", str(self.endpoint),
