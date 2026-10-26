@@ -1,9 +1,10 @@
-//! `/cloud` and `/local`: move the current session to a cloud host and back.
+//! `/cloud` moves a session and its swarm. `/local` returns ungrouped sessions.
 //!
 //! The heavy lifting is the `jcode cloud move|return` CLI. The TUI only runs it
 //! for the current session between turns, surfaces the result in the chat, and
 //! then reattaches at the new location (SSH attach for `/cloud`, local resume
-//! for `/local`). A failure leaves everything where it was.
+//! for `/local`). An uncertain group activation keeps source sessions fenced
+//! until the same move is retried, rather than risking two active owners.
 //!
 //! Mid-turn requests replace one pending destination. Only host preparation may
 //! run during a turn: it does not snapshot the session or migrate a process.
@@ -558,7 +559,7 @@ impl App {
             && !self.should_quit
             && let Some(pending) = self.pending_cloud_handoff.as_ref()
             && !pending.prepared
-            && let (CloudCommand::Move { host } | CloudCommand::MoveSelected { host, .. }) =
+            && let CloudCommand::Move { host } | CloudCommand::MoveSelected { host, .. } =
                 &pending.command
         {
             let command = CloudCommand::Prepare { host: host.clone() };
@@ -988,7 +989,7 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
             let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_default();
             let host = report["host"].as_str().unwrap_or_default().to_string();
             let repo_root = report["repo_root"].as_str().map(str::to_string);
-            let selected = report_session_ids(&report, "session_ids");
+            let selected = report_session_ids(&report, "members");
             let excluded = report_session_ids(&report, "excluded_session_ids");
             let group = selected.len() > 1;
             let selection_note = if selected.is_empty() {
@@ -1199,7 +1200,7 @@ mod tests {
             job,
             output(
                 true,
-                r#"{"host":"box","session_id":"coordinator","session_ids":["coordinator","worker"],"excluded_session_ids":["other"]}"#,
+                r#"{"host":"box","session_id":"coordinator","members":["coordinator","worker"],"excluded_session_ids":["other"]}"#,
             ),
         );
         assert!(matches!(app.cloud_handoff_requested,
