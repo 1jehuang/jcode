@@ -802,8 +802,18 @@ async fn broadcast_swarm_status_now(
                         todo_items: m.todo_items.clone(),
                         runtime: crate::protocol::SwarmMemberRuntime {
                             live_status: super::live_status::snapshot(&m.session_id),
-                            wait_reason: wait.as_ref().map(|(reason, _)| reason.clone()),
+                            wait_reason: wait.as_ref().map(|(reason, _)| reason.clone()).or_else(
+                                || {
+                                    (!matches!(
+                                        m.status.as_str(),
+                                        "running" | "streaming" | "thinking"
+                                    ))
+                                    .then(|| m.runtime.todo_user_action_reason.clone())
+                                    .flatten()
+                                },
+                            ),
                             wait_age_secs: wait.map(|(_, age)| age),
+                            todo_user_action_reason: m.runtime.todo_user_action_reason.clone(),
                             todo_statuses: m.runtime.todo_statuses.clone(),
                             model: m.runtime.model.clone(),
                             provider: m.runtime.provider.clone(),
@@ -1684,7 +1694,11 @@ pub(super) async fn update_member_status_with_report_tldr(
             }
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
-            if status_changed || super::live_status::snapshot(session_id).is_none() {
+            let detail_changed = member.detail != detail;
+            if status_changed
+                || detail_changed
+                || super::live_status::snapshot(session_id).is_none()
+            {
                 if matches!(status, "running" | "streaming" | "thinking") {
                     if !matches!(
                         previous_status.as_str(),
@@ -1697,7 +1711,6 @@ pub(super) async fn update_member_status_with_report_tldr(
                     super::live_status::finish(session_id, status, detail.as_deref());
                 }
             }
-            let detail_changed = member.detail != detail;
             let report_changed =
                 completion_report.is_some() && member.latest_completion_report != completion_report;
             let member_changed = status_changed || detail_changed || report_changed;
@@ -2245,6 +2258,24 @@ mod tests {
         assert_eq!(stopped.phase, "stopped");
         assert_eq!(stopped.stop_reason.as_deref(), Some("User requested stop"));
         assert!(stopped.tool_name.is_none());
+        update_member_status(
+            sid,
+            "stopped",
+            Some("Owner intervention needed".into()),
+            &members,
+            &swarms,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            super::super::live_status::snapshot(sid)
+                .unwrap()
+                .stop_reason
+                .as_deref(),
+            Some("Owner intervention needed")
+        );
         // Late queued events cannot revive the finished turn.
         super::super::fanout_session_event(
             &members,
@@ -2262,6 +2293,57 @@ mod tests {
         let restarted = super::super::live_status::snapshot(sid).unwrap();
         assert!(restarted.connection_type.is_none());
         assert!(restarted.input_tokens.is_none());
+        let mut todos = crate::bus::TodoEvent {
+            session_id: sid.into(),
+            todos: vec![crate::todo::TodoItem {
+                id: "login".into(),
+                content: "Authenticate".into(),
+                status: "pending".into(),
+                requires_user_action: Some(crate::todo::TodoUserAction {
+                    action: "Sign in".into(),
+                    reason: "Only the owner can authenticate".into(),
+                }),
+                ..Default::default()
+            }],
+        };
+        super::super::background_tasks::dispatch_swarm_todo_progress(&todos, &members, &swarms)
+            .await;
+        update_member_status(sid, "ready", None, &members, &swarms, None, None, None).await;
+        super::broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let latest = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                ServerEvent::SwarmStatus { members } => Some(members[0].runtime.clone()),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        assert!(
+            latest
+                .wait_reason
+                .as_deref()
+                .unwrap()
+                .contains("Only the owner can authenticate")
+        );
+        assert_eq!(latest.todo_statuses, vec!["requires_user_action"]);
+        todos.todos.push(crate::todo::TodoItem {
+            id: "independent".into(),
+            content: "Run tests".into(),
+            status: "in_progress".into(),
+            ..Default::default()
+        });
+        super::super::background_tasks::dispatch_swarm_todo_progress(&todos, &members, &swarms)
+            .await;
+        update_member_status(sid, "running", None, &members, &swarms, None, None, None).await;
+        super::broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let latest = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                ServerEvent::SwarmStatus { members } => Some(members[0].runtime.clone()),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        assert!(latest.wait_reason.is_none());
+        assert_eq!(latest.live_status.unwrap().phase, "sending");
         super::super::live_status::forget(sid);
     }
 

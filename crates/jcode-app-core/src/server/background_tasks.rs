@@ -368,7 +368,7 @@ pub(super) async fn dispatch_swarm_todo_progress(
         Some((completed, total))
     };
     let mut items = compact_todo_items(&event.todos);
-    let statuses: Vec<String> = event.todos.iter().map(|todo| todo.status.clone()).collect();
+    let (statuses, user_wait) = todo_runtime_projection(&event.todos);
 
     let swarm_id = {
         let mut members = swarm_members.write().await;
@@ -390,12 +390,14 @@ pub(super) async fn dispatch_swarm_todo_progress(
         if member.todo_progress == progress
             && member.todo_items == items
             && member.runtime.todo_statuses == statuses
+            && member.runtime.todo_user_action_reason == user_wait
         {
             return; // no change, skip the broadcast
         }
         member.todo_progress = progress;
         member.todo_items = items;
         member.runtime.todo_statuses = statuses;
+        member.runtime.todo_user_action_reason = user_wait;
         member.swarm_id.clone()
     };
     if let Some(swarm_id) = swarm_id {
@@ -556,6 +558,40 @@ const SWARM_TODO_CONTENT_CAP: usize = 120;
 const SWARM_TOOL_INTENTS_CAP: usize = 3;
 const SWARM_TOOL_INTENT_CAP: usize = 120;
 
+fn todo_display_status(todo: &crate::todo::TodoItem) -> String {
+    if crate::todo::todo_requires_user_action(todo) {
+        "requires_user_action".into()
+    } else {
+        todo.status.clone()
+    }
+}
+
+/// A user-only pause applies to the worker only when every unfinished item
+/// needs the user. Independent pending/running work must remain actionable.
+pub(super) fn todo_runtime_projection(
+    todos: &[crate::todo::TodoItem],
+) -> (Vec<String>, Option<String>) {
+    let statuses = todos.iter().map(todo_display_status).collect();
+    let unfinished: Vec<_> = todos
+        .iter()
+        .filter(|todo| crate::todo::is_incomplete_todo(todo))
+        .collect();
+    let reason = (!unfinished.is_empty()
+        && unfinished
+            .iter()
+            .all(|todo| crate::todo::todo_requires_user_action(todo)))
+    .then(|| {
+        unfinished
+            .iter()
+            .filter_map(|todo| todo.requires_user_action.as_ref())
+            .map(|required| format!("{} ({})", required.action.trim(), required.reason.trim()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+    .map(|reason| format!("User action required: {reason}"));
+    (statuses, reason)
+}
+
 /// Build the capped, display-only todo snapshot that crosses the swarm
 /// boundary. Prefers showing the active window: everything from the first
 /// non-completed item onward, then backfills with the most recent completed
@@ -575,7 +611,7 @@ pub(super) fn compact_todo_items(
         .take(SWARM_TODO_ITEMS_CAP)
         .map(|t| crate::protocol::SwarmTodoItem {
             content: cap_chars(&t.content, SWARM_TODO_CONTENT_CAP),
-            status: t.status.clone(),
+            status: todo_display_status(t),
             tool_intents: Vec::new(),
         })
         .collect()
@@ -682,6 +718,43 @@ mod tests {
         assert_eq!(
             members.read().await["worker"].runtime.todo_statuses[19],
             "in_progress"
+        );
+        for todo in &mut event.todos {
+            todo.requires_user_action = Some(crate::todo::TodoUserAction {
+                action: "Sign in".into(),
+                reason: "Only the owner can authenticate".into(),
+            });
+        }
+        dispatch_swarm_todo_progress(&event, &members, &swarms).await;
+        {
+            let members = members.read().await;
+            let runtime = &members["worker"].runtime;
+            assert!(
+                runtime
+                    .todo_statuses
+                    .iter()
+                    .all(|s| s == "requires_user_action")
+            );
+            assert!(
+                runtime
+                    .todo_user_action_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("Only the owner can authenticate")
+            );
+            assert_eq!(
+                members["worker"].todo_items[0].status,
+                "requires_user_action"
+            );
+        }
+        event.todos[19].requires_user_action = None;
+        dispatch_swarm_todo_progress(&event, &members, &swarms).await;
+        assert!(
+            members.read().await["worker"]
+                .runtime
+                .todo_user_action_reason
+                .is_none(),
+            "independent in-progress work prevents a worker-wide pause"
         );
     }
 

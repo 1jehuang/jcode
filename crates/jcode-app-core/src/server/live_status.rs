@@ -25,6 +25,7 @@ struct Projection {
     new_call: bool,
     tool_inputs: HashMap<String, String>,
     last_tool_id: Option<String>,
+    interruption_reason: Option<String>,
 }
 
 impl Projection {
@@ -43,6 +44,7 @@ impl Projection {
             new_call: true,
             tool_inputs: HashMap::new(),
             last_tool_id: None,
+            interruption_reason: None,
         }
     }
 
@@ -65,7 +67,6 @@ impl Projection {
                 } else {
                     self.pause(now);
                     self.value.phase = "connecting".into();
-                    self.new_call = true;
                 }
                 self.value.connection_phase = Some(phase.clone());
                 self.value.stream_message_ended = false;
@@ -103,7 +104,7 @@ impl Projection {
                 self.total_output = self
                     .total_output
                     .saturating_add(output.saturating_sub(self.call_output));
-                self.call_output = *output;
+                self.call_output = self.call_output.max(*output);
                 self.value.input_tokens = Some(*input);
                 self.value.output_tokens = Some(*output);
                 let elapsed = self.streaming_elapsed
@@ -136,13 +137,15 @@ impl Projection {
                 self.value.tool_name = None;
                 self.value.tool_intent = None;
                 self.value.phase = "sending".into();
-                self.new_call = true;
             }
-            ServerEvent::MessageEnd { stop_reason } => {
+            ServerEvent::MessageEnd { .. } => {
                 self.pause(now);
                 self.value.stream_message_ended = true;
-                self.value.stop_reason = stop_reason.clone();
+                // Provider stop tokens describe one response, not why the
+                // worker is idle/stopped. Only lifecycle/interrupt reasons
+                // belong in the user-facing stop explanation.
             }
+            ServerEvent::KvCacheRequest { .. } => self.new_call = true,
             ServerEvent::RetryRollback { .. } => {
                 self.pause(now);
                 self.value.phase = "connecting".into();
@@ -151,9 +154,13 @@ impl Projection {
                 self.new_call = true;
             }
             ServerEvent::TurnStopped { message, .. } => {
+                self.interruption_reason = Some(message.clone());
                 self.value.stop_reason = Some(message.clone());
             }
-            ServerEvent::Interrupted => self.value.stop_reason = Some("Interrupted by user".into()),
+            ServerEvent::Interrupted => {
+                self.interruption_reason = Some("Interrupted by user".into());
+                self.value.stop_reason = self.interruption_reason.clone();
+            }
             _ => {}
         }
     }
@@ -209,8 +216,21 @@ pub(super) fn finish(session_id: &str, status: &str, reason: Option<&str>) {
         p.value.phase = status.into();
         p.value.tool_name = None;
         p.value.tool_intent = None;
-        if let Some(reason) = reason {
+        if let Some(reason) = reason.filter(|reason| !reason.trim().is_empty()) {
             p.value.stop_reason = Some(reason.into());
+        } else {
+            p.value.stop_reason = Some(p.interruption_reason.clone().unwrap_or_else(|| {
+                match status {
+                    "ready" | "idle" => "Waiting for work",
+                    "done" | "completed" => "Completed",
+                    "stopped" => "Stopped",
+                    "failed" | "crashed" => "Failed",
+                    "cancelled" => "Cancelled",
+                    "blocked" | "waiting" => "Waiting",
+                    _ => status,
+                }
+                .into()
+            }));
         }
     }
 }
@@ -231,6 +251,89 @@ pub(super) fn forget(session_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request() -> ServerEvent {
+        serde_json::from_value(serde_json::json!({
+            "type":"kv_cache_request", "system_static_hash":0, "tools_hash":0,
+            "messages_hash":0, "message_count":0, "tool_count":0
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn live_status_lifecycle_reasons_do_not_leak_provider_stop_tokens() {
+        let id = "lifecycle-reason-regression";
+        for token in ["tool_use", "end_turn"] {
+            begin(id);
+            observe(
+                id,
+                &ServerEvent::MessageEnd {
+                    stop_reason: Some(token.into()),
+                },
+            );
+            finish(id, "ready", None);
+            assert_eq!(
+                snapshot(id).unwrap().stop_reason.as_deref(),
+                Some("Waiting for work")
+            );
+            finish(id, "stopped", None);
+            assert_eq!(
+                snapshot(id).unwrap().stop_reason.as_deref(),
+                Some("Stopped")
+            );
+        }
+        begin(id);
+        observe(id, &ServerEvent::Interrupted);
+        finish(id, "stopped", None);
+        assert_eq!(
+            snapshot(id).unwrap().stop_reason.as_deref(),
+            Some("Interrupted by user")
+        );
+        finish(id, "stopped", Some("Owner cancelled the deployment"));
+        assert_eq!(
+            snapshot(id).unwrap().stop_reason.as_deref(),
+            Some("Owner cancelled the deployment")
+        );
+        forget(id);
+    }
+
+    #[test]
+    fn live_status_usage_resets_only_on_request_or_retry() {
+        let now = Instant::now();
+        let mut p = Projection::new(now);
+        let usage = |output| ServerEvent::TokenUsage {
+            input: 100,
+            output,
+            cache_read_input: None,
+            cache_creation_input: None,
+        };
+        p.observe(&request(), now);
+        p.observe(&usage(20), now);
+        p.observe(&usage(10), now); // Stale report must not lower the watermark.
+        p.observe(
+            &ServerEvent::ConnectionPhase {
+                phase: "connecting".into(),
+            },
+            now,
+        );
+        p.observe(
+            &ServerEvent::ToolDone {
+                id: "native".into(),
+                name: "search".into(),
+                output: String::new(),
+                error: None,
+            },
+            now,
+        );
+        p.observe(&usage(20), now);
+        assert_eq!(p.total_output, 20);
+        p.observe(&request(), now);
+        p.observe(&usage(5), now);
+        assert_eq!(p.total_output, 25);
+        p.observe(&ServerEvent::RetryRollback { attempt: 1, max: 2 }, now);
+        p.observe(&usage(5), now);
+        assert_eq!(p.total_output, 30);
+    }
 
     #[test]
     fn live_status_projects_counts_and_excludes_tool_time_from_tps() {
@@ -316,6 +419,7 @@ mod tests {
             },
             start + Duration::from_secs(102),
         );
+        p.observe(&request(), start + Duration::from_secs(102));
         p.observe(
             &ServerEvent::ConnectionPhase {
                 phase: "streaming".into(),
