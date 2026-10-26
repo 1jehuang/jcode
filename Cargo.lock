@@ -4464,6 +4464,7 @@ name = "jcode-update-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "semver",
  "serde",
  "sha2 0.10.9",
 ]

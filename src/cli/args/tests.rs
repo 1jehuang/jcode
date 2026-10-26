@@ -2,6 +2,24 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn update_channel_cli_is_explicit_and_limited_to_preview_and_stable() {
+    for channel in ["preview", "stable"] {
+        let args = Args::try_parse_from(["jcode", "update", "--channel", channel]).unwrap();
+        assert!(
+            matches!(args.command, Some(Command::Update { channel: Some(value) }) if value == channel)
+        );
+    }
+    let args = Args::try_parse_from(["jcode", "update"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Update { channel: None })
+    ));
+    for channel in ["main", "nightly", "unknown"] {
+        assert!(Args::try_parse_from(["jcode", "update", "--channel", channel]).is_err());
+    }
+}
+
+#[test]
 fn credential_import_cli_requires_stdin_and_preserves_explicit_provider() {
     for provider in ["openai", "claude"] {
         let args = Args::try_parse_from([

@@ -371,8 +371,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             let mut agent = agent::Agent::new(provider, registry);
             agent.repl().await?;
         }
-        Some(Command::Update) => {
-            hot_exec::run_update()?;
+        Some(Command::Update { channel }) => {
+            hot_exec::run_update(channel.as_deref())?;
         }
         Some(Command::Version { json }) => {
             commands::run_version_command(json)?;

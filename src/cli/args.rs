@@ -285,7 +285,11 @@ pub(crate) enum Command {
     Repl,
 
     /// Update jcode to the latest version
-    Update,
+    Update {
+        /// Persist an update channel (stable permits returning from preview).
+        #[arg(long, value_parser = ["preview", "stable"])]
+        channel: Option<String>,
+    },
 
     /// Show build/version information in human or JSON form
     Version {
