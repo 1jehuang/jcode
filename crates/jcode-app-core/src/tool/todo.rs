@@ -64,7 +64,8 @@ async fn prepare_background_dependencies(
     for todo in todos {
         let prior = previous.iter().find(|old| old.id == todo.id);
         let active = !crate::todo::todo_status_is_completed(&todo.status)
-            && !crate::todo::todo_status_is_cancelled(&todo.status);
+            && !crate::todo::todo_status_is_cancelled(&todo.status)
+            && !crate::todo::todo_requires_user_action(todo);
         for id in &todo.waiting_on {
             // Check before the manager constructs any filesystem path.
             if id.is_empty()
@@ -2550,7 +2551,22 @@ mod tests {
                 "closed todos must not arm wakes"
             );
         }
-        prepare_background_dependencies(&manager, &session, &[], std::slice::from_ref(&item))
+        let mut user_only = item.clone();
+        user_only.requires_user_action = Some(crate::todo::TodoUserAction {
+            action: "Approve account access".into(),
+            reason: "Only the account owner can authorize access".into(),
+        });
+        prepare_background_dependencies(&manager, &session, &[], std::slice::from_ref(&user_only))
+            .await
+            .unwrap();
+        let delivery = manager.status(&task.task_id).await.unwrap();
+        assert!(
+            !delivery.notify && !delivery.wake,
+            "user-only todos must retain dependencies without arming delivery"
+        );
+        // A peer can still need the same task: the user-only condition must
+        // not disable delivery for another actionable todo.
+        prepare_background_dependencies(&manager, &session, &[], &[user_only, item.clone()])
             .await
             .unwrap();
         let status = manager.status(&task.task_id).await.unwrap();
