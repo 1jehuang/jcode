@@ -1557,6 +1557,11 @@ pub(crate) fn set_pinned_todo_card_area_for_test(area: Option<Rect>) {
     set_pinned_todo_card_area(area);
 }
 
+pub(crate) fn clear_pinned_todo_click_areas() {
+    set_pinned_todo_more_area(None);
+    set_pinned_todo_card_area(None);
+}
+
 pub(crate) fn pinned_todo_card_area() -> Option<Rect> {
     PINNED_TODO_CARD_AREA.lock().ok().and_then(|area| *area)
 }

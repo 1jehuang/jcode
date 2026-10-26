@@ -2645,6 +2645,8 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     panel_image_preview::clear_regions();
+    // Only a TODO card drawn in this frame may intercept mouse input.
+    viewport::clear_pinned_todo_click_areas();
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
         return;

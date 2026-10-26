@@ -728,6 +728,84 @@ fn clicking_anywhere_on_pinned_todo_card_toggles_full_list() {
 }
 
 #[test]
+fn fullscreen_panel_selection_ignores_hidden_pinned_todo_card() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    for expanded in [false, true] {
+        let mut app = create_test_app();
+        app.session.short_name = Some("test".to_string());
+        app.diagram_mode = crate::config::DiagramDisplayMode::None;
+        app.diagram_pane_enabled = false;
+        app.pinned_todos_expanded = expanded;
+        let todos: Vec<_> = (0..12)
+            .map(|i| pinned_band_todo(&format!("t{i}"), &format!("many item {i}"), "pending"))
+            .collect();
+        app.pinned_todos_payload = Some(serde_json::json!({"todos": todos}).to_string());
+        app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 40)).unwrap();
+        render_and_snap(&app, &mut terminal);
+        let old_card = crate::tui::ui::viewport::pinned_todo_card_area().unwrap();
+        assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_some());
+
+        app.side_panel = test_side_panel_snapshot("plan", "Selection regression");
+        app.side_panel.pages[0].content = "hello panel selection text".to_string();
+        app.side_panel_fullscreen = true;
+        let panel = render_and_snap(&app, &mut terminal);
+        let (row, column) = panel
+            .lines()
+            .enumerate()
+            .find_map(|(row, line)| {
+                line.find("hello panel")
+                    .map(|column| (row as u16, column as u16))
+            })
+            .expect("fixture panel text should be visible");
+        assert!(old_card.contains(ratatui::layout::Position::new(column, row)));
+        for (kind, x) in [
+            (MouseEventKind::Down(MouseButton::Left), column),
+            (MouseEventKind::Drag(MouseButton::Left), column + 5),
+        ] {
+            app.handle_mouse_event(MouseEvent {
+                kind,
+                column: x,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        assert_eq!(app.pinned_todos_expanded, expanded, "hidden card toggled");
+        assert_eq!(
+            app.current_copy_selection_pane(),
+            Some(crate::tui::CopySelectionPane::SidePane)
+        );
+        let selected = app.current_copy_selection_text();
+        assert!(
+            selected.as_deref().is_some_and(|text| {
+                text.len() >= 4 && "hello panel selection text".contains(text)
+            }),
+            "selected={selected:?}"
+        );
+        assert!(crate::tui::ui::viewport::pinned_todo_card_area().is_none());
+        assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_none());
+
+        app.exit_copy_selection_mode();
+        app.side_panel_fullscreen = false;
+        app.side_panel = crate::side_panel::SidePanelSnapshot::default();
+        render_and_snap(&app, &mut terminal);
+        let card = crate::tui::ui::viewport::pinned_todo_card_area().unwrap();
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: card.x + 1,
+            row: card.y + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.pinned_todos_expanded, !expanded);
+    }
+}
+
+#[test]
 fn clipped_pinned_todo_card_does_not_toggle_below_chat_viewport() {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
