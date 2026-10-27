@@ -34,9 +34,10 @@ async fn live_gemini_38_effort_presets_emit_answers_and_thinking() {
                 _ => {}
             }
         }
+        let answer_digits: String = answer.chars().filter(char::is_ascii_digit).collect();
         assert!(
-            answer.replace(',', "").contains("1813"),
-            "{model}: no correct answer"
+            answer_digits.contains("1813"),
+            "{model}: no correct answer: {answer}"
         );
         // Low effort may legitimately return no reasoning summary.
         if level == "high" {

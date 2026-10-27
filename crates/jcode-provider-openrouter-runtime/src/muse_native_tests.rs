@@ -6,7 +6,6 @@ use jcode_base::provider_catalog::MUSE_SUBSCRIPTION_PROFILE;
 #[tokio::test]
 #[ignore = "requires a live Muse subscription and consumes model quota"]
 async fn live_native_muse_inference_without_experimental_opt_in() {
-    use tokio_stream::StreamExt;
     assert!(
         std::env::var_os(muse::EXPERIMENTAL_ENV_VAR).is_none(),
         "run with the legacy Muse opt-in variable unset"
