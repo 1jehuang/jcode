@@ -2868,6 +2868,12 @@ pub(crate) fn take_stashed_handoff() -> Option<crate::tui::CloudHandoff> {
 
 /// Replace this client with one attached where the session now lives.
 pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
+    let mut command = handoff_command(handoff)?;
+    let error = crate::platform::replace_process(&mut command);
+    bail!("failed to reattach after cloud move: {error}")
+}
+
+fn handoff_command(handoff: crate::tui::CloudHandoff) -> Result<Command> {
     let exe = std::env::current_exe()?;
     let mut command = Command::new(&exe);
     // Never inherit the previous SSH attach identity.
@@ -2883,11 +2889,18 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
         "JCODE_SOCKET",
         "JCODE_CLOUD_HANDOFF_PREVIEW_SESSION",
         "JCODE_CLOUD_ENV_SESSION",
+        "JCODE_CLOUD_CONTINUE_MESSAGE",
     ] {
         command.env_remove(var);
     }
+    let just_migrated = matches!(&handoff, crate::tui::CloudHandoff::Remote { .. });
     match handoff {
         crate::tui::CloudHandoff::Remote {
+            session_id,
+            host,
+            working_dir,
+        }
+        | crate::tui::CloudHandoff::RemoteResume {
             session_id,
             host,
             working_dir,
@@ -2903,11 +2916,13 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
             command.arg("--resume").arg(&session_id);
             // Only an explicit handoff may preview the matching local transcript.
             command.env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", &session_id);
-            command.env("JCODE_CLOUD_ENV_SESSION", &session_id);
-            command.env(
-                "JCODE_CLOUD_CONTINUE_MESSAGE",
-                "[jcode cloud] This session just moved to the cloud host. Read the migration notice above, verify the environment you need is here, then continue the task exactly where you left off.",
-            );
+            if just_migrated {
+                command.env("JCODE_CLOUD_ENV_SESSION", &session_id);
+                command.env(
+                    "JCODE_CLOUD_CONTINUE_MESSAGE",
+                    "[jcode cloud] This session just moved to the cloud host. Read the migration notice above, verify the environment you need is here, then continue the task exactly where you left off.",
+                );
+            }
         }
         crate::tui::CloudHandoff::Local { session_id } => {
             if let Some(root) = storage::read_session_lease(&session_id).and_then(|l| l.repo_root) {
@@ -2916,6 +2931,55 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
             command.arg("--resume").arg(&session_id);
         }
     }
-    let error = crate::platform::replace_process(&mut command);
-    bail!("failed to reattach after cloud move: {error}")
+    Ok(command)
+}
+
+#[cfg(test)]
+mod resume_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn cloud_resume_handoff_does_not_continue_or_grant_local_resources() {
+        let command = handoff_command(crate::tui::CloudHandoff::RemoteResume {
+            session_id: "session_cloud_123".into(),
+            host: "dev-cloud".into(),
+            working_dir: Some("/workspace/project".into()),
+        })
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair == ["--ssh", "dev-cloud"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "session_cloud_123"])
+        );
+        for name in [
+            "JCODE_CLOUD_CONTINUE_MESSAGE",
+            "JCODE_CLOUD_ENV_SESSION",
+            "JCODE_SOCKET",
+        ] {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == name && value.is_none())
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_migration_handoff_still_continues_the_moved_task() {
+        let command = handoff_command(crate::tui::CloudHandoff::Remote {
+            session_id: "session_cloud_123".into(),
+            host: "dev-cloud".into(),
+            working_dir: None,
+        })
+        .unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "JCODE_CLOUD_CONTINUE_MESSAGE" && value.is_some())
+        );
+    }
 }
