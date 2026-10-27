@@ -706,7 +706,7 @@ fn show_cloud_failure(
     app.push_display_message(DisplayMessage::error(format_cloud_failure(
         command, details,
     )));
-    app.set_status_notice(&format!(
+    app.set_status_notice(format!(
         "Cloud failed: {}",
         cloud_failure_reason(&cloud_failure_details(details))
     ));

@@ -903,9 +903,14 @@ fn build_tools_drops_a_required_array_left_empty_after_pruning() {
 }
 
 #[test]
-fn build_tools_keeps_required_when_the_object_declares_no_properties() {
-    // Without a local `properties` map there is nothing to validate against, and
-    // Gemini does not reject it, so leave such schemas untouched.
+fn build_tools_drops_required_when_the_object_declares_no_properties() {
+    // `7e6dec1e6` ("Fix todo add schema rejected by Gemini") changed
+    // `prune_dangling_required` to treat a missing `properties` map as "no
+    // declared names" instead of bailing out early. A schema whose `required`
+    // names nothing it declares cannot be satisfied by any input and is the
+    // shape Gemini rejected in #655, so the names are pruned and an emptied
+    // `required` is dropped. This replaces the earlier expectation that such
+    // schemas pass through untouched.
     let defs = vec![ToolDefinition {
         name: "passthrough".to_string(),
         description: "passthrough".to_string(),
@@ -918,7 +923,10 @@ fn build_tools_keeps_required_when_the_object_declares_no_properties() {
 
     let built = build_tools(&defs).expect("gemini tools");
     let parameters = &built[0].function_declarations[0].parameters;
-    assert_eq!(parameters["required"], json!(["anything"]));
+    assert!(
+        parameters.get("required").is_none(),
+        "`required` names no declared property, so it is dangling: {parameters}"
+    );
 }
 
 #[test]

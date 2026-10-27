@@ -569,7 +569,9 @@ fn test_reload_persisted_background_tasks_note_mentions_running_task() {
 
     assert!(note.contains(&info.task_id));
     assert!(note.contains("Do not rerun those commands"));
-    assert!(note.contains("bg action=\"status\""));
+    // The note now closes with the shared background-wait guidance
+    // (`crate::tool::BACKGROUND_WAIT_GUIDANCE`) instead of naming `bg` actions.
+    assert!(note.contains("make progress on other useful work"));
 
     cleanup_background_task_files(&info.task_id);
 }
@@ -618,7 +620,9 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
     assert!(continuation.contains("Persisted background task(s)"));
     assert!(continuation.contains(&info.task_id));
     assert!(continuation.contains("Do not rerun those commands"));
-    assert!(continuation.contains("bg action=\"output\""));
+    // The note now closes with the shared background-wait guidance
+    // (`crate::tool::BACKGROUND_WAIT_GUIDANCE`) instead of naming `bg` actions.
+    assert!(continuation.contains("make progress on other useful work"));
 
     cleanup_background_task_files(&info.task_id);
     cleanup_reload_context_file(&session_id);

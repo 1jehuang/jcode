@@ -340,18 +340,18 @@ impl FollowUpPolicy {
             clear_gate_observations: !snapshot.gate_observations.is_empty(),
             ..TodoEffects::default()
         };
-        if self.gate_digest_enabled && !self.gate_digest_delivered {
-            if let Some(message) =
+        if self.gate_digest_enabled
+            && !self.gate_digest_delivered
+            && let Some(message) =
                 crate::build_gate_digest(&snapshot.gate_observations, &snapshot.plan, goals)
-            {
-                self.gate_digest_delivered = true;
-                return Decision::send(
-                    FollowUpKind::GateDigest,
-                    message,
-                    "🔍 Double-checking this turn's weak points...",
-                )
-                .with_effects(effects);
-            }
+        {
+            self.gate_digest_delivered = true;
+            return Decision::send(
+                FollowUpKind::GateDigest,
+                message,
+                "🔍 Double-checking this turn's weak points...",
+            )
+            .with_effects(effects);
         }
 
         let ownership_needs_followup = !completed_groups_have_sufficient_delivery(todos, goals);
