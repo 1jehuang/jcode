@@ -1810,3 +1810,59 @@ fn sqlite_picker_lists_unimported_legacy_sessions_and_prefers_native_rows() {
         "unimported legacy sessions stay visible"
     );
 }
+
+#[test]
+fn sqlite_picker_preserves_imported_recency_and_saved_tail() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _backend = EnvVarGuard::set_str("JCODE_SESSION_BACKEND", "files");
+    let _limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "50");
+    let _external = EnvVarGuard::set_str("JCODE_EXTERNAL_SESSIONS", "0");
+    let files = session::SessionStore::open(home.path(), session::SessionBackend::Files).unwrap();
+    let sqlite = session::SessionStore::open(home.path(), session::SessionBackend::Sqlite).unwrap();
+    for index in 0..54 {
+        let id = format!("session_order_{index:04}");
+        let mut item = Session::create_with_id(id.clone(), None, None);
+        item.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "recency parity".into(),
+                cache_control: None,
+            }],
+        );
+        item.is_debug = index == 1 || index == 53;
+        item.saved = index == 0;
+        item.updated_at = chrono::DateTime::from_timestamp(1_700_000_100 - index, 0).unwrap();
+        files.save_prepared(&mut item).unwrap();
+        let path = home.path().join("sessions").join(format!("{id}.json"));
+        let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + index as u64);
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        sqlite.import_from_path(&path).unwrap();
+    }
+    invalidate_session_list_cache();
+    let file_rows = load_sessions().unwrap();
+    let _sqlite_backend = EnvVarGuard::set_str("JCODE_SESSION_BACKEND", "sqlite");
+    invalidate_session_list_cache();
+    let sqlite_rows = load_sessions().unwrap();
+    let ids = |rows: Vec<SessionInfo>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+    let file_ids = ids(file_rows);
+    assert!(
+        file_ids.contains(&"session_order_0000".into()),
+        "saved tail retained"
+    );
+    assert!(
+        !file_ids.contains(&"session_order_0001".into()),
+        "late debug row excluded"
+    );
+    assert!(
+        !file_ids.contains(&"session_order_0002".into()),
+        "old unsaved row excluded"
+    );
+    assert_eq!(ids(sqlite_rows), file_ids);
+}

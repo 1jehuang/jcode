@@ -40,6 +40,8 @@ pub struct SessionSummary {
     pub custom_title: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub discovery_modified_at: Option<DateTime<Utc>>,
     pub last_active_at: Option<DateTime<Utc>>,
     pub working_dir: Option<String>,
     pub short_name: Option<String>,
@@ -67,6 +69,7 @@ impl SessionSummary {
             custom_title: session.custom_title.clone(),
             created_at: session.created_at,
             updated_at: session.updated_at,
+            discovery_modified_at: None,
             last_active_at: session.last_active_at,
             working_dir: session.working_dir.clone(),
             short_name: session.short_name.clone(),
@@ -368,6 +371,15 @@ pub(super) fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn file_discovery_modified_at(snapshot: &Path) -> Option<DateTime<Utc>> {
+    let journal = super::storage_paths::session_journal_path_from_snapshot(snapshot);
+    [snapshot, journal.as_path()]
+        .into_iter()
+        .filter_map(|path| std::fs::metadata(path).ok()?.modified().ok())
+        .max()
+        .map(DateTime::<Utc>::from)
+}
+
 struct FileSessionStorage {
     root: PathBuf,
 }
@@ -421,6 +433,7 @@ impl SessionStorage for FileSessionStorage {
             let session = Session::load_file_at(&path, false, false)
                 .with_context(|| format!("Loading {}", path.display()))?;
             let mut summary = SessionSummary::metadata(&session);
+            summary.discovery_modified_at = file_discovery_modified_at(&path);
             summary.add_messages(&session.messages);
             summaries.push(summary);
         }

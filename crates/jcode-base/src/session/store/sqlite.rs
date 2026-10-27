@@ -227,6 +227,14 @@ impl SqliteSessionStorage {
             || session.messages.len() < state.messages_len;
         let durable_metadata = rebased.as_ref().unwrap_or(session);
         let mut summary = SessionSummary::metadata(durable_metadata);
+        summary.discovery_modified_at = if import_only {
+            state
+                .store_key
+                .as_deref()
+                .and_then(super::file_discovery_modified_at)
+        } else {
+            Some(chrono::Utc::now())
+        };
         if !messages_full {
             let previous: SessionSummary =
                 serde_json::from_str(&existing.as_ref().unwrap().summary)?;

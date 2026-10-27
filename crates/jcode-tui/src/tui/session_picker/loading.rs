@@ -1848,30 +1848,39 @@ fn load_store_sessions(
     store: &session::SessionStore,
     scan_limit: usize,
     catchup_seen: &crate::catchup::CatchupSeenSnapshot,
-) -> Result<Vec<SessionInfo>> {
+) -> Result<(Vec<SessionInfo>, HashMap<String, u128>)> {
     let mut summaries = store.list_summaries(&session::SessionListOptions {
-        limit: session_candidate_window(scan_limit),
+        limit: usize::MAX,
         exclude_id_prefixes: vec!["imported_".to_string()],
         ..Default::default()
     })?;
-    if include_old_saved_sessions_on_initial_load() {
-        // A far-future window leaves only the saved-session tail.
-        let saved = store.list_summaries(&session::SessionListOptions {
-            limit: MAX_SESSION_SCAN_LIMIT,
-            updated_since: Some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
-            include_saved_beyond_window: true,
-            exclude_id_prefixes: vec!["imported_".to_string()],
-        })?;
-        let seen: HashSet<String> = summaries.iter().map(|s| s.id.clone()).collect();
-        summaries.extend(saved.into_iter().filter(|s| !seen.contains(&s.id)));
-    }
-    Ok(summaries
+    let modified: HashMap<String, u128> = summaries
+        .iter()
+        .map(|summary| {
+            let timestamp = summary.discovery_modified_at.unwrap_or(summary.updated_at);
+            let nanos = u128::try_from(timestamp.timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0);
+            (summary.id.clone(), nanos)
+        })
+        .collect();
+    summaries.sort_by(|a, b| {
+        modified[&b.id]
+            .cmp(&modified[&a.id])
+            .then_with(|| session_sort_key(&b.id).cmp(&session_sort_key(&a.id)))
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    let window = session_candidate_window(scan_limit);
+    let include_saved = include_old_saved_sessions_on_initial_load();
+    let rows = summaries
         .into_iter()
+        .enumerate()
+        .filter(|(index, summary)| *index < window || (include_saved && summary.saved))
+        .map(|(_, summary)| summary)
         .filter_map(|summary| {
             let id = summary.id.clone();
             session_info_from_summary(&id, summary_from_store(summary), catchup_seen)
         })
-        .collect())
+        .collect();
+    Ok((rows, modified))
 }
 
 fn summary_from_store(summary: session::SessionSummary) -> SessionSummary {
@@ -1908,19 +1917,40 @@ fn merge_store_sessions(
     sessions: &mut Vec<SessionInfo>,
     store_sessions: Vec<SessionInfo>,
     scan_limit: usize,
+    modified: &HashMap<String, u128>,
+    sessions_dir: &Path,
 ) {
     let store_ids: HashSet<&str> = store_sessions.iter().map(|s| s.id.as_str()).collect();
     sessions.retain(|s| !store_ids.contains(s.id.as_str()));
     sessions.extend(store_sessions);
-    sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+    let sort_keys: HashMap<_, _> = sessions
+        .iter()
+        .map(|info| {
+            let timestamp = modified.get(&info.id).copied().unwrap_or_else(|| {
+                let snapshot = sessions_dir.join(format!("{}.json", info.id));
+                let journal = sessions_dir.join(format!("{}.journal.jsonl", info.id));
+                path_modified_sort_key(&snapshot).max(path_modified_sort_key(&journal))
+            });
+            (info.id.clone(), timestamp)
+        })
+        .collect();
+    sessions.sort_by(|a, b| {
+        sort_keys[&b.id]
+            .cmp(&sort_keys[&a.id])
+            .then_with(|| session_sort_key(&b.id).cmp(&session_sort_key(&a.id)))
+            .then_with(|| b.id.cmp(&a.id))
+    });
     let (mut visible, mut debug) = (0usize, 0usize);
     sessions.retain(|info| {
+        if visible >= scan_limit {
+            return info.saved;
+        }
         if info.is_debug {
             debug += 1;
             return debug <= scan_limit;
         }
         visible += 1;
-        visible <= scan_limit || info.saved
+        true
     });
 }
 
@@ -1963,15 +1993,17 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
     let catchup_seen = crate::catchup::CatchupSeenSnapshot::load();
     let mut native_ids: HashSet<String> = HashSet::new();
     let mut store_sessions: Vec<SessionInfo> = Vec::new();
+    let mut store_modified = HashMap::new();
     if want_sqlite {
         match session::SessionStore::configured().and_then(|store| {
             let ids = store.list_search_candidates(usize::MAX)?;
-            let rows = load_store_sessions(&store, scan_limit, &catchup_seen)?;
-            Ok((ids, rows))
+            let (rows, modified) = load_store_sessions(&store, scan_limit, &catchup_seen)?;
+            Ok((ids, rows, modified))
         }) {
-            Ok((ids, rows)) => {
+            Ok((ids, rows, modified)) => {
                 native_ids = ids.into_iter().map(|candidate| candidate.id).collect();
                 store_sessions = rows;
+                store_modified = modified;
             }
             Err(err) => crate::logging::warn(&format!(
                 "Session picker could not list the SQLite session store: {err}"
@@ -2082,7 +2114,13 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
         (sessions, external_handle.join().unwrap_or_default())
     });
     if !store_sessions.is_empty() {
-        merge_store_sessions(&mut sessions, store_sessions, scan_limit);
+        merge_store_sessions(
+            &mut sessions,
+            store_sessions,
+            scan_limit,
+            &store_modified,
+            &sessions_dir,
+        );
     }
     sessions.extend(external_sessions);
 

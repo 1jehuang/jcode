@@ -178,6 +178,16 @@ fn sqlite_import_replays_legacy_journal_once_without_changing_source() -> Result
         .append(true)
         .open(&journal)?
         .write_all(b"{corrupt tail\n")?;
+    let snapshot_modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+    let journal_modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000);
+    std::fs::File::open(&snapshot)?.set_modified(snapshot_modified)?;
+    std::fs::File::open(&journal)?.set_modified(journal_modified)?;
+    let discovery_modified = DateTime::<Utc>::from(journal_modified);
+    assert_ne!(session.updated_at, discovery_modified);
+    assert_eq!(
+        files.list()?.pop().unwrap().discovery_modified_at,
+        Some(discovery_modified)
+    );
     let snapshot_before = std::fs::read(&snapshot)?;
     let journal_before = std::fs::read(&journal)?;
     let sqlite = SessionStore::open(root.path(), SessionBackend::Sqlite)?;
@@ -189,6 +199,10 @@ fn sqlite_import_replays_legacy_journal_once_without_changing_source() -> Result
         serde_json::to_value(&session)?
     );
     assert!(sqlite.contains_native("legacy")?);
+    assert_eq!(
+        sqlite.list()?.pop().unwrap().discovery_modified_at,
+        Some(discovery_modified)
+    );
     assert_eq!(std::fs::read(&snapshot)?, snapshot_before);
     assert_eq!(std::fs::read(&journal)?, journal_before);
     for backend in [SessionBackend::Files, SessionBackend::Sqlite] {
@@ -202,6 +216,12 @@ fn sqlite_import_replays_legacy_journal_once_without_changing_source() -> Result
         );
         imported_store.import_from_path(&snapshot)?;
         assert_eq!(imported_store.list_search_candidates(1)?.len(), 1);
+        if backend == SessionBackend::Sqlite {
+            assert_eq!(
+                imported_store.list()?.pop().unwrap().discovery_modified_at,
+                Some(discovery_modified)
+            );
+        }
     }
     assert_eq!(std::fs::read(&snapshot)?, snapshot_before);
     assert_eq!(std::fs::read(&journal)?, journal_before);
@@ -213,6 +233,11 @@ fn sqlite_import_replays_legacy_journal_once_without_changing_source() -> Result
         2,
         "an imported session is authoritative in SQLite"
     );
+    let mut imported = sqlite.load("legacy")?;
+    imported.custom_title = Some("metadata update after import".into());
+    let before_save = Utc::now();
+    sqlite.save(&mut imported)?;
+    assert!(sqlite.list()?.pop().unwrap().discovery_modified_at.unwrap() >= before_save);
     Ok(())
 }
 
