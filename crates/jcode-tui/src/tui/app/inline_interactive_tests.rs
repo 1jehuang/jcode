@@ -627,6 +627,24 @@ fn remote_model_catalog_cache_rejects_stale_and_future_timestamps() {
 }
 
 #[test]
+fn remote_model_catalog_accepts_chatgpt_web_route_but_not_forged_method() {
+    // Regression: one live chatgpt-web route (a deliberate browser-backed route)
+    // made the validator reject the whole 2,178-route catalog, so it was never
+    // persisted. The known method must pass; unknown methods must still fail.
+    let snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
+        Some("OpenAI".to_string()),
+        Some("gpt-5.6-pro[web]".to_string()),
+        vec!["gpt-5.6-pro[web]".to_string()],
+        vec![model_route("gpt-5.6-pro[web]", "OpenAI", "chatgpt-web")],
+    );
+    assert!(remote_model_catalog_snapshot_is_safe(&snapshot));
+
+    let mut forged = snapshot.clone();
+    forged.model_routes[0].api_method = "chatgpt-web-steal".to_string();
+    assert!(!remote_model_catalog_snapshot_is_safe(&forged));
+}
+
+#[test]
 fn remote_model_catalog_cache_rejects_forged_or_oversized_routes() {
     let safe_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
         Some("AWS Bedrock".to_string()),
