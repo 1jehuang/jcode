@@ -840,9 +840,8 @@ fn managed_member(id: &str, status: &str, role: Option<&str>) -> SwarmMemberStat
     }
 }
 
-/// With managed members present, the SwarmStatus widget switches to compact
-/// mode: agents tally without plan progress, and has_data_for admits the
-/// widget into layout.
+/// The legacy renderer remains usable, but managed agents no longer make
+/// the redundant swarm margin widget eligible for layout.
 #[test]
 fn swarm_widget_dock_mode_lists_managed_agents() {
     let data = InfoWidgetData {
@@ -856,7 +855,7 @@ fn swarm_widget_dock_mode_lists_managed_agents() {
         }),
         ..Default::default()
     };
-    assert!(data.has_data_for(WidgetKind::SwarmStatus));
+    assert!(!data.has_data_for(WidgetKind::SwarmStatus));
     // Managing agents bumps the dock's effective priority near the top.
     assert!(data.effective_priority(WidgetKind::SwarmStatus) < WidgetKind::SwarmStatus.priority());
 
@@ -883,7 +882,7 @@ fn swarm_widget_dock_mode_lists_managed_agents() {
         assert!(line.width() <= 34, "row too wide: {rows:?}");
     }
     let h = calculate_widget_height(WidgetKind::SwarmStatus, &data, 36, 20);
-    assert_eq!(h, 4, "2 agent rows + 2 border: {h}");
+    assert_eq!(h, 0, "removed swarm widget must not reserve space");
 }
 
 #[test]

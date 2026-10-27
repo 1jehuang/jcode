@@ -826,11 +826,9 @@ impl InfoWidgetData {
                 .as_ref()
                 .map(MemoryInfo::should_render)
                 .unwrap_or(false),
-            WidgetKind::SwarmStatus => self
-                .swarm_info
-                .as_ref()
-                .map(|s| !s.managed_members.is_empty())
-                .unwrap_or(false),
+            // The pinned progress view already presents managed agents.
+            // Do not duplicate that information in the margin HUD.
+            WidgetKind::SwarmStatus => false,
             WidgetKind::BackgroundTasks => self
                 .background_info
                 .as_ref()
