@@ -375,14 +375,14 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
     assert!(ensure_model_allowed_for_subscription("opus 5.5").is_ok());
     assert!(ensure_model_allowed_for_subscription("claude-sonnet-5-5").is_ok());
     assert!(ensure_model_allowed_for_subscription("sonnet 5.5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-sonnet-4-6").is_ok());
+    assert!(ensure_model_allowed_for_subscription("sonnet 4.6").is_ok());
     assert!(ensure_model_allowed_for_subscription("gpt-6.1-sol").is_ok());
     assert!(ensure_model_allowed_for_subscription("claude-haiku-5-5").is_ok());
     for model in [
         "claude-opus-4-8",
         "opus 4.8",
         "claude-opus-5",
-        "claude-sonnet-4-6",
-        "sonnet 4.6",
         "claude-fable-5",
         "gpt-5.4",
         "gpt-5.5",
