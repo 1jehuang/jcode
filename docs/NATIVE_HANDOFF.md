@@ -93,7 +93,11 @@ Store these secrets **in that environment**, not in the build job:
 
 - `APPLE_CERTIFICATE_P12_BASE64`: Developer ID Application certificate plus key
 - `APPLE_CERTIFICATE_PASSWORD`: password for that P12
-- `APPLE_SIGNING_IDENTITY`: exact Developer ID Application signing identity
+- `APPLE_SIGNING_IDENTITY`: full `Developer ID Application: NAME (TEAMID)`
+  certificate name with a 10-character Team ID. Ad-hoc `-`, a partial name, a
+  development certificate, or a SHA1 selector is rejected. The script resolves
+  exactly one matching certificate in the temporary keychain, then signs by its
+  SHA1 to avoid ambiguous name selection.
 - `APPLE_NOTARY_KEY_P8_BASE64`: authorized App Store Connect notarization API key
 - `APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER`: that key's identifiers
 
@@ -108,17 +112,43 @@ This opt-in is not part of the initial no-secrets run. Signing only follows a
 successful native verification of the trusted same-run artifact, with another
 provenance check before credentials enter a step. Missing credentials fail,
 never fall back to ad-hoc/unsigned output. A temporary keychain is deleted on
-exit, signing uses hardened runtime and a timestamp, `codesign --verify` must
-pass, and notarization must return `Accepted`. The signed ZIP, notarization
+exit, signing uses hardened runtime and a timestamp, and verification requires
+Apple's Developer ID chain OIDs, the stable `com.jcode.cli` identifier, and the
+selected Team ID, not merely a structurally valid signature. The signed binary
+then passes the same credential-free native smoke tests before any notarization
+submission. Notarization must return `Accepted`. The signed ZIP, notarization
 result, and separate signed/unsigned digest record are Actions artifacts only.
 A raw CLI cannot carry a stapled ticket: this does not claim offline Gatekeeper
 acceptance, app-bundle validation, or publication. Azure Windows credentials
 and `id-token: write` are not used here.
 
+## Read-only readiness preflight
+
+With `gh` already authenticated for read access, run:
+
+```bash
+python3 scripts/native_handoff_preflight.py
+```
+
+This issues only GET requests. It reports whether the hosted ARM repository
+secret name exists, which signing secret **names** are missing from the protected
+environment, whether reviewers are required, whether self-review is prevented,
+and whether deployment policy allows only the `master` branch (not tags or
+wildcards). It never retrieves secret values, creates an environment, changes
+protection, installs credentials, dispatches a workflow, or submits to Apple.
+A missing/unreadable environment or insufficient API authorization is reported
+as not ready rather than silently assumed safe. Exit status is zero only when
+the signing environment passes its name/policy checks. Secret-name presence
+cannot establish that credentials are valid or that Apple will accept signing.
+Repository-level signing secrets are intentionally not treated as substitutes
+for environment-scoped secrets. The workflow does not automatically run this
+admin-metadata check with its read-only `GITHUB_TOKEN`; a maintainer runs it
+before opting in and reviews the actual environment approval prompt.
+
 ## Local validation and readiness
 
 ```bash
-python3 -m unittest discover -s scripts -p test_native_handoff.py
+python3 -m unittest discover -s scripts -p 'test_native_handoff*.py'
 actionlint .github/workflows/native-handoff.yml
 bash -n scripts/sign_native_handoff_macos.sh
 shellcheck scripts/sign_native_handoff_macos.sh
@@ -126,7 +156,10 @@ shellcheck scripts/sign_native_handoff_macos.sh
 
 Tests exercise both binary formats, wrong architecture, tampering, changed
 source/run/attempt/lock/contract, symlink rejection, execution receipts, isolated
-smoke invocations/timeouts, and missing signing credentials. These are fixture
+smoke invocations/timeouts, missing signing credentials, exact certificate
+selection, Apple chain/identifier/Team ID requirements, refusal to notarize after
+a bad chain or signed-runtime failure, and read-only environment readiness.
+Signing tests use fake platform commands and never contact Apple. These are fixture
 and static checks, not native acceptance. CI must still demonstrate hosted
 compiler availability, full Jcode cross-linking and native launches before this
 can be called runtime-validated. macOS cross-SDK provisioning and live Apple

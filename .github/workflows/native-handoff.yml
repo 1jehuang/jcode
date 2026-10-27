@@ -52,7 +52,7 @@ jobs:
             echo 'Signing is only valid for the macOS lane' >&2
             exit 1
           fi
-          python3 -m unittest discover -s scripts -p test_native_handoff.py
+          python3 -m unittest discover -s scripts -p 'test_native_handoff*.py'
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-10-08
