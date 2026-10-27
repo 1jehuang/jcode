@@ -10,7 +10,7 @@ import struct
 import subprocess
 
 TOOLCHAIN = "nightly-2026-10-08"
-JUSTRUST_REV = "e020bad4c407b573b74cc0aa9ab7d5a90d98018a"
+JUSTRUST_REV = "a7e7d02cbd50358d1aea056d3c17e5496586d62a"
 CONTRACTS = {
     "linux-arm64": {
         "target": "aarch64-unknown-linux-gnu", "producer": "hosted-linux-x86_64",

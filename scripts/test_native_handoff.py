@@ -195,6 +195,9 @@ class HandoffTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/native-handoff.yml').read_text()
         self.assertIn(handoff.TOOLCHAIN, workflow)
         self.assertIn(handoff.JUSTRUST_REV, workflow)
+        self.assertIn(f'ref: {handoff.JUSTRUST_REV}', workflow)
+        self.assertIn(f'test "$(git rev-parse HEAD)" = {handoff.JUSTRUST_REV}', workflow)
+        self.assertRegex(handoff.JUSTRUST_REV, r'^[0-9a-f]{40}$')
         for contract in handoff.CONTRACTS.values():
             self.assertIn('justrust ' + ' '.join(contract['command']), workflow)
         self.assertIn('artifact-ids: ${{ needs.producer.outputs.artifact_id }}', workflow)

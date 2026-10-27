@@ -65,7 +65,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: 1jehuang/justrust
-          ref: e020bad4c407b573b74cc0aa9ab7d5a90d98018a
+          ref: a7e7d02cbd50358d1aea056d3c17e5496586d62a
           path: handoff-tool-source
           persist-credentials: false
       - name: Build pinned justrust client locally
@@ -73,7 +73,7 @@ jobs:
           set -euo pipefail
           mv handoff-tool-source "$RUNNER_TEMP/handoff-tool-source"
           cd "$RUNNER_TEMP/handoff-tool-source"
-          test "$(git rev-parse HEAD)" = e020bad4c407b573b74cc0aa9ab7d5a90d98018a
+          test "$(git rev-parse HEAD)" = a7e7d02cbd50358d1aea056d3c17e5496586d62a
           justrust build --local --locked --release --bin justrust
           cp target/release/justrust "$HOME/.local/bin/justrust"
           justrust --version
