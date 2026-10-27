@@ -5,6 +5,7 @@ use super::provider_init::ProviderChoice;
 mod build_store;
 mod google;
 mod mcp;
+pub(crate) mod plugin;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
@@ -170,6 +171,9 @@ impl Args {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// Install and manage plugins and plugin marketplaces
+    Plugin(plugin::PluginArgs),
+
     /// List configured MCP servers or manage remote-server OAuth credentials
     Mcp {
         #[command(subcommand)]

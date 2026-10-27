@@ -23,6 +23,7 @@ pub struct McpHandle {
     closed: Arc<AtomicBool>,
     writer_tx: mpsc::Sender<String>,
     server_info: Arc<std::sync::RwLock<Option<ServerInfo>>>,
+    instructions: Arc<std::sync::RwLock<Option<String>>>,
     capabilities: Arc<std::sync::RwLock<ServerCapabilities>>,
     tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
     /// Reply timeout applied to every request on this server.
@@ -142,6 +143,14 @@ impl McpHandle {
             .clone()
     }
 
+    /// Instructions from the server's `initialize` result, if any.
+    pub fn instructions(&self) -> Option<String> {
+        self.instructions
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     /// Get available tools
     pub fn tools(&self) -> Vec<McpToolDef> {
         self.tools
@@ -152,15 +161,31 @@ impl McpHandle {
 
     /// Refresh the list of available tools
     pub async fn refresh_tools(&self) -> Result<()> {
-        let response = self.request("tools/list", None).await?;
-
-        if let Some(result) = response.result {
-            let tools_result: ToolsListResult = serde_json::from_value(result)?;
-            *self
-                .tools
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = tools_result.tools;
+        // Follow `nextCursor` so servers that paginate expose every tool. A
+        // server that cycles cursors or never ends is cut off, not followed.
+        const MAX_PAGES: usize = 100;
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..MAX_PAGES {
+            let params = cursor
+                .as_ref()
+                .map(|cursor| serde_json::json!({ "cursor": cursor }));
+            let response = self.request("tools/list", params).await?;
+            let Some(result) = response.result else {
+                break;
+            };
+            let page: ToolsListResult = serde_json::from_value(result)?;
+            tools.extend(page.tools);
+            match page.next_cursor {
+                Some(next) if seen.insert(next.clone()) => cursor = Some(next),
+                _ => break,
+            }
         }
+        *self
+            .tools
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = tools;
 
         Ok(())
     }
@@ -324,6 +349,7 @@ impl McpClient {
             closed,
             writer_tx,
             server_info: Arc::new(std::sync::RwLock::new(None)),
+            instructions: Arc::new(std::sync::RwLock::new(None)),
             capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             request_timeout: request_timeout_for(config),
@@ -368,6 +394,7 @@ impl McpClient {
             closed,
             writer_tx,
             server_info: Arc::new(std::sync::RwLock::new(None)),
+            instructions: Arc::new(std::sync::RwLock::new(None)),
             capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             request_timeout: request_timeout_for(config),
@@ -521,6 +548,13 @@ impl McpClient {
                 .server_info
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.server_info;
+            *self
+                .handle
+                .instructions
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result
+                .instructions
+                .filter(|text| !text.trim().is_empty());
             *self
                 .handle
                 .capabilities
@@ -695,6 +729,41 @@ done
             disabled: None,
             timeout_secs: None,
         }
+    }
+
+    #[tokio::test]
+    async fn tools_list_paging_stops_on_a_repeated_cursor_and_keeps_instructions() {
+        // Every tools/list page says there is a next page with cursor "a".
+        let script = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{},"instructions":"Use me well","serverInfo":{"name":"pager","version":"0"}}}\n' "$id"
+      ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"t","inputSchema":{"type":"object"}}],"nextCursor":"a"}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+        let config = McpServerConfig {
+            args: vec!["-c".to_string(), script.to_string()],
+            ..fake_server_config()
+        };
+        let client = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            McpClient::connect("pager".to_string(), &config),
+        )
+        .await
+        .expect("a cycling cursor must not hang connect")
+        .expect("connect");
+        // First page, then the page for cursor "a"; the repeat ends paging.
+        assert_eq!(client.tools().len(), 2);
+        assert_eq!(
+            client.handle().instructions().as_deref(),
+            Some("Use me well")
+        );
     }
 
     #[tokio::test]

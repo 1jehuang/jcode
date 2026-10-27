@@ -31,6 +31,9 @@ impl SessionPicker {
 
     fn search_matched_session_refs(&mut self, query: &str) -> Vec<SessionRef> {
         let normalized = Self::normalized_search_query(query);
+        if self.cached_search_query.is_empty() && !normalized.is_empty() {
+            self.cached_search_refs.clear();
+        }
         if normalized.is_empty() {
             self.cached_search_query.clear();
             self.cached_search_refs.clear();
@@ -38,7 +41,8 @@ impl SessionPicker {
         }
 
         let can_narrow_cached = !self.cached_search_query.is_empty()
-            && normalized.starts_with(&self.cached_search_query);
+            && normalized.starts_with(&self.cached_search_query)
+            && self.cached_search_query == normalized;
         // When narrowing, reuse the previous match set in place via mem::take
         // instead of cloning it into `candidates` and then cloning the new
         // matches back into the cache (two full-list clones per keystroke).
@@ -73,6 +77,7 @@ impl SessionPicker {
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
                     (show_test || !session.is_debug)
+                        && (self.show_spawned_sessions || session.parent_id.is_none())
                         && self.session_matches_filter_mode(session, filter_mode)
                 })
             })

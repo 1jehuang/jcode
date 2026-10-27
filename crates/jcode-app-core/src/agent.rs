@@ -263,8 +263,6 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 struct RewindUndoSnapshot {
     messages: Vec<StoredMessage>,
-    provider_session_id: Option<String>,
-    session_provider_session_id: Option<String>,
     visible_message_count: usize,
 }
 
@@ -282,7 +280,7 @@ pub struct Agent {
     mcp_tools_mode: crate::config::McpToolsMode,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
-    /// Pending history reset, applied only after the foreground stream stops.
+    /// A failed rewind reset must be retried before any provider completion.
     provider_conversation_reset_pending: bool,
     /// Instruction-only changes retire upstream prompt snapshots without
     /// discarding the active compacted conversation. History rewinds win.
@@ -352,6 +350,10 @@ pub struct Agent {
     announced_mcp_tools: HashSet<String>,
     /// Transcript index already scanned for MCP tools described there.
     announced_mcp_scan_index: usize,
+    /// `server:status` problems (failed, needs approval) already told to the model.
+    announced_mcp_problems: HashSet<String>,
+    /// When MCP server problems were last checked; the check is throttled.
+    mcp_problems_checked_at: Option<Instant>,
     /// AGENTS.md is session bootstrap input. Keep the captured text stable so
     /// tool writes do not mutate the provider's cacheable prefix mid-session.
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
@@ -400,8 +402,8 @@ impl Agent {
         self.refresh_prompt_skills_snapshot();
     }
 
-    /// Re-capture the frozen skills list. Only called at session boundaries
-    /// (new/restored session, working directory change), never mid-turn.
+    /// Re-capture the frozen skills list at session boundaries or before a new
+    /// prompt after plugin registry changes, never during model/tool execution.
     fn refresh_prompt_skills_snapshot(&mut self) {
         self.prompt_skills_snapshot = self.current_prompt_skill_infos();
         self.announced_skills = self
@@ -413,14 +415,7 @@ impl Agent {
     }
 
     fn current_prompt_skill_infos(&self) -> Vec<crate::prompt::SkillInfo> {
-        self.current_skills_snapshot()
-            .list()
-            .iter()
-            .map(|skill| crate::prompt::SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect()
+        crate::skill_overrides::model_skill_infos(&self.current_skills_snapshot())
     }
 
     fn should_track_client_cache(&self) -> bool {
@@ -490,6 +485,8 @@ impl Agent {
             locked_tools_native_deferred: false,
             announced_mcp_tools: HashSet::new(),
             announced_mcp_scan_index: 0,
+            announced_mcp_problems: HashSet::new(),
+            mcp_problems_checked_at: None,
             agents_md_snapshot,
             prompt_skills_snapshot: Vec::new(),
             announced_skills: HashSet::new(),
@@ -767,28 +764,6 @@ impl Agent {
                 context, self.session.id, err
             ));
         }
-    }
-
-    fn reset_runtime_state_for_session_change(&mut self) {
-        self.active_skill = None;
-        self.last_upstream_provider = None;
-        self.last_connection_type = None;
-        self.last_status_detail = None;
-        self.pending_alerts.clear();
-        self.current_turn_system_reminder = None;
-        self.reset_tool_output_tracking();
-        if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
-            queue.clear();
-        }
-        self.background_tool_signal.reset();
-        self.graceful_shutdown.reset();
-        self.cache_tracker.reset();
-        self.kv_cache_monitor.reset();
-        self.last_usage = TokenUsage::default();
-        self.locked_tools = None;
-        self.mcp_late_register_resolved = false;
-        self.rewind_undo_snapshot = None;
-        self.preserve_compaction_on_provider_reset = false;
     }
 
     /// Synchronize the remote client's selected skill, accepting only names
@@ -1148,7 +1123,7 @@ impl Agent {
     /// Fire a session lifecycle observer hook (`session_start`/`session_end`).
     /// No-op when the hook is not configured.
     pub(crate) fn fire_session_lifecycle_hook(&self, event_name: &'static str, source: &str) {
-        if !crate::hooks::hook_configured(event_name) {
+        if !crate::hooks::hook_configured_for_dir(event_name, self.working_dir().as_deref()) {
             return;
         }
         let mut event = crate::hooks::HookEvent::new(event_name)

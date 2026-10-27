@@ -15,6 +15,11 @@ use serde_json::{Value, json};
 #[path = "cases/profile_sources.rs"]
 mod profile_sources;
 
+#[path = "cases/file_routing.rs"]
+mod file_routing;
+#[path = "cases/rewind.rs"]
+mod rewind;
+
 struct Fake {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -201,6 +206,61 @@ async fn text_turn_streams_once_and_reuses_the_child() {
         provider.available_models_display(),
         vec!["claude-opus-5-5".to_string(), "claude-sonnet-5".to_string()]
     );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_task_rows_follow_claude_code_between_turns() {
+    use jcode_base::bus::{BackgroundTaskStatus, Bus, BusEvent};
+    let fake = Fake::new();
+    let provider = fake.provider();
+    provider.bind_session("session-fake-bg");
+    let mut bus = Bus::global().subscribe();
+
+    let events = run_turn(&provider, &[Message::user("bgtask")], None).await;
+    assert_eq!(text(&events), "started");
+
+    // The finish arrives after the turn ended; it must still reach the bus.
+    let mut started = None;
+    let mut finished = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while finished.is_none() {
+        let event = tokio::time::timeout_at(deadline, bus.recv())
+            .await
+            .expect("background task finish published after the turn")
+            .unwrap();
+        match event {
+            BusEvent::UiActivity(a) if a.session_id.as_deref() == Some("session-fake-bg") => {
+                started = Some(a.message)
+            }
+            BusEvent::BackgroundTaskCompleted(c) if c.session_id == "session-fake-bg" => {
+                finished = Some(c)
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        started.as_deref(),
+        Some("**Background task started** `bgfake1` · `subagent: Fake background agent`")
+    );
+    let finished = finished.unwrap();
+    assert_eq!(finished.task_id, "bgfake1");
+    assert!(matches!(finished.status, BackgroundTaskStatus::Completed));
+    assert_eq!(
+        finished.output_preview,
+        "Agent \"Fake background agent\" completed"
+    );
+}
+
+#[tokio::test]
+async fn queued_turn_skips_claude_codes_own_follow_up_turn() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let events = run_turn(&provider, &[Message::user("queued")], None).await;
+    // Not "follow-up": that turn belongs to Claude Code, and its result must
+    // not end ours. Its tool request was still answered, or this would hang.
+    assert_eq!(text(&events), "answer");
+    assert!(errors(&events).is_empty(), "{events:?}");
     provider.shutdown().await;
 }
 

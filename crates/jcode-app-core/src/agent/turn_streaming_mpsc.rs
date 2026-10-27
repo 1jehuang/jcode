@@ -3,38 +3,9 @@ use super::*;
 
 use super::streaming::{find_wrap_marker_incremental, record_partial_stream_usage};
 
-fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
-    if tc.name == "selfdev" {
-        return ("Reload initiated. Process restarting...".to_string(), false);
-    }
-
-    let action = tc
-        .input
-        .get("action")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let is_wait_like = (tc.name == "bg" && action == "wait")
-        || (tc.name == "swarm" && matches!(action, "await_members" | "run_plan"));
-
-    if is_wait_like {
-        let input = serde_json::to_string(&tc.input).unwrap_or_else(|_| "{}".to_string());
-        return (
-            format!(
-                "[Tool '{}' wait interrupted by server reload after {:.1}s. The underlying operation may still be running. Resume the wait by rerunning the same tool call with input: {}]",
-                tc.name, elapsed_secs, input
-            ),
-            false,
-        );
-    }
-
-    (
-        format!(
-            "[Tool '{}' interrupted by server reload after {:.1}s]",
-            tc.name, elapsed_secs
-        ),
-        true,
-    )
-}
+#[path = "turn_streaming_helpers.rs"]
+mod helpers;
+use helpers::reload_interrupted_tool_result;
 
 /// Called only after automatic continuations have been exhausted.
 fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
@@ -327,6 +298,8 @@ impl Agent {
             drop(cache_signature_messages);
             drop(ephemeral_signature_messages);
             let mut keepalive = stream_keepalive_ticker();
+            provider.set_host_tool_executor_available(true);
+            provider.bind_session(&self.session.id);
             let mut stream = {
                 let mut complete_future = std::pin::pin!(provider.complete_split(
                     send_messages,

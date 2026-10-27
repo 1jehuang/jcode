@@ -90,6 +90,10 @@ pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
     #[serde(rename = "serverInfo")]
     pub server_info: Option<ServerInfo>,
+    /// Usage guidance the server wants the model to see (Claude Code shows it
+    /// under "MCP Server Instructions").
+    #[serde(default)]
+    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -137,12 +141,18 @@ pub struct McpToolDef {
     pub description: Option<String>,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    /// Behaviour hints (`readOnlyHint`, `destructiveHint`, `openWorldHint`, ...)
+    /// shown next to the tool in `/mcp`, as Claude Code does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Value>,
 }
 
 /// tools/list result
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolsListResult {
     pub tools: Vec<McpToolDef>,
+    #[serde(rename = "nextCursor", default)]
+    pub next_cursor: Option<String>,
 }
 
 /// tools/call params
@@ -174,6 +184,16 @@ pub enum ContentBlock {
     },
     #[serde(rename = "resource")]
     Resource { resource: ResourceContent },
+    #[serde(rename = "resource_link")]
+    ResourceLink {
+        uri: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Any block type this client does not render (e.g. `audio`). Without it
+    /// one unknown block failed the whole tool call.
+    #[serde(other)]
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -365,6 +385,65 @@ pub struct McpConfig {
     /// jcode's historical `servers` key.
     #[serde(default, alias = "mcpServers")]
     pub servers: std::collections::HashMap<String, McpServerConfig>,
+    /// Config file each server was read from (`~/.jcode/mcp.json`,
+    /// `.mcp.json`, ...), for `/mcp`. Filled by [`McpConfig::load_for_dir`].
+    #[serde(skip)]
+    pub sources: std::collections::HashMap<String, String>,
+    /// Project-file servers waiting for the "New MCP server found in this
+    /// project" approval; they stay disabled until approved.
+    #[serde(skip)]
+    pub pending_approval: std::collections::BTreeSet<String>,
+}
+
+/// Project config files a cloned repository can ship. Their servers need
+/// approval before they start, as in Claude Code.
+pub const PROJECT_MCP_FILES: [&str; 3] = [".jcode/mcp.json", ".mcp.json", ".claude/mcp.json"];
+
+/// Project plugins carry full provenance but require the same approval as
+/// repository MCP files, including when connected manually after discovery.
+pub fn is_project_mcp_source(source: &str) -> bool {
+    PROJECT_MCP_FILES.contains(&source)
+        || source.starts_with(super::plugin_source::PROJECT_SOURCE_PREFIX)
+        || source.starts_with(super::plugin_source::LOCAL_SOURCE_PREFIX)
+}
+
+/// Whether a tracked source comes from an enabled plugin contribution.
+pub fn is_plugin_mcp_source(source: &str) -> bool {
+    source.starts_with(super::plugin_source::USER_SOURCE_PREFIX)
+        || source.starts_with(super::plugin_source::PROJECT_SOURCE_PREFIX)
+        || source.starts_with(super::plugin_source::LOCAL_SOURCE_PREFIX)
+}
+
+/// Source label for `projects.<this dir>.mcpServers` in `~/.claude.json`,
+/// Claude Code's "local" scope (private to you in this project).
+pub const LOCAL_CLAUDE_SOURCE: &str = "~/.claude.json [project]";
+
+/// One project's answers to the approval prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProjectMcpApprovals {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<String>,
+    /// "Use this and all future MCP servers in this project".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
+}
+
+/// Where a project-file server stands with the user's approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectServerState {
+    Approved,
+    Pending,
+    Rejected,
+}
+
+/// The three answers Claude Code offers for a new project server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpApproval {
+    Approve,
+    ApproveAll,
+    Reject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -456,13 +535,38 @@ impl McpConfig {
         let mut warnings = Vec::new();
 
         for (server_name, config) in &mut self.servers {
+            let plugin_root = self
+                .sources
+                .get(server_name)
+                .filter(|source| is_plugin_mcp_source(source))
+                .and_then(|_| config.env.get("CLAUDE_PLUGIN_ROOT").cloned());
+            let plugin_data = self
+                .sources
+                .get(server_name)
+                .filter(|source| is_plugin_mcp_source(source))
+                .and_then(|_| config.env.get("CLAUDE_PLUGIN_DATA").cloned());
+            let lookup = |variable: &str| {
+                if variable == "CLAUDE_PLUGIN_DATA" && plugin_data.is_some() {
+                    plugin_data.clone()
+                } else if variable == "CLAUDE_PLUGIN_ROOT" && plugin_root.is_some() {
+                    plugin_root.clone()
+                } else {
+                    lookup(variable)
+                }
+            };
             let mut unresolved = std::collections::BTreeSet::new();
             config.command = expand_environment_string(&config.command, &lookup, &mut unresolved);
             for arg in &mut config.args {
                 *arg = expand_environment_string(arg, &lookup, &mut unresolved);
             }
-            for value in config.env.values_mut() {
-                *value = expand_environment_string(value, &lookup, &mut unresolved);
+            for (key, value) in &mut config.env {
+                // Intrinsic filesystem paths may themselves contain `${...}`.
+                // Do not recursively interpret them as environment syntax.
+                if !((key == "CLAUDE_PLUGIN_ROOT" && plugin_root.is_some())
+                    || (key == "CLAUDE_PLUGIN_DATA" && plugin_data.is_some()))
+                {
+                    *value = expand_environment_string(value, &lookup, &mut unresolved);
+                }
             }
             if let Some(url) = &mut config.url {
                 *url = expand_environment_string(url, &lookup, &mut unresolved);
@@ -670,7 +774,14 @@ impl McpConfig {
                     std::collections::HashMap<String, McpServerConfig>,
                 >(map.clone())
             {
-                Self::merge_servers_preferring_runnable(&mut config.servers, servers);
+                // Claude Code's "local" scope: private to you in this project.
+                config.merge_tracked(
+                    Self {
+                        servers,
+                        ..Self::default()
+                    },
+                    LOCAL_CLAUDE_SOURCE,
+                );
             }
         }
 
@@ -683,12 +794,12 @@ impl McpConfig {
     /// same-named servers from earlier ones.
     fn load_project_locals(project_root: &std::path::Path) -> Self {
         let mut merged = Self::default();
-        for relative in [".jcode/mcp.json", ".mcp.json", ".claude/mcp.json"] {
+        for relative in PROJECT_MCP_FILES {
             let path = project_root.join(relative);
             if path.exists()
                 && let Ok(config) = Self::load_from_file(&path)
             {
-                Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
+                merged.merge_tracked(config, relative);
             }
         }
         merged
@@ -725,7 +836,7 @@ impl McpConfig {
             let jcode_mcp = jcode_dir.join("mcp.json");
             if jcode_mcp.exists() {
                 if let Ok(config) = Self::load_from_file(&jcode_mcp) {
-                    merged.servers.extend(config.servers);
+                    merged.merge_tracked(config, "~/.jcode/mcp.json");
                 }
             }
         }
@@ -744,7 +855,7 @@ impl McpConfig {
                         "~/.claude.json",
                     ));
                 }
-                Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
+                merged.merge_tracked(config, "~/.claude.json");
             }
         }
 
@@ -763,16 +874,61 @@ impl McpConfig {
                         "~/.claude/mcp.json (legacy)",
                     ));
                 }
-                Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
+                merged.merge_tracked(config, "~/.claude/mcp.json");
             }
         }
 
         // Project-local config files, resolved against the project directory.
         if let Some(project_root) = project_dir {
-            Self::merge_servers_preferring_runnable(
-                &mut merged.servers,
-                Self::load_project_locals(project_root).servers,
-            );
+            merged.merge_tracked(Self::load_project_locals(project_root), "project");
+        }
+
+        // Plugins are live sources, never copied into user configuration. The
+        // manager's enabled/scope selection is re-read on every config reload.
+        // Explicit MCP entries retain precedence even for reserved-looking names.
+        let plugins = super::plugin_source::load_for_dir(project_dir);
+        for (name, config) in plugins.servers {
+            if !merged.servers.contains_key(&name) {
+                if let Some(source) = plugins.sources.get(&name) {
+                    merged.sources.insert(name.clone(), source.clone());
+                }
+                merged.servers.insert(name, config);
+            }
+        }
+
+        // `/mcp` enable/disable choices win over every source file.
+        for (name, enabled) in Self::enabled_overrides() {
+            if let Some(cfg) = merged.servers.get_mut(&name) {
+                cfg.enabled = Some(enabled);
+                cfg.disabled = None;
+            }
+        }
+
+        // Any cloned repository can ship these files, so their servers wait
+        // for approval (Claude Code's "New MCP server found in this project").
+        if let Some(project_root) = project_dir {
+            let approvals = Self::project_approvals(project_root);
+            let trust_all = approvals.all || Self::user_enables_all_project_servers();
+            for (name, cfg) in merged.servers.iter_mut() {
+                let from_project = merged
+                    .sources
+                    .get(name)
+                    .is_some_and(|source| is_project_mcp_source(source));
+                if !from_project {
+                    continue;
+                }
+                let approved = trust_all && !approvals.rejected.contains(name)
+                    || approvals.approved.contains(name);
+                if !approved || approvals.rejected.contains(name) {
+                    // `disabled` outranks `enabled` in `is_enabled`, so a repo's
+                    // `"disabled": false` must not survive the gate.
+                    cfg.enabled = Some(false);
+                    cfg.disabled = None;
+                    if !approvals.rejected.contains(name) {
+                        merged.pending_approval.insert(name.clone());
+                    }
+                }
+            }
         }
 
         // Claude Code expands environment references after source precedence is
@@ -794,6 +950,141 @@ impl McpConfig {
         });
 
         merged
+    }
+
+    /// [`Self::merge_servers_preferring_runnable`], recording where every
+    /// server that `incoming` actually supplies came from: its own recorded
+    /// source when it has one, else `source`.
+    fn merge_tracked(&mut self, incoming: Self, source: &str) {
+        for (name, cfg) in &incoming.servers {
+            let kept_existing = self
+                .servers
+                .get(name)
+                .is_some_and(|current| current.is_stdio() && !cfg.is_stdio());
+            if !kept_existing {
+                let source = incoming.sources.get(name).map_or(source, String::as_str);
+                self.sources.insert(name.clone(), source.to_string());
+            }
+        }
+        Self::merge_servers_preferring_runnable(&mut self.servers, incoming.servers);
+    }
+
+    /// Approvals live in `~/.jcode/mcp-approvals.json`, keyed by project path,
+    /// never inside the project: a repository must not be able to approve its
+    /// own servers (jcode has no folder-trust prompt to lean on).
+    fn approvals_path() -> Option<std::path::PathBuf> {
+        crate::storage::jcode_dir()
+            .ok()
+            .map(|dir| dir.join("mcp-approvals.json"))
+    }
+
+    fn project_key(project_root: &std::path::Path) -> String {
+        std::fs::canonicalize(project_root)
+            .unwrap_or_else(|_| project_root.to_path_buf())
+            .display()
+            .to_string()
+    }
+
+    fn all_project_approvals()
+    -> anyhow::Result<std::collections::BTreeMap<String, ProjectMcpApprovals>> {
+        match Self::approvals_path().filter(|path| path.exists()) {
+            Some(path) => crate::storage::read_json(&path),
+            None => Ok(Default::default()),
+        }
+    }
+
+    pub fn project_approvals(project_root: &std::path::Path) -> ProjectMcpApprovals {
+        Self::all_project_approvals()
+            .ok()
+            .and_then(|mut all| all.remove(&Self::project_key(project_root)))
+            .unwrap_or_default()
+    }
+
+    /// Record an answer to the approval prompt for `name` in this project.
+    pub fn set_project_approval(
+        project_root: &std::path::Path,
+        name: &str,
+        approval: McpApproval,
+    ) -> anyhow::Result<()> {
+        let path = Self::approvals_path()
+            .ok_or_else(|| anyhow::anyhow!("jcode home directory is unavailable"))?;
+        // A malformed file is an error, not an empty map to overwrite.
+        let mut all = Self::all_project_approvals()?;
+        let entry = all.entry(Self::project_key(project_root)).or_default();
+        entry.approved.retain(|server| server != name);
+        entry.rejected.retain(|server| server != name);
+        match approval {
+            McpApproval::Approve => entry.approved.push(name.to_string()),
+            McpApproval::ApproveAll => {
+                entry.approved.push(name.to_string());
+                entry.all = true;
+            }
+            McpApproval::Reject => entry.rejected.push(name.to_string()),
+        }
+        crate::storage::write_json(&path, &all)
+    }
+
+    /// The approval state of project-file server `name`, read fresh from disk.
+    pub fn project_server_state(project_root: &std::path::Path, name: &str) -> ProjectServerState {
+        let approvals = Self::project_approvals(project_root);
+        if approvals.rejected.iter().any(|server| server == name) {
+            ProjectServerState::Rejected
+        } else if approvals.all
+            || approvals.approved.iter().any(|server| server == name)
+            || Self::user_enables_all_project_servers()
+        {
+            ProjectServerState::Approved
+        } else {
+            ProjectServerState::Pending
+        }
+    }
+
+    /// Why a project-file server in `state` may not start, if it may not.
+    pub fn project_server_refusal(state: ProjectServerState, name: &str) -> Option<String> {
+        match state {
+            ProjectServerState::Approved => None,
+            ProjectServerState::Rejected => Some(format!(
+                "MCP server '{name}' was turned down for this project; the user can enable it in /mcp"
+            )),
+            ProjectServerState::Pending => Some(format!(
+                "MCP server '{name}' comes from this project's config and waits for the user's approval in /mcp"
+            )),
+        }
+    }
+
+    /// Claude Code's user-level `enableAllProjectMcpServers` setting. Only the
+    /// user's own `~/.claude/settings.json` counts, never a project's files.
+    fn user_enables_all_project_servers() -> bool {
+        crate::storage::user_home_path(".claude/settings.json")
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|settings| settings.get("enableAllProjectMcpServers")?.as_bool())
+            .unwrap_or(false)
+    }
+
+    fn enabled_overrides_path() -> Option<std::path::PathBuf> {
+        crate::storage::jcode_dir()
+            .ok()
+            .map(|dir| dir.join("mcp-enabled.json"))
+    }
+
+    /// Servers enabled or disabled from `/mcp`, kept in
+    /// `~/.jcode/mcp-enabled.json` (`{"server": false}`) so toggling never
+    /// rewrites a source file such as Claude Code's `~/.claude.json`.
+    pub fn enabled_overrides() -> std::collections::HashMap<String, bool> {
+        Self::enabled_overrides_path()
+            .filter(|path| path.exists())
+            .and_then(|path| crate::storage::read_json(&path).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn set_enabled_override(name: &str, enabled: bool) -> anyhow::Result<()> {
+        let path = Self::enabled_overrides_path()
+            .ok_or_else(|| anyhow::anyhow!("jcode home directory is unavailable"))?;
+        let mut overrides = Self::enabled_overrides();
+        overrides.insert(name.to_string(), enabled);
+        crate::storage::write_json(&path, &overrides)
     }
 
     /// Merge `incoming` over `existing`, except that a remote (HTTP/SSE) entry
@@ -824,6 +1115,10 @@ impl McpConfig {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "plugin_config_tests.rs"]
+mod plugin_config_tests;
 
 #[cfg(test)]
 #[path = "protocol_tests.rs"]

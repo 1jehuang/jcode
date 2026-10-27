@@ -472,7 +472,11 @@ pub(in crate::tui::app) fn handle_server_event(
         _ => {}
     }
 
-    // Profile replies are control traffic and must not settle an active turn.
+    if app_mod::rewind::handle_checkpoint_event(app, &event, remote) {
+        return true;
+    }
+
+    // Replies to `/mcp` (dialog refresh or reconnect/enable/disable).
     match &event {
         ServerEvent::RuntimeCommandResult { id, command, data, .. }
             if command == "agent" && app.agent_profile_picker_request_id == Some(*id) => {
@@ -504,6 +508,18 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.push_display_message(DisplayMessage::error(message.clone()));
                 return true;
             }
+        ServerEvent::RuntimeCommandResult {
+            id, data, message, ..
+        } if app.mcp_request_id == Some(*id) => {
+            app.mcp_request_id = None;
+            app.apply_mcp_reply(Ok((data.clone(), message.clone())));
+            return true;
+        }
+        ServerEvent::Error { id, message, .. } if app.mcp_request_id == Some(*id) => {
+            app.mcp_request_id = None;
+            app.apply_mcp_reply(Err(message.clone()));
+            return true;
+        }
         _ => {}
     }
 
@@ -1264,6 +1280,7 @@ pub(in crate::tui::app) fn handle_server_event(
             retry_after_secs,
             server_resumes,
         } => {
+            app.cancel_prompt_history_switch();
             if app.pending_agent_model_request_id == Some(id) {
                 app.pending_agent_model_request_id = None;
                 app.push_display_message(DisplayMessage::error(format!(
@@ -1306,9 +1323,10 @@ pub(in crate::tui::app) fn handle_server_event(
             // queued follow-up, but the server-side turn had not actually
             // finished. Dropping the pending send here would silently lose the
             // user's queued message (issue #391). Instead, put it back on the
-            // queue and re-adopt the running-turn state so the queue
-            // dispatches once the real turn completes.
+            // queue and re-adopt the running-turn state so queued prompts
+            // dispatch once the real turn completes.
             if message == "Already processing a message"
+                && app.current_message_id == Some(id)
                 && recover_rejected_queued_continuation(app)
             {
                 remote.clear_pending();
@@ -1614,10 +1632,11 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         ServerEvent::SessionId { session_id } => {
             if app.remote_session_id.as_ref() != Some(&session_id) {
+                app.invalidate_rewind_ui();
                 app.invalidate_agent_profile_ui();
             }
             remote.set_session_id(session_id.clone());
-            app.remote_session_id = Some(session_id.clone());
+            app.set_remote_prompt_history_session(&session_id);
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
             app.update_terminal_title();
@@ -1754,6 +1773,13 @@ pub(in crate::tui::app) fn handle_server_event(
             if prev_session_id.as_ref() != Some(&session_id) {
                 app.invalidate_agent_profile_ui();
             }
+            app.rewind_ui.last_empty_escape = None;
+            if prev_session_id
+                .as_ref()
+                .is_some_and(|previous| previous != &session_id)
+            {
+                app.invalidate_rewind_ui();
+            }
             app.remote_provider_oauth_email = provider_oauth_email.clone();
             if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth)
                 && let Some(email) = provider_oauth_email
@@ -1841,7 +1867,7 @@ pub(in crate::tui::app) fn handle_server_event(
             }
 
             remote.set_session_id(session_id.clone());
-            app.remote_session_id = Some(session_id.clone());
+            app.set_remote_prompt_history_session(&session_id);
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
@@ -2123,6 +2149,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
             }
             if should_apply_history_payload {
+                if app.conversation_rewind_history_pending(&session_id) {
+                    app.clear_rewind_continuation_state();
+                }
                 crate::logging::info(&format!(
                     "[TIMING] remote bootstrap: history after {}ms (session={}, resumed={}, messages={}, mcp_servers={}, model={})",
                     app.app_started.elapsed().as_millis(),
@@ -2140,6 +2169,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     && messages.is_empty()
                     && !session_changed
                     && !app.display_messages().is_empty()
+                    && !app.checkpoint_conversation_restore_pending(&session_id)
                 {
                     crate::logging::info(
                         "Preserving locally restored display history for metadata-only History bootstrap",
@@ -2216,6 +2246,7 @@ pub(in crate::tui::app) fn handle_server_event(
                             // is processing, so streaming state present at this
                             // point is stale by construction.
                             if app.pending_remote_rewind_notice.is_some()
+                                || app.checkpoint_conversation_restore_pending(&session_id)
                                 || crate::tui::is_ssh_remote()
                             {
                                 app.stream_buffer.clear();
@@ -2253,24 +2284,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 restore_pending_startup_prompt_echo(app);
                 app.note_runtime_memory_event_force("history_loaded", "remote_history_applied");
                 crate::process_memory::release_retained_heap("client_history_loaded");
-                if let Some(notice) = app.pending_remote_rewind_notice.take() {
-                    let content = if notice.undo {
-                        "✓ Undid rewind. Restored the messages removed by the last rewind."
-                            .to_string()
-                    } else {
-                        format!(
-                            "✓ Rewound to message {}. Removed {} message{}. Undo anytime with /rewind undo.",
-                            notice.message_index.unwrap_or_default(),
-                            notice.changed_messages,
-                            if notice.changed_messages == 1 {
-                                ""
-                            } else {
-                                "s"
-                            }
-                        )
-                    };
-                    app.push_display_message(DisplayMessage::system(content));
-                }
+                app.finish_legacy_rewind_notice();
             } else {
                 crate::logging::info(
                     "Ignoring duplicate History event for active session after local state was restored",

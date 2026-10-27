@@ -22,6 +22,7 @@ Every invocation's argv is appended to $FAKE_CLAUDE_LOG.
 import json
 import os
 import sys
+import threading
 import uuid
 
 argv = sys.argv[1:]
@@ -81,9 +82,13 @@ save_known(known)
 expose_mcp = "--mcp-config" in argv
 
 
+send_lock = threading.Lock()
+
+
 def send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    with send_lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
 
 
 pending = {}
@@ -245,6 +250,18 @@ def turn(msg):
         behavior = resp["response"]["behavior"]
         assistant_text(f"permission:{behavior}")
         result(user_uuid)
+    elif cmd == "file-tools":
+        assistant_text(json.dumps(mcp_tools))
+        result(user_uuid)
+    elif cmd == "host-write":
+        arguments = json.loads(text.strip().split(" ", 1)[1])
+        rid = control_request({"subtype": "mcp_message", "server_name": "jcode",
+                               "message": {"method": "tools/call", "params": {"name": "write", "arguments": arguments},
+                                           "jsonrpc": "2.0", "id": 3}})
+        resp = wait_response(rid)
+        out = resp["response"]["mcp_response"]["result"]
+        assistant_text(json.dumps(out))
+        result(user_uuid)
     elif cmd == "mcp":
         name = words[1] if len(words) > 1 else "echo"
         rid = control_request({"subtype": "can_use_tool", "tool_name": f"mcp__jcode__{name}",
@@ -290,6 +307,38 @@ def turn(msg):
         result(user_uuid)
     elif cmd == "slow":
         park_until_interrupt(user_uuid)
+    elif cmd == "bgtask":
+        # Like the real CLI: the task finishes after the turn's result, while
+        # no host turn is listening.
+        task = {"task_id": "bgfake1", "run_id": "r1", "task_type": "local_agent",
+                "description": "Fake background agent"}
+        send({"type": "system", "subtype": "background_tasks_changed", "tasks": [task]})
+        send({"type": "system", "subtype": "task_started", "task_id": "bgfake1",
+              "is_backgrounded": True, "task_type": "local_agent", "description": task["description"]})
+        assistant_text("started")
+        result(user_uuid)
+
+        def finish():
+            send({"type": "system", "subtype": "task_notification", "task_id": "bgfake1",
+                  "status": "completed", "output_file": "/tmp/bgfake1.output",
+                  "summary": "Agent \"Fake background agent\" completed"})
+            send({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        threading.Timer(0.3, finish).start()
+    elif cmd == "queued":
+        # Like the real CLI when a background task just finished: its own
+        # follow-up turn (no user_message_uuids) runs before ours starts.
+        def lifecycle(state):
+            send({"type": "command_lifecycle", "command_uuid": user_uuid, "state": state})
+        lifecycle("queued")
+        assistant_text("follow-up")
+        decision = wait_response(control_request({"subtype": "can_use_tool", "tool_name": "Bash",
+                                                  "input": {"command": "true"}, "tool_use_id": "toolu_f1"}))
+        assistant_text("follow-up tool " + decision["response"]["behavior"])
+        result(None)
+        lifecycle("started")
+        assistant_text("answer")
+        result(user_uuid)
+        lifecycle("completed")
     elif cmd == "session":
         assistant_text("session:" + ("resume" if resume else "new") + ":" + session_id)
         result(user_uuid)

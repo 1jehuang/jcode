@@ -1,6 +1,12 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
 #[path = "tests/agent_profile_commands.rs"]
 mod agent_profile_commands;
+#[path = "tests/plugin_commands.rs"]
+mod plugin_commands;
+#[path = "tests/rewind_checkpoint.rs"]
+mod rewind_checkpoint;
+#[path = "tests/rewind_recovery.rs"]
+mod rewind_recovery;
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/commands_accounts_01/part_01.rs");
@@ -76,6 +82,7 @@ include!("tests/skill_invocation_multi_word.rs");
 include!("tests/remote_header_hint_facts.rs");
 include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
+include!("tests/prompt_history_lifecycle.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
 include!("tests/resume_search_first.rs");
@@ -907,7 +914,10 @@ fn version_command_shows_remote_server_identity_and_update_status() {
 fn skills_command_lists_loaded_and_endorsed_skills() {
     let mut app = create_test_app();
 
-    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    assert!(super::state_ui::handle_info_command(
+        &mut app,
+        "/skills list"
+    ));
     let content = app.display_messages().last().unwrap().content.clone();
 
     assert!(content.contains("Loaded skills"), "{content}");
@@ -954,7 +964,10 @@ fn skills_command_marks_active_skill_in_remote_mode() {
     app.remote_skills = vec!["optimization".to_string(), "firefox-browser".to_string()];
     app.active_skill = Some("optimization".to_string());
 
-    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    assert!(super::state_ui::handle_info_command(
+        &mut app,
+        "/skills list"
+    ));
     let content = app.display_messages().last().unwrap().content.clone();
 
     assert!(content.contains("- /optimization (active)"), "{content}");
@@ -963,6 +976,104 @@ fn skills_command_marks_active_skill_in_remote_mode() {
     assert!(
         content.contains("/firefox-browser [installed]"),
         "{content}"
+    );
+}
+
+#[test]
+fn skills_command_opens_dialog_with_project_skill() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = temp
+        .path()
+        .join(".jcode")
+        .join("skills")
+        .join("dialog-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: dialog-skill\ndescription: Shown in the dialog\n---\nBody\n",
+    )
+    .expect("write SKILL.md");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+
+    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    let dialog = app.dialog.as_ref().expect("skills dialog opens");
+    assert!(!dialog.is_mcp());
+    let row = dialog
+        .item_summaries()
+        .into_iter()
+        .find(|row| row.starts_with("dialog-skill"))
+        .expect("project skill listed");
+    assert!(row.contains("project"), "{row}");
+
+    // Esc saves nothing and, like Claude Code, says so.
+    let messages = app.display_messages().len();
+    app.handle_dialog_key_offline(KeyCode::Esc, KeyModifiers::empty());
+    assert!(app.dialog.is_none());
+    assert_eq!(app.display_messages().len(), messages + 1);
+    assert_eq!(
+        app.display_messages().last().map(|m| m.content.as_str()),
+        Some("No changes")
+    );
+}
+
+#[test]
+fn remote_mcp_command_opens_dialog_and_applies_daemon_reply() {
+    use crate::protocol::ServerEvent;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.is_remote = true;
+    app.input = "/mcp".to_string();
+    app.cursor_pos = app.input.len();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .expect("remote /mcp should succeed");
+    assert!(app.dialog.as_ref().is_some_and(|dialog| dialog.is_mcp()));
+    let id = app.mcp_request_id.expect("mcp runtime command sent");
+
+    app.handle_server_event(
+        ServerEvent::RuntimeCommandResult {
+            id,
+            command: "mcp".into(),
+            data: serde_json::json!({"servers": [{"name": "github", "status": "connected",
+                "enabled": true, "transport": "stdio", "target": "gh-mcp",
+                "source": "~/.jcode/mcp.json", "tools": []}]}),
+            message: String::new(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.mcp_request_id, None);
+    let rows = app.dialog.as_ref().unwrap().item_summaries();
+    // Claude Code's facts for a connected server with no tools.
+    assert_eq!(rows, ["github · no tools · connected"]);
+
+    // Enter opens the server; Reconnect sends `mcp reconnect github`.
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert_eq!(
+        app.dialog.as_ref().unwrap().item_summaries(),
+        ["Reconnect", "Disable"]
+    );
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    let id = app.mcp_request_id.expect("reconnect sent");
+    app.handle_server_event(
+        ServerEvent::RuntimeCommandResult {
+            id,
+            command: "mcp".into(),
+            data: serde_json::json!({"servers": []}),
+            message: "Reconnected to github.".into(),
+        },
+        &mut remote,
+    );
+    // Like Claude Code, a reconnect closes the dialog and reports in the transcript.
+    assert!(app.dialog.is_none());
+    assert_eq!(
+        app.display_messages().last().unwrap().content,
+        "Reconnected to github."
     );
 }
 
@@ -993,7 +1104,10 @@ fn skills_command_refreshes_registry_from_disk_before_listing() {
         "project-local skill must be visible immediately without reload"
     );
 
-    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    assert!(super::state_ui::handle_info_command(
+        &mut app,
+        "/skills list"
+    ));
     let content = app.display_messages().last().unwrap().content.clone();
 
     assert!(
@@ -1881,7 +1995,5 @@ fn assert_clear_swarm_plan_reset(app: &App) {
     assert_eq!(app.swarm_plan_swarm_id, None);
 }
 include!("tests/kv_cache_provider_identity.rs");
-
 include!("tests/cache_retention_routes.rs");
-
 include!("tests/cache_prompt_accounting.rs");

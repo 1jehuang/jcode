@@ -727,10 +727,9 @@ async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
     assert_eq!(
         summary,
         vec![
-            (
-                "one\n\nanon\n\ntwo".to_string(),
-                vec!["f1".into(), "f2".into()]
-            ),
+            ("one".to_string(), vec!["f1".into()]),
+            ("anon".to_string(), vec![]),
+            ("two".to_string(), vec!["f2".into()]),
             ("[Background Task Completed]".to_string(), vec![]),
             ("three".to_string(), vec!["f3".into()]),
         ]
@@ -3011,6 +3010,68 @@ fn skill_installed_mid_session_keeps_system_prompt_stable_and_is_announced_once(
         .filter(|text| text.contains("New skills were installed."))
         .count();
     assert_eq!(count, 1);
+}
+
+/// `/skill args` enters the transcript once (Claude Code style) with its
+/// base directory and `$ARGUMENTS` filled in; the system prompt never carries
+/// the body, and a still-active skill is not re-sent on later turns.
+#[test]
+fn active_skill_is_injected_into_transcript_once() {
+    let _lock = crate::storage::lock_test_env();
+    let project = tempfile::tempdir().unwrap();
+    let dir = project.path().join(".jcode/skills/ship");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\ndescription: Ship a branch\n---\n\nShip $ARGUMENTS now.\n",
+    )
+    .unwrap();
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new_with_initial_working_dir(
+        provider,
+        Registry::empty(),
+        Some(project.path().to_str().unwrap()),
+    );
+    let prompt_before = agent.build_system_prompt_split(None);
+    agent.active_skill = Some("ship".to_string());
+    agent.inject_active_skill("the release branch");
+    agent.inject_active_skill("a follow-up turn");
+
+    let injected: Vec<String> = transcript_texts(&agent)
+        .into_iter()
+        .filter(|text| text.contains("Skill invoked: /ship"))
+        .collect();
+    assert_eq!(injected.len(), 1, "{injected:?}");
+    assert!(
+        injected[0].contains("Ship the release branch now."),
+        "{}",
+        injected[0]
+    );
+    assert!(
+        injected[0].contains(&format!("Base directory for this skill: {}", dir.display())),
+        "{}",
+        injected[0]
+    );
+    let prompt_after = agent.build_system_prompt_split(None);
+    assert_eq!(prompt_before.static_part, prompt_after.static_part);
+    assert_eq!(prompt_before.dynamic_part, prompt_after.dynamic_part);
+
+    // Once compaction hides that copy from the provider, the next turn
+    // injects the skill again so the model keeps it.
+    agent.session.compaction = Some(crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 1,
+        original_turn_count: 1,
+        compacted_count: agent.session.messages.len(),
+    });
+    agent.inject_active_skill("after compaction");
+    let injected = transcript_texts(&agent)
+        .into_iter()
+        .filter(|text| text.contains("Skill invoked: /ship"))
+        .count();
+    assert_eq!(injected, 2);
 }
 
 /// Esc after a queued follow-up: a cancelled turn must not swallow the

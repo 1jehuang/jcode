@@ -306,6 +306,8 @@ test('transcript returns raw assistant text of the last turn, including wrapper 
   const result=await run({op:'transcript'},f,{pathname:'/c/6ad08967-29f4-83eb-8b81-c5ccaa17b323',globals:{fetch:api.fetch}});
   assert.deepEqual(result.texts,['Checking.',envelope]);assert.equal(result.complete,true);assert.equal(result.temporary,true);
   assert.deepEqual(result.builtin,['container.exec']);
+  assert.match(result.shape,/^code to container\.exec finished_successfully 0 chars; text finished_successfully \d+ chars; thoughts/);
+  assert.ok(!result.shape.includes('Checking'),'shape carries no answer text');
   assert.equal(api.calls[1].url,'/backend-api/conversation/6ad08967-29f4-83eb-8b81-c5ccaa17b323');
   assert.equal(api.calls[1].init.headers.authorization,'Bearer token');assert.equal(f.submits(),0);
 });
@@ -341,6 +343,7 @@ test('arm_send swaps the exact prompt into the page send and decodes the v1 stre
   assert.equal(JSON.parse(sent[0].init.body).messages[0].content.parts[0],prompt);
   const state=await run({op:'stream',key:'jcode-t1'},f,{globals});
   assert.equal(state.complete,true); assert.equal(state.error,null); assert.deepEqual(state.builtin,[]);
+  assert.match(state.shape,/text finished_successfully( \w+)? \d+ chars$/);
   assert.equal(state.substituted.length,prompt.length);
   assert.equal(state.texts.length,1);
   assert.ok(state.texts[0].startsWith('Rivers are among the most beautiful'));
@@ -462,6 +465,24 @@ test('conversation reads by the page are masked, while jcode reads the real tran
   assert.equal(pageRead.mapping.n1.message.content.parts[0],'DONE');
   const t=await run({op:'transcript'},f,{pathname:'/c/6ad08967-29f4-83eb-8b81-c5ccaa17b323',globals});
   assert.deepEqual(t.texts,['DONE']); assert.equal(t.complete,true);
+});
+test('resumed streams and WebSocket frames reach the page with the placeholder, never the prompt',async()=>{
+  const f=fixture(); const placeholder='jcode turn jcode-m3'; const prompt='[{"x":"'+'R'.repeat(4000)+'"}]';
+  class Socket {}
+  class Message { constructor(target, data) { this.target = target; this.raw = data; } get data() { return this.raw; } }
+  const globals={ MessageEvent: Message, WebSocket: Socket, fetch: async url => /resume$/.test(url)
+    ? new Response(echoTurn(prompt,'LATER'),{headers:{'content-type':'text/event-stream'}})
+    : sseResponse(echoTurn(prompt,'NOW')) };
+  await run({op:'arm_send',key:'jcode-m3',text:prompt,placeholder},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody(placeholder)})).text(); await settle();
+  const resumed=await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation/resume',{method:'POST',body:'{}'})).text();
+  assert.ok(!resumed.includes('R'.repeat(100)) && resumed.includes('LATER'),'resumed stream is masked');
+  assert.ok(resumed.includes(JSON.stringify(placeholder)));
+  // A topic frame wraps an encoded SSE item, so the prompt is JSON inside JSON.
+  const frame=JSON.stringify({type:'message',payload:{encoded_item:echoTurn(prompt,'TOPIC')}});
+  const shown=new Message(new Socket(),frame).data;
+  assert.ok(!shown.includes('R'.repeat(100)) && shown.includes('TOPIC'),'socket frame is masked');
+  assert.equal(new Message({},frame).data,frame,'non-socket messages are untouched');
 });
 test('a route sets the exact model and thinking level, and the stream reports what served it',async()=>{
   const f=fixture(); const sent=[]; const placeholder='jcode turn jcode-r1';

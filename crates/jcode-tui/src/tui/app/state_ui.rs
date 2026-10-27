@@ -1890,7 +1890,37 @@ fn build_skills_report(app: &App) -> String {
 }
 
 pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
+    if let Some(command) = crate::tui::plugin_command::parse(trimmed) {
+        if super::commands_dispatch::ssh_local_action_blocked(app, "Plugin management") {
+            return true;
+        }
+        match command {
+            Ok(command) => {
+                let directory = app
+                    .session
+                    .working_dir
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| std::env::current_dir().ok());
+                match directory {
+                    Some(directory) => {
+                        app.dialog = Some(crate::tui::dialog::Dialog::plugins(directory, command));
+                    }
+                    None => app.push_display_message(DisplayMessage::error(
+                        "Cannot determine the plugin project directory".to_string(),
+                    )),
+                }
+            }
+            Err(error) => app.push_display_message(DisplayMessage::error(error)),
+        }
+        return true;
+    }
     if trimmed == "/skills" {
+        app.open_skills_dialog();
+        return true;
+    }
+
+    if trimmed == "/skills list" {
         // Sync from disk first so skills added by agent-side `skill_manage
         // reload_all` (which only updates the server process registry) show up
         // without a restart (issue #431).
@@ -1918,9 +1948,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     if tool_count == 1 { "" } else { "s" }
                 ));
             }
-            app.push_display_message(
-                DisplayMessage::system(report).with_title("MCP Servers"),
-            );
+            app.push_display_message(DisplayMessage::system(report).with_title("MCP Servers"));
         }
         app.set_status_notice("MCP servers");
         return true;

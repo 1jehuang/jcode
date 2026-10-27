@@ -82,6 +82,7 @@ pub struct SpawnSpec {
     pub setting_sources: Vec<String>,
     pub session: SessionStart,
     pub expose_mcp: bool,
+    pub host_file_tools: Vec<String>,
     pub launch_args: Vec<String>,
 }
 
@@ -141,7 +142,10 @@ pub fn build_argv(spec: &SpawnSpec) -> Vec<String> {
         argv.push(JCODE_SDK_MCP_CONFIG.into());
     }
 
-    argv.extend(spec.launch_args.iter().cloned());
+    argv.extend(crate::file_tool_routing::launch_args(
+        &spec.launch_args,
+        &spec.host_file_tools,
+    ));
     argv
 }
 
@@ -322,6 +326,7 @@ mod tests {
             setting_sources: vec!["user".into(), "project".into(), "local".into()],
             session,
             expose_mcp: false,
+            host_file_tools: Vec::new(),
             launch_args: Vec::new(),
         }
     }

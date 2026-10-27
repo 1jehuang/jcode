@@ -66,6 +66,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("RewindCheckpoint", Covered),
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
+    ("RuntimeCommand", Covered),
     // Per-window account pins, default account and failover toggle, like
     // the legacy Switch*Account requests, drive the TUI's /accounts flow.
     ("SetAccountFailover", ClientInternal),

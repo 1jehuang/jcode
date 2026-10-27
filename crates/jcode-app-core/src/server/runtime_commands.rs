@@ -125,6 +125,11 @@ pub(super) async fn execute(
             let data = agent.runtime_skills_snapshot();
             return Ok((data.clone(), skills_report(&data)));
         }
+        RuntimeCommand::Mcp => {
+            let session_id = agent.session_id().to_string();
+            let working_dir = agent.working_dir().map(std::path::PathBuf::from);
+            return mcp(&agent.registry(), &session_id, working_dir.as_deref(), args).await;
+        }
         RuntimeCommand::Context => {
             status_only(args)?;
             agent.runtime_context_snapshot().await
@@ -348,6 +353,12 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
         .as_ref()
         .map(|profile| profile.name.clone());
     let changed = !args.is_empty();
+    let mut ignored_fields = Vec::new();
+    let mut load_profile = |name: &str| -> Result<crate::agent_profile::AgentProfile> {
+        let (profile, fields) = crate::agent_profile::load_with_metadata(name, profile_dir()?)?;
+        ignored_fields = fields;
+        Ok(profile)
+    };
     let current_profile = agent.session_for_split().agent_profile.clone();
     let system_prompt = agent.session_for_split().system_prompt.as_deref();
     let profile = match args {
@@ -357,7 +368,7 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
             let name = current.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("No agent profile is selected. Use /agent NAME first.")
             })?;
-            let mut profile = crate::agent_profile::load(name, profile_dir()?)?;
+            let mut profile = load_profile(name)?;
             profile.instruction_sources = current_profile
                 .as_ref()
                 .unwrap()
@@ -366,7 +377,7 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
             Some(Some(profile))
         }
         [action, name, encoded] if action == "--select" => {
-            let mut profile = crate::agent_profile::load(name, profile_dir()?)?;
+            let mut profile = load_profile(name)?;
             profile.instruction_sources = crate::instruction_sources::select(
                 working_dir.as_deref(),
                 system_prompt,
@@ -400,7 +411,7 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
             )?;
             Some(Some(profile))
         }
-        [name] => Some(Some(crate::agent_profile::load(name, profile_dir()?)?)),
+        [name] => Some(Some(load_profile(name)?)),
         _ => bail!(
             "Usage: /agent [NAME|off|reload], --select NAME JSON_SOURCE_IDS, or --sources JSON_SOURCE_IDS"
         ),
@@ -426,7 +437,8 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
     let message = if changed {
         match current.as_deref() {
             Some(name) => format!(
-                "Instructions only; model, tools and permissions remain unchanged. Agent profile: {name}. Other Jcode-loaded instruction files are excluded unless selected in profile options. YAML frontmatter settings are not applied. Applies on the next turn. /agent reload refreshes the profile body and keeps extra source snapshots; reapply source options to refresh those. Stored session instructions are additive only when selected."
+                "{} Other Jcode-loaded instruction files are excluded unless selected in profile options. /agent reload refreshes the profile body and keeps extra source snapshots; reapply source options to refresh those. Stored session instructions are additive only when selected.",
+                crate::agent_profile::application_notice(name, &ignored_fields)
             ),
             None => {
                 "Agent profile off. Base instructions remain unchanged; applies on the next turn."
@@ -470,6 +482,244 @@ fn agent_profile(agent: &mut Agent, args: &[String]) -> Result<(Value, String)> 
         "instruction_source_notice": notice}),
         format!("{message}\n{notice}"),
     ))
+}
+
+/// `/mcp [reconnect|enable|disable|approve|approve-all|reject <server>]`:
+/// server state for the TUI dialog, plus Claude Code's per-server actions.
+/// Needs no agent lock, so it also works mid-turn. Enable/disable persist via
+/// [`crate::mcp::McpConfig::set_enabled_override`]; approve/reject answer the
+/// project-server prompt via [`crate::mcp::McpConfig::set_project_approval`].
+pub(super) async fn mcp(
+    registry: &crate::tool::Registry,
+    session_id: &str,
+    working_dir: Option<&std::path::Path>,
+    args: &[String],
+) -> Result<(Value, String)> {
+    // UI actions, not tool calls: no tool hooks or telemetry.
+    let run = |action: &str, server: Option<&str>| {
+        registry.execute_internal(
+            "mcp",
+            json!({"action": action, "server": server}),
+            crate::tool::ToolContext {
+                session_id: session_id.into(),
+                message_id: crate::id::new_id("msg"),
+                tool_call_id: crate::id::new_id("call"),
+                working_dir: None,
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            },
+        )
+    };
+    let inspect = || async {
+        let mut data = run("inspect", None)
+            .await?
+            .metadata
+            .ok_or_else(|| anyhow::anyhow!("MCP inspect returned no data"))?;
+        // A disable/enable from `/mcp` applies before the next config reload.
+        let overrides = crate::mcp::McpConfig::enabled_overrides();
+        for server in data["servers"].as_array_mut().into_iter().flatten() {
+            // Project servers already report their fresh approval state.
+            if server["source"]
+                .as_str()
+                .is_some_and(|source| crate::mcp::is_project_mcp_source(source))
+            {
+                continue;
+            }
+            let Some(&enabled) = server["name"].as_str().and_then(|n| overrides.get(n)) else {
+                continue;
+            };
+            server["enabled"] = json!(enabled);
+            if !enabled && server["status"] != "connected" {
+                server["status"] = json!("disabled");
+            } else if enabled && server["status"] == "disabled" {
+                server["status"] = json!("not connected");
+            }
+        }
+        anyhow::Ok(data)
+    };
+    let status_of = |data: &Value, name: &str| {
+        data["servers"]
+            .as_array()
+            .and_then(|servers| servers.iter().find(|s| s["name"] == name))
+            .map(|s| {
+                (
+                    s["status"].as_str().unwrap_or("").to_string(),
+                    s["error"].as_str().map(str::to_string),
+                )
+            })
+    };
+
+    let (action, server) = match args {
+        [] => return Ok((inspect().await?, String::new())),
+        [action, server]
+            if matches!(
+                action.as_str(),
+                "reconnect"
+                    | "enable"
+                    | "disable"
+                    | "approve"
+                    | "approve-all"
+                    | "reject"
+                    | "authenticate"
+                    | "clear-auth"
+            ) =>
+        {
+            (action.as_str(), server.as_str())
+        }
+        _ => bail!(
+            "Usage: /mcp [reconnect|enable|disable|authenticate|clear-auth|approve|approve-all|reject <server>]"
+        ),
+    };
+    if status_of(&inspect().await?, server).is_none() {
+        bail!("MCP server \"{server}\" not found");
+    }
+    if matches!(action, "authenticate" | "clear-auth") {
+        return mcp_auth(action, server, working_dir, &run, inspect, status_of).await;
+    }
+    // For a server from a project config file, enabling or disabling it is
+    // answering the approval prompt, as in Claude Code.
+    let from_project = inspect().await?["servers"]
+        .as_array()
+        .and_then(|servers| servers.iter().find(|s| s["name"] == server))
+        .and_then(|s| s["source"].as_str())
+        .is_some_and(|source| crate::mcp::is_project_mcp_source(source));
+    let approval = match action {
+        "approve" => Some(crate::mcp::McpApproval::Approve),
+        "approve-all" => Some(crate::mcp::McpApproval::ApproveAll),
+        "reject" => Some(crate::mcp::McpApproval::Reject),
+        "enable" if from_project => Some(crate::mcp::McpApproval::Approve),
+        "disable" if from_project => Some(crate::mcp::McpApproval::Reject),
+        _ => None,
+    };
+    if let Some(approval) = approval {
+        let project = working_dir.ok_or_else(|| {
+            anyhow::anyhow!(
+                "No project directory for this session right now; retry after the current turn"
+            )
+        })?;
+        // "All future servers" also covers the ones still waiting now.
+        let waiting: Vec<String> = if approval == crate::mcp::McpApproval::ApproveAll {
+            inspect().await?["servers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["status"] == "needs approval" && s["name"] != server)
+                .filter_map(|s| s["name"].as_str().map(str::to_string))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        crate::mcp::McpConfig::set_project_approval(project, server, approval)?;
+        for other in &waiting {
+            run("connect", Some(other)).await.ok();
+        }
+        if approval == crate::mcp::McpApproval::Reject {
+            run("disconnect", Some(server)).await.ok();
+            let message = if action == "disable" {
+                format!("MCP server \"{server}\" disabled")
+            } else {
+                format!("Continuing without MCP server \"{server}\"")
+            };
+            return Ok((inspect().await?, message));
+        }
+        run("connect", Some(server)).await?;
+        let data = inspect().await?;
+        let message = match status_of(&data, server) {
+            Some((status, _)) if status == "connected" && action == "enable" => {
+                format!("MCP server \"{server}\" enabled")
+            }
+            Some((status, _)) if status == "connected" => {
+                format!("MCP server \"{server}\" approved and connected")
+            }
+            Some((_, Some(error))) => {
+                format!("MCP server \"{server}\" approved, but failed to connect: {error}")
+            }
+            _ => format!("MCP server \"{server}\" approved"),
+        };
+        return Ok((data, message));
+    }
+    if action != "reconnect" {
+        crate::mcp::McpConfig::set_enabled_override(server, action == "enable")?;
+    }
+    if action != "enable" {
+        run("disconnect", Some(server)).await?;
+    }
+    if action != "disable" {
+        run("connect", Some(server)).await?;
+    }
+    let data = inspect().await?;
+    // Claude Code's wording (its `iwt` reconnect results).
+    let message = match (action, status_of(&data, server)) {
+        ("disable", _) => format!("MCP server \"{server}\" disabled"),
+        (_, Some((status, _))) if status == "connected" => match action {
+            "enable" => format!("MCP server \"{server}\" enabled"),
+            _ => format!("Reconnected to {server}."),
+        },
+        (_, Some((status, _))) if status == "needs authentication" => {
+            format!("{server} requires authentication. Use the 'Authenticate' option.")
+        }
+        (_, Some((_, Some(error)))) => format!("Failed to reconnect to {server}: {error}"),
+        _ => format!("Failed to reconnect to {server}."),
+    };
+    Ok((data, message))
+}
+
+/// `authenticate` runs jcode's MCP OAuth login (it opens the browser), then
+/// reconnects; `clear-auth` forgets the stored tokens and disconnects.
+async fn mcp_auth<Run, RunFut, Inspect, InspectFut, StatusOf>(
+    action: &str,
+    server: &str,
+    working_dir: Option<&std::path::Path>,
+    run: &Run,
+    inspect: Inspect,
+    status_of: StatusOf,
+) -> Result<(Value, String)>
+where
+    Run: Fn(&str, Option<&str>) -> RunFut,
+    RunFut: std::future::Future<Output = Result<crate::tool::ToolOutput>>,
+    Inspect: Fn() -> InspectFut,
+    InspectFut: std::future::Future<Output = Result<Value>>,
+    StatusOf: Fn(&Value, &str) -> Option<(String, Option<String>)>,
+{
+    let config = crate::mcp::McpConfig::load_for_dir(working_dir);
+    let url = config
+        .servers
+        .get(server)
+        .filter(|cfg| cfg.is_remote())
+        .and_then(|cfg| cfg.url.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!("MCP server \"{server}\" uses stdio; only HTTP/SSE servers sign in")
+        })?;
+    if action == "clear-auth" {
+        crate::mcp::oauth::logout(&url)?;
+        run("disconnect", Some(server)).await.ok();
+        return Ok((
+            inspect().await?,
+            format!("Authentication cleared for {server}."),
+        ));
+    }
+    let was_connected = status_of(&inspect().await?, server).is_some_and(|(s, _)| s == "connected");
+    crate::mcp::oauth::login(&url, crate::mcp::oauth::BrowserMode::Open, |_| {})
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to authenticate {server}: {error:#}"))?;
+    run("disconnect", Some(server)).await.ok();
+    run("connect", Some(server)).await.ok();
+    let data = inspect().await?;
+    let message = match status_of(&data, server) {
+        Some((status, _)) if status == "connected" && was_connected => {
+            format!("Authentication successful. Reconnected to {server}.")
+        }
+        Some((status, _)) if status == "connected" => {
+            format!("Authentication successful. Connected to {server}.")
+        }
+        Some((status, _)) if status == "needs authentication" => format!(
+            "Got new credentials, but {server} rejected them on reconnect. Try re-authenticating."
+        ),
+        Some((_, Some(error))) => format!("Failed to reconnect to {server}: {error}"),
+        _ => format!("Failed to reconnect to {server}."),
+    };
+    Ok((data, message))
 }
 
 fn role_args(args: &[String], default_label: &str) -> Result<(Option<String>, String, String)> {

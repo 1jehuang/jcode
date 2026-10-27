@@ -24,6 +24,7 @@ fn headless_mcp_cold_wait_excludes_disabled_and_cached_servers() {
 
 fn echo_definition() -> McpToolDef {
     McpToolDef {
+        annotations: None,
         name: "echo".into(),
         description: Some("Test-only cached schema".into()),
         input_schema: json!({"type": "object"}),

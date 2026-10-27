@@ -17,7 +17,7 @@ impl App {
                 "/fix\nRun recovery actions when the model cannot continue.\nRepairs missing tool outputs, resets provider session state, and starts compaction when possible."
             }
             "rewind" => {
-                "/rewind\nShow numbered conversation history.\n\n/rewind N\nRewind to message N (drops everything after it and resets provider session).\n\n/rewind undo\nUndo the most recent rewind and restore the removed messages."
+                "/rewind\nChoose a user or assistant message. User restore returns to before the prompt and puts its original text and images in the editor without sending it. File options appear only for tracked changes. Assistant restore keeps the selected reply and removes later messages; files and your current draft stay unchanged. You can also press Esc twice with an empty prompt while idle.\n\n/rewind N\nLegacy conversation-only rewind retaining message N (drops everything after it and resets provider session).\n\n/rewind undo\nUndo the most recent numeric rewind or assistant-message restore in this session. Does not undo user-prompt checkpoint restores or file restores."
             }
             "clear" => {
                 "/clear\nClear current conversation, queue, and display; starts a fresh session."

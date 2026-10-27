@@ -1,14 +1,12 @@
-//! Persistent cross-session prompt history plus the Ctrl+R reverse search
-//! overlay.
+//! Session-local prompt recall and the Ctrl+R reverse search overlay.
 //!
-//! Every submitted prompt is recorded to `~/.jcode/prompt-history.jsonl`
+//! Every submitted prompt is recorded to a session-specific JSONL journal
 //! (JSONL, one JSON-encoded string per line, append-only with periodic
 //! compaction). Recording dedupes: resubmitting an existing prompt moves it to
 //! the most-recent slot instead of storing a second copy. Up/Down prompt
-//! recall (`input::handle_prompt_history_navigation`) walks the merged
-//! history, so prompts from previous sessions are reachable after the current
-//! session's own prompts. Ctrl+R (or Cmd+R) opens a fuzzy reverse search over
-//! the same merged history.
+//! recall and Ctrl+R search the same journal, independent of the transcript.
+//! Restoring a checkpoint never erases recall, and switching sessions never
+//! exposes another session's prompts. The legacy global history is not loaded.
 
 use super::App;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -16,9 +14,6 @@ use std::path::{Path, PathBuf};
 
 /// Hard cap on persisted history entries (after dedupe, newest kept).
 pub(crate) const MAX_PERSISTED_PROMPTS: usize = 1000;
-/// Prompts longer than this are not recorded (giant pastes are not useful as
-/// recallable history and bloat the file).
-const MAX_RECORDED_PROMPT_LEN: usize = 10_000;
 /// Compact (dedupe + cap + rewrite) the append-only file once it exceeds this
 /// many lines.
 const COMPACT_THRESHOLD_LINES: usize = MAX_PERSISTED_PROMPTS * 2;
@@ -43,14 +38,29 @@ pub(crate) struct PromptHistorySearchState {
     pub(crate) original_cursor: usize,
 }
 
-pub(crate) fn history_file_path() -> Option<PathBuf> {
+/// Ownership is separate from the transcript because SessionId can arrive
+/// before History replaces the previous session's displayed messages.
+#[derive(Default)]
+pub(super) struct PromptHistoryScope {
+    session_id: Option<String>,
+    display_session_id: Option<String>,
+    display_is_backfill: bool,
+    sessions: std::collections::HashMap<String, Vec<String>>,
+    switch_pending: bool,
+}
+
+pub(crate) fn history_file_path(session_id: &str) -> Option<PathBuf> {
     if crate::tui::is_ssh_remote() {
         // Keep recall in-memory for this attachment, not mixed with local hosts.
         return None;
     }
     crate::storage::jcode_dir()
         .ok()
-        .map(|dir| dir.join("prompt-history.jsonl"))
+        // Encode the id instead of trusting it as a path component.
+        .map(|dir| {
+            dir.join("prompt-history")
+                .join(format!("{}.jsonl", hex::encode(session_id)))
+        })
 }
 
 /// Load persisted prompts (oldest → newest), deduped keeping the most recent
@@ -77,10 +87,24 @@ pub(crate) fn load_from_path(path: &Path) -> Vec<String> {
 /// rewriting) so concurrent jcode processes do not clobber each other;
 /// dedupe happens at load and compaction time.
 pub(crate) fn append_to_path(path: &Path, text: &str) {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.len() > MAX_RECORDED_PROMPT_LEN {
+    append_prompts_to_path(path, std::iter::once(text));
+}
+
+/// Re-emit an ordered snapshot after historical backfill. Loading dedupes by
+/// last occurrence, so disk order matches memory without overwriting another
+/// client's appended prompts.
+pub(super) fn append_snapshot_to_path(path: &Path, entries: &[String]) {
+    append_prompts_to_path(path, entries.iter().map(String::as_str));
+}
+
+fn append_prompts_to_path<'a>(path: &Path, entries: impl IntoIterator<Item = &'a str>) {
+    let mut entries = entries
+        .into_iter()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let Some(first) = entries.next() else {
         return;
-    }
+    };
     if let Some(parent) = path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
     {
@@ -91,9 +115,6 @@ pub(crate) fn append_to_path(path: &Path, text: &str) {
         ));
         return;
     }
-    let Ok(line) = serde_json::to_string(trimmed) else {
-        return;
-    };
     use std::io::Write;
     match std::fs::OpenOptions::new()
         .create(true)
@@ -101,9 +122,14 @@ pub(crate) fn append_to_path(path: &Path, text: &str) {
         .open(path)
     {
         Ok(mut file) => {
-            if let Err(error) = writeln!(file, "{}", line) {
-                crate::logging::warn(&format!("prompt history: append failed: {}", error));
-                return;
+            for text in std::iter::once(first).chain(entries) {
+                let Ok(line) = serde_json::to_string(text) else {
+                    continue;
+                };
+                if let Err(error) = writeln!(file, "{}", line) {
+                    crate::logging::warn(&format!("prompt history: append failed: {}", error));
+                    return;
+                }
             }
         }
         Err(error) => {
@@ -156,6 +182,42 @@ fn dedupe_keep_last(entries: Vec<String>) -> Vec<String> {
     reversed
 }
 
+/// Seed a restored transcript without treating reconstructed historical text
+/// as newly submitted. Known journal entries keep their submission recency;
+/// unknown runs are placed beside their chronological transcript anchors.
+fn backfill_history(history: &[String], transcript: Vec<String>) -> Vec<String> {
+    let positions: std::collections::HashMap<&str, usize> = history
+        .iter()
+        .enumerate()
+        .map(|(index, prompt)| (prompt.as_str(), index))
+        .collect();
+    let mut insertions = vec![Vec::new(); history.len() + 1];
+    let mut pending = Vec::new();
+    let mut previous = None;
+    for prompt in dedupe_keep_last(transcript) {
+        if let Some(&index) = positions.get(prompt.as_str()) {
+            insertions[index].append(&mut pending);
+            previous = Some(index);
+        } else {
+            pending.push(prompt);
+        }
+    }
+    // A shortened rewind snapshot may have no known anchor at all. Its
+    // unknown text predates, rather than supersedes, submitted journal entries.
+    insertions[previous.map_or(0, |index| index + 1)].append(&mut pending);
+    let mut merged = Vec::new();
+    for (index, entries) in insertions.into_iter().enumerate() {
+        merged.extend(entries);
+        if let Some(prompt) = history.get(index) {
+            merged.push(prompt.clone());
+        }
+    }
+    if merged.len() > MAX_PERSISTED_PROMPTS {
+        merged.drain(..merged.len() - MAX_PERSISTED_PROMPTS);
+    }
+    merged
+}
+
 /// Collapse a prompt to a single display line for the search overlay.
 fn single_line_preview(text: &str) -> String {
     let mut line: String = text
@@ -172,49 +234,190 @@ fn single_line_preview(text: &str) -> String {
 }
 
 impl App {
-    /// Lazily load the persisted prompt history. Under `cfg(test)` the load is
-    /// skipped (tests inject `persisted_prompt_history` directly) so unit tests
-    /// sharing one `JCODE_HOME` stay deterministic.
-    fn ensure_persisted_prompt_history_loaded(&mut self) {
-        if self.persisted_prompt_history.is_some() {
-            return;
-        }
-        let loaded = if cfg!(test) {
-            Vec::new()
+    fn prompt_history_session_id(&self) -> String {
+        if self.is_remote {
+            self.remote_session_id
+                .as_ref()
+                .or(self.resume_session_id.as_ref())
+                .unwrap_or(&self.session.id)
+                .clone()
         } else {
-            history_file_path()
-                .map(|path| load_from_path(&path))
-                .unwrap_or_default()
-        };
-        self.persisted_prompt_history = Some(loaded);
+            self.session.id.clone()
+        }
     }
 
-    /// Full recall history: persisted prompts from previous sessions (oldest
-    /// first) followed by this session's visible prompts, deduped keeping the
-    /// most recent occurrence so each prompt appears exactly once.
-    pub(super) fn merged_prompt_history(&mut self) -> Vec<String> {
+    /// Bind recall before changing the remote session id. The displayed
+    /// transcript remains owned by the previous session until replaced.
+    pub(super) fn activate_prompt_history(&mut self, session_id: &str) {
+        if self.prompt_history_scope.session_id.as_deref() == Some(session_id) {
+            return;
+        }
+        if let Some(previous) = self.prompt_history_scope.session_id.take() {
+            if let Some(history) = self.persisted_prompt_history.take() {
+                self.prompt_history_scope.sessions.insert(previous, history);
+            }
+            // A search preview or saved history draft must never cross sessions.
+            self.cancel_prompt_history_search();
+            self.history_draft = None;
+        } else {
+            // The first binding owns the initial transcript and any test fixture.
+            self.prompt_history_scope.display_session_id = Some(session_id.to_string());
+        }
+        let history = self
+            .prompt_history_scope
+            .sessions
+            .remove(session_id)
+            .or_else(|| self.persisted_prompt_history.take())
+            .unwrap_or_else(|| {
+                if cfg!(test) {
+                    Vec::new()
+                } else {
+                    history_file_path(session_id)
+                        .map(|path| load_from_path(&path))
+                        .unwrap_or_default()
+                }
+            });
+        self.persisted_prompt_history = Some(history);
+        self.prompt_history_scope.session_id = Some(session_id.to_string());
+    }
+
+    fn ensure_persisted_prompt_history_loaded(&mut self) {
+        let session_id = self.prompt_history_session_id();
+        self.activate_prompt_history(&session_id);
+    }
+
+    /// The first server id names the provisional startup session. Subsequent
+    /// ids are real switches, even when the old transcript is still on screen.
+    pub(super) fn set_remote_prompt_history_session(&mut self, session_id: &str) {
+        self.capture_visible_prompt_history();
+        let adopting_startup = self.remote_session_id.is_none() && self.resume_session_id.is_none();
+        let startup_prompts = adopting_startup
+            .then(|| self.persisted_prompt_history.clone().unwrap_or_default())
+            .unwrap_or_default();
+        self.activate_prompt_history(session_id);
+        self.remote_session_id = Some(session_id.to_string());
+        self.prompt_history_scope.switch_pending = false;
+        if adopting_startup {
+            self.prompt_history_scope.display_session_id = Some(session_id.to_string());
+            for prompt in startup_prompts {
+                self.record_prompt_history(&prompt);
+            }
+        }
+    }
+
+    /// A requested switch has not received SessionId/History yet. Do not let
+    /// Up or Ctrl+R reveal the source session during that gap.
+    pub(super) fn suspend_prompt_history_for_switch(&mut self) {
+        self.capture_visible_prompt_history();
+        self.cancel_prompt_history_search();
+        self.history_draft = None;
+        self.prompt_history_scope.switch_pending = true;
+    }
+
+    pub(super) fn cancel_prompt_history_switch(&mut self) {
+        self.prompt_history_scope.switch_pending = false;
+    }
+
+    /// Import restored/remote prompts once, without replaying older transcript
+    /// entries over the journal's more recent (possibly rewound) submissions.
+    pub(super) fn capture_visible_prompt_history(&mut self) {
         self.ensure_persisted_prompt_history_loaded();
-        let mut combined: Vec<String> = self
+        if self.prompt_history_scope.display_session_id != self.prompt_history_scope.session_id {
+            return;
+        }
+        if self.prompt_history_scope.display_is_backfill {
+            self.backfill_visible_prompt_history();
+            return;
+        }
+        let prompts: Vec<String> = self
+            .display_messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .collect();
+        for prompt in prompts {
+            self.import_prompt_history(&prompt);
+        }
+    }
+
+    /// Re-rendering retained messages (notably local checkpoint restore) is
+    /// not a resubmission and must not move them ahead of removed prompts.
+    pub(super) fn import_prompt_history(&mut self, text: &str) {
+        self.ensure_persisted_prompt_history_loaded();
+        if !self
             .persisted_prompt_history
-            .as_deref()
-            .unwrap_or_default()
-            .to_vec();
-        combined.extend(
-            self.display_messages
-                .iter()
-                .filter(|message| message.role == "user")
-                .map(|message| message.content.trim().to_string())
-                .filter(|content| !content.is_empty()),
-        );
-        dedupe_keep_last(combined)
+            .as_ref()
+            .is_some_and(|history| history.iter().any(|entry| entry == text.trim()))
+        {
+            self.store_prompt_history(text);
+        }
+    }
+
+    /// Called only after the old transcript has been cleared/replaced.
+    pub(super) fn adopt_prompt_history_display(&mut self) {
+        self.ensure_persisted_prompt_history_loaded();
+        self.prompt_history_scope.display_session_id = self.prompt_history_scope.session_id.clone();
+        self.prompt_history_scope.display_is_backfill = true;
+        self.backfill_visible_prompt_history();
+    }
+
+    /// Replacement/restoration is historical seeding, unlike a live user row
+    /// passed through push_display_message or an explicit submitted prompt.
+    fn backfill_visible_prompt_history(&mut self) {
+        if self.pending_login.is_some()
+            || self.pending_account_input.is_some()
+            || self.pending_ssh_remote_name.is_some()
+            || self.prompt_history_scope.display_session_id != self.prompt_history_scope.session_id
+        {
+            return;
+        }
+        let transcript = self
+            .display_messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content.trim().to_string())
+            .filter(|text| !text.is_empty() && !text.starts_with('/') && !text.starts_with('!'))
+            .collect();
+        let history = self.persisted_prompt_history.as_deref().unwrap_or_default();
+        let merged = backfill_history(history, transcript);
+        if merged == history {
+            return;
+        }
+        self.persisted_prompt_history = Some(merged);
+        if !cfg!(test)
+            && let Some(path) = history_file_path(&self.prompt_history_session_id())
+        {
+            append_snapshot_to_path(
+                &path,
+                self.persisted_prompt_history.as_deref().unwrap_or_default(),
+            );
+        }
+    }
+
+    /// Recall is independent of transcript truncation and strictly session-local.
+    pub(super) fn merged_prompt_history(&mut self) -> Vec<String> {
+        if self.prompt_history_scope.switch_pending {
+            return Vec::new();
+        }
+        self.capture_visible_prompt_history();
+        self.persisted_prompt_history.clone().unwrap_or_default()
     }
 
     /// Record a submitted prompt into the persistent history. Only new
     /// content is stored: resubmitting an existing prompt moves it to the
-    /// most-recent slot instead of adding a duplicate. No-op for empty/huge
+    /// most-recent slot instead of adding a duplicate. No-op for empty
     /// prompts and while a login/account/ssh input interception is pending
     /// (those inputs can contain secrets).
     pub(super) fn record_prompt_history(&mut self, text: &str) {
+        // Skill/slash expansion can update an existing user display message
+        // after it was inserted. Seed that older text before this submission,
+        // not later during rewind when it would incorrectly become newest.
+        self.capture_visible_prompt_history();
+        self.store_prompt_history(text);
+    }
+
+    /// Low-level recording for imports. Must not scan the transcript again.
+    fn store_prompt_history(&mut self, text: &str) {
         if self.pending_login.is_some()
             || self.pending_account_input.is_some()
             || self.pending_ssh_remote_name.is_some()
@@ -222,7 +425,7 @@ impl App {
             return;
         }
         let trimmed = text.trim();
-        if trimmed.is_empty() || trimmed.len() > MAX_RECORDED_PROMPT_LEN {
+        if trimmed.is_empty() {
             return;
         }
         // Slash commands and input-line shell commands are not conversational
@@ -246,7 +449,7 @@ impl App {
         // the prompt is already the newest entry (no state change to persist).
         if !already_most_recent
             && !cfg!(test)
-            && let Some(path) = history_file_path()
+            && let Some(path) = history_file_path(&self.prompt_history_session_id())
         {
             append_to_path(&path, trimmed);
         }
@@ -256,6 +459,7 @@ impl App {
     /// until the user types a query; the current input-line draft is saved so
     /// Esc can restore it after the live preview overwrites the input.
     pub(super) fn open_prompt_history_search(&mut self) {
+        self.capture_visible_prompt_history();
         self.prompt_history_search = Some(PromptHistorySearchState {
             original_input: self.input.clone(),
             original_cursor: self.cursor_pos,

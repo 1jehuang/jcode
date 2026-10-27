@@ -22,13 +22,9 @@ pub(super) fn remote_auto_server_reload(
 mod reload_policy_tests;
 
 impl App {
-    /// Re-parse keybinding snapshots when the config cache has reloaded.
-    ///
-    /// The parsed bindings are cached on `App` for cheap per-keystroke lookup,
-    /// so without this poll a config.toml keybinding edit would only take
-    /// effect after a restart. Called from the idle tick in both local and
-    /// remote run loops and before each key press, including at the 5s idle
-    /// cadence. The generation check is one atomic load when unchanged.
+    /// Cached bindings refresh before keypresses and local/remote idle ticks,
+    /// including the 5s deep-idle cadence, without requiring a restart.
+    /// The generation check costs one atomic load when unchanged.
     /// Returns true when bindings were re-parsed.
     pub(super) fn refresh_keybindings_if_config_reloaded(&mut self) -> bool {
         // config() performs the throttled file-fingerprint staleness check and
@@ -594,6 +590,7 @@ impl App {
             remote_turn_streamed_output: false,
             provider_session_id: None,
             rewind_undo_snapshot: None,
+            rewind_ui: Default::default(),
             cancel_requested: false,
             quit_pending: None,
             last_resize_redraw: None,
@@ -715,6 +712,7 @@ impl App {
             swarm_panel_selected: 0,
             swarm_panel_focused: false,
             swarm_panel_full_page: false,
+            swarm_parent_session_id: None,
             diff_mode: display.diff_mode,
             centered: display.centered,
             diagram_mode: display.diagram_mode,
@@ -900,9 +898,12 @@ impl App {
             in_flight_catchup_resume: None,
             login_picker_overlay: None,
             account_picker_overlay: None,
+            dialog: None,
+            mcp_request_id: None,
             agent_profile_request_ids: Default::default(),
             agent_profile_picker_request_id: None,
             agent_profile_ui: Default::default(),
+            mcp_approval_checked: false,
             usage_overlay: None,
             usage_report_refreshing: false,
             usage_reset: Default::default(),
@@ -911,6 +912,7 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            prompt_history_scope: Default::default(),
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -969,14 +971,7 @@ impl App {
         }
 
         // Pre-compute context info so it shows on startup
-        let available_skills: Vec<crate::prompt::SkillInfo> = skills
-            .list()
-            .iter()
-            .map(|s| crate::prompt::SkillInfo {
-                name: s.name.clone(),
-                description: s.description.clone(),
-            })
-            .collect();
+        let available_skills = crate::skill_overrides::model_skill_infos(&skills);
         let (_, context_info) = crate::prompt::build_system_prompt_with_context(
             None,
             &available_skills,
@@ -1083,6 +1078,7 @@ impl App {
             remote_turn_streamed_output: false,
             provider_session_id: None,
             rewind_undo_snapshot: None,
+            rewind_ui: Default::default(),
             cancel_requested: false,
             quit_pending: None,
             last_resize_redraw: None,
@@ -1204,6 +1200,7 @@ impl App {
             swarm_panel_selected: 0,
             swarm_panel_focused: false,
             swarm_panel_full_page: false,
+            swarm_parent_session_id: None,
             diff_mode: display.diff_mode,
             centered: display.centered,
             diagram_mode: display.diagram_mode,
@@ -1389,9 +1386,12 @@ impl App {
             in_flight_catchup_resume: None,
             login_picker_overlay: None,
             account_picker_overlay: None,
+            dialog: None,
+            mcp_request_id: None,
             agent_profile_request_ids: Default::default(),
             agent_profile_picker_request_id: None,
             agent_profile_ui: Default::default(),
+            mcp_approval_checked: false,
             usage_overlay: None,
             usage_report_refreshing: false,
             usage_reset: Default::default(),
@@ -1400,6 +1400,7 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            prompt_history_scope: Default::default(),
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -1450,6 +1451,7 @@ impl App {
         let Ok(mut session) = Session::load_for_remote_startup(session_id) else {
             return;
         };
+        self.set_remote_prompt_history_session(session_id);
 
         let render_start = Instant::now();
         // Narrow scope so render intermediates (rendered messages, display
@@ -1469,7 +1471,7 @@ impl App {
         self.set_side_panel_snapshot(
             crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         );
-        self.remote_session_id = Some(session_id.to_string());
+        self.invalidate_rewind_ui();
         session.strip_transcript_for_remote_client();
         // Strip clears transcript vectors but keeps capacity; free buffers.
         session.messages.shrink_to_fit();

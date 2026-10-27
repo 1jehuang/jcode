@@ -20,6 +20,7 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Login { .. }) => "jcode login".to_string(),
         Some(Command::Account { .. }) => "jcode account".to_string(),
         Some(Command::Mcp { .. }) => "jcode mcp".to_string(),
+        Some(Command::Plugin(_)) => "jcode plugin".to_string(),
         Some(Command::Repl) => "jcode repl".to_string(),
         Some(Command::Update) => "jcode update".to_string(),
         Some(Command::Version { .. }) => "jcode version".to_string(),
@@ -106,6 +107,14 @@ mod tests {
             crate::env::set_var(SELFDEV_ENV, value);
         }
         result
+    }
+
+    #[test]
+    fn initial_title_labels_plugin() {
+        with_selfdev_env_removed(|| {
+            let args = Args::parse_from(["jcode", "plugin", "list"]);
+            assert_eq!(initial_title(&args), "jcode plugin");
+        });
     }
 
     #[test]

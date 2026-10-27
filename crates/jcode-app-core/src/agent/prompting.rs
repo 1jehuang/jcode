@@ -285,11 +285,9 @@ impl Agent {
             return split;
         }
 
-        let skills = self.current_skills_snapshot();
-        let skill_prompt = self
-            .active_skill
-            .as_ref()
-            .and_then(|name| skills.get(name).map(|skill| skill.get_prompt().to_string()));
+        // The active skill is not rendered here: its body enters the
+        // transcript once (`inject_active_skill`), so toggling a skill never
+        // rewrites the system prompt.
 
         // Frozen per session so skill installs never rewrite the cached
         // system prefix. Later installs are announced in the transcript.
@@ -302,7 +300,7 @@ impl Agent {
             .map(std::path::PathBuf::from);
 
         let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
-            skill_prompt.as_deref(),
+            None,
             available_skills,
             self.session.is_canary,
             memory_prompt,

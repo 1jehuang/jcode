@@ -1547,13 +1547,27 @@ impl App {
             self.set_diff_pane_focus(false);
         }
 
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && crate::tui::ui::viewport::pinned_todo_more_area().is_some_and(|area| {
+        let todo_expand_area = crate::tui::ui::viewport::pinned_todo_more_area();
+        let clicked_todo_control = todo_expand_area.is_some_and(|area| {
+            super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+        });
+        let clicked_expanded_todo_card = self.pinned_todos_expanded
+            && crate::tui::ui::viewport::pinned_todo_card_area().is_some_and(|area| {
                 super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
-            })
+            });
+        let clicked_compact_expandable_todo_card = !self.pinned_todos_expanded
+            && todo_expand_area.is_some()
+            && crate::tui::ui::viewport::pinned_todo_card_area()
+                .is_some_and(|area| {
+                    super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+                });
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && (clicked_todo_control
+                || clicked_expanded_todo_card
+                || clicked_compact_expandable_todo_card)
         {
-            self.pinned_todos_expanded = true;
-            finish_mouse_event!(false, "pinned_todos_expand");
+            self.pinned_todos_expanded = !self.pinned_todos_expanded;
+            finish_mouse_event!(false, "pinned_todos_toggle");
         }
 
         // The "Jump to bottom" pill. Checked before copy-selection so a click

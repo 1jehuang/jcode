@@ -10,6 +10,7 @@ use crate::protocol::{
 use crate::provider::Provider;
 use crate::tui::info_widget::{MemoryState, StepStatus};
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::Arc;
 
 #[path = "remote_tests/korean_input.rs"]
@@ -483,6 +484,82 @@ fn startup_history(session_id: &str) -> ServerEvent {
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
         applets: Default::default(),
     }
+}
+
+#[test]
+fn prompt_history_server_event_orders_keep_sessions_isolated() {
+    for session_id_first in [false, true] {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_remote = true;
+        app.auto_server_reload = false;
+        app.remote_session_id = Some("recall-event-source".to_string());
+        app.replace_display_messages(vec![super::DisplayMessage::user("source prompt")]);
+        app.suspend_prompt_history_for_switch();
+        assert!(app.merged_prompt_history().is_empty());
+
+        if session_id_first {
+            app.handle_server_event(
+                ServerEvent::SessionId {
+                    session_id: "recall-event-target".to_string(),
+                },
+                &mut remote,
+            );
+            assert!(app.merged_prompt_history().is_empty());
+        }
+        let mut history = startup_history("recall-event-target");
+        if let ServerEvent::History { messages, .. } = &mut history {
+            messages.push(crate::protocol::HistoryMessage {
+                role: "user".to_string(),
+                content: "target prompt".to_string(),
+                tool_calls: None,
+                tool_data: None,
+                response_stats: None,
+            });
+        }
+        app.handle_server_event(history, &mut remote);
+        assert_eq!(app.merged_prompt_history(), vec!["target prompt"]);
+        app.handle_server_event(
+            ServerEvent::SessionId {
+                session_id: "recall-event-target".to_string(),
+            },
+            &mut remote,
+        );
+        assert_eq!(app.merged_prompt_history(), vec!["target prompt"]);
+        app.handle_server_event(
+            ServerEvent::SessionId {
+                session_id: "recall-event-source".to_string(),
+            },
+            &mut remote,
+        );
+        assert_eq!(app.merged_prompt_history(), vec!["source prompt"]);
+    }
+}
+
+#[test]
+fn prompt_history_clear_request_hides_old_session_before_server_reply() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
+    app.remote_session_id = Some("recall-clear-source".to_string());
+    remote.mark_history_loaded();
+    app.replace_display_messages(vec![super::DisplayMessage::user("old session prompt")]);
+    app.input = "/clear".to_string();
+    app.cursor_pos = app.input.len();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert!(app.merged_prompt_history().is_empty());
+    app.handle_server_event(
+        ServerEvent::SessionId {
+            session_id: "recall-clear-target".to_string(),
+        },
+        &mut remote,
+    );
+    assert!(app.merged_prompt_history().is_empty());
 }
 
 #[test]

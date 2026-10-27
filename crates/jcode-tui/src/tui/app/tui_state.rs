@@ -2018,6 +2018,10 @@ impl crate::tui::TuiState for App {
         self.account_picker_overlay.as_ref()
     }
 
+    fn dialog(&self) -> Option<&crate::tui::dialog::Dialog> {
+        self.dialog.as_ref()
+    }
+
     fn usage_overlay(&self) -> Option<&RefCell<crate::tui::usage_overlay::UsageOverlay>> {
         self.usage_overlay.as_ref()
     }
@@ -2202,6 +2206,14 @@ impl App {
                 self.move_swarm_panel_selection(-1);
                 true
             }
+            Some(SwarmPanelAction::Enter) => {
+                self.enter_selected_swarm_agent();
+                true
+            }
+            Some(SwarmPanelAction::ReturnToParent) => {
+                self.return_to_swarm_parent();
+                true
+            }
             Some(SwarmPanelAction::PopOut) => {
                 self.pop_out_selected_swarm_agent();
                 true
@@ -2217,6 +2229,58 @@ impl App {
             }
             None => false,
         }
+    }
+
+    /// Queue the selected agent session in this terminal and remember the
+    /// current session as the return target.
+    pub(crate) fn enter_selected_swarm_agent(&mut self) {
+        if self.is_processing {
+            self.set_status_notice("Finish current work before entering an agent");
+            return;
+        }
+        let members = self.inline_swarm_members();
+        let Some(member) = crate::tui::info_widget::swarm_gallery::members_display_order(&members)
+            .get(self.swarm_panel_selected.min(members.len().saturating_sub(1)))
+            .and_then(|session_id| members.iter().find(|member| member.session_id == *session_id))
+        else {
+            self.set_status_notice("No swarm agents to enter");
+            return;
+        };
+        let session_id = member.session_id.clone();
+        let label = member
+            .friendly_name
+            .clone()
+            .unwrap_or_else(|| session_id.chars().take(8).collect());
+        let parent = self.remote_session_id
+            .as_deref()
+            .or(self.resume_session_id.as_deref())
+            .unwrap_or(&self.session.id)
+            .to_string();
+        if session_id == parent {
+            self.set_status_notice("Already in this agent session");
+            return;
+        }
+        self.swarm_parent_session_id = Some(parent);
+        self.swarm_panel_focused = false;
+        self.swarm_panel_full_page = false;
+        self.workspace_client.queue_resume_session(session_id);
+        self.set_status_notice(format!("Entering {label}…"));
+    }
+
+    /// Queue a return to the parent captured when entering a swarm agent.
+    pub(crate) fn return_to_swarm_parent(&mut self) {
+        if self.is_processing {
+            self.set_status_notice("Finish current work before returning to the parent");
+            return;
+        }
+        let Some(parent) = self.swarm_parent_session_id.take() else {
+            self.set_status_notice("No parent session to return to");
+            return;
+        };
+        self.workspace_client.queue_resume_session(parent);
+        self.swarm_panel_focused = false;
+        self.swarm_panel_full_page = false;
+        self.set_status_notice("Returning to parent session…");
     }
 
     /// Open the currently selected swarm agent's session in a new terminal
@@ -2257,6 +2321,8 @@ impl App {
 pub(crate) enum SwarmPanelAction {
     SelectNext,
     SelectPrev,
+    Enter,
+    ReturnToParent,
     PopOut,
     OpenPrompt,
     Exit,
@@ -2268,7 +2334,9 @@ pub(crate) enum SwarmPanelAction {
 /// user may keep writing into the chat input while glancing at agents), so
 /// only Esc and Alt-chords are claimed:
 /// - Alt+↑ / Alt+↓ (also Alt+k / Alt+j): move the selection
-/// - Alt+o / Alt+Enter: pop the selected agent out to a terminal
+/// - Alt+Enter: enter the selected agent in this terminal
+/// - Alt+o: pop the selected agent out to another terminal
+/// - Alt+b: return to the parent session
 /// - Alt+Shift+p: open the active swarm routing prompt in the editor
 /// - Esc: exit the panel
 pub(crate) fn swarm_panel_action_for_key(
@@ -2291,7 +2359,9 @@ pub(crate) fn swarm_panel_action_for_key(
     match code {
         KeyCode::Down | KeyCode::Char('j') if alt => Some(SwarmPanelAction::SelectNext),
         KeyCode::Up | KeyCode::Char('k') if alt => Some(SwarmPanelAction::SelectPrev),
-        KeyCode::Char('o') | KeyCode::Enter if alt => Some(SwarmPanelAction::PopOut),
+        KeyCode::Enter if alt => Some(SwarmPanelAction::Enter),
+        KeyCode::Char('b') if alt => Some(SwarmPanelAction::ReturnToParent),
+        KeyCode::Char('o') if alt => Some(SwarmPanelAction::PopOut),
         KeyCode::Char('P') if alt => Some(SwarmPanelAction::OpenPrompt),
         KeyCode::Char('p') if alt && modifiers.contains(KeyModifiers::SHIFT) => {
             Some(SwarmPanelAction::OpenPrompt)

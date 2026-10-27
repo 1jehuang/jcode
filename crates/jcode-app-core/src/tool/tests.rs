@@ -606,6 +606,11 @@ async fn registry_execute_pre_tool_hook_blocks_and_allows() {
             ctx(),
         )
         .await;
+    // jcode's own bookkeeping calls (the `/mcp` dialog, MCP status checks) are
+    // not tool calls, so user hooks never see them.
+    let internal = registry
+        .execute_internal("bash", serde_json::json!({"command": "echo secret"}), ctx())
+        .await;
 
     match prev {
         Some(value) => crate::env::set_var("JCODE_HOOK_PRE_TOOL", value),
@@ -619,6 +624,7 @@ async fn registry_execute_pre_tool_hook_blocks_and_allows() {
         "hook stderr should surface in the error: {error}"
     );
     assert!(allowed.is_ok(), "non-matching input should pass the gate");
+    assert!(internal.is_ok(), "internal calls bypass the pre_tool gate");
 }
 
 #[tokio::test]
@@ -928,6 +934,7 @@ async fn test_context_guard_small_output_passes_through() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(200_000)));
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -943,6 +950,7 @@ async fn test_context_guard_withholds_huge_single_output_by_default() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -981,6 +989,7 @@ async fn test_context_guard_returns_truncated_output_when_caller_accepts() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1017,6 +1026,7 @@ async fn test_context_guard_reports_the_real_cost_and_affordable_size() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1063,6 +1073,7 @@ async fn test_context_guard_truncates_when_context_nearly_full() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1089,6 +1100,7 @@ async fn test_context_guard_still_refuses_when_context_is_exhausted() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1115,6 +1127,7 @@ async fn test_context_guard_zero_budget_passes_through() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(0)));
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1334,6 +1347,7 @@ async fn test_context_guard_never_spends_more_than_it_reports() {
                     }
                     let registry = Registry {
                         mcp_policy: Arc::default(),
+                        plugin_mcp_refresh: Arc::default(),
                         tools: Arc::new(RwLock::new(HashMap::new())),
                         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
                         compaction,
@@ -1383,6 +1397,7 @@ async fn test_context_guard_refusal_reads_clearly_for_todays_regression() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1674,6 +1689,7 @@ async fn test_guard_withholds_large_output_on_a_million_token_window() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1706,6 +1722,7 @@ async fn test_single_output_ceiling_is_absolute_not_only_proportional() {
         let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(budget)));
         let registry = Registry {
             mcp_policy: Arc::default(),
+            plugin_mcp_refresh: Arc::default(),
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
             compaction,

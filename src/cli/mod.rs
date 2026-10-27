@@ -13,6 +13,7 @@ pub mod login;
 pub mod macos_notification_broker;
 pub mod mcp;
 pub mod output;
+pub mod plugin;
 pub mod proctitle;
 pub mod provider_doctor;
 pub mod provider_init;

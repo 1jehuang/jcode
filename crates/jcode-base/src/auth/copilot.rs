@@ -1039,6 +1039,7 @@ impl CopilotModelInfo {
             supports_structured_outputs: supports.and_then(|supports| supports.structured_outputs),
             supports_adaptive_thinking: supports.and_then(|supports| supports.adaptive_thinking),
             supported_endpoints: self.supported_endpoints.clone(),
+            ..Default::default()
         }
     }
 

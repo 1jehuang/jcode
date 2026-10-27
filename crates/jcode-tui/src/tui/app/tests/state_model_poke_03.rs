@@ -1328,7 +1328,7 @@ fn test_model_picker_opens_simplified_state_before_async_routes_complete() {
             .expect("loading picker should open immediately");
         assert_eq!(picker.entries.len(), 1);
         assert_eq!(picker.entries[0].name, "counting-a");
-        assert_eq!(picker.entries[0].options[0].detail, "simplified catalog");
+        assert_eq!(picker.entries[0].options[0].detail, "updating model list…");
         assert!(app.pending_model_picker_load.is_some());
         assert_eq!(
             app.status_notice(),

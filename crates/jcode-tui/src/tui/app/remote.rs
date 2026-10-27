@@ -259,6 +259,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         if let Some(request) = app.take_pending_catchup_resume() {
             match remote.resume_session(&request.target_session_id).await {
                 Ok(()) => {
+                    app.suspend_prompt_history_for_switch();
                     let label = crate::id::extract_session_name(&request.target_session_id)
                         .map(|name| name.to_string())
                         .unwrap_or_else(|| request.target_session_id.clone());
@@ -272,6 +273,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                     return true;
                 }
                 Err(err) => {
+                    app.cancel_prompt_history_switch();
                     app.clear_in_flight_catchup_resume();
                     app.push_display_message(DisplayMessage::error(format!(
                         "Failed to switch Catch Up session: {}",
@@ -285,6 +287,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         if let Some(target_session) = app.workspace_client.take_pending_resume_session() {
             match remote.resume_session(&target_session).await {
                 Ok(()) => {
+                    app.suspend_prompt_history_for_switch();
                     let label = crate::id::extract_session_name(&target_session)
                         .map(|name| name.to_string())
                         .unwrap_or(target_session);
@@ -292,6 +295,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                     return true;
                 }
                 Err(err) => {
+                    app.cancel_prompt_history_switch();
                     app.push_display_message(DisplayMessage::error(format!(
                         "Failed to switch workspace session: {}",
                         err
@@ -1028,6 +1032,7 @@ pub(super) fn handle_disconnect(
     state: &mut RemoteRunState,
     reason: Option<RemoteDisconnectReason>,
 ) {
+    app.invalidate_rewind_ui();
     let detail = if state.server_reload_in_progress {
         "server reload in progress".to_string()
     } else if let Some(reason) = reason.as_ref() {
@@ -2055,6 +2060,11 @@ fn handle_disconnected_key_internal(
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
     if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
+        return Ok(());
+    }
+
+    if app.dialog.is_some() {
+        app.handle_dialog_key_offline(code, modifiers);
         return Ok(());
     }
 

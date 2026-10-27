@@ -284,6 +284,9 @@ pub struct SessionPicker {
     last_preview_area: Option<Rect>,
     /// Whether to show debug/test/canary sessions
     show_test_sessions: bool,
+    /// Spawned agent conversations are hidden by default so /resume stays
+    /// focused on top-level threads.
+    pub(crate) show_spawned_sessions: bool,
     /// Current list filter mode
     filter_mode: SessionFilterMode,
     /// Search query for filtering sessions
@@ -371,6 +374,7 @@ impl SessionPicker {
             last_list_area: None,
             last_preview_area: None,
             show_test_sessions: false,
+            show_spawned_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
@@ -419,6 +423,7 @@ impl SessionPicker {
             last_list_area: None,
             last_preview_area: None,
             show_test_sessions: false,
+            show_spawned_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
@@ -499,6 +504,7 @@ impl SessionPicker {
             last_list_area: None,
             last_preview_area: None,
             show_test_sessions: false,
+            show_spawned_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
@@ -1187,6 +1193,12 @@ impl SessionPicker {
             }
             KeyCode::Char('d') => {
                 self.toggle_test_sessions();
+            }
+            KeyCode::Char('a') => {
+                self.show_spawned_sessions = !self.show_spawned_sessions;
+                self.cached_search_query.clear();
+                self.cached_search_refs.clear();
+                self.rebuild_items();
             }
             KeyCode::Char('T') => {
                 self.begin_claude_takeover_confirmation();

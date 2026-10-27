@@ -154,6 +154,9 @@ pub(in crate::tui::app) async fn handle_remote_key_event(
     event: KeyEvent,
     remote: &mut RemoteConnection,
 ) -> Result<()> {
+    if event.code == KeyCode::Esc && event.kind != crossterm::event::KeyEventKind::Press {
+        return Ok(());
+    }
     handle_remote_key_internal(
         app,
         event.code,
@@ -174,6 +177,8 @@ async fn handle_remote_key_internal(
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+    // Modal Esc and intervening keys cannot arm the composer rewind chord.
+    let previous_empty_escape = app.rewind_ui.last_empty_escape.take();
 
     if app.pending_provider_failover.is_some() && !app.is_processing {
         if code == KeyCode::Esc {
@@ -222,6 +227,22 @@ async fn handle_remote_key_internal(
 
     if app.prompt_history_search.is_some() {
         app.handle_prompt_history_search_key(code, modifiers);
+        return Ok(());
+    }
+
+    if app.dialog.is_some() {
+        match app.handle_dialog_key(code, modifiers) {
+            Some(crate::tui::dialog::DialogKey::Mcp(args)) => {
+                app_mod::dialog_actions::send_mcp_command(app, remote, args).await;
+            }
+            Some(crate::tui::dialog::DialogKey::Rewind {
+                checkpoint_id,
+                mode,
+            }) => {
+                app_mod::rewind::restore_remote(app, remote, checkpoint_id, mode).await;
+            }
+            _ => {}
+        }
         return Ok(());
     }
 
@@ -1049,6 +1070,12 @@ async fn handle_remote_key_internal(
                     app.set_status_notice("Interrupting...");
                 }
             } else {
+                if modifiers.is_empty()
+                    && app.rewind_empty_escape(previous_empty_escape, Instant::now())
+                {
+                    app_mod::rewind::open_remote(app, remote).await;
+                    return Ok(());
+                }
                 app.follow_chat_bottom();
                 input::clear_input_for_escape(app);
             }
@@ -1179,6 +1206,24 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
         if trimmed == "/server-reload" {
             app.append_reload_message("Reloading server...");
             remote.reload().await?;
+            return Ok(());
+        }
+
+        if trimmed.split_whitespace().next() == Some("/plugin") {
+            app_mod::state_ui::handle_info_command(app, trimmed);
+            return Ok(());
+        }
+
+        if trimmed == "/mcp" || trimmed.starts_with("/mcp ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(str::to_string)
+                .collect();
+            if args.is_empty() {
+                app.dialog = Some(crate::tui::dialog::Dialog::mcp_loading());
+            }
+            app_mod::dialog_actions::send_mcp_command(app, remote, args).await;
             return Ok(());
         }
 
@@ -1854,6 +1899,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
 
         if trimmed == "/clear" {
             remote.clear().await?;
+            app.suspend_prompt_history_for_switch();
             app.clear_provider_messages();
             app.clear_display_messages();
             app.queued_messages.clear();

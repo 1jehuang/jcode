@@ -12,7 +12,9 @@
 //! - accounts are instances, each an isolated `CLAUDE_CONFIG_DIR`. jcode never
 //!   reads or stores Claude Code credentials.
 
+mod background;
 pub mod control;
+mod file_tool_routing;
 pub mod process;
 pub mod prompt;
 pub mod settings;
@@ -21,6 +23,7 @@ pub mod turn;
 pub mod usage;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -202,6 +205,9 @@ pub struct ClaudeCodeProvider {
     rate_limits: Arc<StdMutex<Option<ClaudeCodeRateLimits>>>,
     init: Arc<StdMutex<Option<InitInfo>>>,
     probe_cache: Arc<StdMutex<Vec<(String, Instant, ClaudeCodeIdentity)>>>,
+    /// jcode session served, for background-task rows between turns.
+    jcode_session: background::SessionSlot,
+    host_tool_executor: Arc<AtomicBool>,
 }
 
 impl Default for ClaudeCodeProvider {
@@ -246,6 +252,8 @@ impl ClaudeCodeProvider {
             rate_limits: Arc::new(StdMutex::new(None)),
             init: Arc::new(StdMutex::new(None)),
             probe_cache: Arc::new(StdMutex::new(Vec::new())),
+            jcode_session: Default::default(),
+            host_tool_executor: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -289,7 +297,15 @@ impl ClaudeCodeProvider {
     }
 
     fn expose_mcp(&self, tools: &[ToolDefinition]) -> bool {
-        self.settings().expose_jcode_tools && !control::exposed_tools(tools).is_empty()
+        self.settings().expose_jcode_tools
+            && !control::exposed_tools_with_file_tools(
+                tools,
+                &file_tool_routing::host_file_tools(
+                    tools,
+                    self.host_tool_executor.load(Ordering::Acquire),
+                ),
+            )
+            .is_empty()
     }
 
     /// Stop the live child (the Claude session stays resumable).
@@ -340,6 +356,10 @@ impl ClaudeCodeProvider {
         let model = settings::normalize_model_id(&read(&self.model));
         let effort = read(&self.effort);
         let expose_mcp = self.expose_mcp(tools);
+        let host_file_tools = file_tool_routing::host_file_tools(
+            tools,
+            self.host_tool_executor.load(Ordering::Acquire) && self.settings().expose_jcode_tools,
+        );
         let settings = self.settings();
 
         if let Some(child) = state.child.take() {
@@ -348,6 +368,7 @@ impl ClaudeCodeProvider {
                 && launch.instance.env == instance.env
                 && launch.instance.launch_args == instance.launch_args;
             let same_shape = launch.spec.expose_mcp == expose_mcp
+                && launch.spec.host_file_tools == host_file_tools
                 && launch.spec.effort == effort
                 && launch.cwd == cwd
                 && launch.append_system_prompt == append_system_prompt;
@@ -405,10 +426,12 @@ impl ClaudeCodeProvider {
                 setting_sources: settings.setting_sources.clone(),
                 session,
                 expose_mcp,
+                host_file_tools: host_file_tools.clone(),
                 launch_args: launch_args.clone(),
             },
             cwd: cwd.clone(),
             append_system_prompt: append_system_prompt.to_string(),
+            jcode_session: self.jcode_session.clone(),
         };
 
         let child = match resume {
@@ -576,12 +599,18 @@ impl ClaudeCodeProvider {
             rate_limits: Arc::new(StdMutex::new(self.rate_limit_snapshot())),
             init: Arc::new(StdMutex::new(self.init_info())),
             probe_cache: self.probe_cache.clone(),
+            jcode_session: Default::default(),
+            host_tool_executor: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 #[async_trait]
 impl Provider for ClaudeCodeProvider {
+    fn set_host_tool_executor_available(&self, available: bool) {
+        self.host_tool_executor.store(available, Ordering::Release);
+    }
+
     async fn reset_conversation_state(&self) -> Result<()> {
         let _turn_guard = self.turn_lock.lock().await;
         let mut state = self.state.lock().await;
@@ -757,6 +786,11 @@ impl Provider for ClaudeCodeProvider {
         Some(self.result_tx.clone())
     }
 
+    fn bind_session(&self, session_id: &str) {
+        *self.jcode_session.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(session_id.to_string());
+    }
+
     async fn complete_simple(&self, prompt_text: &str, system: &str) -> Result<String> {
         let instance = self.active_instance();
         let model = settings::normalize_model_id(&self.model());
@@ -821,6 +855,8 @@ impl ClaudeCodeProvider {
             rate_limits: self.rate_limits.clone(),
             init: self.init.clone(),
             probe_cache: self.probe_cache.clone(),
+            jcode_session: self.jcode_session.clone(),
+            host_tool_executor: self.host_tool_executor.clone(),
         }
     }
 }

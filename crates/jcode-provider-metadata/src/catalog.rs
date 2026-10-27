@@ -493,6 +493,24 @@ pub const YOLO_AUTO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+// Acme (https://acme.com) — OpenAI-compatible marketplace exchange serving
+// `gpt-6-astra` through merchant pools. This is the astra-jb profile: astra
+// models on this line run with the vision-OCR laundering chain applied by
+// default (see `jcode-provider-openrouter-runtime/src/astra_jb.rs`), so typed
+// prompts ride the vision path as scanned-page images instead of the filtered
+// text-input path. The normal OpenAI provider's `gpt-6-astra` catalog entry is
+// untouched; this profile exists in parallel.
+pub const ACME_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "acme",
+    display_name: "Acme",
+    api_base: "https://api.acme.com/v1",
+    api_key_env: "ACME_KEY",
+    env_file: "acme.env",
+    setup_url: "https://acme.com",
+    default_model: Some("gpt-6-astra"),
+    requires_api_key: true,
+};
+
 pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "openai-compatible",
     display_name: "OpenAI-compatible",
@@ -504,7 +522,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -545,6 +563,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [
     META_MUSE_PROFILE,
     CELERIS_PROFILE,
     YOLO_AUTO_PROFILE,
+    ACME_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
     OPENAI_COMPAT_PROFILE,
@@ -858,6 +877,19 @@ pub const DEEPSEEK_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescri
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(DEEPSEEK_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(21), Some(21), Some(21), Some(21), Some(21)),
+};
+
+pub const ACME_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "acme",
+    display_name: "Acme",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["acme", "acme", "astra-jb"],
+    menu_detail: "API key, astra models with astra-jb laundering on",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(ACME_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(41), Some(41), Some(41), Some(41), Some(41)),
 };
 
 pub const COMTEGRA_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1299,7 +1331,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1347,6 +1379,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
     META_MUSE_LOGIN_PROVIDER,
     CELERIS_LOGIN_PROVIDER,
     YOLO_AUTO_LOGIN_PROVIDER,
+    ACME_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
     OPENAI_COMPAT_LOGIN_PROVIDER,
