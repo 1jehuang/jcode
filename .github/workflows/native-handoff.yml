@@ -1,0 +1,179 @@
+name: Native artifact handoff (validation only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: Producer to validate (macOS is a native fallback, not cross-built)
+        type: choice
+        default: macos-arm64
+        options: [linux-arm64, macos-arm64]
+      sign_macos:
+        description: Sign and notarize after native verification (protected environment required)
+        type: boolean
+        default: false
+
+# Never accepts a source ref, artifact URL, run ID, or workflow_run payload.
+permissions:
+  contents: read
+
+env:
+  JCODE_CI: '1'
+  JCODE_CI_BUILD: '1'
+  CARGO_BUILD_RUSTC_WRAPPER: ''
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: '3'
+  JUSTRUST_TOOLCHAIN: system
+  RUSTUP_TOOLCHAIN: nightly-2026-10-08
+  JUSTRUST_NO_TELEMETRY: '1'
+  JUSTRUST_SLOTS: '0'
+
+jobs:
+  producer:
+    if: github.repository == '1jehuang/jcode' && github.ref == 'refs/heads/master'
+    runs-on: ${{ inputs.lane == 'linux-arm64' && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: 120
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      manifest_digest: ${{ steps.seal.outputs.manifest_digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate dispatch and exact source
+        env:
+          SIGN_MACOS: ${{ inputs.sign_macos }}
+          LANE: ${{ inputs.lane }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ "$SIGN_MACOS" == true && "$LANE" != macos-arm64 ]]; then
+            echo 'Signing is only valid for the macOS lane' >&2
+            exit 1
+          fi
+          python3 -m unittest discover -s scripts -p test_native_handoff.py
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-08
+          components: rust-src
+          targets: ${{ inputs.lane == 'linux-arm64' && 'aarch64-unknown-linux-gnu' || 'aarch64-apple-darwin' }}
+      # alpha.19 does NOT include the GNU ARM emulated-TLS contract. Bootstrap
+      # the reviewed exact source instead of silently using a released old client.
+      - name: Install bootstrap justrust
+        run: bash scripts/install_justrust_ci.sh
+      - uses: actions/checkout@v4
+        with:
+          repository: 1jehuang/justrust
+          ref: e020bad4c407b573b74cc0aa9ab7d5a90d98018a
+          path: handoff-tool-source
+          persist-credentials: false
+      - name: Build pinned justrust client locally
+        run: |
+          set -euo pipefail
+          mv handoff-tool-source "$RUNNER_TEMP/handoff-tool-source"
+          cd "$RUNNER_TEMP/handoff-tool-source"
+          test "$(git rev-parse HEAD)" = e020bad4c407b573b74cc0aa9ab7d5a90d98018a
+          justrust build --local --locked --release --bin justrust
+          cp target/release/justrust "$HOME/.local/bin/justrust"
+          justrust --version
+      - name: Build exact source with pinned contract
+        env:
+          LANE: ${{ inputs.lane }}
+          # Only the trusted hosted producer receives an account key. No signing
+          # credentials or elevated GitHub token are available to this job.
+          JCODE_API_KEY: ${{ inputs.lane == 'linux-arm64' && secrets.JUSTRUST_API_KEY || '' }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code
+          if [[ "$LANE" == linux-arm64 ]]; then
+            test -n "$JCODE_API_KEY" || { echo 'JUSTRUST_API_KEY is required for hosted ARM builds' >&2; exit 1; }
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-Ztls-model=emulated'
+            justrust build --remote --locked --release --bin jcode --target aarch64-unknown-linux-gnu -Zbuild-std=std,panic_abort
+            target=aarch64-unknown-linux-gnu
+          else
+            # Uses Apple's installed SDK only on the native GitHub macOS runner.
+            justrust build --local --locked --release --bin jcode --target aarch64-apple-darwin
+            target=aarch64-apple-darwin
+          fi
+          git diff --exit-code
+          mkdir handoff
+          cp "target/$target/release/jcode" handoff/jcode
+          justrust show > handoff/build-report.txt
+          justrust show --json > handoff/build-report.json
+      - name: Seal artifact provenance
+        id: seal
+        env:
+          LANE: ${{ inputs.lane }}
+        run: |
+          set -euo pipefail
+          digest=$(python3 scripts/native_handoff.py seal --lane "$LANE")
+          echo "manifest_digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: native-handoff-${{ inputs.lane }}-${{ github.run_attempt }}
+          path: handoff/
+          if-no-files-found: error
+          retention-days: 7
+
+  native-verify:
+    needs: producer
+    runs-on: ${{ inputs.lane == 'linux-arm64' && 'ubuntu-24.04-arm' || 'macos-15' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.producer.outputs.artifact_id }}
+          path: handoff
+          merge-multiple: true
+      - name: Verify provenance before executing on native ARM64
+        env:
+          LANE: ${{ inputs.lane }}
+          MANIFEST_DIGEST: ${{ needs.producer.outputs.manifest_digest }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64 || test "$(uname -m)" = aarch64
+          python3 scripts/native_handoff.py smoke --lane "$LANE" --manifest-digest "$MANIFEST_DIGEST"
+
+  sign-macos:
+    needs: [producer, native-verify]
+    if: inputs.sign_macos && inputs.lane == 'macos-arm64' && github.repository == '1jehuang/jcode' && github.ref == 'refs/heads/master'
+    runs-on: macos-15
+    # Configure required reviewers AND deployment branch restriction to master.
+    environment: native-handoff-signing
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.producer.outputs.artifact_id }}
+          path: handoff
+          merge-multiple: true
+      - name: Recheck unsigned artifact before exposing credentials
+        env:
+          MANIFEST_DIGEST: ${{ needs.producer.outputs.manifest_digest }}
+        run: python3 scripts/native_handoff.py verify --lane macos-arm64 --manifest-digest "$MANIFEST_DIGEST"
+      - name: Sign and notarize explicitly authorized binary
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+        run: bash scripts/sign_native_handoff_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-native-handoff-macos-arm64-${{ github.run_attempt }}
+          path: signed-handoff/
+          if-no-files-found: error
+          retention-days: 7
