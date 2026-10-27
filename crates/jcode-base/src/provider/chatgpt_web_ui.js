@@ -316,7 +316,14 @@ return (async () => {
     const last = turn.at(-1);
     return { available: true, temporary: data.is_temporary_chat === true, texts,
       complete: last?.author?.role === 'assistant' && last.end_turn === true && last.status === 'finished_successfully',
-      builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))] };
+      builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))],
+      shape: replyShape(assistant.map(m => [m.content?.content_type, m.recipient ?? 'all', m.status, m.metadata?.finish_details?.type,
+        (m.content?.parts || []).filter(part => typeof part === 'string').join('').length])) };
+  }
+  // Content-free summary of the reply messages, for errors about empty answers.
+  function replyShape(messages) {
+    return messages.map(([type, recipient, status, finish, chars]) =>
+      [type || '?', recipient && recipient !== 'all' ? `to ${recipient}` : null, status, finish, `${chars} chars`].filter(Boolean).join(' ')).join('; ');
   }
   // Live view of the owned turn's own network stream. The page still sends
   // the request itself (with its own sentinel checks); jcode only reads a tee
@@ -330,7 +337,6 @@ return (async () => {
         const url = typeof input === 'string' ? input : input?.url || String(input);
         const method = (init?.method || input?.method || 'GET').toUpperCase();
         const isTurn = method === 'POST' && /\/backend-api\/f\/conversation(\?|$)/.test(url);
-        const isConversationRead = method === 'GET' && /\/backend-api\/conversation\/[0-9a-f-]{36}(\?|$)/i.test(url);
         let substituted = null;
         let mask = null;
         if (isTurn && net.pending) {
@@ -371,7 +377,13 @@ return (async () => {
           }
         }
         const response = await net.original.call(this ?? globalThis, input, init);
-        if (isConversationRead && net.mask && response.ok) return maskedResponse(response, await response.text(), net.mask);
+        // Conversation reads, resumed streams (/f/conversation/resume) and
+        // background (Pro) turns re-deliver the echoed prompt outside the send.
+        if (!isTurn && net.mask && response.ok && /\/backend-api\//.test(url)) {
+          const type = response.headers?.get?.('content-type') || '';
+          if (type.includes('event-stream') && response.body) return new Response(response.body.pipeThrough(maskStream(net.mask)), { status: response.status, statusText: response.statusText, headers: response.headers });
+          if (type.includes('json')) return maskedResponse(response, await response.text(), net.mask);
+        }
         if (!isTurn || !response.body || !net.key) return response;
         const turn = { key: net.key, status: response.status, substituted, buffer: '', events: 0, messages: {}, order: [], lastPath: null, current: null, done: false, error: null, started: Date.now(), firstToken: null };
         net.turns.push(turn);
@@ -402,32 +414,43 @@ return (async () => {
         return new Response(pageBody, { status: response.status, statusText: response.statusText, headers: response.headers });
       };
       net.wrapper = globalThis.fetch;
+      // Background (Pro) turns also reach the page over a WebSocket topic.
+      const { MessageEvent: Message, WebSocket: Socket } = globalThis;
+      const data = Message && Socket && Object.getOwnPropertyDescriptor(Message.prototype, 'data');
+      if (data?.get) Object.defineProperty(Message.prototype, 'data', { ...data, get() {
+        const value = data.get.call(this);
+        return net.mask && typeof value === 'string' && this.target instanceof Socket ? maskText(value, net.mask) : value;
+      } });
     }
     net.key = key;
     return { armed: true };
   }
   // Replaces every string equal to jcode's prompt with its placeholder.
-  function maskValue(value, mask, depth = 0) {
-    if (typeof value === 'string') return value === mask.text ? { value: mask.placeholder, changed: true } : { value, changed: false };
+  function maskValue(value, mask, nesting, depth = 0) {
+    if (typeof value === 'string') { const masked = maskText(value, mask, nesting); return { value: masked, changed: masked !== value }; }
     if (!value || typeof value !== 'object' || depth > 64) return { value, changed: false };
     let changed = false;
     for (const key of Object.keys(value)) {
-      const result = maskValue(value[key], mask, depth + 1);
+      const result = maskValue(value[key], mask, nesting, depth + 1);
       if (result.changed) { value[key] = result.value; changed = true; }
     }
     return { value, changed };
   }
-  // A JSON text that may contain the prompt is at least as long as it.
-  function maskJsonText(text, mask) {
-    if (text.length < mask.text.length) return text;
-    try {
-      const result = maskValue(JSON.parse(text), mask);
-      return result.changed ? JSON.stringify(result.value) : text;
-    } catch { return text; }
-  }
-  function maskSseBlock(block, mask) {
-    if (block.length < mask.text.length) return block;
-    return block.split('\n').map(line => line.startsWith('data: ') ? `data: ${maskJsonText(line.slice(6), mask)}` : line).join('\n');
+  // The prompt arrives as a JSON value, in an SSE block, or inside a string
+  // that itself holds JSON or SSE (WebSocket frames wrap encoded stream items).
+  // Text that may contain the prompt is at least as long as it.
+  function maskText(text, mask, nesting = 0) {
+    if (typeof text !== 'string' || text.length < mask.text.length || nesting > 3) return text;
+    if (text === mask.text) return mask.placeholder;
+    const head = text.trimStart()[0];
+    if (head === '{' || head === '[') {
+      try {
+        const result = maskValue(JSON.parse(text), mask, nesting + 1);
+        return result.changed ? JSON.stringify(result.value) : text;
+      } catch { return text; }
+    }
+    if (!text.includes('data: ')) return text;
+    return text.split('\n').map(line => line.startsWith('data: ') ? `data: ${maskText(line.slice(6), mask, nesting + 1)}` : line).join('\n');
   }
   // The page's copy of the turn stream, with the echoed prompt masked.
   function maskStream(mask) {
@@ -439,14 +462,14 @@ return (async () => {
         buffer += decoder.decode(chunk, { stream: true });
         let end, out = '';
         while ((end = buffer.indexOf('\n\n')) >= 0) {
-          out += maskSseBlock(buffer.slice(0, end), mask) + '\n\n';
+          out += maskText(buffer.slice(0, end), mask) + '\n\n';
           buffer = buffer.slice(end + 2);
         }
         if (out) controller.enqueue(encoder.encode(out));
       },
       flush(controller) {
         buffer += decoder.decode();
-        if (buffer) controller.enqueue(encoder.encode(maskSseBlock(buffer, mask)));
+        if (buffer) controller.enqueue(encoder.encode(maskText(buffer, mask)));
       },
     });
   }
@@ -454,7 +477,7 @@ return (async () => {
     const headers = new Headers(response.headers);
     headers.delete('content-length');
     headers.delete('content-encoding');
-    return new Response(maskJsonText(text, mask), { status: response.status, statusText: response.statusText, headers });
+    return new Response(maskText(text, mask), { status: response.status, statusText: response.statusText, headers });
   }
   function armSend(key, text, placeholder, route) {
     if (typeof text !== 'string' || !text) throw Error('Refusing to arm an empty ChatGPT prompt');
@@ -487,7 +510,7 @@ return (async () => {
         if (!m?.id) return;
         if (!turn.messages[m.id]) turn.order.push(m.id);
         turn.messages[m.id] = { role: m.author?.role, recipient: m.recipient ?? 'all', channel: m.channel ?? null, type: m.content?.content_type,
-          text: (m.content?.parts || []).filter(p => typeof p === 'string').join(''), status: m.status, endTurn: m.end_turn };
+          text: (m.content?.parts || []).filter(p => typeof p === 'string').join(''), status: m.status, endTurn: m.end_turn, finish: m.metadata?.finish_details?.type ?? null };
         // The server reports which model and thinking level actually ran.
         const meta = m.metadata || {};
         if (m.author?.role !== 'user') {
@@ -530,6 +553,7 @@ return (async () => {
       served: turn.served || null, servedEffort: turn.servedEffort || null,
       complete: turn.done && !!last && last.endTurn === true && last.status === 'finished_successfully',
       builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))],
+      shape: replyShape(assistant.map(m => [m.type, m.recipient, m.status, m.finish, m.text.length])),
       firstTokenMs: turn.firstToken ? turn.firstToken - turn.started : null };
   }
   // The account's full model catalog, from the same endpoint the picker uses.

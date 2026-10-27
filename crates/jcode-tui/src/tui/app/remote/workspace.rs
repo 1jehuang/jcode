@@ -35,6 +35,7 @@ pub(super) async fn handle_workspace_navigation_key(
         return Ok(true);
     };
     remote.resume_session(&target_session_id).await?;
+    app.suspend_prompt_history_for_switch();
     let label = crate::id::extract_session_name(&target_session_id)
         .map(|name| name.to_string())
         .unwrap_or(target_session_id);

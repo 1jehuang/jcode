@@ -96,6 +96,8 @@ pub struct LaunchConfig {
     pub spec: SpawnSpec,
     pub cwd: Option<PathBuf>,
     pub append_system_prompt: String,
+    /// jcode session served, shared with the provider.
+    pub jcode_session: crate::background::SessionSlot,
 }
 
 /// A line routed to the active turn.
@@ -122,6 +124,8 @@ pub struct ChildHandle {
     pub tools: StdMutex<Vec<ToolDefinition>>,
     /// Model the child currently runs (changes with control `set_model`).
     model: StdMutex<String>,
+    /// Claude Code background tasks mirrored into jcode's task rows.
+    background: crate::background::BackgroundTasks,
 }
 
 impl ChildHandle {
@@ -315,6 +319,7 @@ pub async fn spawn(launch: LaunchConfig, tools: &[ToolDefinition]) -> Result<Arc
         turn_tx: StdMutex::new(None),
         pending: StdMutex::new(HashMap::new()),
         stderr_tail: stderr_tail.clone(),
+        background: crate::background::BackgroundTasks::new(launch.jcode_session.clone()),
         launch,
         init: StdMutex::new(InitInfo::default()),
         exited: exited.clone(),
@@ -430,7 +435,11 @@ async fn route_line(handle: &Arc<ChildHandle>, value: Value) {
     {
         let message = request.get("message").cloned().unwrap_or(Value::Null);
         let tools = handle.tools();
-        if let control::McpAction::Reply(reply) = control::handle_mcp_message(&message, &tools) {
+        if let control::McpAction::Reply(reply) = control::handle_mcp_message_with_file_tools(
+            &message,
+            &tools,
+            &handle.launch.spec.host_file_tools,
+        ) {
             let request_id = value
                 .get("request_id")
                 .and_then(Value::as_str)
@@ -472,6 +481,11 @@ async fn route_line(handle: &Arc<ChildHandle>, value: Value) {
         }
         "keep_alive" | "control_cancel_request" => {}
         _ => {
+            // Background task events also arrive between turns, when no turn
+            // would see them.
+            if kind == "system" {
+                handle.background.observe(&value);
+            }
             let tx = handle
                 .turn_tx
                 .lock()
@@ -493,7 +507,7 @@ async fn route_line(handle: &Arc<ChildHandle>, value: Value) {
 
 /// Answer control requests that arrive while no turn is listening, so the
 /// child never waits forever.
-async fn answer_idle(handle: &Arc<ChildHandle>, value: &Value) {
+pub(crate) async fn answer_idle(handle: &Arc<ChildHandle>, value: &Value) {
     if value.get("type").and_then(Value::as_str) != Some("control_request") {
         return;
     }

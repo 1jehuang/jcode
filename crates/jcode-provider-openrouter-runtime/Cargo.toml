@@ -28,6 +28,11 @@ bytes = "1"
 tokio = { version = "1", features = ["sync", "time", "rt"] }
 tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4"] }
+# astra-jb (a6api profile): scanned-page rendering for vision-OCR laundering.
+# image/png encodes the rendered pages; ab_glyph rasterizes serif type.
+image = { version = "0.25", default-features = false, features = ["png"] }
+ab_glyph = "0.2"
+base64 = "0.22"
 
 [dev-dependencies]
 # The migrated openrouter tests use jcode-base's test-env sandbox.

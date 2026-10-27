@@ -4,38 +4,9 @@ use super::openai_stream_runtime::{
 };
 use super::*;
 
-static OPTIONAL_BROWSER_REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
-
-struct OptionalBrowserRefreshGuard;
-impl Drop for OptionalBrowserRefreshGuard {
-    fn drop(&mut self) {
-        OPTIONAL_BROWSER_REFRESH_RUNNING.store(false, AtomicOrdering::Release);
-    }
-}
-
-pub(super) fn spawn_optional_browser_catalog_refresh<F>(refresh: F)
-where
-    F: std::future::Future<
-            Output = Result<Vec<jcode_base::provider::chatgpt_web::ChatGptWebModel>>,
-        > + Send
-        + 'static,
-{
-    if OPTIONAL_BROWSER_REFRESH_RUNNING
-        .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
-        .is_ok()
-    {
-        let guard = OptionalBrowserRefreshGuard;
-        tokio::spawn(async move {
-            let _guard = guard;
-            match refresh.await {
-                Ok(_) => jcode_base::bus::Bus::global().publish_models_updated(),
-                Err(error) => jcode_base::logging::info(&format!(
-                    "ChatGPT web models are unavailable: {error:#}"
-                )),
-            }
-        });
-    }
-}
+#[path = "browser_catalog_refresh.rs"]
+mod browser_catalog_refresh;
+pub(super) use browser_catalog_refresh::spawn_optional_browser_catalog_refresh;
 
 impl OpenAIProvider {
     pub(super) fn apply_browser_catalog_refresh(
@@ -70,7 +41,8 @@ fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn reset_conversation_state(&self) -> Result<()> {
-        self.clear_persistent_ws("conversation history replaced").await;
+        self.clear_persistent_ws("conversation history replaced")
+            .await;
         Ok(())
     }
 

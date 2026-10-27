@@ -233,6 +233,7 @@ impl SessionPicker {
         matches!(
             c,
             'q' | ' '
+                | 'a'
                 | 'd'
                 | 'T'
                 | 's'

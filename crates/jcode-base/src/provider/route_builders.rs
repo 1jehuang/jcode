@@ -110,8 +110,10 @@ pub fn listable_model_names_from_routes(routes: &[ModelRoute]) -> Vec<String> {
     let mut models = Vec::new();
     let mut seen = BTreeSet::new();
     for route in routes {
-        if is_listable_model_name(&route.model) && seen.insert(route.model.clone()) {
-            models.push(route.model.clone());
+        let model = route.model.trim();
+        let canonical = model.to_ascii_lowercase();
+        if is_listable_model_name(model) && seen.insert(canonical) {
+            models.push(model.to_string());
         }
     }
     models
@@ -269,7 +271,32 @@ pub fn build_openrouter_fallback_provider_route(
 
 #[cfg(test)]
 mod listable_tests {
-    use super::{is_listable_model_name, model_name_is_likely_non_chat};
+    use super::{
+        is_listable_model_name, listable_model_names_from_routes, model_name_is_likely_non_chat,
+    };
+    use crate::provider::ModelRoute;
+
+    fn route(model: &str) -> ModelRoute {
+        ModelRoute {
+            catalog_metadata: None,
+            model: model.to_string(),
+            provider: "test".to_string(),
+            api_method: "test".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_model_names_differing_only_by_case_or_whitespace_collapse() {
+        let routes = [route("a6api/model"), route(" A6API/model "), route("other")];
+        assert_eq!(
+            listable_model_names_from_routes(&routes),
+            vec!["a6api/model".to_string(), "other".to_string()]
+        );
+    }
 
     #[test]
     fn keeps_real_chat_models() {

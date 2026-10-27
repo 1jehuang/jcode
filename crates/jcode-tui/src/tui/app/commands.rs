@@ -28,7 +28,7 @@ pub(super) use super::commands_review::{
     reset_current_session,
 };
 pub(super) use super::todos_view::handle_todos_view_command;
-use super::{App, DisplayMessage, LocalRewindUndoSnapshot, ProcessingStatus};
+use super::{App, DisplayMessage, ProcessingStatus};
 use crate::bus::{Bus, BusEvent, GitStatusCompleted, ManualToolCompleted, ToolEvent, ToolStatus};
 use crate::id;
 use crate::message::{ContentBlock, Message, Role};
@@ -2018,78 +2018,12 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/rewind undo" {
-        let Some(snapshot) = app.rewind_undo_snapshot.take() else {
-            app.push_display_message(DisplayMessage::system("No rewind to undo.".to_string()));
-            return true;
-        };
-
-        let current_count = app.session.rewind_target_count();
-        let restored = snapshot.visible_message_count.saturating_sub(current_count);
-        app.session.replace_messages(snapshot.messages);
-        app.provider_session_id = snapshot.provider_session_id;
-        app.session.provider_session_id = snapshot.session_provider_session_id;
-        app.session.updated_at = chrono::Utc::now();
-        let provider_messages = app.session.messages_for_provider_uncached();
-        app.replace_provider_messages(provider_messages);
-
-        app.clear_display_messages();
-        // Drop any streaming mermaid preview tied to the transcript being
-        // replaced (defensive: submit_input's commit already clears it on the
-        // slash-command path, but direct callers must not leak the slot).
-        // ACTIVE_DIAGRAMS deliberately survives: undo RESTORES messages whose
-        // diagrams are already registered, and the body-cache prefix reuse in
-        // ui_prepare.rs means re-rendered-identical messages do not re-run the
-        // mermaid path (and so would never re-register if we cleared here).
-        app.clear_streaming_render_state();
-        for rendered in crate::session::render_messages(&app.session) {
-            app.push_display_message(DisplayMessage {
-                role: rendered.role,
-                content: rendered.content,
-                tool_calls: rendered.tool_calls,
-                duration_secs: None,
-                title: None,
-                tool_data: rendered.tool_data,
-            });
-        }
-
-        let _ = app.session.save();
-        app.push_display_message(DisplayMessage::system(format!(
-            "✓ Undid rewind. Restored {} message{}.",
-            restored,
-            if restored == 1 { "" } else { "s" }
-        )));
+        app.undo_local_rewind();
         return true;
     }
 
     if trimmed == "/rewind" {
-        // Number the same rendered transcript entries `/rewind N` targets so
-        // the printed numbers always match what a rewind actually does
-        // (issue #432).
-        let rendered_targets: Vec<_> = crate::session::render_messages(&app.session)
-            .into_iter()
-            .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
-            .collect();
-        if rendered_targets.is_empty() {
-            app.push_display_message(DisplayMessage::system(
-                "No messages in conversation.".to_string(),
-            ));
-            return true;
-        }
-
-        let mut history = String::from("Conversation history:\n\n");
-        for (i, msg) in rendered_targets.iter().enumerate() {
-            let role_str = match msg.role.as_str() {
-                "user" => "👤 User",
-                "assistant" => "🤖 Assistant",
-                _ => "💬 Message",
-            };
-            let content = msg.content.replace('\n', " ");
-            let preview = crate::util::truncate_str(content.trim(), 80);
-            history.push_str(&format!("  {} {} - {}\n", i + 1, role_str, preview));
-        }
-        history.push_str("\nUse /rewind N to rewind to message N (removes all messages after). After rewinding, use /rewind undo to restore the removed messages.");
-
-        app.push_display_message(DisplayMessage::system(history));
+        app.open_rewind_dialog_local();
         return true;
     }
 
@@ -2099,50 +2033,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         let visible_count = targets.len();
         match num_str.parse::<usize>() {
             Ok(n) if n > 0 && n <= visible_count => {
-                let removed = visible_count - n;
-                app.rewind_undo_snapshot = Some(LocalRewindUndoSnapshot {
-                    messages: app.session.messages.clone(),
-                    provider_session_id: app.provider_session_id.clone(),
-                    session_provider_session_id: app.session.provider_session_id.clone(),
-                    visible_message_count: visible_count,
-                });
-                app.session.truncate_messages(targets[n - 1] + 1);
-                let provider_messages = app.session.messages_for_provider_uncached();
-                app.replace_provider_messages(provider_messages);
-                app.session.updated_at = chrono::Utc::now();
-
-                app.clear_display_messages();
-                // Same defensive preview clear as /rewind undo above.
-                // ACTIVE_DIAGRAMS survives here too: messages BEFORE the
-                // rewind point are retained, and body-cache prefix reuse
-                // (ui_prepare.rs build_body_from_base) skips re-rendering
-                // them, so clearing the registry would orphan the pinned
-                // pane / margin widget for diagrams that are still in the
-                // transcript. Diagrams from rewound-away messages leak until
-                // eviction (ACTIVE_DIAGRAMS_MAX) - a pinned, known tradeoff
-                // (tests/swarm_plan_graph_inline.rs).
-                app.clear_streaming_render_state();
-                for rendered in crate::session::render_messages(&app.session) {
-                    app.push_display_message(DisplayMessage {
-                        role: rendered.role,
-                        content: rendered.content,
-                        tool_calls: rendered.tool_calls,
-                        duration_secs: None,
-                        title: None,
-                        tool_data: rendered.tool_data,
-                    });
-                }
-
-                app.provider_session_id = None;
-                app.session.provider_session_id = None;
-                let _ = app.session.save();
-
-                app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Rewound to message {}. Removed {} message{}. Undo anytime with /rewind undo.",
-                    n,
-                    removed,
-                    if removed == 1 { "" } else { "s" }
-                )));
+                app.rewind_local_to_message(n);
             }
             Ok(n) => {
                 app.push_display_message(DisplayMessage::error(format!(

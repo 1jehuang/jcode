@@ -2789,6 +2789,11 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
+    if app.dialog.is_some() {
+        app.handle_dialog_key_offline(code, modifiers);
+        return Ok(true);
+    }
+
     if handle_scroll_overlay_key(app, code)? {
         return Ok(true);
     }
@@ -2891,6 +2896,7 @@ pub(super) fn clear_draft_or_request_quit(app: &mut App) {
         app.cursor_pos.min(app.input.len()),
         std::sync::Arc::new(app.pending_images.clone()),
         app.input_image_markers.clone(),
+        std::sync::Arc::new(app.pasted_contents.clone()),
     ));
     if !app.pending_images.is_empty() {
         let depth = app.input_undo_stack.len();
@@ -3177,6 +3183,9 @@ impl App {
     }
 
     pub(super) fn handle_key_press_event(&mut self, event: KeyEvent) -> Result<()> {
+        if event.code == KeyCode::Esc && event.kind != crossterm::event::KeyEventKind::Press {
+            return Ok(());
+        }
         // Pick up config.toml keybinding edits before this key is matched.
         // The idle tick refreshes too, but it can run as slowly as the 5s
         // deep-idle cadence, which would leave the first keystroke after an
@@ -3203,6 +3212,7 @@ impl App {
         let mut code = code;
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+        let previous_empty_escape = self.rewind_ui.last_empty_escape.take();
 
         if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
             return Ok(());
@@ -3403,6 +3413,15 @@ impl App {
         // inserting a surprise character.
         self.note_unrecognized_hotkey(code, modifiers, false);
 
+        if code == KeyCode::Esc
+            && modifiers.is_empty()
+            && self.inline_interactive_state.is_none()
+            && self.inline_view_state.is_none()
+            && self.rewind_empty_escape(previous_empty_escape, Instant::now())
+        {
+            self.open_rewind_dialog_local();
+            return Ok(());
+        }
         if handle_basic_key(self, code) {
             return Ok(());
         }
@@ -3595,6 +3614,7 @@ impl App {
     /// Queue a message to be sent later
     /// Handle bracketed paste: store text content (image URLs are still detected inline)
     pub(super) fn handle_paste(&mut self, text: String) {
+        self.rewind_ui.last_empty_escape = None;
         handle_paste(self, text);
     }
 
@@ -3990,8 +4010,8 @@ impl App {
         self.ensure_input_image_markers();
         let transport_text = self.input_without_owned_image_markers();
         let raw_input = std::mem::take(&mut self.input);
-        // Persist to cross-session prompt history (no-op for slash/shell
-        // commands, secret-intercept inputs, and oversized pastes).
+        // Persist to this session's prompt journal (no-op for slash/shell
+        // commands and secret-intercept inputs).
         self.record_prompt_history(&raw_input);
         let mut input = self.expand_paste_placeholders(&transport_text);
         if let Some(notice) = input_exceeds_submit_limit(&input) {
@@ -4068,6 +4088,7 @@ impl App {
             return;
         }
 
+        let original_prompt = input.clone();
         // File drops remain ordinary input. Registry-aware resolution supports
         // multi-word skill names without weakening that guard.
         let initial_snapshot = self.current_skills_snapshot();
@@ -4095,6 +4116,16 @@ impl App {
                 skill = self.current_skills_snapshot().get(&skill_name).cloned();
             }
 
+            if skill.is_some()
+                && crate::skill_overrides::mode(&crate::skill_overrides::load(), &skill_name)
+                    == crate::skill_overrides::SkillMode::Off
+            {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Skill /{} is turned off. Turn it back on in /skills.",
+                    skill_name
+                )));
+                return;
+            }
             if let Some(skill) = skill {
                 self.active_skill = Some(skill_name.clone());
                 self.push_display_message(DisplayMessage {
@@ -4152,6 +4183,19 @@ impl App {
         if super::remote::stage_turn_for_remote_tick_loop(self, &input) {
             return;
         }
+        let rewind_checkpoint_id =
+            match crate::session::is_authentic_user_input(&input, !self.pending_images.is_empty())
+                .then(|| self.session.create_rewind_checkpoint(&original_prompt))
+                .transpose()
+            {
+                Ok(checkpoint) => checkpoint.map(|checkpoint| checkpoint.id),
+                Err(error) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Could not create rewind checkpoint: {error}"
+                    )));
+                    None
+                }
+            };
         // A new prompt supersedes a local turn held on a usage limit; that
         // held turn's context is sent with this one.
         self.rate_limit_reset = None;
@@ -4202,6 +4246,7 @@ impl App {
             });
             self.session.add_message(Role::User, blocks);
         }
+        self.bind_local_rewind_checkpoint(rewind_checkpoint_id);
         crate::telemetry::record_turn();
         self.session_save_pending = true;
 
@@ -4244,6 +4289,21 @@ impl App {
     /// Commit the combined queued user turn at the real provider/session boundary.
     /// Taking attachments here keeps them out of unrelated composer submissions.
     pub(super) fn append_queued_user_payload(&mut self, combined: &str) {
+        let rewind_checkpoint_id = match crate::session::is_authentic_user_input(
+            combined,
+            !self.queued_message_images.is_empty(),
+        )
+        .then(|| self.session.create_rewind_checkpoint(combined))
+        .transpose()
+        {
+            Ok(checkpoint) => checkpoint.map(|checkpoint| checkpoint.id),
+            Err(error) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Could not create rewind checkpoint: {error}"
+                )));
+                None
+            }
+        };
         let images = std::mem::take(&mut self.queued_message_images);
         self.add_provider_message(Message::user_with_images(combined, images.clone()));
         let mut blocks: Vec<ContentBlock> = images
@@ -4255,6 +4315,7 @@ impl App {
             cache_control: None,
         });
         self.session.add_message(Role::User, blocks);
+        self.bind_local_rewind_checkpoint(rewind_checkpoint_id);
     }
 
     /// Prepare the next queued turn without entering the terminal/provider loop.

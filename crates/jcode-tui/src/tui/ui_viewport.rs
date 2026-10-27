@@ -459,6 +459,13 @@ pub(super) fn draw_messages(
             height: 1,
         }
     }));
+    let pinned_todo_card_height = pinned_todo_band.card_height().min(render_area.height);
+    set_pinned_todo_card_area((pinned_todo_card_height > 0).then_some(Rect {
+        x: text_render_area.x,
+        y: render_area.y.saturating_add(prompt_preview_lines),
+        width: text_render_area.width,
+        height: pinned_todo_card_height,
+    }));
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
     // preview first, then the todo band, then transcript content).
     let top_band_lines = pinned_todo_lines + prompt_preview_lines;
@@ -1457,7 +1464,7 @@ pub(crate) struct PinnedTodoBand {
     /// Todo rows drawn inside the rounded border. Empty means no box.
     pub(crate) card: Vec<Line<'static>>,
     title: String,
-    /// Index of the `… +N more` row within `card`.
+    /// Index of the expand/collapse control row within `card`.
     more_line: Option<usize>,
     tasks: Vec<Line<'static>>,
 }
@@ -1556,7 +1563,14 @@ pub(crate) fn pinned_todo_band_lines(
     let mut card: Vec<Line<'static>> = Vec::new();
     let has_more = card_lines.len() > content_budget && !app.pinned_todos_expanded();
     let mut more_line = None;
-    if has_more {
+    if app.pinned_todos_expanded() && card_lines.len() > content_budget {
+        card.extend(card_lines);
+        more_line = Some(card.len());
+        card.push(Line::from(Span::styled(
+            "… collapse (todo)",
+            Style::default().fg(dim_color()),
+        )));
+    } else if has_more {
         let shown = content_budget.saturating_sub(1);
         let hidden = card_lines.len() - shown;
         card.extend(card_lines.into_iter().take(shown));

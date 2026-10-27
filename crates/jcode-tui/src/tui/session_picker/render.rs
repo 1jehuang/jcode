@@ -273,6 +273,24 @@ impl SessionPicker {
             &highlight_tokens,
             name_style,
         ));
+        if let Some(parent_id) = session.parent_id.as_deref() {
+            let parent_name = self
+                .all_sessions
+                .iter()
+                .chain(self.all_orphan_sessions.iter())
+                .chain(
+                    self.all_server_groups
+                        .iter()
+                        .flat_map(|group| group.sessions.iter()),
+                )
+                .find(|parent| parent.id == parent_id)
+                .map(Self::primary_title_display)
+                .unwrap_or_else(|| parent_id.chars().take(12).collect());
+            line1_spans.push(Span::styled(
+                format!("  ↳ from {}", parent_name),
+                Style::default().fg(rgb(150, 160, 180)),
+            ));
+        }
         line1_spans.extend([
             Span::styled(canary_marker, Style::default().fg(rgb(255, 193, 7))),
             Span::styled(debug_marker, Style::default().fg(rgb(180, 180, 180))),
@@ -605,6 +623,14 @@ impl SessionPicker {
             },
             Style::default().fg(rgb(80, 80, 80)),
         ));
+        title_parts.push(Span::styled(
+            if self.show_spawned_sessions {
+                "  agents:on"
+            } else {
+                "  agents:off"
+            },
+            Style::default().fg(rgb(120, 150, 180)),
+        ));
 
         if self.hidden_test_count > 0 {
             title_parts.push(Span::styled(
@@ -641,10 +667,10 @@ impl SessionPicker {
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {
-                    " type to search · Space select · Enter in place · Ctrl+Enter new terminal · d debug · h/l focus · ↑↓ · q ".to_string()
+                    " type to search · Space select · Enter in place · Ctrl+Enter new terminal · a agents · d debug · h/l focus · ↑↓ · q ".to_string()
                 }
                 crate::config::SessionPickerResumeAction::NewTerminal => {
-                    " type to search · Space select · Enter new terminal · Ctrl+Enter in place · d debug · h/l focus · ↑↓ · q ".to_string()
+                    " type to search · Space select · Enter new terminal · Ctrl+Enter in place · a agents · d debug · h/l focus · ↑↓ · q ".to_string()
                 }
             }
         };

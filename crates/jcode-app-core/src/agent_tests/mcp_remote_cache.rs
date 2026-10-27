@@ -271,11 +271,15 @@ async fn remote_startup_case(shared: bool) {
     for (name, input) in [
         ("mcp", json!({"action": "list"})),
         ("mcp_search", json!({"server": "fast"})),
+        ("mcp_search", json!({"query": "select:mcp__fast__echo"})),
         (
             "mcp__fast__echo",
             json!({"text": "usable before slow peer"}),
         ),
     ] {
+        let is_select = input["query"]
+            .as_str()
+            .is_some_and(|q| q.starts_with("select:"));
         let output = tokio::time::timeout(
             Duration::from_secs(1),
             registry.execute(name, input, context(&agent)),
@@ -284,6 +288,14 @@ async fn remote_startup_case(shared: bool) {
         .expect("slow initialization must not block management or fast remote calls")
         .unwrap();
         assert!(!output.output.is_empty());
+        if is_select {
+            assert_eq!(output.title.as_deref(), Some("MCP tools (1)"));
+            assert!(
+                output.output.contains(r#""server":"fast""#),
+                "{}",
+                output.output
+            );
+        }
         if name == "mcp__fast__echo" {
             assert!(output.output.contains("usable before slow peer"));
         }
@@ -402,6 +414,7 @@ async fn remote_empty_catalog_replaces_obsolete_cached_schemas() {
         "remote",
         &config.servers["remote"],
         vec![crate::mcp::McpToolDef {
+            annotations: None,
             name: "echo".into(),
             description: Some("Obsolete schema".into()),
             input_schema: json!({"type": "object"}),
@@ -598,9 +611,10 @@ async fn remote_connect_disconnect_reconnect_preserves_prompt_and_cache_baseline
                         messages.as_array().unwrap()[..original_messages.as_array().unwrap().len()],
                         original_messages.as_array().unwrap()[..]
                     );
+                    // Both deferred paths name the new tool once.
                     assert_eq!(
                         agent.session.messages.len(),
-                        original_messages.as_array().unwrap().len() + usize::from(!native)
+                        original_messages.as_array().unwrap().len() + 1
                     );
                     // Announcement is append-only and never repeats on reconnect.
                     agent.announce_late_mcp_tools().await;

@@ -267,13 +267,16 @@ fn build_available_skills_section(available_skills: &[SkillInfo]) -> Option<Stri
         return None;
     }
 
-    let mut section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
+    let mut section = "# Available Skills\n\nSkills are packaged instructions for specific kinds of tasks. When a task matches one, load it first with the `skill_manage` tool (`name`, optional `args`; called `Skill` on some providers) and follow it. The user can also run one with `/skillname`:\n".to_string();
     for skill in available_skills {
-        section.push_str(&format!(
-            "\n- `/{} ` - {}",
-            skill.name,
-            clip_skill_description(&skill.description)
-        ));
+        section.push_str(&format!("\n- `/{} `", skill.name));
+        // Empty for skills set to name-only in `/skills`.
+        if !skill.description.trim().is_empty() {
+            section.push_str(&format!(
+                " - {}",
+                clip_skill_description(&skill.description)
+            ));
+        }
     }
     section.push_str(
         "\n\nWhen a user asks about available skills or capabilities, mention these skills.",

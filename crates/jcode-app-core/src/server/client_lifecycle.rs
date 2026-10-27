@@ -1342,128 +1342,29 @@ pub(super) async fn handle_client(
                 }
             }
 
-            Request::Rewind { id, message_index } => {
-                if client_is_processing {
-                    let _ = client_event_tx.send(ServerEvent::Error {
-                        id,
-                        message: "Cannot rewind while a turn is processing.".to_string(),
-                        retry_after_secs: None,
-                        server_resumes: false,
-                    });
-                    continue;
-                }
-
-                let rewind_result = {
-                    let mut agent_guard = agent.lock().await;
-                    agent_guard.rewind_to_message(message_index)
+            request @ (Request::Rewind { id, .. } | Request::RewindUndo { id }) => {
+                let message_index = match request {
+                    Request::Rewind { message_index, .. } => Some(message_index),
+                    _ => None,
                 };
-
-                match rewind_result {
-                    Ok(removed) => {
-                        crate::logging::info(&format!(
-                            "Rewound session {} to message {} (removed {})",
-                            client_session_id, message_index, removed
-                        ));
-                        if handle_get_history(
-                            id,
-                            &client_session_id,
-                            client_is_processing,
-                            &agent,
-                            &provider,
-                            &sessions,
-                            &client_connections,
-                            &client_count,
-                            &writer,
-                            &server_name,
-                            &server_icon,
-                            None,
-                            supports_pdf_panels,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                        // The truncated History replaces the client transcript
-                        // (dropping the inline plan graph); re-send the plan so
-                        // the diagram comes back.
-                        send_swarm_plan_to_session(
-                            &client_session_id,
-                            &swarm_members,
-                            &swarm_plans,
-                        )
-                        .await;
-                    }
-                    Err(message) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
-                            id,
-                            message,
-                            retry_after_secs: None,
-                            server_resumes: false,
-                        });
-                    }
-                }
-            }
-
-            Request::RewindUndo { id } => {
-                if client_is_processing {
-                    let _ = client_event_tx.send(ServerEvent::Error {
-                        id,
-                        message: "Cannot undo rewind while a turn is processing.".to_string(),
-                        retry_after_secs: None,
-                        server_resumes: false,
-                    });
-                    continue;
-                }
-
-                let undo_result = {
-                    let mut agent_guard = agent.lock().await;
-                    agent_guard.undo_rewind()
+                let context = checkpoint::RestoreContext {
+                    session_id: &client_session_id,
+                    processing: client_is_processing,
+                    agent: &agent,
+                    provider: &provider,
+                    sessions: &sessions,
+                    connections: &client_connections,
+                    client_count: &client_count,
+                    writer: &writer,
+                    server_name: &server_name,
+                    server_icon: &server_icon,
+                    pdf_panels: supports_pdf_panels,
+                    members: &swarm_members,
+                    plans: &swarm_plans,
+                    events: &client_event_tx,
                 };
-
-                match undo_result {
-                    Ok(restored) => {
-                        crate::logging::info(&format!(
-                            "Undid rewind for session {} (restored {})",
-                            client_session_id, restored
-                        ));
-                        if handle_get_history(
-                            id,
-                            &client_session_id,
-                            client_is_processing,
-                            &agent,
-                            &provider,
-                            &sessions,
-                            &client_connections,
-                            &client_count,
-                            &writer,
-                            &server_name,
-                            &server_icon,
-                            None,
-                            supports_pdf_panels,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                        // Same as rewind: restore the inline plan graph after
-                        // the transcript replacement.
-                        send_swarm_plan_to_session(
-                            &client_session_id,
-                            &swarm_members,
-                            &swarm_plans,
-                        )
-                        .await;
-                    }
-                    Err(message) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
-                            id,
-                            message,
-                            retry_after_secs: None,
-                            server_resumes: false,
-                        });
-                    }
+                if context.restore_legacy(id, message_index).await.is_err() {
+                    break;
                 }
             }
 
@@ -2371,6 +2272,13 @@ pub(super) async fn handle_client(
                             serde_json::to_value(crate::subscription_api::fetch_subscription_me().await?)?
                         } else { serde_json::json!({"signed_in": false, "status": "not_signed_in"}) };
                         return Ok((data.clone(), serde_json::to_string_pretty(&data)?));
+                    }
+                    if parsed == jcode_harness_api::RuntimeCommand::Mcp {
+                        // Prefer the live agent's registry (it can change on resume); a busy
+                        // agent shares the client registry it was built with.
+                        let registry = agent.try_lock().map(|guard| guard.registry()).unwrap_or_else(|_| registry.clone());
+                        let working_dir = agent.try_lock().ok().and_then(|guard| guard.working_dir().map(std::path::PathBuf::from));
+                        return super::runtime_commands::mcp(&registry, &client_session_id, working_dir.as_deref(), &args).await;
                     }
                     let mut guard = agent.try_lock().map_err(|_| anyhow::anyhow!("Session is busy. Retry this runtime command after the current turn."))?;
                     super::runtime_commands::execute(&mut guard, parsed, &args, swarm_enabled, serde_json::Value::Null).await
@@ -3738,11 +3646,22 @@ async fn cancel_processing_message(
     let stopped_session = session_label.as_str();
     super::swarm::cancel_session_turn_with(stopped_session, |had_turn| async move {
         if had_turn {
-            update_member_status(stopped_session, "stopped", Some("cancelled".into()), swarm.members,
-                swarm.swarms_by_id, Some(swarm.event_history), Some(swarm.event_counter), Some(swarm.event_tx)).await;
-            super::swarm_persistence::persist_member_lifecycle(stopped_session, swarm.members).await;
+            update_member_status(
+                stopped_session,
+                "stopped",
+                Some("cancelled".into()),
+                swarm.members,
+                swarm.swarms_by_id,
+                Some(swarm.event_history),
+                Some(swarm.event_counter),
+                Some(swarm.event_tx),
+            )
+            .await;
+            super::swarm_persistence::persist_member_lifecycle(stopped_session, swarm.members)
+                .await;
         }
-    }).await;
+    })
+    .await;
     // Stopping a session also stops the workers it spawned. This runs on
     // every path, including the idle one: a coordinator waiting on
     // `await_members` has no running turn of its own while its workers do.

@@ -96,6 +96,51 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
 }
 
 #[test]
+fn test_busy_rejection_restores_user_queued_followup() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.auto_poke_incomplete_todos = false;
+    app.queued_messages.push("my follow-up".to_string());
+    app.queued_message_images
+        .push(("image/png".to_string(), "YWJj".to_string()));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let queued_images = app.queued_message_images.clone();
+
+    rt.block_on(remote::begin_remote_send(
+        &mut app,
+        &mut remote,
+        "my follow-up".to_string(),
+        queued_images,
+        false,
+        None,
+        false,
+        0,
+    ))
+    .unwrap();
+    app.queued_messages.clear();
+    app.queued_message_images.clear();
+    let rejected_id = app.current_message_id.unwrap();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: rejected_id,
+            message: "Already processing a message".to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+
+    assert!(app.is_processing);
+    assert_eq!(app.queued_messages, ["my follow-up"]);
+    assert_eq!(app.queued_message_images.len(), 1);
+    assert!(app.rate_limit_pending_message.is_none());
+}
+
+#[test]
 fn test_external_stream_with_queued_followup_is_not_synthetic_startup() {
     let mut app = create_test_app();
     app.is_remote = true;

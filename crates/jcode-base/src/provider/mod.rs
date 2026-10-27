@@ -51,6 +51,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
+pub use catalog_routes::named_provider_model_supports_chat;
 pub use catalog_routes::{
     append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
     remote_model_is_server_copilot_only, remote_model_routes_fallback,
@@ -3174,8 +3175,18 @@ impl Provider for MultiProvider {
         Arc::new(provider)
     }
 
+    fn bind_session(&self, session_id: &str) {
+        self.bind_existing_claude_session(session_id);
+    }
+
     async fn reset_conversation_state(&self) -> Result<()> {
         self.reset_existing_conversation_state().await
+    }
+
+    fn set_host_tool_executor_available(&self, available: bool) {
+        if let Some(provider) = self.claude_code_provider() {
+            provider.set_host_tool_executor_available(available);
+        }
     }
 
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {

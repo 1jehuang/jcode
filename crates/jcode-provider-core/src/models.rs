@@ -445,10 +445,10 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(128_000);
     }
 
-    // GPT-5.4-family and GPT-6-family models should default to the long-context
-    // window. The live Codex OAuth catalog can still override this via the
-    // dynamic cache above.
-    if model.starts_with("gpt-5.4") || model.starts_with("gpt-6") {
+    // GPT-5.4, GPT-5.6, and GPT-6 families are long-context. GPT-5.5 keeps
+    // the established 272K fallback unless an explicit route/catalog limit
+    // overrides it above.
+    if model.starts_with("gpt-5.4") || model.starts_with("gpt-5.6") || model.starts_with("gpt-6") {
         return Some(1_000_000);
     }
 

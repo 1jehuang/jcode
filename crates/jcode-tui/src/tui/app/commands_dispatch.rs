@@ -23,7 +23,8 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
     }
     matches!(
         command,
-        "/logout"
+        "/plugin"
+            | "/logout"
             | "/auth"
             | "/accounts"
             | "/config"

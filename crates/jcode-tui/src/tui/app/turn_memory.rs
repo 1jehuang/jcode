@@ -15,18 +15,15 @@ impl App {
         }
 
         let skills = self.current_skills_snapshot();
+        // shortcut: local (daemon-less) turns keep the skill in the system
+        // prompt with an empty $ARGUMENTS (the arguments arrive as the user's
+        // message); move to transcript injection like the agent if local
+        // mode stays in use.
         let skill_prompt = self
             .active_skill
             .as_ref()
-            .and_then(|name| skills.get(name).map(|s| s.get_prompt().to_string()));
-        let available_skills: Vec<crate::prompt::SkillInfo> = skills
-            .list()
-            .iter()
-            .map(|s| crate::prompt::SkillInfo {
-                name: s.name.clone(),
-                description: s.description.clone(),
-            })
-            .collect();
+            .and_then(|name| skills.get(name).map(|s| s.invocation_text("")));
+        let available_skills = crate::skill_overrides::model_skill_infos(&skills);
         let (mut split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,

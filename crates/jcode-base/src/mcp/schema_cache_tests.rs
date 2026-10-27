@@ -22,6 +22,7 @@ fn cfg(command: &str, args: &[&str]) -> McpServerConfig {
 
 fn tool(name: &str) -> McpToolDef {
     McpToolDef {
+        annotations: None,
         name: name.to_string(),
         description: Some(format!("{name} desc")),
         input_schema: json!({"type": "object"}),

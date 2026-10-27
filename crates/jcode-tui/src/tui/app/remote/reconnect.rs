@@ -615,6 +615,10 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     state: &mut RemoteRunState,
     session_to_resume: Option<&str>,
 ) -> Result<PostConnectOutcome> {
+    if app.rewind_ui.list_request.is_some() || app.rewind_ui.restore_request.is_some() {
+        app.invalidate_rewind_ui();
+        app.set_status_notice("Reconnected; reopen /rewind to refresh checkpoints.");
+    }
     crate::logging::info(&format!(
         "Reload check: session_to_resume={:?}, remote_session_id={:?}, reconnect_attempts={}",
         session_to_resume, app.remote_session_id, state.reconnect_attempts
@@ -759,6 +763,13 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     // this follow-up the public picker exposes generic `remote-catalog` rows.
     // Request ordering keeps the authoritative History snapshot ahead of this
     // expanded catalog response on a newly connected transport.
+    // Claude Code asks about servers a project config file adds before they
+    // run; this silent `/mcp` check opens that prompt only when one is waiting.
+    if !app.mcp_approval_checked {
+        app.mcp_approval_checked = true;
+        crate::tui::app::dialog_actions::send_mcp_command(app, remote, Vec::new()).await;
+    }
+
     if let Err(error) = remote.request_model_catalog().await {
         crate::logging::warn(&format!(
             "Failed to hydrate model routes during remote bootstrap: {error}"

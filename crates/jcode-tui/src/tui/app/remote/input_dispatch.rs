@@ -243,9 +243,12 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         app.refresh_skills_snapshot();
         skill = app.current_skills_snapshot().get(&skill_name).cloned();
     }
-    if skill.is_none() {
+    let turned_off = crate::skill_overrides::mode(&crate::skill_overrides::load(), &skill_name)
+        == crate::skill_overrides::SkillMode::Off;
+    if skill.is_none() || turned_off {
         // Preserve the existing unknown-skill and built-in slash-command
-        // handling, including the helpful endorsed-skill installation hint.
+        // handling, including the helpful endorsed-skill installation hint
+        // and the turned-off notice, without sending the trailing prompt.
         restore_prepared_remote_input(app, prepared);
         app.submit_input_with_routing(raw_input);
         return Ok(());

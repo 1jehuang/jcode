@@ -1,22 +1,26 @@
 use super::*;
 
 impl Agent {
-    pub(super) async fn ensure_provider_conversation_reset(&mut self) -> Result<()> {
-        if self.provider_conversation_reset_pending {
-            // This is part of the retry gate: cancellation while waiting for a
-            // compaction reader must not expose a summary of discarded history.
-            if !self.preserve_compaction_on_provider_reset {
-                let compaction = self.registry.compaction();
-                let mut manager = compaction.write().await;
-                manager.reset();
-                manager.set_budget(self.provider.input_token_limit());
-                manager.seed_restored_stored_messages_with(&self.session.messages);
-            }
-            self.provider.reset_conversation_state().await?;
-            self.provider_conversation_reset_pending = false;
-            self.preserve_compaction_on_provider_reset = false;
+    pub(super) fn reset_runtime_state_for_session_change(&mut self) {
+        self.active_skill = None;
+        self.last_upstream_provider = None;
+        self.last_connection_type = None;
+        self.last_status_detail = None;
+        self.pending_alerts.clear();
+        self.current_turn_system_reminder = None;
+        self.reset_tool_output_tracking();
+        if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
+            queue.clear();
         }
-        Ok(())
+        self.background_tool_signal.reset();
+        self.graceful_shutdown.reset();
+        self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
+        self.last_usage = TokenUsage::default();
+        self.locked_tools = None;
+        self.mcp_late_register_resolved = false;
+        self.rewind_undo_snapshot = None;
+        self.preserve_compaction_on_provider_reset = false;
     }
 
     pub(super) fn checkpoint_user_input(
@@ -57,19 +61,53 @@ impl Agent {
         mode: jcode_session_types::RewindMode,
     ) -> Result<jcode_session_types::RewindResult, String> {
         let previous_len = self.session.messages.len();
+        let undo = (mode == jcode_session_types::RewindMode::ConversationOnly
+            && checkpoint_id.starts_with("assistant:"))
+        .then(|| self.capture_rewind_undo_snapshot());
         let result = self.session.rewind_checkpoint(checkpoint_id, mode).await;
         if mode.restores_conversation() && self.session.messages.len() < previous_len {
             self.provider_session_id = None;
             self.reset_runtime_state_for_session_change();
-            // Unlike best-effort session startup seeding, rewind must never
-            // retain a summary containing the discarded future on contention.
-            let compaction = self.registry.compaction();
-            let mut manager = compaction.write().await;
-            manager.reset();
-            manager.set_budget(self.provider.input_token_limit());
-            manager.seed_restored_stored_messages_with(&self.session.messages);
+            // The broad reset clears the old slot. Assistant rewind only changes
+            // the transcript, so its retained sidecar metadata can support undo.
+            self.rewind_undo_snapshot = undo;
+            // Mark this before awaiting: errors or cancellation must prevent a
+            // later turn from resuming the provider's discarded branch.
+            self.provider_conversation_reset_pending = true;
+            let provider_reset = self.ensure_provider_conversation_reset().await;
+            if let Err(error) = provider_reset {
+                return Err(match result {
+                    Ok(_) => format!("Conversation rewound, but provider reset failed: {error:#}"),
+                    Err(original) => format!("{original}; provider reset failed: {error:#}"),
+                });
+            }
         }
         result
+    }
+
+    fn capture_rewind_undo_snapshot(&self) -> RewindUndoSnapshot {
+        RewindUndoSnapshot {
+            messages: self.session.messages.clone(),
+            visible_message_count: self.session.rewind_target_count(),
+        }
+    }
+
+    pub(super) async fn ensure_provider_conversation_reset(&mut self) -> Result<()> {
+        if self.provider_conversation_reset_pending {
+            // This is part of the retry gate: cancellation while waiting for a
+            // compaction reader must not expose a summary of discarded history.
+            if !self.preserve_compaction_on_provider_reset {
+                let compaction = self.registry.compaction();
+                let mut manager = compaction.write().await;
+                manager.reset();
+                manager.set_budget(self.provider.input_token_limit());
+                manager.seed_restored_stored_messages_with(&self.session.messages);
+            }
+            self.provider.reset_conversation_state().await?;
+            self.provider_conversation_reset_pending = false;
+            self.preserve_compaction_on_provider_reset = false;
+        }
+        Ok(())
     }
 
     /// Clear conversation history
@@ -105,12 +143,14 @@ impl Agent {
         self.reset_runtime_state_for_session_change();
         self.provider_session_id = None;
         self.seed_compaction_from_session();
+        self.provider_conversation_reset_pending = true;
     }
 
     /// Clear provider session so the next turn sends full context.
     pub fn reset_provider_session(&mut self) {
         self.provider_session_id = None;
         self.session.provider_session_id = None;
+        self.provider_conversation_reset_pending = true;
         self.persist_session_best_effort("provider session reset");
     }
 
@@ -126,51 +166,54 @@ impl Agent {
     /// truncated context from scratch instead of continuing from a stale upstream
     /// conversation.
     pub fn rewind_to_message(&mut self, message_index: usize) -> Result<usize, String> {
-        let targets = self.session.rewind_target_stored_indices();
-        let message_count = targets.len();
-        if message_index == 0 || message_index > message_count {
-            return Err(format!(
-                "Invalid message number: {}. Valid range: 1-{}",
-                message_index, message_count
-            ));
-        }
-        let stored_len = targets[message_index - 1] + 1;
+        let message_count = self.session.rewind_target_count();
+        let stored_len = self
+            .session
+            .rewind_stored_len_for_message(message_index)
+            .ok_or_else(|| {
+                format!(
+                    "Invalid message number: {}. Valid range: 1-{}",
+                    message_index, message_count
+                )
+            })?;
 
         let removed = message_count - message_index;
-        self.rewind_undo_snapshot = Some(RewindUndoSnapshot {
-            messages: self.session.messages.clone(),
-            provider_session_id: self.provider_session_id.clone(),
-            session_provider_session_id: self.session.provider_session_id.clone(),
-            visible_message_count: message_count,
-        });
-        self.session.truncate_messages(stored_len);
-        self.session.updated_at = chrono::Utc::now();
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.cache_tracker.reset();
-        self.kv_cache_monitor.reset();
-        self.locked_tools = None;
-        self.reset_tool_output_tracking();
-        self.persist_session_best_effort("conversation rewind");
+        let previous_len = self.session.messages.len();
+        let undo = self.capture_rewind_undo_snapshot();
+        let result = self.session.rewind_conversation_to_len(stored_len);
+        if self.session.messages.len() < previous_len {
+            self.provider_session_id = None;
+            self.reset_runtime_state_for_session_change();
+            self.rewind_undo_snapshot = Some(undo);
+            self.provider_conversation_reset_pending = true;
+        }
+        result.map_err(|error| format!("{error:#}"))?;
         Ok(removed)
     }
 
     pub fn undo_rewind(&mut self) -> Result<usize, String> {
-        let Some(snapshot) = self.rewind_undo_snapshot.take() else {
+        let Some(snapshot) = self.rewind_undo_snapshot.clone() else {
             return Err("No rewind to undo.".to_string());
         };
 
         let current_count = self.session.rewind_target_count();
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
-        self.session.replace_messages(snapshot.messages);
-        self.provider_session_id = snapshot.provider_session_id;
-        self.session.provider_session_id = snapshot.session_provider_session_id;
-        self.session.updated_at = chrono::Utc::now();
-        self.cache_tracker.reset();
-        self.kv_cache_monitor.reset();
-        self.locked_tools = None;
-        self.reset_tool_output_tracking();
-        self.persist_session_best_effort("conversation rewind undo");
+        let previous_ids: Vec<_> = self.session.messages.iter().map(|m| m.id.clone()).collect();
+        let result = self.session.restore_rewind_messages(snapshot.messages);
+        let changed = !self
+            .session
+            .messages
+            .iter()
+            .map(|m| &m.id)
+            .eq(previous_ids.iter());
+        if result.is_ok() || changed {
+            // Never resume the old provider branch, even when undo restores its
+            // transcript. Reset also consumes the one-slot in-memory snapshot.
+            self.provider_session_id = None;
+            self.reset_runtime_state_for_session_change();
+            self.provider_conversation_reset_pending = true;
+        }
+        result.map_err(|error| format!("{error:#}"))?;
         Ok(restored)
     }
 }

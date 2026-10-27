@@ -2638,6 +2638,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    // The `/mcp` and `/skills` dialogs are drawn below the transcript, in
+    // place of the input (see `dialog_height`), like Claude Code.
+
     if let Some(picker_cell) = app.account_picker_overlay() {
         let mut picker = picker_cell.borrow_mut();
         picker.render(frame);
@@ -2875,9 +2878,20 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
-    let inline_block_height: u16 = inline_ui_height(app);
+    // An open `/mcp` or `/skills` dialog replaces the input and inline UI,
+    // drawn under the transcript like Claude Code's. It grows with its
+    // content, up to about two thirds of the screen.
+    let dialog_height = app.dialog().map(|dialog| {
+        let cap = (chat_area.height.saturating_mul(2) / 3).max(8);
+        dialog.desired_height(chat_area.width).clamp(4, cap)
+    });
+    let inline_block_height: u16 = if dialog_height.is_some() {
+        0
+    } else {
+        inline_ui_height(app)
+    };
     let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
-    let input_height = base_input_height + hint_line_height;
+    let input_height = dialog_height.unwrap_or(base_input_height + hint_line_height);
 
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("prepare_messages".to_string());
@@ -3378,13 +3392,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         draw_inline_ui(frame, app, chunks[5]);
     }
 
-    let _input_cursor = input_ui::draw_input(
-        frame,
-        app,
-        chunks[7],
-        user_count + pending_count + 1,
-        &mut debug_capture,
-    );
+    let _input_cursor = if let Some(dialog) = app.dialog() {
+        dialog.render(frame, chunks[7]);
+        None
+    } else {
+        Some(input_ui::draw_input(
+            frame,
+            app,
+            chunks[7],
+            user_count + pending_count + 1,
+            &mut debug_capture,
+        ))
+    };
 
     if overscroll_height > 0 {
         input_ui::draw_overscroll_status(frame, app, chunks[8]);

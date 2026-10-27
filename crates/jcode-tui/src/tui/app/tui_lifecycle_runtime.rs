@@ -330,6 +330,7 @@ impl App {
             // Don't restore provider_session_id - Claude sessions don't persist across
             // process restarts. The messages are restored, so Claude will get full context.
             self.provider_session_id = None;
+            self.invalidate_rewind_ui();
             self.session = session;
             crate::memory::sync_injected_memories(
                 &self.session.id,

@@ -328,7 +328,11 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry(
         "/skills",
-        "Show loaded skills and jcode-endorsed recommendations",
+        "Browse skills and turn them on or off (/skills list: endorsed skills)",
+    ));
+    lines.push(help_entry(
+        "/plugin",
+        "Discover and manage plugins and marketplaces",
     ));
     lines.push(help_entry("/info", "Show session info and token usage"));
     lines.push(help_entry(
@@ -367,7 +371,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry(
         "/rewind",
-        "Show numbered history, /rewind N to rewind",
+        "Choose a prompt to restore conversation or tracked files",
     ));
     lines.push(help_entry(
         "/fix",
@@ -665,6 +669,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
             "Move to start / end of input",
         ));
     }
+    lines.push(key_entry("Esc Esc", "Rewind selector (idle, empty input)"));
     lines.push(key_entry("Cmd/Super+Z", "Undo input edit"));
     lines.push(key_entry("Cmd/Super+X / V", "Cut input / paste clipboard"));
     lines.push(key_entry("Ctrl+S", "Stash / pop input (save for later)"));
@@ -687,7 +692,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
     lines.push(key_entry(
         "Ctrl+R",
-        "Search prompt history (across sessions)",
+        "Search this session's prompt history",
     ));
     lines.push(key_entry(
         &format!("Ctrl+V / {}", alt("V")),

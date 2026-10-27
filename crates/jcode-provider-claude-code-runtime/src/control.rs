@@ -13,8 +13,7 @@ use crate::translate::JCODE_MCP_PREFIX;
 /// Name of the SDK MCP server jcode registers with Claude Code.
 pub const JCODE_MCP_SERVER: &str = "jcode";
 
-/// jcode tools Claude Code already provides natively. They are never exposed
-/// over MCP so the model does not see two shells, two file readers, etc.
+/// Native duplicates, unless explicitly replaced by a ready host editor.
 pub const NATIVE_DUPLICATE_TOOLS: &[&str] = &[
     "bash",
     "read",
@@ -54,7 +53,17 @@ pub fn is_exposed_tool(name: &str) -> bool {
 
 /// jcode tools to offer over MCP, in the order jcode passed them.
 pub fn exposed_tools(tools: &[ToolDefinition]) -> Vec<&ToolDefinition> {
-    tools.iter().filter(|t| is_exposed_tool(&t.name)).collect()
+    exposed_tools_with_file_tools(tools, &[])
+}
+
+pub(crate) fn exposed_tools_with_file_tools<'a>(
+    tools: &'a [ToolDefinition],
+    host_file_tools: &[String],
+) -> Vec<&'a ToolDefinition> {
+    tools
+        .iter()
+        .filter(|t| is_exposed_tool(&t.name) || host_file_tools.contains(&t.name))
+        .collect()
 }
 
 /// `{"type":"control_request",...}` written by the host.
@@ -192,6 +201,14 @@ fn jsonrpc_error(id: &Value, code: i64, message: &str) -> Value {
 
 /// Handle one JSON-RPC message for the `jcode` SDK MCP server.
 pub fn handle_mcp_message(message: &Value, tools: &[ToolDefinition]) -> McpAction {
+    handle_mcp_message_with_file_tools(message, tools, &[])
+}
+
+pub(crate) fn handle_mcp_message_with_file_tools(
+    message: &Value,
+    tools: &[ToolDefinition],
+    host_file_tools: &[String],
+) -> McpAction {
     let id = message.get("id").cloned().unwrap_or(json!(0));
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -213,7 +230,7 @@ pub fn handle_mcp_message(message: &Value, tools: &[ToolDefinition]) -> McpActio
         m if m.starts_with("notifications/") => McpAction::Reply(jsonrpc_result(&id, json!({}))),
         "ping" => McpAction::Reply(jsonrpc_result(&id, json!({}))),
         "tools/list" => {
-            let list: Vec<Value> = exposed_tools(tools)
+            let list: Vec<Value> = exposed_tools_with_file_tools(tools, host_file_tools)
                 .into_iter()
                 .map(|tool| {
                     let schema = if tool.input_schema.is_object() {
@@ -236,7 +253,10 @@ pub fn handle_mcp_message(message: &Value, tools: &[ToolDefinition]) -> McpActio
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            if !exposed_tools(tools).iter().any(|t| t.name == name) {
+            if !exposed_tools_with_file_tools(tools, host_file_tools)
+                .iter()
+                .any(|t| t.name == name)
+            {
                 return McpAction::Reply(jsonrpc_result(
                     &id,
                     json!({

@@ -38,6 +38,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> super::input::PreparedInput 
 }
 
 pub(super) fn attach_image(app: &mut App, media_type: String, base64_data: String) {
+    app.rewind_ui.last_empty_escape = None;
     let size_kb = base64_data.len() / 1024;
     app.ensure_input_image_markers();
     // Selection replacement records one undo step for the entire paste.
@@ -62,6 +63,11 @@ pub(super) struct InputImageMarkers {
     spans: Vec<(usize, usize, usize)>,
 }
 
+fn owned_marker_matches(text: Option<&str>, number: usize) -> bool {
+    let marker = format!("[image {number}]");
+    text.is_some_and(|text| text == marker || text.strip_prefix(' ') == Some(marker.as_str()))
+}
+
 impl InputImageMarkers {
     pub(super) fn from_saved(value: &serde_json::Value) -> Self {
         match value.get("image_markers") {
@@ -79,7 +85,13 @@ impl InputImageMarkers {
     }
 }
 
-pub(super) type InputUndoSnapshot = (String, usize, Arc<Vec<(String, String)>>, InputImageMarkers);
+pub(super) type InputUndoSnapshot = (
+    String,
+    usize,
+    Arc<Vec<(String, String)>>,
+    InputImageMarkers,
+    Arc<Vec<String>>,
+);
 
 impl App {
     pub(super) fn undo_input_change(&mut self) {
@@ -109,6 +121,28 @@ impl App {
         }
     }
 
+    pub(super) fn input_draft_snapshot(&self) -> InputUndoSnapshot {
+        let images = self
+            .input_undo_stack
+            .last()
+            .filter(|snapshot| snapshot.2.as_ref() == &self.pending_images)
+            .map(|snapshot| Arc::clone(&snapshot.2))
+            .unwrap_or_else(|| Arc::new(self.pending_images.clone()));
+        let pasted_contents = self
+            .input_undo_stack
+            .last()
+            .filter(|snapshot| snapshot.4.as_ref() == &self.pasted_contents)
+            .map(|snapshot| Arc::clone(&snapshot.4))
+            .unwrap_or_else(|| Arc::new(self.pasted_contents.clone()));
+        (
+            self.input.clone(),
+            self.cursor_pos.min(self.input.len()),
+            images,
+            self.input_image_markers.clone(),
+            pasted_contents,
+        )
+    }
+
     pub(super) fn take_input_draft(&mut self) -> InputUndoSnapshot {
         self.ensure_input_image_markers();
         (
@@ -116,15 +150,17 @@ impl App {
             std::mem::replace(&mut self.cursor_pos, 0),
             Arc::new(std::mem::take(&mut self.pending_images)),
             std::mem::take(&mut self.input_image_markers),
+            Arc::new(std::mem::take(&mut self.pasted_contents)),
         )
     }
 
     pub(super) fn restore_input_draft(&mut self, draft: InputUndoSnapshot) {
-        let (text, cursor, images, markers) = draft;
+        let (text, cursor, images, markers, pasted_contents) = draft;
         self.input = text;
         self.cursor_pos = cursor.min(self.input.len());
         self.pending_images = Arc::unwrap_or_clone(images);
         self.input_image_markers = markers;
+        self.pasted_contents = Arc::unwrap_or_clone(pasted_contents);
         self.ensure_input_image_markers();
     }
 
@@ -143,7 +179,7 @@ impl App {
                     && !seen[n - 1]
                     && start >= previous_end
                     && start < end
-                    && self.input.get(start..end) == Some(format!("[image {n}]").as_str());
+                    && owned_marker_matches(self.input.get(start..end), n);
                 if valid {
                     seen[n - 1] = true;
                     previous_end = end;
@@ -159,6 +195,9 @@ impl App {
         }
         for (index, present) in visible.into_iter().enumerate() {
             if !present {
+                let start = self.input.len();
+                // The fresh span owns its separator too, so transport text
+                // remains exact without changing visual or command boundaries.
                 if self
                     .input
                     .chars()
@@ -167,7 +206,6 @@ impl App {
                 {
                     self.input.push(' ');
                 }
-                let start = self.input.len();
                 self.input.push_str(&format!("[image {}]", index + 1));
                 self.input_image_markers
                     .spans
@@ -239,7 +277,7 @@ impl App {
         spans.retain(|&(start, end, n)| {
             n > 0
                 && n <= self.pending_images.len()
-                && self.input.get(start..end) == Some(format!("[image {n}]").as_str())
+                && owned_marker_matches(self.input.get(start..end), n)
         });
         spans.sort_unstable_by_key(|span| span.0);
         let mut keep = vec![false; self.pending_images.len()];
@@ -260,7 +298,12 @@ impl App {
             .collect();
         for index in (0..spans.len()).rev() {
             let (start, end, n) = spans[index];
-            let replacement = format!("[image {}]", numbering[n - 1]);
+            let separator = if self.input[start..end].starts_with(' ') {
+                " "
+            } else {
+                ""
+            };
+            let replacement = format!("{separator}[image {}]", numbering[n - 1]);
             if self.cursor_pos >= end {
                 self.cursor_pos = self.cursor_pos - (end - start) + replacement.len();
             } else if self.cursor_pos > start {

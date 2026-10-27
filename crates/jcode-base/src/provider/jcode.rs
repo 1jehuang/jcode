@@ -289,6 +289,14 @@ impl Provider for JcodeProvider {
         self.inner.reset_conversation_state().await
     }
 
+    fn set_host_tool_executor_available(&self, available: bool) {
+        self.inner.set_host_tool_executor_available(available);
+    }
+
+    fn bind_session(&self, session_id: &str) {
+        self.inner.bind_session(session_id)
+    }
+
     fn drain_startup_notices(&self) -> Vec<String> {
         self.inner.drain_startup_notices()
     }

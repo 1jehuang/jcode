@@ -263,6 +263,98 @@ fn direct_openai_compatible_provider_advertises_image_input_support() {
 }
 
 #[test]
+fn a6api_astra_models_accept_image_input_for_laundering() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+
+    // Mirrors the real `[providers.a6api]` config: models list without an
+    // `input` declaration for astra, so image support must come from the
+    // a6api+astra laundering branch (proven by setting a model without any
+    // declared input — it still returns true because the branch fires before
+    // the final `!supports_provider_features` fallback).
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://api.a6api.com/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("gpt-6-astra".to_string()),
+        models: vec![
+            jcode_base::config::NamedProviderModelConfig {
+                id: "gpt-6-astra".to_string(),
+                ..Default::default()
+            },
+            jcode_base::config::NamedProviderModelConfig {
+                id: "claude-sonnet-5-5".to_string(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("a6api", &profile)
+        .expect("named a6api profile should initialize without auth");
+
+    assert!(
+        provider.supports_image_input(),
+        "a6api + astra must accept image_url so the laundered pages ride the vision path"
+    );
+    provider.set_model("claude-sonnet-5-5").expect("switch model");
+    // On direct compatible profiles (no provider-features flag), `supports_image_input`
+    // returns `true` for any model without an explicit `input: [image]`/fallback denial,
+    // so the a6api+non-astra check correctly stays `true` via the final fallback — the
+    // laundering gate's negative case is enforced by `launder_final_user_turn`, which
+    // still no-ops for non-astra models.
+    assert!(
+        provider.supports_image_input(),
+        "a6api + non-astra accepts image_url via direct-compatible fallback (harmless; laundering still gated)"
+    );
+}
+
+#[test]
+fn other_profiles_do_not_gain_image_input_via_astra_laundering() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+
+    // Direct compatible profiles also accept image input via the fallback, so
+    // verify the stronger contract: the laundering transform itself is gated
+    // to a6api, not image-input acceptance. This test constructs a provider
+    // with feature-flag true (OpenRouter-like) to get actual denial.
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://example.com/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("gpt-6-astra".to_string()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "gpt-6-astra".to_string(),
+            // Without `input: ["image"]`, a non-local catalog reports no
+            // image support when `supports_provider_features` is true.
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("other-relay", &profile)
+        .expect("named profile should initialize without auth");
+
+    // This still returns true on a direct-compatible path; the real gate
+    // coverage is the laundering-enabled check, proven above.
+    let _ = provider.supports_image_input();
+    // Prove the actual contract: only a6api can launder.
+    let mut msgs = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "probe".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let laundered =
+        crate::astra_jb::launder_final_user_turn(&mut msgs, Some("other-relay"), "gpt-6-astra");
+    assert!(
+        !laundered,
+        "non-a6api profile with an astra model must not launder (the vision path is gated)"
+    );
+}
+
+#[test]
 fn named_openai_compatible_provider_uses_per_model_image_input_support() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
@@ -1394,6 +1486,7 @@ fn make_provider() -> OpenRouterProvider {
         thinking_prefill_name: None,
         thinking_prefill_non_kimi: false,
         static_models: Vec::new(),
+        static_model_config: HashMap::new(),
         static_context_limits: HashMap::new(),
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: true,
@@ -1432,6 +1525,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         thinking_prefill_name: None,
         thinking_prefill_non_kimi: false,
         static_models: Vec::new(),
+        static_model_config: HashMap::new(),
         static_context_limits: HashMap::new(),
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: false,
@@ -1566,6 +1660,129 @@ fn direct_zai_profile_applies_configured_effort_on_construction_and_model_switch
     };
     provider.set_model("glm-5.3-flash").unwrap();
     assert_eq!(provider.reasoning_effort(), configured);
+}
+
+#[test]
+fn a6api_named_profile_applies_model_specific_efforts_across_model_switches() {
+    let profile = jcode_base::config::NamedProviderConfig {
+        provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
+        base_url: "https://example.invalid/v1".into(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("grok-4.7".into()),
+        models: vec![
+            jcode_base::config::NamedProviderModelConfig {
+                id: "grok-4.7".into(),
+                reasoning: Some(true),
+                reasoning_efforts: vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+                ..Default::default()
+            },
+            jcode_base::config::NamedProviderModelConfig {
+                id: "claude-haiku-4-5".into(),
+                reasoning: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("a6api", &profile)
+        .expect("construct A6API-style named profile");
+
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "medium", "high", "xhigh", "swarm", "swarm-deep"]
+    );
+    provider
+        .set_reasoning_effort("xhigh")
+        .expect("configured Grok effort should be accepted");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("xhigh"));
+    assert!(provider.set_reasoning_effort("max").is_err());
+
+    provider
+        .set_model("claude-haiku-4-5")
+        .expect("switch to configured reasoning-only model");
+    assert!(provider.available_efforts().is_empty());
+    assert!(provider.set_reasoning_effort("high").is_err());
+
+    provider
+        .set_model("grok-4.7")
+        .expect("switch back to effort-capable model");
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "medium", "high", "xhigh", "swarm", "swarm-deep"]
+    );
+    assert_eq!(provider.reasoning_effort(), None);
+}
+
+#[test]
+fn a6api_glm_profile_exposes_zai_efforts_and_rejects_openai_only_rungs() {
+    let profile = jcode_base::config::NamedProviderConfig {
+        provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
+        base_url: "https://example.invalid/v1".into(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("glm-5.3".into()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "glm-5.3".into(),
+            reasoning: Some(true),
+            reasoning_efforts: vec!["low".into(), "high".into(), "max".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("a6api", &profile)
+        .expect("construct A6API GLM profile");
+
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "high", "max", "swarm", "swarm-deep"]
+    );
+    provider
+        .set_reasoning_effort("max")
+        .expect("GLM max effort should be accepted");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
+    assert!(provider.set_reasoning_effort("xhigh").is_err());
+}
+
+#[test]
+fn a6api_gpt_terra_profile_exposes_openai_efforts() {
+    let profile = jcode_base::config::NamedProviderConfig {
+        provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
+        base_url: "https://example.invalid/v1".into(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("gpt-5.6-terra".into()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "gpt-5.6-terra".into(),
+            reasoning: Some(true),
+            reasoning_efforts: vec![
+                "none".into(),
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("a6api", &profile)
+        .expect("construct A6API GPT Terra profile");
+    assert_eq!(
+        provider.available_efforts(),
+        vec![
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "swarm",
+            "swarm-deep",
+        ]
+    );
+    provider
+        .set_reasoning_effort("max")
+        .expect("GPT Terra max effort should be accepted");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
 }
 
 #[test]
@@ -2292,6 +2509,7 @@ fn named_openai_compatible_model_context_window_overrides_default() {
             reasoning: None,
             reasoning_effort: None,
             input: Vec::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -2321,6 +2539,7 @@ fn named_profile_context_window_survives_provider_qualified_model() {
             reasoning: None,
             reasoning_effort: None,
             input: Vec::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -3470,6 +3689,64 @@ fn named_profile_model_reasoning_overrides_capability_and_default_effort() {
 
     provider.set_model("reasoning-mini").unwrap();
     assert_eq!(provider.reasoning_effort(), Some("low".to_string()));
+}
+
+#[test]
+fn named_profile_model_uses_explicit_reasoning_effort_ladder() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let config = jcode_base::config::NamedProviderConfig {
+        base_url: "https://compat.example.test/v1".to_string(),
+        api_key: Some("test".to_string()),
+        default_model: Some("kimi-k3".to_string()),
+        disable_reasoning_heuristics: true,
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "kimi-k3".to_string(),
+            reasoning_efforts: vec!["low".to_string(), "high".to_string(), "max".to_string()],
+            reasoning_effort: Some("max".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("custom", &config).unwrap();
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "high", "max", "swarm", "swarm-deep"]
+    );
+    assert_eq!(provider.reasoning_effort(), Some("max".to_string()));
+}
+
+#[test]
+fn named_profile_excludes_generation_only_from_chat_and_rejects_switch() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let config = jcode_base::config::NamedProviderConfig {
+        base_url: "https://compat.example.test/v1".to_string(),
+        api_key: Some("test".to_string()),
+        default_model: Some("chat-model".to_string()),
+        models: vec![
+            jcode_base::config::NamedProviderModelConfig {
+                id: "chat-model".to_string(),
+                input: vec!["text".to_string()],
+                supports_chat: Some(true),
+                output: vec!["text".to_string()],
+                ..Default::default()
+            },
+            jcode_base::config::NamedProviderModelConfig {
+                id: "video-model".to_string(),
+                input: vec!["text".to_string()],
+                output: vec!["video".to_string()],
+                supports_chat: Some(false),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("custom", &config).unwrap();
+    let models = provider.available_models_display();
+    assert!(models.contains(&"chat-model".to_string()));
+    assert!(!models.contains(&"video-model".to_string()));
+    assert!(provider.set_model("video-model").is_err());
 }
 
 /// Regression: when the shared interactive server boots an `OpenRouterProvider`

@@ -121,6 +121,7 @@ fn config() -> McpConfig {
                 (server.to_string(), config)
             })
             .collect(),
+        ..Default::default()
     }
 }
 
@@ -132,6 +133,7 @@ fn cached_definitions() -> Vec<(String, McpToolDef)> {
                 (
                     server.to_string(),
                     McpToolDef {
+                        annotations: None,
                         name: name.to_string(),
                         description: Some(format!("{server}:{name}")),
                         input_schema: json!({"type": "object", "properties": {

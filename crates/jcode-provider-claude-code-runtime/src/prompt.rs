@@ -128,7 +128,13 @@ pub fn transcript(history: &[Message]) -> Option<String> {
                 ContentBlock::Text { text, .. } => Some(text.trim()),
                 _ => None,
             })
-            .filter(|t| !t.is_empty() && !t.starts_with("<system-reminder>"))
+            // Reminders are per-turn context, except an invoked skill's body
+            // (jcode's `Skill invoked: /name` note), which stays in force.
+            .filter(|t| {
+                !t.is_empty()
+                    && (!t.starts_with("<system-reminder>")
+                        || t.starts_with("<system-reminder>\nSkill invoked: /"))
+            })
             .collect();
         if text.is_empty() {
             continue;
@@ -267,6 +273,19 @@ mod tests {
         assert_eq!(content[1]["text"], "look");
         assert_eq!(line["uuid"], "u1");
         assert_eq!(line["type"], "user");
+    }
+
+    #[test]
+    fn transcript_keeps_invoked_skill_but_not_other_reminders() {
+        let history = vec![
+            user("<system-reminder>\nSkill invoked: /ship\nShip it carefully.\n</system-reminder>"),
+            user("<system-reminder>\nTime: now\n</system-reminder>"),
+            user("deploy please"),
+            assistant("done"),
+        ];
+        let text = transcript(&history).expect("transcript");
+        assert!(text.contains("Skill invoked: /ship"), "{text}");
+        assert!(!text.contains("Time: now"), "{text}");
     }
 
     #[test]

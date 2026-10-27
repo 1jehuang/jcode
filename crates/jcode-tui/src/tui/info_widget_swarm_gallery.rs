@@ -193,9 +193,10 @@ pub(crate) fn render_swarm_page_lines(
     if max_height > 1 {
         out.push(Line::from(Span::styled(
             format!(
-                "{} chat  ·  {} select  ·  {} open  ·  {} prompt  ·  esc chat",
+                "{} chat  ·  {} select  ·  {} enter  ·  {} pop out  ·  {} prompt  ·  esc chat",
                 alt_chord_lower("n"),
                 alt_chord_lower("↑/↓"),
+                alt_chord_lower("enter"),
                 alt_chord_lower("o"),
                 alt_chord_lower("shift+p"),
             ),

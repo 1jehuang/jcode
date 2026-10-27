@@ -1,10 +1,12 @@
 //! MCP management tool - stdio/remote connections and noninteractive OAuth management
 
+#[path = "mcp_inspect.rs"]
+mod inspect;
 #[cfg(test)]
 #[path = "mcp_remote_management_tests.rs"]
 mod remote_management_tests;
 
-use crate::mcp::{ContentBlock, McpManager, McpServerConfig, dispatch_name};
+use crate::mcp::{McpManager, McpServerConfig, dispatch_name};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -178,7 +180,7 @@ impl Tool for McpSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search available MCP tools by server, name, or description. Returns callable names and input schemas."
+        "Find MCP tools, or load exact ones with query \"select:a,b\". Returns schemas."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -191,7 +193,7 @@ impl Tool for McpSearchTool {
                 },
                 "query": {
                     "type": "string",
-                    "description": "Optional case-insensitive name or description search."
+                    "description": "Optional case-insensitive name or description search, or \"select:<name>[,<name>...]\" to load exact tools by name."
                 }
             }
         })
@@ -205,11 +207,24 @@ impl Tool for McpSearchTool {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        // `select:a,b` fetches exact tools, like Claude Code's ToolSearch.
+        let selected: Option<Vec<&str>> = params
+            .query
+            .as_deref()
+            .and_then(|query| query.trim().strip_prefix("select:"))
+            .map(|names| {
+                names
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            });
         // Tokenize the optional query directly, avoiding a lowercased copy of
         // the entire query and an artificial empty-query sentinel.
         let query_terms: Vec<String> = params
             .query
             .iter()
+            .filter(|_| selected.is_none())
             .flat_map(|query| query.split_whitespace().map(str::to_ascii_lowercase))
             .collect();
         let manager = self.manager.read().await;
@@ -252,7 +267,13 @@ impl Tool for McpSearchTool {
                     return None;
                 }
                 let description = tool.description.as_deref().unwrap_or_default();
-                let rank = match_rank(&query_terms, &name, &server, &tool.name, description)?;
+                let rank = match &selected {
+                    Some(selected) => selected
+                        .iter()
+                        .any(|wanted| *wanted == name || *wanted == legacy_name)
+                        .then_some(MatchRank::Name)?,
+                    None => match_rank(&query_terms, &name, &server, &tool.name, description)?,
+                };
                 Some((
                     rank,
                     McpSearchResult {
@@ -284,7 +305,26 @@ impl Tool for McpSearchTool {
         } else {
             SEARCH_TOKEN_BUDGET
         };
-        let (output, detailed) = fit_search_results(&matches, budget)?;
+        let (mut output, detailed) = fit_search_results(&matches, budget)?;
+
+        // Server instructions arrive with the server's schemas instead of in
+        // the system prompt, which stays cache-stable as servers come and go.
+        let mut servers: Vec<&str> = matches[..detailed]
+            .iter()
+            .map(|m| m.server.as_str())
+            .collect();
+        servers.sort_unstable();
+        servers.dedup();
+        let manager = self.manager.read().await;
+        for server in servers {
+            if let Some(instructions) = manager.server_instructions(server).await {
+                output.push_str(&format!(
+                    "\n\n## Instructions from MCP server `{server}`\n{}",
+                    instructions.trim()
+                ));
+            }
+        }
+        drop(manager);
 
         // Ask the agent to load the matched definitions natively. With
         // provider-native deferred loading these become directly callable
@@ -427,37 +467,7 @@ impl Tool for McpCallTool {
             .await?;
         drop(manager);
 
-        let mut output_parts = Vec::new();
-        for block in result.content {
-            match block {
-                ContentBlock::Text { text } => output_parts.push(text),
-                ContentBlock::Image { data, mime_type } => {
-                    output_parts.push(format!("[Image: {} ({} bytes)]", mime_type, data.len()));
-                }
-                ContentBlock::Resource { resource } => {
-                    if let Some(rendered) = crate::applets::mount_mcp_resource(
-                        &ctx.session_id,
-                        &ctx.tool_call_id,
-                        &resource.uri,
-                        resource.mime_type.as_deref(),
-                        resource.text.as_deref(),
-                    ) {
-                        output_parts.push(rendered);
-                    } else if let Some(text) = resource.text {
-                        output_parts.push(text);
-                    } else if let Some(blob) = resource.blob {
-                        output_parts.push(format!(
-                            "[Resource: {} ({} bytes)]",
-                            resource.uri,
-                            blob.len()
-                        ));
-                    } else {
-                        output_parts.push(format!("[Resource: {}]", resource.uri));
-                    }
-                }
-            }
-        }
-        let output = output_parts.join("\n");
+        let output = crate::mcp::render_content(result.content, &ctx.session_id, &ctx.tool_call_id);
         let output = if accept_large_output {
             output
         } else {
@@ -662,6 +672,7 @@ impl Tool for McpManagementTool {
             "connect" => self.connect_server(params, &ctx.session_id).await,
             "disconnect" => self.disconnect_server(params).await,
             "reload" => self.reload_config(&ctx.session_id).await,
+            "inspect" => self.inspect_servers().await,
             "status" | "logout" => self.oauth_action(params).await,
             "login" => anyhow::bail!(
                 "Interactive MCP OAuth login is CLI-only. Run `jcode mcp login <configured-server>` in a terminal (add --no-browser to print the authorization URL). No browser was opened."
@@ -876,6 +887,14 @@ impl McpManagementTool {
             .servers
             .get(&server_name)
             .cloned();
+        // A named server must be allowed to run; an explicit command/URL is ad hoc.
+        if configured.is_some()
+            && params.command.is_none()
+            && params.url.is_none()
+            && let Some(reason) = self.manager.read().await.connect_refusal(&server_name)
+        {
+            anyhow::bail!(reason);
+        }
         let config = connection_config(&params, configured)?;
 
         let manager = self.manager.read().await;

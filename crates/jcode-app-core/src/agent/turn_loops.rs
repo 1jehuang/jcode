@@ -3,20 +3,6 @@ use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_println as println};
 
 impl Agent {
-    /// Speculatively prewarm the provider while a newly created session is idle.
-    ///
-    /// This deliberately bypasses `tool_definitions`, whose cache lock is only
-    /// appropriate once an actual turn starts. Late MCP registration or user
-    /// customization can therefore still change the foreground tool snapshot;
-    /// the provider is responsible for discarding an incompatible warmup.
-    pub(crate) async fn prewarm_provider_idle(&self) {
-        let tools = self.tool_definitions_for_debug().await;
-        let split_prompt = self.build_system_prompt_split(None);
-        self.provider
-            .prewarm(&tools, &split_prompt.static_part)
-            .await;
-    }
-
     /// Run turns until no more tool calls
     /// Maximum number of context-limit compaction retries before giving up.
     pub(super) const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
@@ -210,6 +196,8 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
+            self.provider.set_host_tool_executor_available(true);
+            self.provider.bind_session(&self.session.id);
             let completion = self
                 .provider
                 .complete_split(

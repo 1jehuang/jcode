@@ -100,6 +100,60 @@ fn make_session_with_flags(
 }
 
 #[test]
+fn resume_hides_spawned_sessions_by_default_and_toggle_shows_parent_label() {
+    let mut parent = make_session("main-thread-123456", "main", false, SessionStatus::Closed);
+    parent.title = "Main thread title".to_string();
+    let mut child = make_session("child", "agent", false, SessionStatus::Closed);
+    child.parent_id = Some(parent.id.clone());
+
+    let mut picker = SessionPicker::new(vec![parent, child]);
+    assert_eq!(picker.visible_session_iter().count(), 1);
+    assert!(picker.find_item_index_for_session_id("child").is_none());
+
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Char('a'), KeyModifiers::NONE)
+            .unwrap(),
+        OverlayAction::Continue
+    ));
+    assert_eq!(picker.visible_session_iter().count(), 2);
+    let child = picker
+        .visible_session_iter()
+        .find(|session| session.id == "child")
+        .expect("spawned session is visible after toggle");
+    let rendered = picker.render_session_item_lines(child, false);
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line_text(line).contains("↳ from Main thread title"))
+    );
+
+    picker
+        .apply_session_list_update(SessionListUpdate::Fresh(Ok((
+            Vec::new(),
+            vec![
+                make_session("main-thread-123456", "main", false, SessionStatus::Closed),
+                {
+                    let mut child = make_session("child", "agent", false, SessionStatus::Closed);
+                    child.parent_id = Some("main-thread-123456".to_string());
+                    child
+                },
+            ],
+        ))))
+        .expect("fresh list");
+    assert_eq!(picker.visible_session_iter().count(), 2);
+    let reopened = SessionPicker::new(vec![
+        make_session("main-thread-123456", "main", false, SessionStatus::Closed),
+        {
+            let mut child = make_session("child", "agent", false, SessionStatus::Closed);
+            child.parent_id = Some("main-thread-123456".to_string());
+            child
+        },
+    ]);
+    assert_eq!(reopened.visible_session_iter().count(), 1);
+}
+
+#[test]
 fn standalone_resume_renders_before_list_load_finishes() {
     let mut picker = SessionPicker::loading();
     let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();

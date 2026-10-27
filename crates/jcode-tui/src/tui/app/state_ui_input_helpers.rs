@@ -131,7 +131,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/clear", "Clear conversation history"),
     RegisteredCommand::public("/cls", "Clear the view only, keeping context"),
     RegisteredCommand::hidden("/clear-view", "Alias for /cls"),
-    RegisteredCommand::public("/rewind", "Rewind conversation to previous message"),
+    RegisteredCommand::public(
+        "/rewind",
+        "Restore a previous prompt's conversation or tracked files",
+    ),
     RegisteredCommand::public("/poke", "Poke model to resume with incomplete todos"),
     RegisteredCommand::public("/plan", "Create a plan-only response as a plan card"),
     RegisteredCommand::public("/improve", "Autonomously improve the repository"),
@@ -153,11 +156,15 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/context", "Show the full session context snapshot"),
     RegisteredCommand::public(
         "/skills",
-        "Show loaded skills and jcode-endorsed recommendations",
+        "Browse skills and turn them on or off (/skills list: endorsed skills)",
+    ),
+    RegisteredCommand::public(
+        "/plugin",
+        "Manage plugins: discover, installed, marketplaces, errors",
     ),
     RegisteredCommand::public(
         "/mcp",
-        "Show connected MCP (Model Context Protocol) servers",
+        "Manage MCP servers: status, tools, reconnect, enable/disable",
     ),
     RegisteredCommand::public("/version", "Show current version"),
     RegisteredCommand::public("/changelog", "Show recent changes in this build"),
@@ -1781,18 +1788,7 @@ impl App {
     pub(super) fn remember_input_undo_state(&mut self) {
         self.ensure_input_image_markers();
         self.input_typing_undo = None;
-        let images = self
-            .input_undo_stack
-            .last()
-            .filter(|snapshot| snapshot.2.as_ref() == &self.pending_images)
-            .map(|snapshot| std::sync::Arc::clone(&snapshot.2))
-            .unwrap_or_else(|| std::sync::Arc::new(self.pending_images.clone()));
-        let snapshot = (
-            self.input.clone(),
-            self.cursor_pos.min(self.input.len()),
-            images,
-            self.input_image_markers.clone(),
-        );
+        let snapshot = self.input_draft_snapshot();
         if self.input_undo_stack.last() == Some(&snapshot)
             && self.input_undo_image_counts.last() == Some(&self.pending_images.len())
         {
