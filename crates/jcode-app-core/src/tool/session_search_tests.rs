@@ -670,3 +670,10 @@ fn limit_validation_reports_friendly_errors() {
         .expect_err("negative limit should be rejected");
     assert!(err.contains("received -1"));
 }
+#[test]
+fn large_session_files_limit_parallel_search_workers() {
+    assert_eq!(super::search_worker_count(20, 1024), 8);
+    assert_eq!(super::search_worker_count(20, 64 * 1024 * 1024), 2);
+    assert_eq!(super::search_worker_count(20, 150 * 1024 * 1024), 1);
+    assert_eq!(super::search_worker_count(1, 1024), 1);
+}

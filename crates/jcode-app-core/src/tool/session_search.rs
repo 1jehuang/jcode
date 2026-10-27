@@ -45,6 +45,9 @@ const MAX_DESERIALIZE: usize = 500;
 
 /// Number of parallel threads for file scanning/loading.
 const SCAN_THREADS: usize = 8;
+// Large histories are read and deserialized in full by each worker. Limit
+// parallelism when a search includes them rather than multiplying their peak.
+const SEARCH_WORKER_INPUT_BUDGET: u64 = 128 * 1024 * 1024;
 
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 50;
@@ -867,7 +870,7 @@ fn filter_candidates_parallel(
     if files.is_empty() {
         return Vec::new();
     }
-    let thread_count = SCAN_THREADS.min(files.len());
+    let thread_count = session_scan_threads(files);
     let chunk_size = files.len().div_ceil(thread_count);
 
     std::thread::scope(|scope| {
@@ -906,6 +909,29 @@ fn filter_candidates_parallel(
     })
 }
 
+fn session_scan_threads(files: &[SessionFileCandidate]) -> usize {
+    let largest = files
+        .iter()
+        .map(|candidate| {
+            [&candidate.snapshot_path, &candidate.journal_path]
+                .iter()
+                .filter_map(|path| std::fs::metadata(path).ok())
+                .map(|metadata| metadata.len())
+                .sum::<u64>()
+        })
+        .max()
+        .unwrap_or(0);
+    search_worker_count(files.len(), largest)
+}
+
+fn search_worker_count(count: usize, largest_file_bytes: u64) -> usize {
+    let budget_threads = SEARCH_WORKER_INPUT_BUDGET / largest_file_bytes.max(1);
+    count
+        .min(SCAN_THREADS)
+        .min(budget_threads.max(1) as usize)
+        .max(1)
+}
+
 fn read_candidate_raw(
     candidate: &SessionFileCandidate,
     read_errors: &mut usize,
@@ -939,7 +965,7 @@ fn score_candidates_parallel(
     if candidates.is_empty() {
         return Vec::new();
     }
-    let thread_count = SCAN_THREADS.min(candidates.len());
+    let thread_count = session_scan_threads(candidates);
     let chunk_size = candidates.len().div_ceil(thread_count);
 
     std::thread::scope(|scope| {
