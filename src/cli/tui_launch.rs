@@ -496,11 +496,50 @@ pub use crate::session_launch::{
     spawn_selfdev_in_new_terminal, spawn_selfdev_in_new_terminal_with_provider,
 };
 
+fn resume_target_cloud_handoff(
+    target: &jcode_tui_session_picker::ResumeTarget,
+) -> Option<tui::CloudHandoff> {
+    let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } = target else {
+        return None;
+    };
+    let lease = crate::storage::read_session_lease(session_id)?;
+    Some(tui::CloudHandoff::RemoteResume {
+        session_id: session_id.clone(),
+        host: lease.away_host?,
+        working_dir: lease.repo_root,
+    })
+}
+
+fn cloud_resume_target_args(
+    target: &jcode_tui_session_picker::ResumeTarget,
+) -> Option<Vec<String>> {
+    let tui::CloudHandoff::RemoteResume {
+        session_id,
+        host,
+        working_dir,
+    } = resume_target_cloud_handoff(target)?
+    else {
+        return None;
+    };
+    let mut args = vec!["--ssh".into(), host];
+    if let Ok(binary) = std::env::var("JCODE_CLOUD_REMOTE_BINARY") {
+        args.extend(["--ssh-binary".into(), binary]);
+    }
+    if let Some(dir) = working_dir {
+        args.extend(["--remote-working-dir".into(), dir]);
+    }
+    args.extend(["--resume".into(), session_id]);
+    Some(args)
+}
+
 pub fn list_sessions() -> Result<()> {
     fn build_resume_target_command(
         exe: &std::path::Path,
         target: &jcode_tui_session_picker::ResumeTarget,
     ) -> (std::path::PathBuf, Vec<String>) {
+        if let Some(args) = cloud_resume_target_args(target) {
+            return (exe.to_path_buf(), args);
+        }
         match target {
             jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } => (
                 exe.to_path_buf(),
@@ -584,13 +623,22 @@ pub fn list_sessions() -> Result<()> {
             }
         };
         let title = crate::output_style::terminal_text(&title).into_owned();
-        let command = crate::terminal_launch::TerminalCommand::new(program, args).title(title);
+        let remote = args.iter().any(|arg| arg == "--ssh");
+        let mut command = crate::terminal_launch::TerminalCommand::new(program, args).title(title);
+        if remote {
+            command = command
+                .spawn_env("JCODE_CLOUD_CONTINUE_MESSAGE", "")
+                .spawn_env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "");
+        }
         crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
     }
 
     match tui::session_picker::pick_session()? {
         Some(tui::session_picker::PickerResult::TakeOverClaude(target)) => {
             let resolved_target = crate::import::take_over_live_claude_session(&target)?;
+            if let Some(handoff) = resume_target_cloud_handoff(&resolved_target) {
+                return super::cloud_move::exec_handoff(handoff);
+            }
             let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } =
                 &resolved_target
             else {
@@ -622,6 +670,9 @@ pub fn list_sessions() -> Result<()> {
             if targets.len() == 1 {
                 let target = &targets[0];
                 let resolved_target = crate::import::resolve_resume_target_to_jcode(target)?;
+                if let Some(handoff) = resume_target_cloud_handoff(&resolved_target) {
+                    return super::cloud_move::exec_handoff(handoff);
+                }
                 let mut session_cwd = cwd.clone();
                 if let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } =
                     &resolved_target
@@ -810,3 +861,64 @@ pub fn list_sessions() -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cloud_resume_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_cloud_resume_uses_passive_handoff_and_ssh_args() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 {
+                    crate::env::set_var("JCODE_HOME", value);
+                } else {
+                    crate::env::remove_var("JCODE_HOME");
+                }
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        let target = jcode_tui_session_picker::ResumeTarget::JcodeSession {
+            session_id: "cloud-picker-test".into(),
+        };
+        assert!(resume_target_cloud_handoff(&target).is_none());
+        assert!(cloud_resume_target_args(&target).is_none());
+        let mut lease = crate::storage::SessionLease {
+            session_id: "cloud-picker-test".into(),
+            epoch: 1,
+            away_host: Some("cloud-box".into()),
+            repo_root: Some("/workspace/project with spaces".into()),
+            last_sync_snapshot: None,
+            last_sync_head: None,
+            updated_at: "2026-10-27T00:00:00Z".into(),
+        };
+        crate::storage::write_session_lease(&lease).unwrap();
+        assert_eq!(
+            resume_target_cloud_handoff(&target),
+            Some(tui::CloudHandoff::RemoteResume {
+                session_id: lease.session_id.clone(),
+                host: "cloud-box".into(),
+                working_dir: lease.repo_root.clone(),
+            })
+        );
+        let args = cloud_resume_target_args(&target).unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--ssh", "cloud-box"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "cloud-picker-test"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--remote-working-dir", "/workspace/project with spaces"] })
+        );
+        assert!(!args.iter().any(|arg| arg == "--socket"));
+        lease.away_host = None;
+        crate::storage::write_session_lease(&lease).unwrap();
+        assert!(resume_target_cloud_handoff(&target).is_none());
+        assert!(cloud_resume_target_args(&target).is_none());
+    }
+}
