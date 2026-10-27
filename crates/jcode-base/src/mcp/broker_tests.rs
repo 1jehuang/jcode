@@ -335,3 +335,106 @@ fn shared_upstream_env_drops_seat_identity_but_keeps_explicit_config() {
         "explicit config.env is the owner's choice and must win"
     );
 }
+
+async fn broker_connections(h: &Harness) -> u64 {
+    request_status(&h.socket).await.expect("status")["connections"]
+        .as_u64()
+        .unwrap_or(u64::MAX)
+}
+
+async fn wait_for_connections(h: &Harness, expected: u64) -> u64 {
+    let mut last = u64::MAX;
+    for _ in 0..100 {
+        last = broker_connections(h).await;
+        if last == expected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    last
+}
+
+#[tokio::test]
+async fn dropped_broker_client_releases_its_broker_connection() {
+    let h = start_broker(Duration::from_secs(60), Duration::from_secs(60)).await;
+    let config = fake_server(&h.log);
+
+    for cycle in 0..3 {
+        let client = attach(&h, &config).await;
+        assert_eq!(
+            wait_for_connections(&h, 1).await,
+            1,
+            "cycle {cycle}: attached client must hold one broker connection"
+        );
+        drop(client);
+        assert_eq!(
+            wait_for_connections(&h, 0).await,
+            0,
+            "cycle {cycle}: dropping the client must release its broker connection"
+        );
+    }
+    h.task.abort();
+}
+
+#[cfg(target_os = "macos")]
+fn open_fd_count() -> usize {
+    std::fs::read_dir("/dev/fd").map(|dir| dir.count()).unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn broker_client_cycles_do_not_grow_open_fds() {
+    let h = start_broker(Duration::from_secs(60), Duration::from_secs(60)).await;
+    let config = fake_server(&h.log);
+
+    // Warm up once so one-time allocations do not count as growth.
+    drop(attach(&h, &config).await);
+    wait_for_connections(&h, 0).await;
+    let baseline = open_fd_count();
+
+    for _ in 0..10 {
+        let client = attach(&h, &config).await;
+        drop(client);
+        wait_for_connections(&h, 0).await;
+    }
+    let after = open_fd_count();
+    assert!(
+        after <= baseline + 2,
+        "fd count grew across 10 attach/drop cycles: baseline={baseline} after={after}"
+    );
+    h.task.abort();
+}
+
+#[cfg(target_os = "macos")]
+fn resident_bytes() -> u64 {
+    crate::process_memory::snapshot_with_source("broker_lifecycle_test")
+        .rss_bytes
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn broker_client_cycles_do_not_grow_resident_memory() {
+    let h = start_broker(Duration::from_secs(60), Duration::from_secs(60)).await;
+    let config = fake_server(&h.log);
+
+    for _ in 0..3 {
+        drop(attach(&h, &config).await);
+        wait_for_connections(&h, 0).await;
+    }
+    let baseline = resident_bytes();
+    for _ in 0..30 {
+        drop(attach(&h, &config).await);
+        wait_for_connections(&h, 0).await;
+    }
+    let after = resident_bytes();
+    let growth = after.saturating_sub(baseline);
+    eprintln!("broker_churn_rss baseline={baseline} after={after} growth={growth}");
+    // Allocator noise is real, so allow a generous margin; a per-cycle leak
+    // of a whole connection would be far larger than this across 30 cycles.
+    assert!(
+        growth < 8 * 1024 * 1024,
+        "resident memory grew {growth} bytes across 30 broker attach/drop cycles"
+    );
+    h.task.abort();
+}
