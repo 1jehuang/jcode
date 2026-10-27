@@ -1345,6 +1345,43 @@ fn register_on_demand_server_spawner_for_run(
     }));
 }
 
+/// Build the command that starts a spawned server.
+///
+/// The child is pinned to `socket`, the socket the spawning client resolved. A
+/// replacement started after a failed reload is a new process. Without this pin
+/// it binds the runtime-dir default `runtime/jcode.sock`, while the clients that
+/// spawned it stay on their own socket, so they end up on two servers.
+fn build_shared_server_command(
+    exe: &std::path::Path,
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+    lifetime: ServerLifetime,
+    client_requested_selfdev: bool,
+    socket: &std::path::Path,
+) -> ProcessCommand {
+    let mut cmd = ProcessCommand::new(exe);
+    cmd.env_remove(selfdev::CLIENT_SELFDEV_ENV);
+    if client_requested_selfdev {
+        cmd.env("JCODE_DEBUG_CONTROL", "1");
+    }
+    cmd.arg("--provider").arg(provider_choice.as_arg_value());
+    // The interactive TUI owns first-run onboarding/login. Let the spawned
+    // server boot with a deferred (credential-less) provider when nothing is
+    // configured yet, instead of bailing; the TUI activates a provider via the
+    // in-TUI `/login` flow. See init_provider_with_options.
+    cmd.env("JCODE_DEFERRED_AUTH_BOOTSTRAP", "1");
+    if let Some(provider_profile) = provider_profile {
+        cmd.arg("--provider-profile").arg(provider_profile);
+    }
+    if let Some(model) = model {
+        cmd.arg("--model").arg(model);
+    }
+    cmd.args(serve_subcommand_args(lifetime, std::process::id()));
+    cmd.env("JCODE_SOCKET", socket);
+    cmd
+}
+
 /// The `serve` subcommand argv for a spawned server of the given lifetime.
 ///
 /// Split out so the contract with `Command::Serve` is testable without
@@ -1410,24 +1447,15 @@ async fn spawn_server_with_lifetime(
         })
         .or_else(|| std::env::current_exe().ok())
         .ok_or_else(|| anyhow::anyhow!("Could not determine executable path for server spawn"))?;
-    let mut cmd = ProcessCommand::new(&exe);
-    cmd.env_remove(selfdev::CLIENT_SELFDEV_ENV);
-    if client_requested_selfdev {
-        cmd.env("JCODE_DEBUG_CONTROL", "1");
-    }
-    cmd.arg("--provider").arg(provider_choice.as_arg_value());
-    // The interactive TUI owns first-run onboarding/login. Let the spawned
-    // server boot with a deferred (credential-less) provider when nothing is
-    // configured yet, instead of bailing; the TUI activates a provider via the
-    // in-TUI `/login` flow. See init_provider_with_options.
-    cmd.env("JCODE_DEFERRED_AUTH_BOOTSTRAP", "1");
-    if let Some(provider_profile) = provider_profile {
-        cmd.arg("--provider-profile").arg(provider_profile);
-    }
-    if let Some(model) = model {
-        cmd.arg("--model").arg(model);
-    }
-    cmd.args(serve_subcommand_args(lifetime, std::process::id()));
+    let mut cmd = build_shared_server_command(
+        &exe,
+        provider_choice,
+        model,
+        provider_profile,
+        lifetime,
+        client_requested_selfdev,
+        &socket_path,
+    );
     cmd.stdout(Stdio::null()).stderr(Stdio::piped());
 
     #[cfg(unix)]

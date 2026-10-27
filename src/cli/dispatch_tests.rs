@@ -353,6 +353,35 @@ async fn server_is_running_at_treats_live_listener_as_running_without_pong() {
     );
 }
 
+#[test]
+fn replacement_server_binds_the_clients_pinned_socket() {
+    // Regression: after a failed reload, clients pinned to a custom socket
+    // spawned a replacement that inherited only the runtime-dir default and
+    // bound runtime/jcode.sock, so the clients ended up on two servers. The
+    // child command must carry the client's pinned socket.
+    let pinned = std::path::PathBuf::from("/tmp/pinned-shared/hull.sock");
+    let cmd = build_shared_server_command(
+        std::path::Path::new("jcode"),
+        &ProviderChoice::Auto,
+        None,
+        None,
+        ServerLifetime::Shared,
+        false,
+        &pinned,
+    );
+
+    let child_socket = cmd
+        .get_envs()
+        .find(|(key, _)| *key == std::ffi::OsStr::new("JCODE_SOCKET"))
+        .and_then(|(_, value)| value)
+        .map(std::path::PathBuf::from);
+    assert_eq!(
+        child_socket.as_deref(),
+        Some(pinned.as_path()),
+        "the spawned server must bind the socket the client was pinned to"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn spawn_lock_creates_missing_runtime_directory() {
