@@ -3157,7 +3157,7 @@ impl App {
             if !super::commands_cloud::check_cloud_handoff_input(self, "/cloud") {
                 return;
             }
-            self.cloud_handoff_requested = Some(CloudHandoff::Remote {
+            self.cloud_handoff_requested = Some(CloudHandoff::RemoteResume {
                 session_id,
                 host,
                 working_dir: lease.repo_root,
@@ -4286,7 +4286,7 @@ mod cloud_resume_tests {
         app.handle_session_picker_current_terminal_selection(&[target]);
         assert_eq!(
             app.cloud_handoff_requested,
-            Some(CloudHandoff::Remote {
+            Some(CloudHandoff::RemoteResume {
                 session_id: app.session.id.clone(),
                 host: "cloud-test-host".into(),
                 working_dir: Some("/remote/project with spaces".into()),
@@ -4355,7 +4355,7 @@ mod cloud_resume_tests {
         app.handle_session_picker_selection(&[target]);
         assert!(matches!(
             app.cloud_handoff_requested,
-            Some(CloudHandoff::Remote { .. })
+            Some(CloudHandoff::RemoteResume { .. })
         ));
         assert!(app.workspace_client.take_pending_resume_session().is_none());
     }

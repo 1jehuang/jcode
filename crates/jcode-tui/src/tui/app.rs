@@ -648,6 +648,12 @@ pub enum CloudHandoff {
         host: String,
         working_dir: Option<String>,
     },
+    /// Attach to an already cloud-owned session without submitting a continuation.
+    RemoteResume {
+        session_id: String,
+        host: String,
+        working_dir: Option<String>,
+    },
     /// Resume the (returned) session locally.
     Local { session_id: String },
 }

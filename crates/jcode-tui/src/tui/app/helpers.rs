@@ -843,8 +843,14 @@ fn spawn_command_in_new_terminal(
         // tests is the libtest harness and would pop up a broken window.
         return Ok(false);
     }
-    let command = crate::terminal_launch::TerminalCommand::new(program, args.to_vec())
+    let mut command = crate::terminal_launch::TerminalCommand::new(program, args.to_vec())
         .title(title.to_string());
+    if args.iter().any(|arg| arg == "--ssh") {
+        // Resuming is an attachment, never a request to start another turn.
+        command = command
+            .spawn_env("JCODE_CLOUD_CONTINUE_MESSAGE", "")
+            .spawn_env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "");
+    }
     crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
 }
 
