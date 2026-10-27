@@ -45,6 +45,7 @@ fn justrust_status_is_below_todos_and_never_wraps() {
             justrust_status: Some(crate::tui::justrust_status::StatusRow {
                 text: "justrust [remote/hosted] test 编译器 · 51s · 7.8/96 cores".into(),
                 tone: crate::tui::justrust_status::Tone::Active,
+                own_session: false,
             }),
             ..Default::default()
         };
@@ -71,6 +72,19 @@ fn justrust_status_is_below_todos_and_never_wraps() {
         state.pinned_todos_payload = None;
         let (lines, _) = viewport::pinned_todo_band_lines(&state, 100, 24);
         assert_eq!(lines.len(), 1, "a build row does not require todos");
+        for (own_session, expected) in [(false, Color::Magenta), (true, Color::Cyan)] {
+            let status = state.justrust_status.as_mut().unwrap();
+            status.own_session = own_session;
+            status.tone = crate::tui::justrust_status::Tone::Failure;
+            let (lines, _) = viewport::pinned_todo_band_lines(&state, 100, 24);
+            let label = lines[0]
+                .spans
+                .iter()
+                .find(|span| span.content == "justrust")
+                .unwrap();
+            assert_eq!(label.style.fg, Some(expected));
+            assert_eq!(lines[0].spans.last().unwrap().style.fg, Some(Color::Red));
+        }
         state.justrust_status = None;
         assert!(
             viewport::pinned_todo_band_lines(&state, 100, 24)

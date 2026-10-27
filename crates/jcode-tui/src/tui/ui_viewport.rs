@@ -1534,10 +1534,17 @@ pub(crate) fn pinned_todo_band_lines(
             crate::tui::justrust_status::Tone::Success => ratatui::style::Color::Green,
             crate::tui::justrust_status::Tone::Failure => ratatui::style::Color::Red,
         };
-        let line = Line::from(Span::styled(
-            format!("  {}", status.text),
-            Style::default().fg(color),
-        ));
+        let label_color = if status.own_session {
+            ratatui::style::Color::Cyan
+        } else {
+            ratatui::style::Color::Magenta
+        };
+        let (label, rest) = status.text.split_once(' ').unwrap_or((&status.text, ""));
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::styled(label.to_owned(), Style::default().fg(label_color)),
+            Span::styled(format!(" {rest}"), Style::default().fg(color)),
+        ]);
         lines.push(super::truncate_line_with_ellipsis_to_width(
             &line,
             width as usize,

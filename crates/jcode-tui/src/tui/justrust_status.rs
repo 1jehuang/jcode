@@ -86,6 +86,7 @@ pub enum Tone {
 pub struct StatusRow {
     pub text: String,
     pub tone: Tone,
+    pub own_session: bool,
 }
 
 fn clean(value: &str) -> String {
@@ -206,6 +207,7 @@ impl Snapshot {
             return Some(StatusRow {
                 text,
                 tone: Tone::Active,
+                own_session: relevance(run.agent_session.as_deref(), &run.cwd, session, repo) == 2,
             });
         }
         let run = self.recent.as_ref()?;
@@ -229,6 +231,7 @@ impl Snapshot {
                 duration(run.wall)
             ),
             tone: if run.ok { Tone::Success } else { Tone::Failure },
+            own_session: relevance(run.agent_session.as_deref(), &run.cwd, session, repo) == 2,
         })
     }
 }
@@ -363,6 +366,40 @@ impl Poller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ownership_distinguishes_session_from_repository_for_all_outcomes() {
+        for active in [true, false] {
+            for ok in [true, false] {
+                for owner in ["ours", "other"] {
+                    let run = serde_json::json!({
+                        "cwd": "/repo/app", "agent_session": owner,
+                        "wall": 5, "ago": 1, "ok": ok
+                    });
+                    let value = if active {
+                        serde_json::json!({"active": [run]})
+                    } else {
+                        serde_json::json!({"recent": run})
+                    };
+                    let snapshot: Snapshot = serde_json::from_value(value).unwrap();
+                    let row = snapshot
+                        .row(Some("ours"), Some("/repo/app"), Duration::ZERO)
+                        .unwrap();
+                    assert_eq!(row.own_session, owner == "ours");
+                    assert_eq!(
+                        row.tone,
+                        if active {
+                            Tone::Active
+                        } else if ok {
+                            Tone::Success
+                        } else {
+                            Tone::Failure
+                        }
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn old_waybar_api_remains_usable_without_resource_fields() {
@@ -504,6 +541,7 @@ mod tests {
             row: Some(StatusRow {
                 text: "old".into(),
                 tone: Tone::Active,
+                own_session: false,
             }),
             ..Default::default()
         };
