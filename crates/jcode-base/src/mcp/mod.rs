@@ -11,7 +11,7 @@ pub mod broker;
 pub mod budget;
 pub mod broker;
 pub mod budget;
-mod broker;
+pub mod broker;
 mod client;
 mod manager;
 mod pending;
