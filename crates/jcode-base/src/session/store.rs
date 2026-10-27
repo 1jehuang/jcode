@@ -345,7 +345,7 @@ impl SessionStore {
     /// Import an explicit legacy snapshot and adjacent journal without modifying
     /// the source or refreshing timestamps. Existing native sessions win.
     pub fn import_from_path(&self, path: &Path) -> Result<()> {
-        let mut session = Session::load_file_at(path, false, false)?;
+        let mut session = Session::load_file_without_title_backfill(path)?;
         validate_id(&session.id)?;
         let _guard = super::persistence::SAVES_IN_FLIGHT
             .read()
@@ -430,7 +430,7 @@ impl SessionStorage for FileSessionStorage {
     fn list(&self) -> Result<Vec<SessionSummary>> {
         let mut summaries = Vec::new();
         for path in self.paths()? {
-            let session = Session::load_file_at(&path, false, false)
+            let session = Session::load_file_without_title_backfill(&path)
                 .with_context(|| format!("Loading {}", path.display()))?;
             let mut summary = SessionSummary::metadata(&session);
             summary.discovery_modified_at = file_discovery_modified_at(&path);

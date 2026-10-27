@@ -392,6 +392,19 @@ impl Session {
     }
 
     pub(super) fn load_file_at(path: &Path, refresh_overrides: bool, repair: bool) -> Result<Self> {
+        Self::load_file_with_title_policy(path, refresh_overrides, repair, true)
+    }
+
+    pub(super) fn load_file_without_title_backfill(path: &Path) -> Result<Self> {
+        Self::load_file_with_title_policy(path, false, false, false)
+    }
+
+    fn load_file_with_title_policy(
+        path: &Path,
+        refresh_overrides: bool,
+        repair: bool,
+        backfill_title: bool,
+    ) -> Result<Self> {
         let load_start = Instant::now();
         let snapshot_bytes = file_len_or_zero(path);
         let snapshot_start = Instant::now();
@@ -417,7 +430,9 @@ impl Session {
         if refresh_overrides {
             session.refresh_agent_model_overrides()?;
         }
-        session.backfill_prompt_title();
+        if backfill_title {
+            session.backfill_prompt_title();
+        }
         session.reset_persist_state(path.exists());
         session.persist_state.store_key = Some(path.to_path_buf());
         session.reset_provider_messages_cache();

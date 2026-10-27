@@ -1833,6 +1833,7 @@ fn sqlite_picker_preserves_imported_recency_and_saved_tail() {
         );
         item.is_debug = index == 1 || index == 53;
         item.saved = index == 0;
+        item.title = None;
         item.updated_at = chrono::DateTime::from_timestamp(1_700_000_100 - index, 0).unwrap();
         files.save_prepared(&mut item).unwrap();
         let path = home.path().join("sessions").join(format!("{id}.json"));
@@ -1850,6 +1851,17 @@ fn sqlite_picker_preserves_imported_recency_and_saved_tail() {
     let _sqlite_backend = EnvVarGuard::set_str("JCODE_SESSION_BACKEND", "sqlite");
     invalidate_session_list_cache();
     let sqlite_rows = load_sessions().unwrap();
+    assert_eq!(
+        sqlite_rows
+            .iter()
+            .map(|row| (&row.id, &row.title))
+            .collect::<Vec<_>>(),
+        file_rows
+            .iter()
+            .map(|row| (&row.id, &row.title))
+            .collect::<Vec<_>>(),
+        "import must not backfill titles only in the SQLite picker"
+    );
     let ids = |rows: Vec<SessionInfo>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
     let file_ids = ids(file_rows);
     assert!(

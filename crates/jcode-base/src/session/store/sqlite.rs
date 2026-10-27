@@ -114,7 +114,7 @@ impl SqliteSessionStorage {
         }
         let path = crate::session::storage_paths::session_path_in_dir(&self.root, id);
         // Read-only replay does not repair or remove even a corrupt legacy journal.
-        let mut session = Session::load_file_at(&path, false, false)
+        let mut session = Session::load_file_without_title_backfill(&path)
             .with_context(|| format!("Loading legacy session {id}"))?;
         if session.id != id {
             bail!("Legacy session id does not match its filename");
