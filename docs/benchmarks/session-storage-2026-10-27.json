@@ -1,0 +1,47 @@
+{
+  "format_version": 1,
+  "conditions": {
+    "cache": "warm filesystem; no global cache eviction",
+    "file_durability": "existing snapshot/journal backend semantics; no fsync",
+    "load_and_write_size_quantiles": 16,
+    "order": "alternating backends",
+    "repetitions": 7,
+    "sqlite_durability": "WAL synchronous=FULL",
+    "profile": "unoptimized dev",
+    "rustc": "1.98.1",
+    "cpu": "Intel Core i9-14900, 32 logical CPUs",
+    "kernel": "Linux 6.12.107+deb13-amd64",
+    "filesystem": "Btrfs",
+    "host": "shared, concurrent workloads; no global cache eviction"
+  },
+  "corpus": {
+    "import_failures": 0,
+    "imported_sessions": 3018,
+    "input_sessions": 3018,
+    "snapshot_bytes": 3547678955
+  },
+  "full_corpus_parity_check_ms": 61583.849795,
+  "sqlite_import_ms": 167153.975623,
+  "whole_run_wall_seconds": 293.87,
+  "whole_run_peak_rss_kib": 1712536,
+  "initial_footprint": {
+    "files": {"allocated_bytes": 3632390144, "files": 3420, "logical_bytes": 3625325615},
+    "sqlite": {"allocated_bytes": 3539058688, "files": 3, "logical_bytes": 3539058776}
+  },
+  "final_footprint": {
+    "files": {"allocated_bytes": 3261407232, "files": 3435, "logical_bytes": 3254314789},
+    "sqlite": {"allocated_bytes": 3500003328, "files": 3, "logical_bytes": 3500003648}
+  },
+  "measurements": [
+    {"backend":"files","operation":"load_size_quantiles","samples":112,"median_ms":2.100037,"p95_ms":1097.034225,"min_ms":0.165721,"max_ms":1801.944759},
+    {"backend":"sqlite","operation":"load_size_quantiles","samples":112,"median_ms":2.048548,"p95_ms":31.233215,"min_ms":0.218115,"max_ms":63.795227},
+    {"backend":"files","operation":"metadata_commit","samples":112,"median_ms":0.321012,"p95_ms":3.0090310000000002,"min_ms":0.17893699999999998,"max_ms":8.463004},
+    {"backend":"sqlite","operation":"metadata_commit","samples":112,"median_ms":7.52377,"p95_ms":17.471154,"min_ms":2.478868,"max_ms":20.663744},
+    {"backend":"files","operation":"title_edit_commit","samples":112,"median_ms":3.6081580000000004,"p95_ms":13.888098,"min_ms":0.200019,"max_ms":23.699873999999998},
+    {"backend":"sqlite","operation":"title_edit_commit","samples":112,"median_ms":3.366769,"p95_ms":7.2361830000000005,"min_ms":1.2246290000000002,"max_ms":17.591268},
+    {"backend":"files","operation":"append_commit","samples":105,"median_ms":0.29548399999999997,"p95_ms":1.9864439999999999,"min_ms":0.19642800000000002,"max_ms":6.827146},
+    {"backend":"sqlite","operation":"append_commit","samples":105,"median_ms":3.0225239999999998,"p95_ms":9.538248,"min_ms":1.582761,"max_ms":45.232815},
+    {"backend":"files","operation":"truncate_commit","samples":112,"median_ms":6.701463,"p95_ms":513.330479,"min_ms":0.150924,"max_ms":941.286682},
+    {"backend":"sqlite","operation":"truncate_commit","samples":112,"median_ms":14.207251000000001,"p95_ms":600.554862,"min_ms":1.33508,"max_ms":990.081622}
+  ]
+}
