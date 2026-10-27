@@ -582,6 +582,8 @@ pub(super) async fn handle_subscribe(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &SessionInterruptQueues,
 ) {
     let subscribe_start = Instant::now();
     crate::logging::event_info(
@@ -888,6 +890,8 @@ pub(super) async fn handle_subscribe(
             plans: Arc::clone(swarm_plans),
             coordinators: Arc::clone(swarm_coordinators),
         },
+        sessions,
+        soft_interrupt_queues,
     )
     .await;
 
@@ -2039,6 +2043,8 @@ pub(super) async fn handle_resume_session(
                     plans: Arc::clone(swarm_plans),
                     coordinators: Arc::clone(swarm_coordinators),
                 },
+                sessions,
+                soft_interrupt_queues,
             )
             .await;
             // Report the restored route for the same reason: a resuming client

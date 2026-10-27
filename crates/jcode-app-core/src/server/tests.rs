@@ -1047,11 +1047,13 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
             "work in flight before shutdown",
         )?;
     }
-    assert!(super::reload_recovery::mark_delivered_if_matching_continuation(
-        &idle.id,
-        "Continue interrupted work",
-        "test-completed-recovery",
-    )?);
+    assert!(
+        super::reload_recovery::mark_delivered_if_matching_continuation(
+            &idle.id,
+            "Continue interrupted work",
+            "test-completed-recovery",
+        )?
+    );
     let swarm_id = "swarm-stopped-recovery";
     let mut headed_member = persisted_headless_member(&headed.id, swarm_id, "ready", "attached");
     headed_member.is_headless = false;

@@ -1738,6 +1738,8 @@ pub(super) async fn handle_client(
                                 &event_history,
                                 &event_counter,
                                 &swarm_event_tx,
+                                &sessions,
+                                &soft_interrupt_queues,
                             )
                             .await;
                             if let Some(snapshot) = try_available_models_snapshot(&agent) {
@@ -1777,6 +1779,8 @@ pub(super) async fn handle_client(
                             &event_history,
                             &event_counter,
                             &swarm_event_tx,
+                            &sessions,
+                            &soft_interrupt_queues,
                         )
                         .await;
                     }
@@ -1807,6 +1811,8 @@ pub(super) async fn handle_client(
                         &event_history,
                         &event_counter,
                         &swarm_event_tx,
+                        &sessions,
+                        &soft_interrupt_queues,
                     )
                     .await;
                     // No catalog dedup baseline here. A fresh subscribe sends
