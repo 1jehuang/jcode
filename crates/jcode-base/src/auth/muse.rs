@@ -962,7 +962,7 @@ fn valid_percent(value: Option<f64>) -> Option<f64> {
 
 /// Strip control characters from a tier label and cap its length so a
 /// hostile snapshot cannot inject terminal escape sequences or junk.
-fn sanitize_tier(tier: &str) -> String {
+pub(crate) fn sanitize_tier(tier: &str) -> String {
     tier.chars()
         .filter(|ch| !ch.is_control())
         .collect::<String>()

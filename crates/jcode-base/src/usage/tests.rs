@@ -1409,5 +1409,25 @@ fn parse_muse_subs_usage_limits_handles_windows_and_rejects_invalid() {
     };
     let limits = api_keys::parse_muse_subs_usage_limits(&invalid);
     assert!(limits.is_empty());
-}
 
+    // Boundary percentages (0.0 and 100.0), millisecond timestamps and negative epochs
+    let boundary = crate::auth::muse::SubsUsage {
+        window_used_percent: Some(0.0),
+        window_duration_mins: Some(120),
+        window_resets_at: Some(1793094549000), // millis
+        weekly_used_percent: Some(100.0),
+        weekly_resets_at: Some(-10), // invalid epoch ignored
+        tier: None,
+    };
+    let limits = api_keys::parse_muse_subs_usage_limits(&boundary);
+    assert_eq!(limits.len(), 2);
+    assert_eq!(limits[0].name, "120-minute window");
+    assert!((limits[0].usage_percent - 0.0).abs() < f32::EPSILON);
+    assert_eq!(
+        limits[0].resets_at.as_deref(),
+        Some("2026-10-27T09:49:09+00:00")
+    );
+    assert_eq!(limits[1].name, "Weekly window");
+    assert!((limits[1].usage_percent - 100.0).abs() < f32::EPSILON);
+    assert_eq!(limits[1].resets_at, None);
+}

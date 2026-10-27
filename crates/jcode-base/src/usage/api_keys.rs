@@ -279,8 +279,10 @@ async fn fetch_compatible_profile_report(
                     .subs_usage
                     .as_ref()
                     .and_then(|usage| usage.tier.as_deref())
+                    .map(crate::auth::muse::sanitize_tier)
+                    .filter(|tier| !tier.is_empty())
                 {
-                    extra_info.push(("Plan".to_string(), tier.to_string()));
+                    extra_info.push(("Plan".to_string(), tier));
                 }
                 if let Some(usage) = credentials.subs_usage.as_ref() {
                     let parsed_limits = parse_muse_subs_usage_limits(usage);
