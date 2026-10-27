@@ -330,3 +330,151 @@ async fn reload_marker_is_active_when_clients_are_notified() -> Result<()> {
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
     result
 }
+
+/// Send one newline-framed JSON request over a raw socket.
+async fn send_frame(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    frame: serde_json::Value,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    writer.write_all(format!("{frame}\n").as_bytes()).await?;
+    Ok(())
+}
+
+/// Read newline-framed events until `Done` for `target_id`, returning the
+/// `ToolDone` outputs seen along the way.
+async fn read_turn_tool_outputs(
+    reader: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+    target_id: u64,
+) -> Result<Vec<String>> {
+    let mut outputs = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let line = tokio::time::timeout(Duration::from_secs(2), reader.next_line()).await??;
+        let Some(line) = line else { break };
+        let value: serde_json::Value = serde_json::from_str(&line)?;
+        match value.get("type").and_then(|t| t.as_str()) {
+            Some("tool_done") => {
+                if let Some(out) = value.get("output").and_then(|o| o.as_str()) {
+                    outputs.push(out.to_string());
+                }
+            }
+            Some("done") if value.get("id").and_then(|i| i.as_u64()) == Some(target_id) => {
+                return Ok(outputs);
+            }
+            _ => {}
+        }
+    }
+    anyhow::bail!("turn {target_id} did not reach done; outputs so far: {outputs:?}")
+}
+
+/// Two real socket clients on ONE shared server must each have their own bash
+/// tool run under their OWN identity and cwd. Identity travels in the
+/// subscribe request's `terminal_env`, which the server applies around each
+/// client's turn. Built on raw socket frames (same pattern as text_framing.rs)
+/// so no production method is needed.
+#[tokio::test]
+async fn shared_server_bash_tool_uses_each_clients_identity_and_cwd() -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let _env = setup_test_env()?;
+
+    let provider = Arc::new(MockProvider::new());
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let (socket_path, debug_socket_path, server_handle) =
+        start_inprocess_server("seat-identity", provider_dyn).await?;
+
+    // Scripted turns, consumed FIFO. Turns below run serially.
+    let bash_turn = |seat: &str| {
+        vec![
+            StreamEvent::ToolUseStart {
+                id: format!("bash-{seat}"),
+                name: "bash".to_string(),
+            },
+            StreamEvent::ToolInputDelta(
+                serde_json::json!({
+                    "command": "echo SEAT=${OPENRIG_SESSION_NAME:-none} CWD=$(pwd)"
+                })
+                .to_string(),
+            ),
+            StreamEvent::ToolUseEnd,
+            StreamEvent::MessageEnd {
+                stop_reason: Some("tool_use".to_string()),
+            },
+        ]
+    };
+    let final_turn = || {
+        vec![
+            StreamEvent::TextDelta("done".to_string()),
+            StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".to_string()),
+            },
+        ]
+    };
+    provider.queue_response(bash_turn("alpha"));
+    provider.queue_response(final_turn());
+    provider.queue_response(bash_turn("beta"));
+    provider.queue_response(final_turn());
+
+    let base = std::env::temp_dir().join(format!(
+        "jcode-seat-identity-{}",
+        std::process::id()
+    ));
+    let cwd_a = base.join("alpha");
+    let cwd_b = base.join("beta");
+    std::fs::create_dir_all(&cwd_a)?;
+    std::fs::create_dir_all(&cwd_b)?;
+
+    let result = async {
+        let mut observed = Vec::new();
+        for (seat, cwd) in [("alpha", &cwd_a), ("beta", &cwd_b)] {
+            let stream = tokio::net::UnixStream::connect(&socket_path).await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader).lines();
+
+            // Subscribe with this seat's own identity and cwd.
+            send_frame(
+                &mut writer,
+                serde_json::json!({
+                    "type": "subscribe",
+                    "id": 1,
+                    "working_dir": cwd.to_string_lossy(),
+                    "terminal_env": [["OPENRIG_SESSION_NAME", format!("{seat}@test")]],
+                }),
+            )
+            .await?;
+            read_turn_tool_outputs(&mut reader, 1).await?;
+
+            send_frame(
+                &mut writer,
+                serde_json::json!({
+                    "type": "message",
+                    "id": 2,
+                    "content": "run the seat probe",
+                }),
+            )
+            .await?;
+            let outputs = read_turn_tool_outputs(&mut reader, 2).await?;
+            observed.push((seat, cwd.clone(), outputs));
+        }
+
+        for (seat, cwd, outputs) in &observed {
+            let joined = outputs.join("\n");
+            assert!(
+                joined.contains(&format!("SEAT={seat}@test")),
+                "{seat} bash ran under the wrong identity; outputs: {outputs:?}"
+            );
+            assert!(
+                joined.contains(&cwd.to_string_lossy().to_string()),
+                "{seat} bash ran in the wrong cwd; expected {}, outputs: {outputs:?}",
+                cwd.display()
+            );
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    let _ = std::fs::remove_dir_all(&base);
+    server::clear_reload_marker();
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}
