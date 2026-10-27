@@ -1,8 +1,7 @@
 //! Interactive device-flow logins (GitHub Copilot, native Muse subscription).
 //!
 //! These flows show a verification URL + user code, optionally open a browser,
-//! then poll until the user approves. The Muse subscription flow is
-//! experimental and gated by `auth::muse::ensure_enabled()`; its poll loop is
+//! then poll until the user approves. The Muse subscription poll loop is
 //! shared with the scriptable `--complete` path.
 
 use super::{LoginFlowOutcome, maybe_open_browser};
@@ -61,10 +60,7 @@ async fn login_copilot_device_flow(no_browser: bool) -> Result<()> {
 }
 
 pub(super) async fn login_muse_subscription_flow(no_browser: bool) -> Result<LoginFlowOutcome> {
-    // Native Muse subscription (experimental, explicit opt-in). The gate lives
-    // in auth::muse so every surface (CLI, scriptable, TUI) enforces the same
-    // JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION=1 requirement.
-    auth::muse::ensure_enabled()?;
+    // Native Muse subscription device flow, without an environment opt-in.
     eprintln!("{}", auth::muse::experimental_warning_message());
     eprintln!("Starting native Muse subscription login...");
     eprintln!("No local Muse installation is required.\n");

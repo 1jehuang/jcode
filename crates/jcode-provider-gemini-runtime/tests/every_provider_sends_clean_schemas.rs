@@ -14,6 +14,43 @@
 use jcode_message_types::ToolDefinition;
 use serde_json::Value;
 
+#[test]
+fn nullable_todo_fields_use_scalar_types_on_gemini_and_antigravity_wire() {
+    let schema = serde_json::json!({"type":"object","properties":{
+        "add":{"type":["array","null"],"items":{"type":"object","properties":{
+            "confidence":{"type":["string","null"],"description":"Evidence strength"}
+        }}}
+    }});
+    let tools = vec![ToolDefinition {
+        name: "todo".into(),
+        description: "Nullable task metadata".into(),
+        input_schema: schema.clone(),
+        defer_loading: false,
+    }];
+    let wire = serde_json::to_value(jcode_provider_gemini::build_tools(&tools).unwrap()).unwrap();
+    let direct = &wire[0]["functionDeclarations"][0]["parameters"];
+    let antigravity =
+        jcode_provider_antigravity::antigravity_compatible_schema(&schema, "gemini-3.8-flash-high");
+    for parameters in [direct, &antigravity] {
+        let add = &parameters["properties"]["add"];
+        assert_eq!(add["type"], "array");
+        assert_eq!(add["nullable"], true);
+        assert_eq!(add["items"]["properties"]["confidence"]["type"], "string");
+        assert_eq!(add["items"]["properties"]["confidence"]["nullable"], true);
+        assert_eq!(
+            add["items"]["properties"]["confidence"]["description"],
+            "Evidence strength"
+        );
+        assert!(
+            jcode_schema_dialect::must_not_contain_unsupported_constructs(
+                parameters,
+                &jcode_schema_dialect::registry::GEMINI
+            )
+            .is_empty()
+        );
+    }
+}
+
 /// A schema combining the trigger from every issue in this class.
 fn hostile_schema() -> Value {
     serde_json::json!({

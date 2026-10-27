@@ -36,6 +36,9 @@ pub mod quirks;
 pub mod registry;
 pub mod rejection;
 
+#[cfg(test)]
+mod type_union_tests;
+
 pub use conformance::{
     ConformanceError, must_not_contain_unsupported_constructs, must_preserve_meaning,
     untyped_properties,

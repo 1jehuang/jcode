@@ -149,6 +149,8 @@ pub struct CodeAssistGenerateRequest {
 #[serde(rename_all = "camelCase")]
 pub struct VertexGenerateContentRequest {
     pub contents: Vec<GeminiContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_config: Option<GeminiGenerationConfig>,
     #[serde(rename = "systemInstruction", skip_serializing_if = "Option::is_none")]
     pub system_instruction: Option<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -157,6 +159,19 @@ pub struct VertexGenerateContentRequest {
     pub tool_config: Option<GeminiToolConfig>,
     #[serde(rename = "session_id", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiGenerationConfig {
+    pub thinking_config: GeminiThinkingConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiThinkingConfig {
+    pub thinking_level: &'static str,
+    pub include_thoughts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +203,24 @@ pub struct GeminiPart {
     /// the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+    /// Thinking-model reasoning text. The backend marks visible reasoning
+    /// parts with `"thought": true`; without this field serde drops the flag
+    /// and the runtime cannot distinguish reasoning from answer text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought: Option<bool>,
+}
+
+impl GeminiPart {
+    /// Consume visible text without treating thought signatures as reasoning.
+    /// An omitted or false `thought` flag denotes ordinary answer text.
+    pub fn take_text_event(&mut self) -> Option<jcode_message_types::StreamEvent> {
+        let text = self.text.take().filter(|text| !text.is_empty())?;
+        Some(if self.thought.unwrap_or(false) {
+            jcode_message_types::StreamEvent::ThinkingDelta(text)
+        } else {
+            jcode_message_types::StreamEvent::TextDelta(text)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -721,6 +754,43 @@ pub fn choose_onboard_tier(res: &LoadCodeAssistResponse) -> GeminiUserTier {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thought_parts_emit_reasoning_without_polluting_the_answer() {
+        use jcode_message_types::StreamEvent;
+        for (value, is_thought) in [
+            (
+                serde_json::json!({"text":"reasoning", "thought":true}),
+                true,
+            ),
+            (serde_json::json!({"text":"answer", "thought":false}), false),
+            (serde_json::json!({"text":"answer"}), false),
+        ] {
+            let mut part: super::GeminiPart = serde_json::from_value(value).unwrap();
+            let event = part.take_text_event().unwrap();
+            if is_thought {
+                assert!(
+                    matches!(event, StreamEvent::ThinkingDelta(ref text) if text == "reasoning")
+                );
+            } else {
+                assert!(matches!(event, StreamEvent::TextDelta(ref text) if text == "answer"));
+            }
+            assert!(part.take_text_event().is_none());
+        }
+    }
+
+    #[test]
+    fn empty_parts_and_opaque_signatures_do_not_fabricate_thinking() {
+        for value in [
+            serde_json::json!({"thought":true,"text":""}),
+            serde_json::json!({"thoughtSignature":"opaque-signature"}),
+        ] {
+            let mut part: super::GeminiPart = serde_json::from_value(value).unwrap();
+            assert!(part.take_text_event().is_none());
+            if part.thought_signature.is_some() {
+                assert_eq!(part.thought_signature.as_deref(), Some("opaque-signature"));
+            }
+        }
+    }
     use super::*;
     use serde_json::json;
 

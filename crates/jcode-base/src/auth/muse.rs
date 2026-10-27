@@ -1,10 +1,13 @@
-//! Experimental native Muse subscription login (device flow + observed mint).
+//! Native Muse subscription login (device flow + observed mint).
 //!
-//! This module is explicitly **experimental** and is not Meta-supported. It
-//! implements the RFC 8628 device authorization flow against the same public
-//! first-party endpoints the official `muse` launcher script uses, then
-//! exchanges the resulting device OAuth access token for a subscription API
-//! key using the *observed* community-client mint contract described below.
+//! This module implements the RFC 8628 device authorization flow against the
+//! same public first-party endpoints the official `muse` launcher script
+//! uses, then exchanges the resulting device OAuth access token for a
+//! subscription API key using the *observed* community-client mint contract
+//! described below.
+//!
+//! It is a third-party client and is not Meta-supported; the mint step below
+//! is NOT verified against a first-party binary.
 //!
 //! ## Verified sources
 //!
@@ -25,9 +28,6 @@
 //!
 //! ## Safety rules enforced here
 //!
-//! - Gated behind `JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION=1`
-//!   ([`ensure_enabled`]); every network or mutating entry point refuses to
-//!   run without it.
 //! - HTTP redirects are disabled and requests are bounded by timeouts.
 //! - Errors never include response bodies or credential material.
 //! - `verification_uri` must be `https://auth.meta.com/...`; the minted
@@ -60,7 +60,9 @@ pub const PROFILE_ID: &str = "muse-subscription";
 pub const API_KEY_ENV: &str = "JCODE_MUSE_SUBSCRIPTION_API_KEY";
 /// Metadata hint: config file name a compatible profile would use. Hint only.
 pub const ENV_FILE: &str = "muse-subscription.env";
-/// Opt-in gate: every network or mutating function requires this to be `1`.
+/// Legacy opt-in gate, kept as a no-op for backward compatibility.
+/// Muse subscription login is generally available: no opt-in is required.
+/// Existing shell profiles may keep exporting it, but its value has no effect.
 pub const EXPERIMENTAL_ENV_VAR: &str = "JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION";
 
 /// Public OAuth client id shipped inside the official `muse` launcher. This is
@@ -87,37 +89,26 @@ const MAX_BODY_LEN: usize = 64 * 1024;
 const MINT_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const REFRESH_SAFETY_WINDOW_MS: i64 = 5 * 60 * 1000;
 
-/// Warning surfaced before any experimental Muse subscription auth runs.
+/// Notice surfaced before any Muse subscription auth runs.
 ///
-/// Covers the experimental status, the CLI-only billing uncertainty, and that
-/// no local Muse CLI install is needed for this flow.
+/// Covers the third-party-client status, the billing behavior, and that no
+/// local Muse CLI install is needed for this flow.
 pub fn experimental_warning_message() -> &'static str {
-    "Muse subscription login is EXPERIMENTAL and is not supported by Meta: \
-     it reimplements the official launcher's public device flow plus an \
-     observed (community-client) key-mint step that may change or break \
-     without notice. Meta may restrict or block this kind of access at any \
-     time, and subscription coverage here is unverified: this flow never \
-     claims guaranteed subscription coverage and offers no billing support, \
-     so a subscription that requires payment cannot be used. No local Muse \
-     CLI install is needed. Set JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION=1 to \
-     opt in."
+    "Muse subscription login uses the official launcher's public device \
+     flow plus a key-mint step, without requiring a local Muse CLI \
+     install. It is a third-party client and is not supported by Meta: \
+     Meta may restrict or block this kind of access at any time, and \
+     subscription coverage here is unverified: this flow never claims \
+     guaranteed subscription coverage and offers no billing support, so a \
+     subscription that requires payment cannot be used."
 }
 
-/// Require the experimental opt-in. Every network or mutating entry point
-/// calls this first.
+/// Muse subscription login is generally available: this always succeeds.
+///
+/// Retained for source compatibility with existing callers. Subscription,
+/// payment and credential validation remain enforced independently.
 pub fn ensure_enabled() -> Result<()> {
-    let enabled = std::env::var(EXPERIMENTAL_ENV_VAR)
-        .map(|value| value.trim() == "1")
-        .unwrap_or(false);
-    if enabled {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "Muse subscription login is experimental and disabled. {}. \
-         To opt in, set {}=1.",
-        experimental_warning_message(),
-        EXPERIMENTAL_ENV_VAR
-    )
+    Ok(())
 }
 
 /// Short-lived HTTP client: redirects disabled, timeouts bounded.
@@ -971,7 +962,7 @@ fn valid_percent(value: Option<f64>) -> Option<f64> {
 
 /// Strip control characters from a tier label and cap its length so a
 /// hostile snapshot cannot inject terminal escape sequences or junk.
-fn sanitize_tier(tier: &str) -> String {
+pub(crate) fn sanitize_tier(tier: &str) -> String {
     tier.chars()
         .filter(|ch| !ch.is_control())
         .collect::<String>()

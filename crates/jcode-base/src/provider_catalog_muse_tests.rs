@@ -39,7 +39,7 @@ fn native_muse_never_borrows_paid_or_named_profile_credentials() {
 }
 
 #[test]
-fn native_muse_credentials_are_bound_to_official_profile_and_opt_in() {
+fn native_muse_credentials_are_bound_to_official_profile_without_opt_in() {
     let _sandbox = AuthTestSandbox::new().unwrap();
     crate::env::set_var(muse::EXPERIMENTAL_ENV_VAR, "1");
     muse::save_credentials(&native_credentials()).unwrap();
@@ -58,8 +58,11 @@ fn native_muse_credentials_are_bound_to_official_profile_and_opt_in() {
         assert!(load_openai_compatible_profile_api_key(&changed).is_none());
     }
     crate::env::remove_var(muse::EXPERIMENTAL_ENV_VAR);
-    assert!(load_openai_compatible_profile_api_key(&resolved).is_none());
-    assert!(!openai_compatible_profile_is_configured(
+    assert_eq!(
+        load_openai_compatible_profile_api_key(&resolved).as_deref(),
+        Some("native-test-key")
+    );
+    assert!(openai_compatible_profile_is_configured(
         MUSE_SUBSCRIPTION_PROFILE
     ));
 }
@@ -77,7 +80,8 @@ fn native_muse_status_reports_local_presence_not_verified_billing() {
         AuthCredentialSource::JcodeManagedFile
     );
     assert_eq!(assessment.expiry_confidence, AuthExpiryConfidence::Unknown);
-    assert!(assessment.method_detail.contains("experimental"));
+    assert!(!assessment.method_detail.contains("experimental"));
+    assert!(assessment.method_detail.contains("third-party client"));
     assert!(assessment.method_detail.contains("billing unverified"));
     assert!(assessment.method_detail.contains("quota unknown"));
 }

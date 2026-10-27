@@ -7,9 +7,9 @@ impl AuthStatus {
                 let usage = muse::usage_summary()
                     .map(|usage| format!("; last account snapshot: {usage}"))
                     .unwrap_or_else(|| "; quota unknown".to_string());
-                format!("Device OAuth + minted key (experimental, billing unverified){usage}")
+                format!("Device OAuth + minted key (third-party client, billing unverified){usage}")
             } else {
-                "Native device login not configured or experimental opt-in disabled".to_string()
+                "Native device login not configured".to_string()
             };
         }
         match provider.target {

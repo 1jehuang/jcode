@@ -11,8 +11,9 @@ use jcode_message_types::{ConnectionPhase, Message, StreamEvent, ToolDefinition}
 use jcode_provider_antigravity::{
     AVAILABLE_MODELS, CatalogModel, CatalogSnapshot, DEFAULT_FALLBACK_MODEL, PersistedCatalog,
     X_GOOG_API_CLIENT, antigravity_compatible_schema, antigravity_user_agent, catalog_is_stale,
-    catalog_model_detail, client_metadata_header, generate_content_api_url,
-    is_retryable_empty_turn, merge_antigravity_model_ids, remap_unsupported_model,
+    catalog_model_detail, client_metadata_header, expand_effort_presets, generate_content_api_url,
+    generation_config_for_model, is_retryable_empty_turn, merge_antigravity_model_ids,
+    remap_unsupported_model,
 };
 #[cfg(test)]
 use jcode_provider_antigravity::{
@@ -95,10 +96,13 @@ impl AntigravityProvider {
     }
 
     fn fetched_catalog(&self) -> Vec<CatalogModel> {
-        self.fetched_catalog
+        let mut models = self
+            .fetched_catalog
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .clone();
+        expand_effort_presets(&mut models);
+        models
     }
 
     fn backend_default_model(&self) -> Option<String> {
@@ -182,9 +186,8 @@ impl AntigravityProvider {
     /// finally to a hardcoded fallback.
     ///
     /// Note: this only resolves the `"default"` alias / empty input. An
-    /// explicit model id from the user is honoured verbatim, except for ids
-    /// the backend advertises but cannot actually service, which are remapped
-    /// to an equivalent working id via [`remap_unsupported_model`].
+    /// explicit model id from the user is honoured without silently changing
+    /// the requested model family.
     fn resolve_model_for_request(&self, model: &str) -> String {
         let trimmed = model.trim();
         if !trimmed.is_empty() && trimmed != DEFAULT_MODEL {
@@ -330,11 +333,13 @@ impl AntigravityProvider {
                 }
             }
         }
+        let generation_config = generation_config_for_model(&resolved_model);
         let request = CodeAssistGenerateRequest {
             model: resolved_model,
             project,
             user_prompt_id: Uuid::new_v4().to_string(),
             request: VertexGenerateContentRequest {
+                generation_config,
                 contents: jcode_provider_gemini::build_contents_with_signature_policy(
                     messages,
                     signature_policy,
@@ -671,15 +676,15 @@ impl Provider for AntigravityProvider {
                 // ToolUse block and resent on later turns (required by the
                 // Cloud Code backend, which rejects function calls missing it).
                 let mut pending_signature: Option<String> = None;
-                for part in content.parts {
+                for mut part in content.parts {
                     let part_signature = part
                         .thought_signature
                         .as_ref()
                         .filter(|sig| !sig.is_empty())
                         .cloned();
-                    if let Some(text) = part.text.filter(|text| !text.is_empty()) {
-                        produced_output = true;
-                        let _ = tx.send(Ok(StreamEvent::TextDelta(text))).await;
+                    if let Some(event) = part.take_text_event() {
+                        produced_output |= matches!(event, StreamEvent::TextDelta(_));
+                        let _ = tx.send(Ok(event)).await;
                     }
                     if let Some(function_call) = part.function_call {
                         produced_output = true;
@@ -803,6 +808,7 @@ impl Provider for AntigravityProvider {
             catalog
                 .into_iter()
                 .map(|model| model.id)
+                .chain(AVAILABLE_MODELS.iter().map(|model| (*model).to_string()))
                 .chain(std::iter::once(self.model())),
         )
     }

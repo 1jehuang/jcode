@@ -1,5 +1,5 @@
 //! OpenAI-compatible profile runtime init, including the native Muse
-//! subscription (experimental opt-in).
+//! subscription (native device flow).
 //!
 //! Extracted from `provider_init.rs` so compatible-profile runtime wiring
 //! stays in one cohesive place. The Muse subscription branch reuses the same
@@ -83,13 +83,10 @@ async fn init_muse_subscription_runtime(
     notify: &dyn Fn(&str),
 ) -> Result<Arc<dyn provider::Provider>> {
     disable_subscription_runtime_mode();
-    // Native Muse subscription (experimental opt-in). No API-key consent
+    // Native Muse subscription (generally available). No API-key consent
     // prompt: the credential lives in auth::muse's own JSON store and is
     // resolved by the coordinator, never pasted here.
-    crate::auth::muse::ensure_enabled()?;
-    notify(
-        "Using Muse subscription provider (experimental native device flow; no local Muse required)",
-    );
+    notify("Using Muse subscription provider (native device flow; no local Muse required)");
     let profile = profile_for_choice(choice)
         .ok_or_else(|| anyhow::anyhow!("missing provider profile for choice"))?;
     if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none() {

@@ -40,6 +40,18 @@ class Reports(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Missing test prerequisites"):
                 acceptance.preflight(["tui"])
 
+    def test_group_preflight_requires_rg_and_ci_installs_ripgrep(self):
+        with patch.object(acceptance.shutil, "which",
+                          side_effect=lambda name: None if name == "rg" else "/bin/available"):
+            with self.assertRaisesRegex(RuntimeError, "Missing test prerequisites: rg$"):
+                acceptance.preflight(["group"])
+        workflow = (SCRIPTS.parent / ".github/workflows/cloud-acceptance.yml").read_text()
+        installed = set()
+        for line in workflow.splitlines():
+            if "apt-get install " in line:
+                installed.update(line.split("apt-get install ", 1)[1].split())
+        self.assertIn("ripgrep", installed, "rg must be explicitly installed on hosted runners")
+
     def test_child_failure_propagates_and_preserves_output(self):
         with tempfile.TemporaryDirectory() as temp:
             log = Path(temp) / "child.log"

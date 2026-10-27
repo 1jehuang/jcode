@@ -18,7 +18,7 @@ const ANTIGRAVITY_CLIENT_SECRET: &str = "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"; /
 const CLIENT_ID_ENV: &str = "JCODE_ANTIGRAVITY_CLIENT_ID";
 const CLIENT_SECRET_ENV: &str = "JCODE_ANTIGRAVITY_CLIENT_SECRET";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-const ANTIGRAVITY_VERSION: &str = "1.18.3";
+const ANTIGRAVITY_VERSION: &str = jcode_provider_antigravity::ANTIGRAVITY_VERSION;
 const ANTIGRAVITY_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",

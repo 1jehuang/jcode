@@ -1,5 +1,5 @@
 //! Device-flow TUI logins: GitHub Copilot and the native Muse subscription
-//! (experimental opt-in).
+//! (native device flow).
 //!
 //! Extracted from `auth.rs` so device-flow polling loops stay in one cohesive
 //! place. The Muse subscription background task never persists credentials: it
@@ -188,22 +188,13 @@ impl App {
     }
 }
 
-/// Native Muse subscription device flow (experimental opt-in).
+/// Native Muse subscription device flow.
 ///
-/// Mirrors the Copilot device flow: the experimental gate and warning come
-/// from auth::muse, the challenge is shown with a QR, and a background task
-/// polls the single-attempt `poll_login` to a terminal outcome. No billing
-/// is claimed and no local Muse installation is required.
+/// Mirrors the Copilot device flow: the challenge is shown with a QR, and a
+/// background task polls the single-attempt `poll_login` to a terminal
+/// outcome. No billing is claimed and no local Muse installation is required.
 impl App {
     pub(super) fn start_muse_subscription_login(&mut self) {
-        if let Err(err) = crate::auth::muse::ensure_enabled() {
-            self.push_display_message(DisplayMessage::error(format!(
-                "Muse subscription login is experimental and opt-in: {}",
-                err
-            )));
-            self.set_status_notice("Login: muse-subscription gated");
-            return;
-        }
         self.set_status_notice("Login: muse-subscription device flow...");
         // Opaque per-attempt id: progress/completion events carry it in the
         // provider string so stale or cross-session events never match a

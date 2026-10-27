@@ -76,10 +76,10 @@ fn last_body(server: &StubServer) -> String {
         .unwrap_or_default()
 }
 
-fn sandbox_with_opt_in() -> (crate::auth::test_sandbox::AuthTestSandbox, Option<String>) {
+fn sandbox_without_opt_in() -> (crate::auth::test_sandbox::AuthTestSandbox, Option<String>) {
     let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
     let previous = std::env::var(EXPERIMENTAL_ENV_VAR).ok();
-    crate::env::set_var(EXPERIMENTAL_ENV_VAR, "1");
+    crate::env::remove_var(EXPERIMENTAL_ENV_VAR);
     (sandbox, previous)
 }
 
@@ -134,7 +134,7 @@ fn challenge_for(base_url: &str) -> DeviceChallenge {
 
 #[tokio::test]
 async fn begin_login_parses_loopback_challenge() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let server = start_stub(vec![(
         200,
         device_json("dev-code-1", "https://auth.meta.com/device"),
@@ -156,7 +156,7 @@ async fn begin_login_parses_loopback_challenge() {
 
 #[tokio::test]
 async fn begin_login_wrong_type_body_leaks_no_values() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     // Well-typed strings where numbers belong: serde's error would name
     // the offending value; assert it never surfaces.
     let body = r#"{"device_code":"dev-x","user_code":"U","verification_uri":"https://auth.meta.com/device","expires_in":"SECRET-NUMBER","interval":"SECRET-INTERVAL"}"#.to_string();
@@ -178,7 +178,7 @@ async fn begin_login_wrong_type_body_leaks_no_values() {
 
 #[tokio::test]
 async fn begin_login_clamps_numbers_like_launcher() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let body = serde_json::json!({
         "device_code": "dev-code-2",
         "user_code": "WXYZ-9999",
@@ -201,7 +201,7 @@ async fn begin_login_clamps_numbers_like_launcher() {
 
 #[tokio::test]
 async fn begin_login_rejects_non_first_party_verification_url() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let server = start_stub(vec![(
         200,
         device_json("dev-code-3", "http://evil.example/device"),
@@ -223,7 +223,7 @@ async fn begin_login_rejects_non_first_party_verification_url() {
 
 #[tokio::test]
 async fn begin_login_rejects_missing_codes() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let body = serde_json::json!({
         "device_code": "",
         "user_code": "",
@@ -243,21 +243,25 @@ async fn begin_login_rejects_missing_codes() {
 }
 
 #[tokio::test]
-async fn begin_login_requires_opt_in() {
+async fn native_route_does_not_require_legacy_opt_in() {
+    // GA: no opt-in variable needed. The legacy variable is accepted silently
+    // whether set or not.
     let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
     let previous = std::env::var(EXPERIMENTAL_ENV_VAR).ok();
     crate::env::remove_var(EXPERIMENTAL_ENV_VAR);
-    let client = http_client().unwrap();
+    assert!(ensure_enabled().is_ok(), "GA must not require opt-in");
 
-    let err = begin_login(&client).await.expect_err("must require opt-in");
-    assert!(format!("{err:#}").contains("experimental"), "{err:?}");
+    crate::env::set_var(EXPERIMENTAL_ENV_VAR, "1");
+    assert!(ensure_enabled().is_ok(), "legacy opt-in still accepted");
+    crate::env::set_var(EXPERIMENTAL_ENV_VAR, "0");
+    assert!(ensure_enabled().is_ok(), "legacy opt-out value ignored");
 
     restore_opt_in(previous);
 }
 
 #[tokio::test]
 async fn poll_pending_and_slowdown() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let server = start_stub(vec![
         (400, r#"{"error":"authorization_pending"}"#.to_string()),
         (400, r#"{"error":"slow_down"}"#.to_string()),
@@ -282,7 +286,7 @@ async fn poll_pending_and_slowdown() {
 
 #[tokio::test]
 async fn poll_denied_and_expired() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let server = start_stub(vec![
         (400, r#"{"error":"access_denied"}"#.to_string()),
         (400, r#"{"error":"expired_token"}"#.to_string()),
@@ -307,7 +311,7 @@ async fn poll_denied_and_expired() {
 
 #[tokio::test]
 async fn poll_http_failure_reports_status_without_body() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let server = start_stub(vec![(
         500,
         r#"{"error":"server_error","detail":"SECRET-BODY-MUST-NOT-LEAK"}"#.to_string(),
@@ -330,7 +334,7 @@ async fn poll_http_failure_reports_status_without_body() {
 
 #[tokio::test]
 async fn poll_approval_mints_without_persisting() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let server = start_stub(vec![
         (200, r#"{"access_token":"dca-token-1"}"#.to_string()),
         (200, mint_json("LLM_TEST_KEY_1", Some(true), Some(false))),
@@ -361,7 +365,7 @@ async fn poll_approval_mints_without_persisting() {
 
 #[tokio::test]
 async fn poll_rejects_unexpected_mint_base_url() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let mut mint = serde_json::json!({
         "api_key": "LLM_TEST_KEY_EVIL",
         "base_url": "https://evil.example/v1",
@@ -394,7 +398,7 @@ async fn poll_rejects_unexpected_mint_base_url() {
 
 #[tokio::test]
 async fn poll_fails_closed_without_active_subscription() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let server = start_stub(vec![
         (200, r#"{"access_token":"dca-token-3"}"#.to_string()),
         (200, mint_json("LLM_TEST_KEY_3", Some(false), Some(false))),
@@ -416,7 +420,7 @@ async fn poll_fails_closed_without_active_subscription() {
 
 #[tokio::test]
 async fn poll_fails_closed_when_payment_unverified() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     // require_payment absent: must fail closed, not silently pass.
     let mint = serde_json::json!({
         "api_key": "LLM_TEST_KEY_4",
@@ -448,7 +452,7 @@ async fn poll_fails_closed_when_payment_unverified() {
 
 #[tokio::test]
 async fn mint_revoked_login_fails_closed() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let server = start_stub(vec![(401, r#"{"error":"invalid_token"}"#.to_string())]).await;
     let _endpoints = use_stub(&server);
     let client = http_client().unwrap();
@@ -464,7 +468,7 @@ async fn mint_revoked_login_fails_closed() {
 
 #[tokio::test]
 async fn mint_rejects_empty_token_without_network() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let client = http_client().unwrap();
     mint_credentials(&client, "   ")
         .await
@@ -492,7 +496,7 @@ fn credentials_debug_redacts_secrets() {
 
 #[test]
 fn load_rejects_tampered_stored_credentials() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     // Well-formed active record loads fine.
     let mut credentials = MuseCredentials {
         api_key: "LLM_GOOD_KEY".to_string(),
@@ -548,7 +552,7 @@ fn device_challenge_debug_redacts_device_code() {
 
 #[test]
 fn save_load_clear_roundtrip_with_owner_only_file() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let credentials = MuseCredentials {
         api_key: "LLM_ROUNDTRIP_KEY".to_string(),
         access_token: "dca-roundtrip".to_string(),
@@ -597,7 +601,7 @@ fn save_load_clear_roundtrip_with_owner_only_file() {
 
 #[test]
 fn usage_summary_rejects_invalid_snapshot_values() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     // Hostile snapshot: NaN/infinite/out-of-range percents, absurd duration,
     // control-char tier injection. None of it may render.
     let credentials = MuseCredentials {
@@ -657,7 +661,7 @@ fn usage_summary_rejects_invalid_snapshot_values() {
 
 #[tokio::test]
 async fn refresh_if_needed_skips_network_when_fresh() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let credentials = MuseCredentials {
         api_key: "LLM_FRESH_KEY".to_string(),
         access_token: "dca-fresh".to_string(),
@@ -681,7 +685,7 @@ async fn refresh_if_needed_skips_network_when_fresh() {
 
 #[tokio::test]
 async fn refresh_if_needed_remints_when_stale() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let credentials = MuseCredentials {
         api_key: "LLM_STALE_KEY".to_string(),
         access_token: "dca-stale".to_string(),
@@ -744,7 +748,7 @@ where
 
 #[tokio::test]
 async fn refresh_credentials_fails_and_does_not_resurrect_when_deleted_concurrently() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let credentials = MuseCredentials {
         api_key: "LLM_INITIAL_KEY".to_string(),
         access_token: "dca-account-to-delete".to_string(),
@@ -790,7 +794,7 @@ async fn refresh_credentials_fails_and_does_not_resurrect_when_deleted_concurren
 
 #[tokio::test]
 async fn refresh_credentials_refuses_to_overwrite_different_account_saved_concurrently() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let credentials = MuseCredentials {
         api_key: "LLM_ORIGINAL_KEY".to_string(),
         access_token: "dca-account-original".to_string(),
@@ -848,7 +852,7 @@ async fn refresh_credentials_refuses_to_overwrite_different_account_saved_concur
 
 #[tokio::test]
 async fn credentials_lock_provides_mutual_exclusion() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let credentials = MuseCredentials {
         api_key: "LLM_MUTEX_KEY".to_string(),
         access_token: "dca-mutex".to_string(),
@@ -901,7 +905,7 @@ async fn credentials_lock_provides_mutual_exclusion() {
 /// the account must end up logged out rather than restored.
 #[tokio::test]
 async fn refresh_holds_lock_so_logout_cannot_interleave_between_compare_and_write() {
-    let (_sandbox, previous) = sandbox_with_opt_in();
+    let (_sandbox, previous) = sandbox_without_opt_in();
     let credentials = MuseCredentials {
         api_key: "LLM_RACE_KEY".to_string(),
         access_token: "dca-race".to_string(),
