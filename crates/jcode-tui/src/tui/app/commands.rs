@@ -2843,14 +2843,6 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
     }
 }
 
-pub(super) fn format_todo_completion_confidence(summary: TodoConfidenceSummary) -> String {
-    summary
-        .completion_average
-        .map(crate::todo::ConfidenceState::from_legacy_score)
-        .map(|state| state.as_str().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {
     app.session
         .working_dir

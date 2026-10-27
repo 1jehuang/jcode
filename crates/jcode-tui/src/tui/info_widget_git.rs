@@ -144,8 +144,7 @@ pub(super) fn changes_height(info: &GitInfo) -> u16 {
 /// bottom-right. Every body row is a file. The dirty-file count stays on the
 /// status line.
 pub(super) fn render_changes_framed(data: &InfoWidgetData, inner: Rect) -> Framed {
-    if data.dual_git_info.is_some() {
-        let dual = data.dual_git_info.as_ref().unwrap();
+    if let Some(dual) = data.dual_git_info.as_ref() {
         let source = if dual.local_is_source {
             "local → cloud"
         } else {

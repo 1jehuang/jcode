@@ -2,8 +2,14 @@ use super::*;
 use ratatui::{Terminal, backend::TestBackend};
 
 /// Keep pinning deterministic without modifying the developer's config.
+///
+/// Takes the process env lock before the render-state lock. Tests that hold
+/// `lock_test_env` and then call `clear_test_render_state_for_tests` take the
+/// two locks in that order, so acquiring the render lock first here forms an
+/// ABBA cycle and hangs the whole `--test-threads` run.
 fn with_pinned_todos_config(f: impl FnOnce()) {
     let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = viewport_snapshot_test_lock();
     let home = tempfile::tempdir().expect("temporary test home");
     struct RestoreHome(Option<std::ffi::OsString>);
     impl Drop for RestoreHome {
@@ -96,7 +102,6 @@ fn justrust_status_is_below_todos_and_never_wraps() {
 
 #[test]
 fn pinned_todos_share_top_band_with_swarm_only_on_wide_terminals() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
         let member = crate::protocol::SwarmMemberStatus {
             session_id: "test-worker".into(),
@@ -183,7 +188,6 @@ fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
 
 #[test]
 fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
         let _changelog = header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
         reset_prompt_viewport_state_for_test();
@@ -245,7 +249,6 @@ fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() 
 
 #[test]
 fn pinned_todo_regression_hidden_message_has_zero_length_cache_boundary() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
         let mut state = TestState {
             display_messages: vec![

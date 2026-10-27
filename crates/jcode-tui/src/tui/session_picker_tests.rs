@@ -1913,9 +1913,11 @@ fn test_preview_structured_messages_stay_left_aligned() {
         }
     }
     let _restore = RestorePin;
+    // Finished todo cards collapse to status dots, so keep this item in flight
+    // to exercise a structured card line in the preview.
     let todos = serde_json::json!([{
         "id": "alignment", "content": "Verify structured preview alignment",
-        "status": "completed", "priority": "high", "confidence": "verified"
+        "status": "in_progress", "priority": "high", "confidence": "validated"
     }]);
     let mut session = make_session(
         "structured_alignment",
