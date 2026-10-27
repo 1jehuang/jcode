@@ -160,7 +160,18 @@ smoke invocations/timeouts, missing signing credentials, exact certificate
 selection, Apple chain/identifier/Team ID requirements, refusal to notarize after
 a bad chain or signed-runtime failure, and read-only environment readiness.
 Signing tests use fake platform commands and never contact Apple. These are fixture
-and static checks, not native acceptance. CI must still demonstrate hosted
-compiler availability, full Jcode cross-linking and native launches before this
-can be called runtime-validated. macOS cross-SDK provisioning and live Apple
-signing remain pending separately authorized inputs.
+and static checks. Hosted ARM compilation and native ARM Linux acceptance remain
+pending, as do macOS cross-SDK provisioning and live Apple signing.
+
+### Recorded native macOS acceptance
+
+On October 27, 2026, Actions run `40423877886` passed at exact source/workflow
+commit `d605b6747fe0504e638818729a7785750158877d`. The **native macOS ARM64
+producer**, not a hosted cross-build, completed from 00:03:25 to 00:28:02 UTC
+(Jcode build step: 00:05:56 to 00:27:43 UTC). It uploaded artifact `12699812599`
+(`native-handoff-macos-arm64-1`). The separate native consumer passed same-run
+provenance checks and `--version`, `--help`, and `run --help` smoke checks from
+00:28:06 to 00:28:29 UTC. This validates the native macOS artifact handoff and
+basic launch/help behavior, **not full integration coverage or hosted ARM/Linux
+cross-compilation**. Signing was skipped; nothing was notarized or published.
+Later signing-hardening and ARM-feature changes are not covered by this run.
