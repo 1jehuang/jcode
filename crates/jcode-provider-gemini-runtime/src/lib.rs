@@ -615,6 +615,7 @@ impl GeminiProvider {
             project: state.project_id.clone(),
             user_prompt_id: Uuid::new_v4().to_string(),
             request: VertexGenerateContentRequest {
+                generation_config: None,
                 contents: build_contents(messages),
                 system_instruction: build_system_instruction_with_tool_guard(
                     system,
@@ -955,17 +956,15 @@ impl Provider for GeminiProvider {
                     // rejects follow-up turns whose functionCall omits it
                     // ("Function call is missing a thought_signature").
                     let mut pending_signature: Option<String> = None;
-                    for part in content.parts {
+                    for mut part in content.parts {
                         let part_signature = part
                             .thought_signature
                             .as_ref()
                             .filter(|sig| !sig.is_empty())
                             .cloned();
-                        if let Some(text) = part.text
-                            && !text.is_empty()
-                        {
-                            produced_output = true;
-                            let _ = tx.send(Ok(StreamEvent::TextDelta(text))).await;
+                        if let Some(event) = part.take_text_event() {
+                            produced_output |= matches!(event, StreamEvent::TextDelta(_));
+                            let _ = tx.send(Ok(event)).await;
                         }
                         if let Some(function_call) = part.function_call {
                             produced_output = true;

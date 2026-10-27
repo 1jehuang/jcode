@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use jcode_provider_gemini::CodeAssistGenerateResponse;
+use jcode_provider_gemini::{
+    CodeAssistGenerateResponse, GeminiGenerationConfig, GeminiThinkingConfig,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -8,16 +10,36 @@ use std::collections::{HashMap, HashSet};
 /// alias `"default"` is rejected by `generateContent` with HTTP 404, so we must
 /// always resolve it to a real model id before issuing a request.
 pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-3-flash";
+/// Bootstrap routes, supplemented by account-specific live discovery.
+/// Gemini 3.8 effort presets send matching generationConfig.thinkingConfig,
+/// even when the discovery endpoint only advertises the shared tiered route.
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
-    "gemini-3.1-pro-high",
-    "gemini-3.1-pro-low",
     "gemini-3-flash",
-    "gemini-3-flash-agent",
-    "gemini-3.5-flash-low",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-tiered",
     "gpt-oss-120b-medium",
 ];
+
+/// Native effort configuration for Gemini 3.8, following the Antigravity
+/// tier contract also used by 9router. Unknown models keep their own defaults.
+pub fn generation_config_for_model(model: &str) -> Option<GeminiGenerationConfig> {
+    let level = match model {
+        "gemini-3.8-flash-low" => "low",
+        "gemini-3.8-flash-high" => "high",
+        "gemini-3.8-flash" | "gemini-3.8-flash-medium" | "gemini-3.8-flash-tiered" => "medium",
+        _ => return None,
+    };
+    Some(GeminiGenerationConfig {
+        thinking_config: GeminiThinkingConfig {
+            thinking_level: level,
+            include_thoughts: true,
+        },
+    })
+}
 /// Default Cloud Code base endpoint used for Antigravity requests.
 ///
 /// The official Antigravity IDE talks to `daily-cloudcode-pa.googleapis.com`,
@@ -32,7 +54,7 @@ pub const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// environments that need a different Cloud Code host.
 pub const ENDPOINT_ENV: &str = "JCODE_ANTIGRAVITY_ENDPOINT";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-pub const ANTIGRAVITY_VERSION: &str = "1.18.3";
+pub const ANTIGRAVITY_VERSION: &str = "2.5.5";
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
 
@@ -403,10 +425,31 @@ pub fn parse_fetch_available_models_response(
             })
         })
         .collect();
+    expand_effort_presets(&mut models);
     models.sort_by_key(|model| !model.available);
     CatalogSnapshot {
         models,
         default_model_id,
+    }
+}
+
+/// Expose effort presets from either a live or previously persisted catalog.
+/// Presets share quota, entitlement and context limits with the tiered route.
+pub fn expand_effort_presets(models: &mut Vec<CatalogModel>) {
+    if let Some(shared) = models
+        .iter()
+        .find(|model| model.id == "gemini-3.8-flash-tiered")
+        .cloned()
+    {
+        for (level, label) in [("low", "Low"), ("medium", "Medium"), ("high", "High")] {
+            let id = format!("gemini-3.8-flash-{level}");
+            if !models.iter().any(|model| model.id == id) {
+                let mut preset = shared.clone();
+                preset.id = id;
+                preset.display_name = Some(format!("Gemini 3.8 Flash ({label})"));
+                models.push(preset);
+            }
+        }
     }
 }
 
@@ -477,7 +520,8 @@ pub fn is_retryable_empty_turn(response: &CodeAssistGenerateResponse) -> bool {
         .map(|content| {
             content.parts.iter().any(|part| {
                 part.function_call.is_some()
-                    || part.text.as_deref().is_some_and(|text| !text.is_empty())
+                    || (!part.thought.unwrap_or(false)
+                        && part.text.as_deref().is_some_and(|text| !text.is_empty()))
             })
         })
         .unwrap_or(false);
@@ -525,24 +569,11 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
         })
 }
 
-/// Remap model ids that the Antigravity catalog advertises but the
-/// `generateContent`/`streamGenerateContent` backend cannot actually service,
-/// onto an equivalent id that works.
-///
-/// `gemini-3.1-pro-high` is advertised as `available` and is a *recognized* id
-/// (a typo'd id returns HTTP 404, but this one returns HTTP 400), yet every
-/// request for it is rejected with a detail-less HTTP 400 "Request contains an
-/// invalid argument" on both the unary and streaming endpoints, across all
-/// client versions, with or without tools, and regardless of `generationConfig`
-/// / `thinkingConfig`. The sibling `gemini-3.1-pro-low` accepts byte-identical
-/// requests and succeeds, and `gemini-pro-agent` advertises the *same* display
-/// name ("Gemini 3.1 Pro (High)"), provider, and token limits while accepting
-/// the same requests, so it is the working route to the High Pro model. Map the
-/// broken id onto it so users who pick "Gemini 3.1 Pro (High)" get a working
-/// model instead of a hard 400.
+/// Resolve the unqualified Gemini 3.8 alias to its medium effort preset.
+/// Retired Pro routes must fail honestly, not silently select a Flash model.
 pub fn remap_unsupported_model(model: &str) -> &str {
     match model {
-        "gemini-3.1-pro-high" => "gemini-pro-agent",
+        "gemini-3.8-flash" => "gemini-3.8-flash-medium",
         other => other,
     }
 }
@@ -667,6 +698,29 @@ mod endpoint_tests {
     // Serialize env-var mutation across tests in this module: `std::env` is
     // process-global, and cargo runs tests in this crate on multiple threads.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn version_baseline_and_explicit_override_are_used_in_user_agent() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os(VERSION_ENV);
+        unsafe {
+            std::env::remove_var(VERSION_ENV);
+        }
+        assert_eq!(antigravity_version(), "2.5.5");
+        assert!(antigravity_user_agent().starts_with("antigravity/2.5.5 "));
+        unsafe {
+            std::env::set_var(VERSION_ENV, " 9.9.9 ");
+        }
+        assert_eq!(antigravity_version(), "9.9.9");
+        assert!(antigravity_user_agent().starts_with("antigravity/9.9.9 "));
+        unsafe {
+            if let Some(value) = previous {
+                std::env::set_var(VERSION_ENV, value);
+            } else {
+                std::env::remove_var(VERSION_ENV);
+            }
+        }
+    }
 
     #[test]
     fn antigravity_endpoint_defaults_to_daily_host() {

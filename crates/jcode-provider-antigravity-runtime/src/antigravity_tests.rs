@@ -6,6 +6,53 @@ use jcode_provider_antigravity::{
 use jcode_provider_core::Provider;
 use tokio_stream::StreamExt;
 
+/// Explicitly opt-in: uses the operator's saved Antigravity credential and quota.
+#[tokio::test]
+#[ignore = "requires a live Antigravity account and consumes model quota"]
+async fn live_gemini_38_effort_presets_emit_answers_and_thinking() {
+    for level in ["low", "medium", "high"] {
+        let provider = AntigravityProvider::new();
+        let model = format!("gemini-3.8-flash-{level}");
+        provider.set_model(&model).unwrap();
+        let mut stream = provider
+            .complete(
+                &[Message::user(
+                    "Compute 37*49 and briefly verify the result using another method.",
+                )],
+                &[],
+                "Answer the arithmetic question accurately.",
+                None,
+            )
+            .await
+            .unwrap();
+        let mut answer = String::new();
+        let mut thinking = String::new();
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                StreamEvent::TextDelta(text) => answer.push_str(&text),
+                StreamEvent::ThinkingDelta(text) => thinking.push_str(&text),
+                _ => {}
+            }
+        }
+        assert!(
+            answer.replace(',', "").contains("1813"),
+            "{model}: no correct answer"
+        );
+        // Low effort may legitimately return no reasoning summary.
+        if level == "high" {
+            assert!(
+                !thinking.is_empty(),
+                "high effort returned no visible thinking"
+            );
+        }
+        println!(
+            "{model}: answer={} bytes, thinking={} bytes",
+            answer.len(),
+            thinking.len()
+        );
+    }
+}
+
 fn context_test_provider(model: &str, limit: Option<u64>) -> AntigravityProvider {
     let provider = AntigravityProvider::new();
     provider.set_model(model).unwrap();
@@ -50,7 +97,7 @@ fn context_window_missing_or_zero_catalog_limit_uses_resolved_family() {
 }
 
 #[test]
-fn context_window_prefers_remapped_model_catalog_limit() {
+fn context_window_preserves_explicit_model_catalog_limit() {
     let provider = context_test_provider("gemini-3.1-pro-high", Some(128_000));
     let mut source = provider.fetched_catalog()[0].clone();
     source.id = "gemini-3.1-pro-high".into();
@@ -58,7 +105,7 @@ fn context_window_prefers_remapped_model_catalog_limit() {
     target.id = "gemini-pro-agent".into();
     target.max_tokens = Some(256_000);
     *provider.fetched_catalog.write().unwrap() = vec![source.clone(), target];
-    assert_eq!(provider.context_window(), 256_000);
+    assert_eq!(provider.context_window(), 128_000);
     *provider.fetched_catalog.write().unwrap() = vec![source];
     assert_eq!(provider.context_window(), 128_000);
     provider.set_model("unknown-test-model").unwrap();
@@ -120,13 +167,13 @@ fn parse_fetch_available_models_response_discovers_metadata_and_priority_order()
     );
     let parsed = parsed.models;
     assert_eq!(parsed[0].id, "claude-opus-4-6-thinking");
-    assert_eq!(parsed[1].id, "gemini-3.1-pro-high");
-    assert_eq!(parsed[2].id, "gpt-oss-120b-medium");
+    assert_eq!(parsed[1].id, "gpt-oss-120b-medium");
+    assert_eq!(parsed[2].id, "gemini-3.1-pro-high");
     assert_eq!(
         parsed[0].display_name.as_deref(),
         Some("Claude Opus 4.6 (Thinking)")
     );
-    assert_eq!(parsed[1].remaining_fraction_milli, Some(250));
+    assert_eq!(parsed[2].remaining_fraction_milli, Some(250));
     let flash = parsed
         .iter()
         .find(|model| model.id == "gemini-3-flash")
@@ -290,11 +337,10 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
         "claude-sonnet-4-6"
     );
 
-    // ...except the catalog-advertised-but-unserviceable `gemini-3.1-pro-high`,
-    // which is remapped to the equivalent working "Gemini 3.1 Pro (High)" id.
+    // Retired ids must not silently select a different model.
     assert_eq!(
         provider.resolve_model_for_request("gemini-3.1-pro-high"),
-        "gemini-pro-agent"
+        "gemini-3.1-pro-high"
     );
     // Its sibling `-low` works as-is and must not be remapped.
     assert_eq!(
@@ -304,10 +350,10 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
 }
 
 #[test]
-fn remap_unsupported_model_only_touches_broken_pro_high() {
+fn remap_unsupported_model_preserves_explicit_choice() {
     assert_eq!(
         remap_unsupported_model("gemini-3.1-pro-high"),
-        "gemini-pro-agent"
+        "gemini-3.1-pro-high"
     );
     for model in [
         "gemini-3.1-pro-low",
@@ -319,6 +365,93 @@ fn remap_unsupported_model_only_touches_broken_pro_high() {
     ] {
         assert_eq!(remap_unsupported_model(model), model);
     }
+}
+
+#[test]
+fn gemini_38_effort_presets_serialize_native_thinking_config() {
+    for (model, expected) in [
+        ("gemini-3.8-flash-low", "low"),
+        ("gemini-3.8-flash-medium", "medium"),
+        ("gemini-3.8-flash-high", "high"),
+        ("gemini-3.8-flash", "medium"),
+        ("gemini-3.8-flash-tiered", "medium"),
+    ] {
+        let config = generation_config_for_model(model).unwrap();
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            json!({
+                "thinkingConfig": {"thinkingLevel": expected, "includeThoughts": true}
+            })
+        );
+        let expected_model = if model == "gemini-3.8-flash" {
+            "gemini-3.8-flash-medium"
+        } else {
+            model
+        };
+        assert_eq!(remap_unsupported_model(model), expected_model);
+    }
+    assert!(generation_config_for_model("claude-sonnet-4-6").is_none());
+    assert!(generation_config_for_model("gpt-oss-120b-medium").is_none());
+    assert!(generation_config_for_model("gemini-unknown").is_none());
+}
+
+#[test]
+fn model_picker_includes_gemini_38_effort_presets_without_cached_catalog() {
+    let provider = context_test_provider("default", None);
+    let models = provider.available_models_for_switching();
+    for level in ["low", "medium", "high"] {
+        assert!(models.contains(&format!("gemini-3.8-flash-{level}")));
+    }
+}
+
+#[test]
+fn cached_shared_route_exposes_effort_routes_without_losing_quota_state() {
+    let provider = context_test_provider("gemini-3.8-flash-high", Some(128000));
+    {
+        let mut catalog = provider.fetched_catalog.write().unwrap();
+        catalog[0].id = "gemini-3.8-flash-tiered".into();
+        catalog[0].available = false;
+    }
+    let routes = provider.model_routes();
+    for level in ["low", "medium", "high"] {
+        let id = format!("gemini-3.8-flash-{level}");
+        let route = routes.iter().find(|route| route.model == id).unwrap();
+        assert!(!route.available);
+    }
+    assert_eq!(provider.context_window(), 128000);
+    assert_eq!(provider.model_routes().len(), routes.len());
+}
+
+#[test]
+fn discovered_gemini_38_presets_inherit_shared_entitlement_and_quota() {
+    let response: FetchAvailableModelsResponse = serde_json::from_value(json!({
+        "models": {"gemini-3.8-flash-tiered": {
+            "maxTokens": 128000,
+            "quotaInfo": {"remainingFraction": 0.0, "resetTime": "2026-10-28T00:00:00Z"}
+        }}
+    }))
+    .unwrap();
+    let snapshot = parse_fetch_available_models_response(&response);
+    for level in ["low", "medium", "high"] {
+        let id = format!("gemini-3.8-flash-{level}");
+        let model = snapshot.models.iter().find(|model| model.id == id).unwrap();
+        assert!(!model.available);
+        assert_eq!(model.max_tokens, Some(128000));
+        assert_eq!(model.remaining_fraction_milli, Some(0));
+        assert_eq!(model.reset_time.as_deref(), Some("2026-10-28T00:00:00Z"));
+    }
+}
+
+#[test]
+fn thinking_only_malformed_turn_is_not_a_successful_answer() {
+    let response: CodeAssistGenerateResponse = serde_json::from_value(json!({
+        "response": {"candidates": [{
+            "content": {"parts": [{"text":"reasoning only", "thought":true}]},
+            "finishReason": "MALFORMED_FUNCTION_CALL"
+        }]}
+    }))
+    .unwrap();
+    assert!(is_retryable_empty_turn(&response));
 }
 
 #[test]
