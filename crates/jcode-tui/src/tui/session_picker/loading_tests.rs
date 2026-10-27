@@ -45,6 +45,102 @@ fn write_picker_snapshot(path: &Path, has_messages: bool) {
 }
 
 #[test]
+fn cloud_sessions_are_loaded_outside_the_recent_window_and_grouped_by_host() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let id = "session_cloudtest_1770000000000";
+    let mut session = Session::create_with_id(id.to_string(), None, Some("Cloud work".into()));
+    session.append_stored_message(crate::session::StoredMessage {
+        id: "msg1".into(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "Continue my cloud work".into(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save().expect("save snapshot");
+    let mut lease = storage::SessionLease {
+        session_id: id.into(),
+        epoch: 1,
+        away_host: Some("dev-cloud".into()),
+        repo_root: Some("/workspace/project".into()),
+        last_sync_snapshot: None,
+        last_sync_head: None,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    storage::write_session_lease(&lease).expect("write lease");
+    let catchup = crate::catchup::CatchupSeenSnapshot::load();
+    let mut sessions = Vec::new();
+    include_cloud_sessions(&temp.path().join("sessions"), &catchup, &mut sessions);
+    assert_eq!(
+        sessions.len(),
+        1,
+        "cloud snapshot is added even without recent candidates"
+    );
+    assert_eq!(sessions[0].server_name.as_deref(), Some("cloud: dev-cloud"));
+    assert!(sessions[0].search_index.contains("cloud dev-cloud"));
+    include_cloud_sessions(&temp.path().join("sessions"), &catchup, &mut sessions);
+    assert_eq!(sessions.len(), 1, "existing snapshots are not duplicated");
+
+    invalidate_session_list_cache();
+    let (groups, orphans) = load_sessions_grouped().expect("group sessions");
+    let group = groups
+        .iter()
+        .find(|group| group.name == "cloud: dev-cloud")
+        .expect("cloud group");
+    assert_eq!(group.icon, "☁");
+    assert!(
+        !group.is_running,
+        "ownership does not imply remote liveness"
+    );
+    assert_eq!(group.sessions[0].id, id);
+    assert!(!orphans.iter().any(|session| session.id == id));
+
+    lease.away_host = None;
+    storage::write_session_lease(&lease).expect("return lease");
+    invalidate_session_list_cache();
+    let (groups, orphans) = load_sessions_grouped().expect("group returned sessions");
+    assert!(!groups.iter().any(|group| group.name == "cloud: dev-cloud"));
+    assert!(
+        orphans
+            .iter()
+            .any(|session| session.id == id && session.server_icon.is_none())
+    );
+}
+
+#[test]
+fn cloud_session_discovery_ignores_missing_snapshots_and_corrupt_leases() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let dir = temp.path().join("session_leases");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("broken.json"), "{").unwrap();
+    storage::write_session_lease(&storage::SessionLease {
+        session_id: "session_missing_1770000000000".into(),
+        epoch: 1,
+        away_host: Some("dev-cloud".into()),
+        repo_root: None,
+        last_sync_snapshot: None,
+        last_sync_head: None,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    })
+    .unwrap();
+    let mut sessions = Vec::new();
+    include_cloud_sessions(
+        &temp.path().join("sessions"),
+        &crate::catchup::CatchupSeenSnapshot::load(),
+        &mut sessions,
+    );
+    assert!(sessions.is_empty());
+}
+
+#[test]
 fn collect_recent_session_stems_keeps_empty_snapshot_with_journal_history() {
     let temp = tempfile::tempdir().expect("temp dir");
     let stem = "session_alpha_1770000000000";

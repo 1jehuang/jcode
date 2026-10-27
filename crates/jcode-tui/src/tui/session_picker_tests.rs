@@ -100,6 +100,41 @@ fn make_session_with_flags(
 }
 
 #[test]
+fn cloud_session_picker_renders_host_and_preserves_resume_target() {
+    let mut session = make_session(
+        "session_cloud_1770000000000",
+        "cloud",
+        false,
+        SessionStatus::Closed,
+    );
+    session.server_name = Some("cloud: dev-cloud".into());
+    session.server_icon = Some("☁".into());
+    let target = session.resume_target.clone();
+    let mut picker = SessionPicker::new_grouped(
+        vec![ServerGroup {
+            name: "cloud: dev-cloud".into(),
+            icon: "☁".into(),
+            version: String::new(),
+            git_hash: String::new(),
+            is_running: false,
+            sessions: vec![session],
+        }],
+        vec![],
+    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("cloud: dev-cloud"));
+    assert_eq!(picker.selection_or_current_targets(), vec![target]);
+}
+
+#[test]
 fn standalone_resume_renders_before_list_load_finishes() {
     let mut picker = SessionPicker::loading();
     let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
