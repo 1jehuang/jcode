@@ -3046,15 +3046,19 @@ fn include_cloud_sessions(
         let Some(lease) = storage::read_session_lease(id) else {
             continue;
         };
-        let Some(host) = lease.away_host.filter(|host| !host.trim().is_empty()) else {
+        let Some(host) = lease
+            .away_host
+            .as_ref()
+            .filter(|host| !host.trim().is_empty())
+        else {
             continue;
         };
         if lease.session_id != id {
             continue;
         }
-        if !sessions.iter().any(|session| session.id == id)
-            && let Some(session) = parse_jcode_session_info(sessions_dir, id, catchup_seen)
-        {
+        if !sessions.iter().any(|session| session.id == id) {
+            let session = parse_jcode_session_info(sessions_dir, id, catchup_seen)
+                .unwrap_or_else(|| cloud_session_stub(&lease));
             sessions.push(session);
         }
         if let Some(session) = sessions.iter_mut().find(|session| session.id == id) {
@@ -3064,6 +3068,58 @@ fn include_cloud_sessions(
                 .search_index
                 .push_str(&format!(" cloud {}", host.to_lowercase()));
         }
+    }
+}
+
+/// A migration can leave only a lease or a hidden handoff notice locally.
+/// The ownership record is enough to attach without inventing transcript data.
+fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
+    let id = &lease.session_id;
+    let short_name = extract_session_name(id).unwrap_or(id).to_string();
+    let updated_at = chrono::DateTime::parse_from_rfc3339(&lease.updated_at)
+        .map(|time| time.with_timezone(&chrono::Utc))
+        .unwrap_or_default();
+    let title = format!("{short_name} (cloud session)");
+    let search_index = build_search_index(
+        id,
+        &short_name,
+        &title,
+        lease.repo_root.as_deref(),
+        None,
+        &[],
+    );
+    SessionInfo {
+        id: id.clone(),
+        parent_id: None,
+        icon: session_icon(&short_name).to_string(),
+        short_name,
+        title,
+        message_count: 0,
+        user_message_count: 0,
+        assistant_message_count: 0,
+        created_at: updated_at,
+        last_message_time: updated_at,
+        last_active_at: Some(updated_at),
+        working_dir: lease.repo_root.clone(),
+        model: None,
+        provider_key: None,
+        is_canary: false,
+        is_debug: false,
+        saved: false,
+        save_label: None,
+        status: SessionStatus::Closed,
+        needs_catchup: false,
+        estimated_tokens: 0,
+        first_user_prompt: None,
+        messages_preview: Vec::new(),
+        search_index,
+        server_name: None,
+        server_icon: None,
+        source: SessionSource::Jcode,
+        resume_target: ResumeTarget::JcodeSession {
+            session_id: id.clone(),
+        },
+        external_path: None,
     }
 }
 

@@ -114,7 +114,7 @@ fn cloud_sessions_are_loaded_outside_the_recent_window_and_grouped_by_host() {
 }
 
 #[test]
-fn cloud_session_discovery_ignores_missing_snapshots_and_corrupt_leases() {
+fn cloud_session_discovery_keeps_missing_snapshots_and_ignores_corrupt_leases() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -137,7 +137,27 @@ fn cloud_session_discovery_ignores_missing_snapshots_and_corrupt_leases() {
         &crate::catchup::CatchupSeenSnapshot::load(),
         &mut sessions,
     );
-    assert!(sessions.is_empty());
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "session_missing_1770000000000");
+    assert_eq!(sessions[0].message_count, 0);
+    assert_eq!(sessions[0].server_name.as_deref(), Some("cloud: dev-cloud"));
+
+    // An empty local migration stub must remain selectable as well.
+    let session = Session::create_with_id("session_missing_1770000000000".into(), None, None);
+    storage::write_json(
+        &crate::session::session_path(&session.id).unwrap(),
+        &session,
+    )
+    .expect("save empty local stub");
+    sessions.clear();
+    include_cloud_sessions(
+        &temp.path().join("sessions"),
+        &crate::catchup::CatchupSeenSnapshot::load(),
+        &mut sessions,
+    );
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].message_count, 0);
+    assert!(sessions[0].title.contains("cloud session"));
 }
 
 #[test]
