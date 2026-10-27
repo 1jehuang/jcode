@@ -1870,10 +1870,13 @@ impl crate::tui::TuiState for App {
                                 if super::service_tier_display_label(reported) == label {
                                     requested
                                 } else {
-                                    format!("{label} requested, provider reports {reported} (unconfirmed)")
+                                    format!(
+                                        "Got {} · req {label}",
+                                        super::service_tier_display_label(reported)
+                                    )
                                 }
                             }
-                            _ => format!("{label} requested (unconfirmed)"),
+                            _ => format!("{label} · awaiting report"),
                         }
                     })
             },

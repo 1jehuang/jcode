@@ -434,7 +434,7 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     let badge = app.info_widget_data().service_tier.unwrap();
     assert_eq!(
         badge,
-        "Ultrafast requested, provider reports default (unconfirmed)"
+        "Got Standard · req Ultrafast"
     );
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
@@ -511,7 +511,7 @@ fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
     app.is_remote = true;
     app.remote_service_tier = Some("fast".into());
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    assert!(app.info_widget_data().service_tier.unwrap().contains("unconfirmed"));
+    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Fast · awaiting report"));
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
             requested: Some("priority".into()), tier: "default".into(),
@@ -520,7 +520,7 @@ fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
     let badge = app.info_widget_data().service_tier.unwrap();
     assert_eq!(
         badge,
-        "Fast requested, provider reports default (unconfirmed)"
+        "Got Standard · req Fast"
     );
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
@@ -533,7 +533,7 @@ fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
     app.remote_service_tier = None;
     app.remote_reported_service_tier = None;
     app.remote_service_tier_confirmation_pending = true;
-    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Standard requested (unconfirmed)"));
+    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Standard · awaiting report"));
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
             requested: None, tier: "default".into(),
