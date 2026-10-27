@@ -1,5 +1,27 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_snapshot_reports_resident_memory_and_history() {
+    let source = "macos_native_memory_smoke";
+    let snapshot = snapshot_with_source(source);
+    let rss = snapshot.rss_bytes.expect("resident size");
+    assert!(rss > 0);
+    assert!(snapshot.peak_rss_bytes.expect("peak resident size") >= rss);
+    assert!(snapshot.virtual_bytes.expect("virtual size") >= rss);
+    assert!(
+        history(MAX_HISTORY_SAMPLES)
+            .iter()
+            .any(|entry| entry.source == source)
+    );
+}
+
+#[cfg(all(target_os = "macos", not(feature = "jemalloc")))]
+#[test]
+fn macos_allocator_purge_is_available() {
+    assert!(purge_allocator().expect("macOS allocator purge").available);
+}
+
 #[test]
 fn windows_memory_metrics_keep_private_commit_separate() {
     let snapshot = windows_memory_snapshot(4096, 8192, 16384);

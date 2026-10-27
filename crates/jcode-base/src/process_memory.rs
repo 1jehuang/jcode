@@ -228,7 +228,42 @@ fn windows_memory_snapshot(rss: u64, peak_rss: u64, private_commit: u64) -> Proc
     }
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "macos")]
+pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
+    let source = source.into();
+    // SAFETY: The zeroed structure is valid, and task_info writes at most the
+    // supplied count of natural_t words to this correctly sized buffer.
+    let mut info: libc::mach_task_basic_info = unsafe { std::mem::zeroed() };
+    let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+    // libc still exposes this system call; keep the compatibility allowance
+    // local rather than adding a dependency for a single Mach port lookup.
+    #[allow(deprecated)]
+    let result = unsafe {
+        libc::task_info(
+            libc::mach_task_self(),
+            libc::MACH_TASK_BASIC_INFO,
+            (&mut info as *mut libc::mach_task_basic_info).cast(),
+            &mut count,
+        )
+    };
+    let snapshot = if result == libc::KERN_SUCCESS && count >= libc::MACH_TASK_BASIC_INFO_COUNT {
+        ProcessMemorySnapshot {
+            rss_bytes: Some(info.resident_size),
+            peak_rss_bytes: Some(info.resident_size_max),
+            virtual_bytes: Some(info.virtual_size),
+            ..ProcessMemorySnapshot::default()
+        }
+    } else {
+        logging::warn(&format!(
+            "process memory snapshot source={source} task_info failed: {result}"
+        ));
+        ProcessMemorySnapshot::default()
+    };
+    record_snapshot(source, snapshot.clone());
+    snapshot
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
     let source = source.into();
     logging::debug(&format!(
@@ -379,8 +414,18 @@ pub fn purge_allocator() -> Result<AllocatorTuningInfo> {
         })
     }
 
+    #[cfg(all(target_os = "macos", not(feature = "jemalloc")))]
+    {
+        release_retained_heap("debug_allocator_purge");
+        Ok(AllocatorTuningInfo {
+            available: true,
+            ..AllocatorTuningInfo::default()
+        })
+    }
+
     #[cfg(all(
         not(all(target_os = "linux", target_env = "gnu")),
+        not(target_os = "macos"),
         not(feature = "jemalloc")
     ))]
     {
