@@ -1077,6 +1077,14 @@ impl OpenAIProvider {
     /// so validation, availability, and refresh must all use the loaded
     /// credential's own catalog instead of one shared per-account slot.
     pub(crate) fn catalog_scope_for(credentials: &CodexCredentials) -> String {
+        if Self::is_chatgpt_mode(credentials)
+            && let Ok(accounts) = jcode_base::auth::codex::list_accounts()
+            && let Some(label) =
+                jcode_base::auth::codex::account_label_for_credentials(&accounts, credentials)
+        {
+            return label;
+        }
+        // Unmatched legacy OAuth credentials retain the existing account fallback.
         jcode_base::provider::openai_catalog_scope_for_credential(
             Self::is_chatgpt_mode(credentials),
             &credentials.access_token,
