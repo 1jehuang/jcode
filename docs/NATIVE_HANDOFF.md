@@ -43,7 +43,10 @@ switch.
 
 Both lanes use `nightly-2026-10-08`, `--locked --release --bin jcode`, default
 features, opt-level 3, and no incremental compilation. Linux adds the rebuilt
-standard-library flag above. The source SHA, Cargo.lock digest, target,
+standard-library flag above and `--features linux-compat-vendored-openssl` so
+OpenSSL is built for the cross target rather than discovered from the host.
+Default features remain enabled on both lanes; macOS adds no extra feature.
+The source SHA, Cargo.lock digest, target,
 producer kind, command, flags, toolchain, client revision, binary digest, and
 build-report digest are sealed in `provenance.json`. Native smoke checks run
 `--version`, `--help`, and `run --help` with isolated HOME/config, stripped

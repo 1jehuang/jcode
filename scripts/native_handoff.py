@@ -15,13 +15,16 @@ CONTRACTS = {
     "linux-arm64": {
         "target": "aarch64-unknown-linux-gnu", "producer": "hosted-linux-x86_64",
         "command": ["build", "--remote", "--locked", "--release", "--bin", "jcode",
-                    "--target", "aarch64-unknown-linux-gnu", "-Zbuild-std=std,panic_abort"],
+                    "--target", "aarch64-unknown-linux-gnu", "-Zbuild-std=std,panic_abort",
+                    "--features", "linux-compat-vendored-openssl"],
+        "features": ["default", "linux-compat-vendored-openssl"],
         "target_rustflags": "-Ztls-model=emulated",
     },
     "macos-arm64": {
         "target": "aarch64-apple-darwin", "producer": "native-macos-arm64",
         "command": ["build", "--local", "--locked", "--release", "--bin", "jcode",
                     "--target", "aarch64-apple-darwin"],
+        "features": ["default"],
         "target_rustflags": "",
     },
 }
@@ -64,7 +67,7 @@ def expected(lane):
     return {"schema": 1, "context": context(), "lane": lane,
             "toolchain": TOOLCHAIN, "justrust_revision": JUSTRUST_REV,
             "contract": CONTRACTS[lane], "profile_opt_level": "3",
-            "lock_sha256": digest(Path("Cargo.lock")), "features": "default"}
+            "lock_sha256": digest(Path("Cargo.lock")), "features": CONTRACTS[lane]["features"]}
 
 
 def build_receipt(directory, lane, sealing=False):

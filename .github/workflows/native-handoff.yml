@@ -90,7 +90,7 @@ jobs:
           if [[ "$LANE" == linux-arm64 ]]; then
             test -n "$JCODE_API_KEY" || { echo 'JUSTRUST_API_KEY is required for hosted ARM builds' >&2; exit 1; }
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-Ztls-model=emulated'
-            justrust build --remote --locked --release --bin jcode --target aarch64-unknown-linux-gnu -Zbuild-std=std,panic_abort
+            justrust build --remote --locked --release --bin jcode --target aarch64-unknown-linux-gnu -Zbuild-std=std,panic_abort --features linux-compat-vendored-openssl
             target=aarch64-unknown-linux-gnu
           else
             # Uses Apple's installed SDK only on the native GitHub macOS runner.

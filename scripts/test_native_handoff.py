@@ -169,6 +169,20 @@ class HandoffTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'hosted'):
             handoff.seal(self.directory, 'linux-arm64')
 
+    def test_arm_requires_vendored_openssl_and_keeps_defaults(self):
+        self.binary()
+        self.assertEqual(handoff.CONTRACTS['linux-arm64']['features'],
+                         ['default', 'linux-compat-vendored-openssl'])
+        self.assertEqual(handoff.CONTRACTS['macos-arm64']['features'], ['default'])
+        for contract in handoff.CONTRACTS.values():
+            self.assertNotIn('--no-default-features', contract['command'])
+        report = self.directory / 'build-report.json'
+        data = json.loads(report.read_text())
+        data['args'] = data['args'][:-2]
+        report.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'pinned command'):
+            handoff.seal(self.directory, 'linux-arm64')
+
     def test_build_report_tampering_rejected(self):
         self.binary()
         digest = handoff.seal(self.directory, 'linux-arm64')
