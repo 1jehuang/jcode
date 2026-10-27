@@ -226,3 +226,14 @@ async fn off_mode_never_compresses_but_still_inflates() {
     assert_eq!(echoes, vec![big]);
     assert!(!seen[0].0);
 }
+
+#[test]
+fn oversized_frame_message_is_metadata_only() {
+    // Header byte 0x82 = FIN + binary opcode; 0x40 would set RSV1.
+    let msg = oversized_frame_message(u64::MAX, 0xC2, true, 14);
+    assert!(msg.contains("declared_len=18446744073709551615"));
+    assert!(msg.contains(&format!("cap={MAX_INFLATED_MESSAGE}")));
+    assert!(msg.contains("opcode=2 fin=true rsv1=true masked=true header_len=14"));
+    // Only fixed field names and numbers: no raw payload-looking text.
+    assert!(msg.chars().all(|c| c.is_ascii_graphic() || c == ' '));
+}

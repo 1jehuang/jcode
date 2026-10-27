@@ -30,4 +30,4 @@ tokio = { version = "1", features = ["sync", "time", "macros", "io-util"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "macros", "rt", "net", "io-util"] }
-tokio-tungstenite = { version = "0.24", default-features = false }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

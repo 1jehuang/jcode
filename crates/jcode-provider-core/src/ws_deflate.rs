@@ -136,6 +136,18 @@ struct FrameHeader {
     payload_len: usize,
 }
 
+/// Diagnostic for a frame whose declared length exceeds the inflated cap.
+/// Takes header metadata only, never the payload, so no payload bytes can
+/// reach the log by construction.
+fn oversized_frame_message(declared_len: u64, b0: u8, masked: bool, header_len: usize) -> String {
+    format!(
+        "websocket frame rejected: declared_len={declared_len} cap={MAX_INFLATED_MESSAGE} opcode={} fin={} rsv1={} masked={masked} header_len={header_len}",
+        b0 & 0x0f,
+        b0 & 0x80 != 0,
+        b0 & 0x40 != 0,
+    )
+}
+
 fn parse_frame_header(buf: &[u8]) -> io::Result<Option<FrameHeader>> {
     if buf.len() < 2 {
         return Ok(None);
@@ -164,12 +176,8 @@ fn parse_frame_header(buf: &[u8]) -> io::Result<Option<FrameHeader>> {
         .ok()
         .filter(|len| *len <= MAX_INFLATED_MESSAGE)
         .ok_or_else(|| {
-            // Metadata only: declared length and header flags. No payload bytes.
-            jcode_logging::warn(&format!(
-                "websocket frame rejected: declared_len={payload_len} cap={MAX_INFLATED_MESSAGE} opcode={} fin={} rsv1={} masked={masked} header_len={offset}",
-                b0 & 0x0f,
-                b0 & 0x80 != 0,
-                b0 & 0x40 != 0,
+            jcode_logging::warn(&oversized_frame_message(
+                payload_len, b0, masked, offset,
             ));
             io::Error::new(io::ErrorKind::InvalidData, "websocket frame too large")
         })?;
