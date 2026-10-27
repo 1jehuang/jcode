@@ -306,3 +306,32 @@ fn session_scoped_env_is_not_inherited_by_broker() {
     assert!(!is_session_scoped_env(BROKER_BIN_ENV));
     assert!(!is_session_scoped_env("PATH"));
 }
+
+#[test]
+fn shared_upstream_env_drops_seat_identity_but_keeps_explicit_config() {
+    let inherited: HashMap<String, String> = [
+        ("OPENRIG_SESSION_NAME", "seat-a@rig"),
+        ("JCODE_SOCKET", "/tmp/seat-a.sock"),
+        ("TMUX_PANE", "%3"),
+        ("PATH", "/usr/bin"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let filtered: HashMap<String, String> = inherited
+        .into_iter()
+        .filter(|(key, _)| !is_session_scoped_env(key))
+        .collect();
+    let explicit: HashMap<String, String> =
+        [("OPENRIG_SESSION_NAME".to_string(), "pinned@rig".to_string())].into();
+    let env = crate::mcp::client::mcp_child_env(filtered, &explicit);
+
+    assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+    assert!(!env.contains_key("JCODE_SOCKET"));
+    assert!(!env.contains_key("TMUX_PANE"));
+    assert_eq!(
+        env.get("OPENRIG_SESSION_NAME").map(String::as_str),
+        Some("pinned@rig"),
+        "explicit config.env is the owner's choice and must win"
+    );
+}

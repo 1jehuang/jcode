@@ -117,7 +117,13 @@ struct Upstream {
 
 impl Upstream {
     async fn spawn(name: &str, config: &McpServerConfig) -> Result<Arc<Self>> {
-        let env = super::client::mcp_child_env(std::env::vars().collect(), &config.env);
+        // A shared upstream outlives any one client, so it must not inherit the
+        // identity of whichever process happened to launch the broker. Explicit
+        // config.env values are the server owner's own choice and are kept.
+        let inherited: std::collections::HashMap<String, String> = std::env::vars()
+            .filter(|(key, _)| !is_session_scoped_env(key))
+            .collect();
+        let env = super::client::mcp_child_env(inherited, &config.env);
         let mut command = Command::new(&config.command);
         command
             .args(&config.args)
