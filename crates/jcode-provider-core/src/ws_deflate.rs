@@ -163,7 +163,16 @@ fn parse_frame_header(buf: &[u8]) -> io::Result<Option<FrameHeader>> {
     let payload_len = usize::try_from(payload_len)
         .ok()
         .filter(|len| *len <= MAX_INFLATED_MESSAGE)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "websocket frame too large"))?;
+        .ok_or_else(|| {
+            // Metadata only: declared length and header flags. No payload bytes.
+            jcode_logging::warn(&format!(
+                "websocket frame rejected: declared_len={payload_len} cap={MAX_INFLATED_MESSAGE} opcode={} fin={} rsv1={} masked={masked} header_len={offset}",
+                b0 & 0x0f,
+                b0 & 0x80 != 0,
+                b0 & 0x40 != 0,
+            ));
+            io::Error::new(io::ErrorKind::InvalidData, "websocket frame too large")
+        })?;
     let mask = if masked {
         if buf.len() < offset + 4 {
             return Ok(None);
