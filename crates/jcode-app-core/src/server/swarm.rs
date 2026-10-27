@@ -1411,12 +1411,20 @@ fn member_awaits_unrestored_notice(member: &SwarmMember) -> bool {
 /// worker has nothing to re-attach, so without this its coordinator only
 /// learns it is gone by polling the member list. Called when a session attaches
 /// (subscribe or resume): workers that report back to it, or whose swarm it
-/// coordinates, are listed in one swarm notification and marked notified so
-/// the notice is delivered once. Returns the number of workers reported.
+/// coordinates, are listed in one model-facing interrupt and a best-effort UI
+/// notification. Acknowledge only accepted model delivery, so an unavailable
+/// owner can retry on reconnect. Returns the number of workers reported.
 pub(super) async fn notify_owner_of_unrestored_idle_workers(
     owner_session_id: &str,
     swarm_state: &SwarmState,
+    sessions: &super::SessionAgents,
+    soft_interrupt_queues: &super::SessionInterruptQueues,
 ) -> usize {
+    // Concurrent subscribe/resume requests must not both observe an unnotified
+    // worker before either has queued its interrupt. This lock is independent
+    // of the swarm snapshot lock, which persistence acquires below.
+    static NOTICE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _notice_guard = NOTICE_LOCK.lock().await;
     let coordinated_swarms: HashSet<String> = {
         let coordinators = swarm_state.coordinators.read().await;
         coordinators
@@ -1426,12 +1434,12 @@ pub(super) async fn notify_owner_of_unrestored_idle_workers(
             .collect()
     };
     let (owner_name, reported) = {
-        let mut members = swarm_state.members.write().await;
+        let members = swarm_state.members.read().await;
         let owner_name = members
             .get(owner_session_id)
             .and_then(|member| member.friendly_name.clone());
         let mut reported: Vec<(String, String, Option<String>)> = Vec::new();
-        for member in members.values_mut() {
+        for member in members.values() {
             if member.session_id == owner_session_id || !member_awaits_unrestored_notice(member) {
                 continue;
             }
@@ -1445,11 +1453,6 @@ pub(super) async fn notify_owner_of_unrestored_idle_workers(
             if !(owned_by_report_back || owned_by_coordination) {
                 continue;
             }
-            member.detail = Some(format!(
-                "{} ({})",
-                member.detail.as_deref().unwrap_or_default(),
-                super::swarm_persistence::OWNER_NOTIFIED_NOTE
-            ));
             reported.push((
                 member.session_id.clone(),
                 member
@@ -1483,6 +1486,32 @@ pub(super) async fn notify_owner_of_unrestored_idle_workers(
              They had no work in flight. Spawn replacements if you still need them."
         )
     };
+    if !super::queue_soft_interrupt_for_session(
+        owner_session_id,
+        message.clone(),
+        false,
+        jcode_agent_runtime::SoftInterruptSource::System,
+        soft_interrupt_queues,
+        sessions,
+    )
+    .await
+    {
+        return 0;
+    }
+    {
+        let mut members = swarm_state.members.write().await;
+        for (session_id, _, _) in &reported {
+            if let Some(member) = members.get_mut(session_id)
+                && member_awaits_unrestored_notice(member)
+            {
+                member.detail = Some(format!(
+                    "{} ({})",
+                    member.detail.as_deref().unwrap_or_default(),
+                    super::swarm_persistence::OWNER_NOTIFIED_NOTE
+                ));
+            }
+        }
+    }
     crate::logging::info(&format!(
         "Notifying {owner_session_id} of {count} idle headless worker(s) not restored after restart: {names}"
     ));
@@ -3108,10 +3137,32 @@ mod tests {
             HashMap::from([("swarm-1".to_string(), "coord".to_string())]),
         );
 
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let queue: jcode_agent_runtime::SoftInterruptQueue = Default::default();
+        let queues = Arc::new(RwLock::new(HashMap::from([(
+            "coord".to_string(),
+            queue.clone(),
+        )])));
         assert_eq!(
-            super::notify_owner_of_unrestored_idle_workers("coord", &swarm_state).await,
+            super::notify_owner_of_unrestored_idle_workers(
+                "coord",
+                &swarm_state,
+                &sessions,
+                &queues
+            )
+            .await,
             1
         );
+        {
+            let pending = queue.lock().unwrap();
+            assert_eq!(pending.len(), 1);
+            assert!(pending[0].content.contains("butterfly"));
+            assert!(!pending[0].content.contains("stranger"));
+            assert_eq!(
+                pending[0].source,
+                jcode_agent_runtime::SoftInterruptSource::System
+            );
+        }
         let notices: Vec<String> = std::iter::from_fn(|| coord_rx.try_recv().ok())
             .filter_map(|event| match event {
                 ServerEvent::Notification { message, .. } => Some(message),
@@ -3124,7 +3175,13 @@ mod tests {
 
         // Delivered once: a later reattach does not repeat it.
         assert_eq!(
-            super::notify_owner_of_unrestored_idle_workers("coord", &swarm_state).await,
+            super::notify_owner_of_unrestored_idle_workers(
+                "coord",
+                &swarm_state,
+                &sessions,
+                &queues
+            )
+            .await,
             0
         );
         let members = swarm_state.members.read().await;
@@ -3135,6 +3192,160 @@ mod tests {
                 .and_then(|m| m.detail.as_deref())
                 .is_some_and(|d| !d.contains("owner notified"))
         );
+    }
+
+    #[tokio::test]
+    async fn unrestored_notice_retries_model_delivery_despite_available_ui() {
+        let owner_id = "unrestored-notice-retry-owner";
+        let (state, mut ui_rx) = unrestored_notice_state(owner_id);
+        let sessions = Default::default();
+        let queues = Default::default();
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            0
+        );
+        assert!(ui_rx.try_recv().is_err());
+        assert!(super::member_awaits_unrestored_notice(
+            &state.members.read().await["recovery-worker"]
+        ));
+
+        // Reconnect registers the model queue. The earlier failed delivery
+        // must not have consumed the durable recovery marker.
+        let queue: jcode_agent_runtime::SoftInterruptQueue = Default::default();
+        queues
+            .write()
+            .await
+            .insert(owner_id.to_string(), queue.clone());
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            1
+        );
+        assert_eq!(queue.lock().unwrap().len(), 1);
+    }
+
+    fn unrestored_notice_state(
+        owner_id: &str,
+    ) -> (
+        crate::server::SwarmState,
+        tokio::sync::mpsc::UnboundedReceiver<ServerEvent>,
+    ) {
+        let swarm_id = format!("swarm-{owner_id}");
+        let (mut owner, owner_rx) = swarm_member(owner_id, "coordinator", false);
+        owner.swarm_id = Some(swarm_id.clone());
+        let (mut worker, _worker_rx) = swarm_member("recovery-worker", "agent", true);
+        worker.swarm_id = Some(swarm_id.clone());
+        worker.status = "stopped".to_string();
+        worker.detail =
+            Some(crate::server::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE.to_string());
+        // Exercise the coordinator fallback when no explicit report-back
+        // owner survived in a legacy snapshot.
+        worker.report_back_to_session_id = None;
+        (
+            crate::server::SwarmState::new(
+                HashMap::from([
+                    (owner_id.to_string(), owner),
+                    ("recovery-worker".to_string(), worker),
+                ]),
+                HashMap::from([(
+                    swarm_id.clone(),
+                    HashSet::from([owner_id.to_string(), "recovery-worker".to_string()]),
+                )]),
+                HashMap::new(),
+                HashMap::from([(swarm_id, owner_id.to_string())]),
+            ),
+            owner_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn unrestored_notice_concurrent_reconnects_queue_once_without_ui() {
+        let owner_id = "unrestored-notice-concurrent-owner";
+        let (state, ui_rx) = unrestored_notice_state(owner_id);
+        drop(ui_rx);
+        let sessions = Default::default();
+        let queue: jcode_agent_runtime::SoftInterruptQueue = Default::default();
+        let queues = Arc::new(RwLock::new(HashMap::from([(
+            owner_id.to_string(),
+            queue.clone(),
+        )])));
+        let (first, second) = tokio::join!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues),
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues),
+        );
+        assert_eq!(first + second, 1);
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        assert!(!super::member_awaits_unrestored_notice(
+            &state.members.read().await["recovery-worker"]
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn unrestored_notice_persists_for_owner_without_live_agent() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let owner_id = "unrestored-notice-durable-owner";
+        crate::session::Session::create_with_id(owner_id.to_string(), None, None)
+            .save_prepared()
+            .unwrap();
+        let (state, ui_rx) = unrestored_notice_state(owner_id);
+        drop(ui_rx);
+        let sessions = Default::default();
+        let queues = Default::default();
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            1
+        );
+        let pending = crate::soft_interrupt_store::load(owner_id).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].content.contains("recovery-worker"));
+        assert_eq!(
+            pending[0].source,
+            jcode_agent_runtime::SoftInterruptSource::System
+        );
+        // Rebuild the worker from the persisted swarm snapshot as a second
+        // restart would. A reconnect must not append another deferred notice.
+        let snapshot =
+            crate::server::swarm_persistence::read_transfer_snapshot(&format!("swarm-{owner_id}"))
+                .unwrap()
+                .unwrap();
+        let worker = snapshot
+            .members
+            .into_iter()
+            .find(|member| member.record.session_id == "recovery-worker")
+            .unwrap();
+        let recovered = crate::server::swarm_persistence::from_persisted_member(
+            worker,
+            snapshot.updated_at_unix_ms,
+            snapshot.updated_at_unix_ms,
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        assert!(!super::member_awaits_unrestored_notice(&recovered));
+        state
+            .members
+            .write()
+            .await
+            .insert("recovery-worker".to_string(), recovered);
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            0
+        );
+        assert_eq!(
+            crate::soft_interrupt_store::load(owner_id).unwrap().len(),
+            1
+        );
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[tokio::test]

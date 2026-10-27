@@ -100,8 +100,9 @@ pub(super) struct LoadedSwarmRuntimeState {
 /// No headless process survives a restart (issue #1651).
 pub(super) const IDLE_WORKER_NOT_RESTORED_NOTE: &str =
     "idle worker not restored after server restart";
-/// Suffix appended once the worker's owner has been told it was stopped, so
-/// the notice is delivered exactly once even across further restarts.
+/// Suffix appended only after the owner's model-facing interrupt was accepted.
+/// Persisting it suppresses reconnect/restart duplicates. Delivery precedes
+/// acknowledgement, so a crash in between may repeat a notice rather than lose it.
 pub(super) const OWNER_NOTIFIED_NOTE: &str = "owner notified";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
