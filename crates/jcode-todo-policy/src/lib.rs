@@ -673,12 +673,8 @@ pub fn build_actionable_poke_message(actionable: &[TodoItem]) -> String {
             actionable.len() - GATE_NAMED_TODO_LIMIT
         ));
     }
-    message.push('\n');
-    message.push_str(ACTIONABLE_POKE_WAIT_GUIDANCE);
     message
 }
-
-const ACTIONABLE_POKE_WAIT_GUIDANCE: &str = "Leave todos waiting on still-running background tasks alone until their dependencies finish. Leave externally blocked todos alone until their review deadlines or an explicit blocker update. Leave todos marked Absolutely requires user action alone until the user performs the required action and the condition is cleared. Continue independent actionable work.";
 
 /// Longest list of named todos a gate continuation will spell out, so a big
 /// plan cannot turn one nudge into a wall of text.
@@ -774,8 +770,7 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         && first_line.contains(" incomplete todo")
         && first_line.ends_with("update the todo tool.")
         && (trimmed == first_line
-            || (trimmed[first_line.len()..].starts_with("\nActionable todos:")
-                && trimmed.ends_with(ACTIONABLE_POKE_WAIT_GUIDANCE))))
+            || trimmed[first_line.len()..].starts_with("\nActionable todos:")))
         || trimmed.starts_with(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_TODO_REMINDER_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
@@ -819,6 +814,9 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     let trimmed = message.trim();
     if !is_auto_poke_message(trimmed) {
         return None;
+    }
+    if trimmed.starts_with("You have ") && trimmed.contains("\nActionable todos:") {
+        return Some("Auto-poking: incomplete todos...");
     }
     if trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
@@ -919,6 +917,9 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
 
     non_empty(plan.user_intention.as_deref())
 }
+
+#[cfg(test)]
+mod reminder_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]
