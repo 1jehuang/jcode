@@ -116,7 +116,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
         rows.push(RuntimeRow {
             icon: "⚡",
             icon_color: rgb(200, 140, 255),
-            text: if tier.contains(" · ") {
+            text: if tier.contains(" ← ") || tier.ends_with(" ?") {
                 tier.to_string()
             } else {
                 format!("{tier} tier")
@@ -259,10 +259,7 @@ mod tests {
     #[test]
     fn compact_tier_reports_keep_actual_tier_visible() {
         let mut d = data();
-        for status in [
-            "Got Standard · req Ultrafast",
-            "Ultrafast · awaiting report",
-        ] {
+        for status in ["Standard ← Ultrafast", "Ultrafast ?"] {
             d.service_tier = Some(status.into());
             let out = text(render_model_info(&d, Rect::new(0, 0, 34, 8)));
             assert!(out.contains(status), "{out}");
@@ -274,8 +271,8 @@ mod tests {
                 for line in &lines {
                     assert!(line.width() <= width as usize, "{line:?}");
                 }
-                if status.starts_with("Got") {
-                    assert!(text(lines).contains("Got Standard"));
+                if status.starts_with("Standard") {
+                    assert!(text(lines).contains("Standard"));
                 }
             }
         }

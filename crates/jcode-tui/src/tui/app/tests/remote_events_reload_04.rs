@@ -31,7 +31,7 @@ fn test_remote_fast_status_tracks_history_tier_including_explicit_off() {
                 crate::tui::TuiState::info_widget_data(&app)
                     .service_tier
                     .as_deref(),
-                tier.map(|_| "Fast · awaiting report")
+                tier.map(|_| "Fast ?")
             );
 
             app.input = "/fast status".to_string();

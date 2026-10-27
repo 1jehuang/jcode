@@ -1871,12 +1871,12 @@ impl crate::tui::TuiState for App {
                                     requested
                                 } else {
                                     format!(
-                                        "Got {} · req {label}",
+                                        "{} ← {label}",
                                         super::service_tier_display_label(reported)
                                     )
                                 }
                             }
-                            _ => format!("{label} · awaiting report"),
+                            _ => format!("{label} ?"),
                         }
                     })
             },
