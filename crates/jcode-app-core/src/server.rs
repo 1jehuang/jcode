@@ -951,7 +951,14 @@ impl Server {
             let members = self.swarm_state.members.read().await;
             members
                 .values()
-                .filter(|member| headless_member_should_restore(&member.status, member.is_headless))
+                .filter(|member| {
+                    // Shutdown can persist `ready` after recording recovery
+                    // intent. On load that becomes `stopped`, but the durable
+                    // continuation must still take priority over that status.
+                    member.is_headless
+                        && (headless_member_should_restore(&member.status, true)
+                            || reload_recovery::has_pending_for_session(&member.session_id))
+                })
                 .map(|member| member.session_id.clone())
                 .collect::<Vec<_>>()
         };

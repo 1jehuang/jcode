@@ -1010,6 +1010,100 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
     clippy::await_holding_lock,
     reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
 )]
+async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("recovered durable work".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+
+    // Shutdown may finish an aborted turn before persisting swarm state,
+    // leaving no interruption marker in the session and a ready snapshot.
+    let mut worker = crate::session::Session::create(None, Some("worker".to_string()));
+    worker.add_message(
+        Role::Assistant,
+        vec![crate::message::ContentBlock::Text {
+            text: "Waiting for acceptance results".to_string(),
+            cache_control: None,
+        }],
+    );
+    worker.save()?;
+    let mut idle = crate::session::Session::create(None, Some("idle".to_string()));
+    idle.save()?;
+    let mut headed = crate::session::Session::create(None, Some("headed".to_string()));
+    headed.save()?;
+    for id in [&worker.id, &headed.id, &idle.id] {
+        super::reload_recovery::persist_intent(
+            "reload-stopped-worker",
+            id,
+            super::reload_recovery::ReloadRecoveryRole::Headless,
+            crate::tool::selfdev::ReloadRecoveryDirective {
+                reconnect_notice: None,
+                continuation_message: "Continue interrupted work".to_string(),
+            },
+            "work in flight before shutdown",
+        )?;
+    }
+    assert!(super::reload_recovery::mark_delivered_if_matching_continuation(
+        &idle.id,
+        "Continue interrupted work",
+        "test-completed-recovery",
+    )?);
+    let swarm_id = "swarm-stopped-recovery";
+    let mut headed_member = persisted_headless_member(&headed.id, swarm_id, "ready", "attached");
+    headed_member.is_headless = false;
+    persist_swarm_state_snapshot(
+        swarm_id,
+        None,
+        None,
+        &[
+            persisted_headless_member(&worker.id, swarm_id, "ready", "aborted turn"),
+            persisted_headless_member(&idle.id, swarm_id, "ready", "genuinely idle"),
+            headed_member,
+        ],
+    );
+    let server = Server::new(provider);
+    assert_eq!(
+        server.swarm_state.members.read().await[&worker.id].status,
+        "stopped"
+    );
+    server.recover_headless_sessions_on_startup().await;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if !super::reload_recovery::has_pending_for_session(&worker.id)
+                && server.swarm_state.members.read().await[&worker.id].status == "ready"
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("durable intent must resume even a stopped worker");
+    let sessions = server.sessions.read().await;
+    assert!(
+        !sessions.contains_key(&idle.id),
+        "idle workers must not be resurrected"
+    );
+    assert!(
+        !sessions.contains_key(&headed.id),
+        "headed recovery belongs to reconnect"
+    );
+    let agent = sessions[&worker.id].clone();
+    drop(sessions);
+    assert!(agent.lock().await.messages().iter().any(|message| {
+        message.role == Role::Assistant
+            && message.content_preview().contains("recovered durable work")
+    }));
+    assert!(super::reload_recovery::has_pending_for_session(&headed.id));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn startup_recovery_preserves_headed_session_reload_context_for_later_reconnect() -> Result<()>
 {
     let _storage_guard = crate::storage::lock_test_env();
