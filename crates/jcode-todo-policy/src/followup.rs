@@ -106,6 +106,16 @@ pub fn todo_has_external_blocker(todo: &TodoItem) -> bool {
     todo_has_external_blocker_at(todo, chrono::Utc::now())
 }
 
+/// Only valid, incomplete complete blockers suppress work. Programmatically
+/// constructed snapshots may bypass the persisted type's field validation.
+pub fn todo_completely_blocked(todo: &TodoItem) -> bool {
+    is_incomplete_todo(todo)
+        && todo
+            .completely_blocked
+            .as_ref()
+            .is_some_and(|required| !required.reason.trim().is_empty())
+}
+
 /// Persistent side effects a decision requires. Apply them whether or not a
 /// follow-up was produced: an empty digest still consumes the observation log.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,7 +290,8 @@ impl FollowUpPolicy {
             .iter()
             .copied()
             .filter(|todo| {
-                !todo_has_external_blocker(todo)
+                !todo_completely_blocked(todo)
+                    && !todo_has_external_blocker(todo)
                     && !todo_waits_on_running_task(todo, |id| {
                         snapshot
                             .running_background_tasks

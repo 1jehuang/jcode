@@ -25,6 +25,7 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -73,6 +74,7 @@ fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
                     completion_confidence: None,
                     confidence_history: Vec::new(),
                     external_blocker: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                 }],
             )
@@ -2349,6 +2351,7 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2386,6 +2389,7 @@ fn test_poke_status_reports_current_state() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2444,6 +2448,7 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2497,6 +2502,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2537,6 +2543,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     completion_confidence: None,
                     confidence_history: Vec::new(),
                     external_blocker: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
@@ -2553,6 +2560,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     completion_confidence: None,
                     confidence_history: Vec::new(),
                     external_blocker: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                 },
             ],
@@ -2610,6 +2618,7 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2648,6 +2657,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     )),
                     confidence_history: Vec::new(),
                     external_blocker: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
@@ -2666,6 +2676,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     )),
                     confidence_history: Vec::new(),
                     external_blocker: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                 },
             ],
@@ -2781,6 +2792,7 @@ fn test_todo_completion_gate_detects_abrupt_confidence_increase() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
         completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(0),
@@ -2803,6 +2815,7 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
         completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::Speculative,
@@ -2833,6 +2846,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
@@ -2943,6 +2957,7 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
                 confidence_history: Vec::new(),
                 external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2982,6 +2997,7 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -3153,6 +3169,7 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
                     confidence: Some(planning),
                     completion_confidence: Some(completion),
                     external_blocker: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                     confidence_history: history,
                     ..Default::default()

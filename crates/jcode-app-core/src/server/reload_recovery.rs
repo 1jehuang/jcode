@@ -222,7 +222,6 @@ pub(super) fn peek_for_session(session_id: &str) -> Result<Option<ReloadRecovery
     crate::storage::read_json(&path).map(Some)
 }
 
-#[cfg(test)]
 pub(super) fn has_pending_for_session(session_id: &str) -> bool {
     peek_for_session(session_id)
         .ok()

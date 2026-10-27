@@ -23,6 +23,14 @@ mod external_blocker_tests;
 fn validate_external_blockers(previous: &[TodoItem], todos: &[TodoItem]) -> Result<()> {
     let now = chrono::Utc::now();
     for todo in todos {
+        if let Some(required) = &todo.completely_blocked {
+            if required.reason.trim().is_empty() {
+                bail!(
+                    "completely_blocked.reason must be nonempty for todo {}",
+                    todo.id
+                );
+            }
+        }
         if let Some(blocker) = &todo.external_blocker {
             if blocker.reason.trim().is_empty() {
                 bail!(
@@ -56,7 +64,8 @@ async fn prepare_background_dependencies(
     for todo in todos {
         let prior = previous.iter().find(|old| old.id == todo.id);
         let active = !crate::todo::todo_status_is_completed(&todo.status)
-            && !crate::todo::todo_status_is_cancelled(&todo.status);
+            && !crate::todo::todo_status_is_cancelled(&todo.status)
+            && !crate::todo::todo_completely_blocked(todo);
         for id in &todo.waiting_on {
             // Check before the manager constructs any filesystem path.
             if id.is_empty()
@@ -1173,7 +1182,7 @@ impl Tool for TodoTool {
          Keep the todo pending/in_progress. Pokes pause until review_at and a durable \
          scheduler wakes this session to reassess, not assume resolution or completion. \
          Clear external_blocker with null when unblocked. Use this instead of a separate \
-         schedule call for todo blocker reviews."
+         schedule call for todo blocker reviews. completely_blocked: No way forward."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1224,6 +1233,15 @@ impl Tool for TodoTool {
                                 "type": ["array", "null"],
                                 "items": {"type": "string"},
                                 "description": "Existing background task IDs or swarm await_members dependency IDs in this session. Block only while pending, never after completion or timeout. Enables completion notify/wake. [] or null clears."
+                            },
+                            "completely_blocked": {
+                                "type": ["object", "null"],
+                                "required": ["reason"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "reason": {"type": "string", "minLength": 1, "description": "Reason."}
+                                },
+                                "description": "No way forward."
                             },
                             "external_blocker": {
                                 "type": ["object", "null"],
@@ -1363,6 +1381,8 @@ impl Tool for TodoTool {
             schema["properties"]["todos"]["items"]["properties"]["waiting_on"].clone();
         schema["properties"]["update"]["items"]["properties"]["external_blocker"] =
             schema["properties"]["todos"]["items"]["properties"]["external_blocker"].clone();
+        schema["properties"]["update"]["items"]["properties"]["completely_blocked"] =
+            schema["properties"]["todos"]["items"]["properties"]["completely_blocked"].clone();
         let mut item = schema["properties"]
             .as_object_mut()
             .unwrap()
@@ -1403,6 +1423,11 @@ impl Tool for TodoTool {
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
             for todo in &mut todos {
                 if !crate::todo::is_incomplete_todo(todo) {
+                    todo.external_blocker = None;
+                    todo.completely_blocked = None;
+                } else if todo.completely_blocked.is_some() {
+                    // Complete blockers have no timed review. Existing task
+                    // and todo dependencies remain useful once unblocked.
                     todo.external_blocker = None;
                 }
             }
@@ -2482,6 +2507,7 @@ mod tests {
             })
             .await;
         let item = TodoItem {
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: vec![task.task_id.clone()],
             ..Default::default()
@@ -2497,6 +2523,7 @@ mod tests {
             .is_err()
         );
         let unknown = TodoItem {
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: vec!["missing-task".into()],
             ..Default::default()
@@ -2523,7 +2550,21 @@ mod tests {
                 "closed todos must not arm wakes"
             );
         }
-        prepare_background_dependencies(&manager, &session, &[], std::slice::from_ref(&item))
+        let mut blocked = item.clone();
+        blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            reason: "Required data is permanently unavailable".into(),
+        });
+        prepare_background_dependencies(&manager, &session, &[], std::slice::from_ref(&blocked))
+            .await
+            .unwrap();
+        let delivery = manager.status(&task.task_id).await.unwrap();
+        assert!(
+            !delivery.notify && !delivery.wake,
+            "completely blocked todos must retain dependencies without arming delivery"
+        );
+        // A peer can still need the same task: the completely blocked condition must
+        // not disable delivery for another actionable todo.
+        prepare_background_dependencies(&manager, &session, &[], &[blocked, item.clone()])
             .await
             .unwrap();
         let status = manager.status(&task.task_id).await.unwrap();
@@ -2569,6 +2610,7 @@ mod tests {
         crate::storage::write_json_fast(&path, &state).unwrap();
         let manager = crate::background::BackgroundTaskManager::new();
         let item = TodoItem {
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: vec![id.clone()],
             ..Default::default()
@@ -2579,6 +2621,7 @@ mod tests {
                 .is_err()
         );
         let invalid = TodoItem {
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: vec!["await-unknown-1".into()],
             ..Default::default()
@@ -2685,6 +2728,7 @@ mod tests {
                 content: "old".into(),
                 status: "completed".into(),
                 priority: "high".into(),
+                completely_blocked: None,
                 external_blocker: None,
                 waiting_on: vec!["removed-bg-task".into()],
                 ..Default::default()

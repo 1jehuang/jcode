@@ -105,6 +105,38 @@ Retrying is safe because publication does not overwrite existing files.
 
 ## Saved requirements and environment
 
+### Shared workspace after a group handoff
+
+A migrated group uses one canonical repository root, not a checkout per member.
+Project files, fixed home credentials, saved requirements and the private
+repository-keyed environment are shared. The transfer path can inject
+`cloud_environment::group_migration_guidance(session_id, coordinator_session_id)`:
+the matching coordinator owns workspace setup and resource requests, while
+members use the hydrated environment and report specific missing identifiers
+to that coordinator. Single-session moves retain `migration_guidance`.
+
+Only the coordinator owns any temporary local bridge. Members must not each
+repeat setup, sync, or request a separate local push. The coordinator checks
+actual state, syncs saved requirements once when needed, deduplicates member
+requests, and confirms success before members proceed. This is coordination
+guidance, not an exactly-once setup guarantee or proof of parity. A failed or
+partial setup may need a safe retry. New environment values are visible to
+subsequent tool processes, not processes already running.
+
+Group membership never authorizes a callback. The existing exact session,
+destination, epoch, repository and expiring lease checks still apply. Do not
+copy a coordinator's callback grant to members. Without a callback, the
+coordinator arranges an explicit push from the local source machine.
+
+Concurrent receives acquire a repository-keyed hydration lock before validating
+the payload and publishing resources. Acquisition waits at most five seconds,
+then returns the same nonsecret unavailable status. The separate map locks avoid
+recursive locking. Lock release follows guard drop or process exit, without
+stale lock-file deletion. Repeated pushes remain safe no-clobber operations:
+serialization does not suppress network transfers or cache authorization, and
+each receive revalidates its own lease. It also does not make multi-file writes
+transactional. No secrets or free-text reasons are used as lock names.
+
 `.jcode/cloud-environment.json` contains only typed resource identifiers:
 
 ```json

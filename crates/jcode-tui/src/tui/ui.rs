@@ -2557,7 +2557,7 @@ fn transcript_definitely_overflows(messages: &[DisplayMessage], available_rows: 
         let role = message.effective_role();
         // Tool results can be hidden (notably pinned todos). These three roles
         // do not add the usual inter-message separator either.
-        if rows > 0 && !matches!(role, "tool" | "meta" | "swarm") {
+        if rows > 0 && messages::needs_message_separator(message) {
             rows = rows.saturating_add(1);
         }
         rows = rows.saturating_add(match role {
@@ -2950,11 +2950,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         pinned_width,
         app.centered_mode(),
     ));
-    let swarm_beside_todos = viewport::swarm_beside_pinned_todos(app, pinned_width);
+    let workers_in_todos = viewport::pinned_todos_show_workers(app, pinned_width);
     let swarm_strip_lines: Vec<Line<'static>> = if !swarm_page_active
-        && !swarm_beside_todos
         && app.inline_swarm_gallery_active()
-        && (app.swarm_panel_focused() || !super::info_widget::swarm_strip_stands_down_for_dock())
+        && (app.swarm_panel_focused()
+            || (!workers_in_todos && !super::info_widget::swarm_strip_stands_down_for_dock()))
     {
         let members = app.inline_swarm_members();
         if chat_area.width >= 24 {

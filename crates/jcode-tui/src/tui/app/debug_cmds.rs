@@ -447,6 +447,17 @@ impl App {
                 self.debug_force_inline_gallery = false;
                 self.remote_swarm_members.clear();
                 "OK: inline swarm gallery cleared".to_string()
+            } else if raw.starts_with('[') {
+                match serde_json::from_str::<Vec<crate::protocol::SwarmMemberStatus>>(raw) {
+                    Ok(members) => {
+                        let n = members.len();
+                        self.remote_swarm_members = members;
+                        self.debug_force_inline_gallery = true;
+                        self.refresh_pinned_todos_now();
+                        format!("OK: injected {n} explicit swarm members; gallery forced active")
+                    }
+                    Err(error) => format!("Invalid swarm member fixture: {error}"),
+                }
             } else {
                 let n: usize = raw.parse().unwrap_or(3);
                 let statuses = ["running", "thinking", "ready", "completed", "blocked"];
@@ -848,7 +859,7 @@ impl App {
             let (role, content) = if let Some((r, c)) = raw.split_once(':') {
                 let role = match r {
                     "user" | "assistant" | "system" | "background_task" | "tool" | "error"
-                    | "meta" => r,
+                    | "todos" | "meta" => r,
                     _ => "assistant",
                 };
                 if role == "assistant" && r != "assistant" {
@@ -860,14 +871,19 @@ impl App {
                 ("assistant", raw)
             };
 
-            self.push_display_message(DisplayMessage {
-                role: role.to_string(),
-                content: content.to_string(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            let message = if role == "todos" {
+                DisplayMessage::todos(content)
+            } else {
+                DisplayMessage {
+                    role: role.to_string(),
+                    content: content.to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                }
+            };
+            self.push_display_message(message);
             format!("OK: injected {} message ({} chars)", role, content.len())
         } else if cmd == "scroll-test" || cmd.starts_with("scroll-test:") {
             let raw = cmd.strip_prefix("scroll-test:");

@@ -198,6 +198,11 @@ impl App {
             .map(|member| {
                 let mut agent = crate::tui::ui::TodoCardAgent::from_member(member);
                 agent.shortcut = self.swarm_agent_shortcut_digit(&member.session_id);
+                if jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+                    && let Some(received_at) = self.remote_swarm_members_received_at
+                {
+                    advance_todo_agent_elapsed(&mut agent, received_at.elapsed());
+                }
                 agent
             })
             .filter(|agent| {
@@ -543,6 +548,26 @@ fn todo_card_payload_json_with_agents(
     serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"todos":[],"goals":[]}"#.to_string())
 }
 
+fn advance_todo_agent_elapsed(
+    agent: &mut crate::tui::ui::TodoCardAgent,
+    elapsed: std::time::Duration,
+) {
+    if let Some(live) = &mut agent.live_status {
+        live.elapsed_ms = live
+            .elapsed_ms
+            .saturating_add(elapsed.as_millis().min(u64::MAX as u128) as u64);
+    }
+    for age in [
+        &mut agent.age_secs,
+        &mut agent.activity_age_secs,
+        &mut agent.wait_age_secs,
+    ] {
+        if let Some(age) = age {
+            *age = age.saturating_add(elapsed.as_secs());
+        }
+    }
+}
+
 fn hash_todo_card_agents(agents: &[crate::tui::ui::TodoCardAgent]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for agent in agents {
@@ -551,12 +576,16 @@ fn hash_todo_card_agents(agents: &[crate::tui::ui::TodoCardAgent]) -> u64 {
         agent.status.hash(&mut hasher);
         agent.activity.hash(&mut hasher);
         agent.todo_statuses.hash(&mut hasher);
-        // Minute granularity: the band shows "3m", so finer ages would only
-        // force redraws with no visible change.
-        agent
-            .age_secs
-            .map(|age| if age < 60 { age } else { age / 60 * 60 })
+        agent.wait_reason.hash(&mut hasher);
+        // The wire snapshot is small and includes every visible status field.
+        serde_json::to_string(&agent.live_status)
+            .unwrap_or_default()
             .hash(&mut hasher);
+        // Hash every displayed age, including quiet activity and scoped waits.
+        for age in [agent.age_secs, agent.activity_age_secs, agent.wait_age_secs] {
+            age.map(|age| if age < 60 { age } else { age / 60 * 60 })
+                .hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -648,11 +677,23 @@ fn format_todo_compact_markdown(todo: &TodoItem) -> String {
         .filter(|group| !group.is_empty())
         .map(|group| format!(" _({group})_"))
         .unwrap_or_default();
+    let blocker_detail = if crate::todo::todo_completely_blocked(todo) {
+        let blocker = todo
+            .completely_blocked
+            .as_ref()
+            .expect("validated complete blocker");
+        format!("\n  ✋ **Completely blocked**: {}\n", blocker.reason)
+    } else {
+        String::new()
+    };
     format!(
-        "- {} {}{}\n",
-        status_badge(&todo.status, !todo.blocked_by.is_empty()),
-        todo.content,
-        group
+        "- {} {}{group}{blocker_detail}\n",
+        if crate::todo::todo_completely_blocked(todo) {
+            "✋"
+        } else {
+            status_badge(&todo.status, !todo.blocked_by.is_empty())
+        },
+        todo.content
     )
 }
 
@@ -668,7 +709,7 @@ fn sorted_todos_for_status<'a>(todos: &'a [TodoItem], status: &str) -> Vec<&'a T
 }
 
 fn status_badge(status: &str, blocked: bool) -> &'static str {
-    if blocked && status != "completed" {
+    if blocked && !matches!(status, "completed" | "cancelled") {
         return "[blocked]";
     }
     match status {
@@ -704,6 +745,9 @@ fn hash_todos_payload(
         todo.confidence.hash(&mut hasher);
         todo.completion_confidence.hash(&mut hasher);
         todo.blocked_by.hash(&mut hasher);
+        if let Some(blocker) = &todo.completely_blocked {
+            blocker.reason.hash(&mut hasher);
+        }
         todo.assigned_to.hash(&mut hasher);
         todo.stage.hash(&mut hasher);
     }
@@ -739,6 +783,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn live_status_elapsed_and_tokens_invalidate_pinned_payload() {
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            live_status: Some(crate::protocol::SwarmLiveStatus {
+                phase: "running_tool".into(),
+                elapsed_ms: 12_000,
+                input_tokens: Some(123),
+                ..Default::default()
+            }),
+            activity_age_secs: Some(1),
+            ..Default::default()
+        };
+        let before = hash_todo_card_agents(&[agent.clone()]);
+        advance_todo_agent_elapsed(&mut agent, std::time::Duration::from_secs(5));
+        assert_eq!(agent.live_status.as_ref().unwrap().elapsed_ms, 17_000);
+        assert_eq!(agent.activity_age_secs, Some(6));
+        let later = hash_todo_card_agents(&[agent.clone()]);
+        assert_ne!(before, later);
+        agent.live_status.as_mut().unwrap().output_tokens = Some(456);
+        assert_ne!(later, hash_todo_card_agents(&[agent]));
+    }
+
+    #[test]
     fn shortcut_changes_invalidate_pinned_payload() {
         let mut agent = crate::tui::ui::TodoCardAgent::default();
         agent.shortcut = Some(1);
@@ -754,6 +820,24 @@ mod tests {
         let before = hash_todo_card_agents(&[agent.clone()]);
         agent.todo_statuses.swap(0, 1);
         assert_ne!(before, hash_todo_card_agents(&[agent]));
+    }
+
+    #[test]
+    fn wait_and_activity_changes_invalidate_pinned_payload() {
+        let mut agent = crate::tui::ui::TodoCardAgent::default();
+        let before = hash_todo_card_agents(&[agent.clone()]);
+        agent.wait_reason = Some("Waiting for build".into());
+        let waiting = hash_todo_card_agents(&[agent.clone()]);
+        assert_ne!(before, waiting);
+        agent.wait_age_secs = Some(120);
+        let aged = hash_todo_card_agents(&[agent.clone()]);
+        assert_ne!(waiting, aged);
+        agent.wait_age_secs = Some(125);
+        assert_eq!(aged, hash_todo_card_agents(&[agent.clone()]));
+        agent.activity_age_secs = Some(180);
+        assert_ne!(aged, hash_todo_card_agents(&[agent.clone()]));
+        agent.wait_reason = None;
+        assert_ne!(waiting, hash_todo_card_agents(&[agent]));
     }
 
     /// Plan-level intent used by the view tests.
@@ -784,11 +868,38 @@ mod tests {
                 .map(crate::todo::ConfidenceState::from_legacy_score),
             confidence_history: Vec::new(),
             external_blocker: None,
+            completely_blocked: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
             stage: None,
             details: None,
+        }
+    }
+
+    #[test]
+    fn complete_blocker_panel_preserves_reason_and_invalidates_cache() {
+        let mut item = todo("1", "Connect", "pending", "high", None, None);
+        let before = hash_todos_payload(None, &[item.clone()], &plan(), &[]);
+        item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            reason: "Only the account owner can grant access.\nKeep this entire explanation."
+                .into(),
+        });
+        let after = hash_todos_payload(None, &[item.clone()], &plan(), &[]);
+        assert_ne!(before, after);
+        let markdown = format_todo_compact_markdown(&item);
+        assert!(markdown.contains("✋"));
+        assert!(markdown.contains("Completely blocked"));
+        assert!(!markdown.contains("Approve access"));
+        assert!(markdown.contains("Keep this entire explanation."));
+        item.completely_blocked.as_mut().unwrap().reason.push('!');
+        assert_ne!(
+            after,
+            hash_todos_payload(None, &[item.clone()], &plan(), &[])
+        );
+        for status in ["completed", "cancelled"] {
+            item.status = status.into();
+            assert!(!format_todo_compact_markdown(&item).contains("✋"));
         }
     }
 

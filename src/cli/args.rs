@@ -285,7 +285,11 @@ pub(crate) enum Command {
     Repl,
 
     /// Update jcode to the latest version
-    Update,
+    Update {
+        /// Persist an update channel (stable permits returning from preview).
+        #[arg(long, value_parser = ["preview", "stable"])]
+        channel: Option<String>,
+    },
 
     /// Show build/version information in human or JSON form
     Version {
@@ -748,6 +752,10 @@ pub(crate) enum CloudCommand {
         json: bool,
     },
 
+    /// Internal: report the supported coordinated migration protocol.
+    #[command(hide = true)]
+    GroupProtocol,
+
     /// Replace the cloud checkout with this local Git repository, keeping a backup.
     /// Does not move a conversation or copy authentication or ignored files.
     Replace {
@@ -779,6 +787,12 @@ pub(crate) enum CloudCommand {
         /// Session ID or name. Defaults to the session this command runs in.
         #[arg(long)]
         session: Option<String>,
+        /// Include another independent session sharing this repository (repeatable).
+        #[arg(long = "include-session", conflicts_with = "session_only")]
+        include_sessions: Vec<String>,
+        /// Move only this session instead of its associated swarm.
+        #[arg(long)]
+        session_only: bool,
         #[command(flatten)]
         target: CloudMoveTarget,
         /// Allow moving while the session is mid-turn (the agent itself runs /cloud).

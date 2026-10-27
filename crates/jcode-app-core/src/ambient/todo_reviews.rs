@@ -31,6 +31,7 @@ fn reconcile_items(items: &mut Vec<ScheduledItem>, session_id: &str, todos: &[To
         .iter()
         .filter(|todo| {
             is_incomplete_todo(todo)
+                && !crate::todo::todo_completely_blocked(todo)
                 && todo
                     .external_blocker
                     .as_ref()
@@ -99,6 +100,7 @@ pub fn scheduled_todo_review_is_current(item: &ScheduledItem) -> bool {
             todos.iter().any(|todo| {
                 todo.id == *todo_id
                     && is_incomplete_todo(todo)
+                    && !crate::todo::todo_completely_blocked(todo)
                     && todo.external_blocker.as_ref() == Some(blocker)
                     && !blocker.reason.trim().is_empty()
                     && blocker.review_at <= chrono::Utc::now()

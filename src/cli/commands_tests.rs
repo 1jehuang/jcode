@@ -609,6 +609,67 @@ fn dependency_todo(id: &str, dependencies: &[&str]) -> crate::todo::TodoItem {
 }
 
 #[tokio::test]
+async fn completely_blocked_cli_pauses_without_review_and_keeps_peers_actionable() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+    let mut blocked = dependency_todo("blocked", &[]);
+    blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        reason: "Required source data no longer exists".into(),
+    });
+    let (actionable, resumed) =
+        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
+    assert!(actionable.is_empty());
+    assert!(resumed.is_none());
+    let notice = run_blocked_notice(&[blocked.clone()]).unwrap();
+    assert_eq!(
+        notice,
+        "✋ Completely blocked. No way forward.\nblocked: Required source data no longer exists"
+    );
+    assert!(!notice.contains("review deadline"));
+    assert!(run_external_blocker_notice(&[blocked.clone()]).is_none());
+
+    let independent = dependency_todo("independent", &[]);
+    let all = vec![blocked.clone(), independent];
+    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &all, true).await;
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(actionable[0].id, "independent");
+    let poke = run_actionable_poke_message("original".into(), &all, &actionable);
+    assert!(poke.contains("independent"));
+    assert!(!poke.contains("Required source data"));
+
+    blocked.completely_blocked = None;
+    let (actionable, _) =
+        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(actionable[0].status, "pending");
+    assert!(run_completely_blocked_notice(&[blocked]).is_none());
+}
+
+#[test]
+fn completely_blocked_cli_ignores_terminal_tasks_and_keeps_external_notice() {
+    let mut blocked = dependency_todo("blocked", &[]);
+    blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        reason: "Required source data no longer exists".into(),
+    });
+    let mut external = dependency_todo("service", &[]);
+    external.external_blocker = Some(crate::todo::TodoExternalBlocker {
+        reason: "Service is unavailable".into(),
+        review_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+    });
+    let notice = run_blocked_notice(&[blocked.clone(), external]).unwrap();
+    assert!(notice.contains("Completely blocked. No way forward."));
+    assert!(notice.contains("Service is unavailable"));
+    for status in ["completed", "cancelled"] {
+        blocked.status = status.into();
+        assert!(run_completely_blocked_notice(&[blocked.clone()]).is_none());
+        assert_eq!(
+            run_actionable_todos(&[blocked.clone()], &[], "owner").len(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
 async fn external_blocker_cli_suppresses_only_blocked_work_and_reports_durable_review() {
     let temp = tempfile::tempdir().unwrap();
     let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());

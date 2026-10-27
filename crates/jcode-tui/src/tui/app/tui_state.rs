@@ -823,6 +823,10 @@ impl crate::tui::TuiState for App {
         self.pinned_todos_expanded
     }
 
+    fn justrust_status(&self) -> Option<&crate::tui::justrust_status::StatusRow> {
+        self.justrust_status.row()
+    }
+
     fn background_task_rows(&self) -> &[crate::tui::BackgroundTaskRow] {
         self.background_task_rows_ref()
     }
@@ -1866,10 +1870,12 @@ impl crate::tui::TuiState for App {
                                 if super::service_tier_display_label(reported) == label {
                                     requested
                                 } else {
-                                    format!("{label} requested, provider reports {reported} (unconfirmed)")
+                                    // Keep the raw report: a generic `default`
+                                    // response tier is not a throughput measurement.
+                                    format!("{reported} ← {label}")
                                 }
                             }
-                            _ => format!("{label} requested (unconfirmed)"),
+                            _ => format!("{label} ?"),
                         }
                     })
             },

@@ -50,10 +50,37 @@ fn age_marker(age: u64) -> String {
     }
 }
 
-/// Build the body lines shown inside a member's viewport. Prefers live streamed
-/// output (the tail) when present; otherwise surfaces the latest detail plus a
-/// status-age hint.
+/// Display-only status. Explicit waits do not change worker lifecycle state.
+pub(super) fn member_display_status(member: &SwarmMemberStatus) -> &str {
+    if is_active_status(&member.status) && member.runtime.wait_reason.is_some() {
+        "waiting"
+    } else {
+        &member.status
+    }
+}
+
+pub(super) fn member_wait_note(member: &SwarmMemberStatus) -> Option<String> {
+    if member_display_status(member) != "waiting" {
+        return None;
+    }
+    let reason = member.runtime.wait_reason.as_deref()?;
+    let mut note = reason
+        .lines()
+        .next()
+        .unwrap_or("waiting")
+        .trim()
+        .to_string();
+    if let Some(age) = member.runtime.wait_age_secs.filter(|age| *age >= 2) {
+        note.push_str(&format!(" · {}", humanize_age(age)));
+    }
+    Some(note)
+}
+
+/// Show scoped waits before stale output, otherwise prefer streamed text.
 fn member_body(member: &SwarmMemberStatus) -> Vec<String> {
+    if let Some(note) = member_wait_note(member) {
+        return vec![note];
+    }
     // Live streamed output wins: show the worker's in-progress assistant text.
     if let Some(tail) = member.output_tail.as_ref().filter(|t| !t.trim().is_empty()) {
         let mut body: Vec<String> = tail.lines().map(|l| l.to_string()).collect();
@@ -79,7 +106,7 @@ pub(crate) fn members_to_gallery(members: &[SwarmMemberStatus]) -> Vec<GalleryMe
         .map(|member| GalleryMember {
             label: member_label(member),
             icon: member_icon(member),
-            status: member.status.clone(),
+            status: member_display_status(member).to_string(),
             task: member.task_label.clone(),
             role: member.role.clone(),
             body: member_body(member),
@@ -645,6 +672,21 @@ mod tests {
             todo_items: Vec::new(),
             runtime: crate::protocol::SwarmMemberRuntime::default(),
         }
+    }
+
+    #[test]
+    fn gallery_wait_overrides_stale_output_and_preserves_lifecycle() {
+        let mut worker = member("fox", "running", None, None);
+        worker.output_tail = Some("Previous output".into());
+        worker.runtime.wait_reason = Some("Waiting for task".into());
+        worker.runtime.wait_age_secs = Some(12);
+        let gallery = members_to_gallery(&[worker.clone()]);
+        assert_eq!(gallery[0].status, "waiting");
+        assert_eq!(gallery[0].body, ["Waiting for task · 12s"]);
+        assert_eq!(status_glyph(&gallery[0].status, 0), "◷");
+        worker.status = "failed".into();
+        assert_eq!(member_display_status(&worker), "failed");
+        assert!(member_wait_note(&worker).is_none());
     }
 
     #[test]

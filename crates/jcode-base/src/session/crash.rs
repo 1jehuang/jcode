@@ -1,4 +1,4 @@
-use super::{Session, SessionStatus, active_pids_dir, session_exists};
+use super::{Session, SessionStatus, active_pids_dir, session_exists, session_path};
 use crate::id::extract_session_name;
 use crate::message::{ContentBlock, Role};
 use crate::storage;
@@ -586,30 +586,22 @@ fn resolve_imported_snapshot_id(provider_id: &str) -> Option<String> {
 }
 
 /// Find a session by ID, memorable name, generated title, or custom rename.
-/// If the input doesn't load as a full session ID, scan recent session snapshots
-/// and return the newest matching short name/title.
+/// Existing exact snapshot IDs are resolved without reading their contents.
+/// The authoritative session load still validates snapshots and replays journals.
+/// Otherwise scan recent session snapshots for the newest matching name/title.
 /// Returns the full session ID if found.
 pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
-    // Try loading directly first so stable imported IDs like `imported_codex_*`
-    // or other explicit session ids can be resumed without going through the
-    // short-name matcher. Every `--resume` (including each client re-exec in a
-    // reload storm) runs this, so validate with the metadata-only startup stub:
-    // a full load deserializes the whole transcript (0.4-0.6s for a 35MB
-    // session) just to discard it. Fall back to the full load for its error.
-    if Session::load_startup_stub(name_or_id).is_ok() {
+    // IDs are filename stems, never paths. Titles containing separators remain
+    // searchable, but cannot escape the sessions directory via exact lookup.
+    let is_stem = !name_or_id.is_empty()
+        && name_or_id != "."
+        && name_or_id != ".."
+        && !name_or_id.contains(['/', '\\', '\0']);
+    // Resolution is not validation. Reading a multi-MB snapshot here repeats
+    // startup metadata reads and server restore, and can trigger client-side
+    // backup recovery. Leave corruption detection to the authoritative load.
+    if is_stem && session_path(name_or_id)?.is_file() {
         return Ok(name_or_id.to_string());
-    }
-    match Session::load(name_or_id) {
-        Ok(_) => return Ok(name_or_id.to_string()),
-        Err(e) => {
-            if session_exists(name_or_id) {
-                anyhow::bail!(
-                    "Session '{}' exists but failed to load (possibly corrupt):\n  {}",
-                    name_or_id,
-                    e
-                );
-            }
-        }
     }
 
     // A *bare* external provider id (e.g. an OpenCode `ses_...` or a Codex/Claude
@@ -617,7 +609,10 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
     // `imported_<tool>_<id>` stem. Resolve to that snapshot before falling back to
     // re-importing from the external tool's storage, which fails outright once the
     // user has removed/reinstalled that tool (issue #336).
-    if let Some(imported_id) = resolve_imported_snapshot_id(name_or_id) {
+    if let Some(imported_id) = is_stem
+        .then(|| resolve_imported_snapshot_id(name_or_id))
+        .flatten()
+    {
         return Ok(imported_id);
     }
 
@@ -688,6 +683,26 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
 mod batch_crash_tests {
     use super::*;
 
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl HomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.0 {
+                crate::env::set_var("JCODE_HOME", previous);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+
     #[test]
     fn test_crashed_sessions_info_struct() {
         let info = CrashedSessionsInfo {
@@ -741,6 +756,120 @@ mod batch_crash_tests {
         );
 
         crate::env::remove_var("JCODE_HOME");
+    }
+
+    #[test]
+    fn exact_resume_resolution_defers_corruption_to_authoritative_load() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        std::fs::create_dir_all(temp.path().join("sessions"))?;
+        for id in ["session_corrupt_1770000000000", "imported_codex_corrupt"] {
+            let path = session_path(id)?;
+            std::fs::write(&path, b"not JSON")?;
+            assert_eq!(find_session_by_name_or_id(id)?, id);
+            assert!(
+                Session::load(id).is_err(),
+                "authoritative load must reject corruption"
+            );
+            assert_eq!(std::fs::read(&path)?, b"not JSON");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exact_resume_resolution_rejects_paths_and_directories() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        std::fs::create_dir_all(temp.path().join("sessions"))?;
+        std::fs::write(temp.path().join("outside.json"), b"{}")?;
+        std::fs::create_dir(temp.path().join("sessions/session_directory_1770000000000"))?;
+        std::fs::create_dir(
+            temp.path()
+                .join("sessions/session_directory_1770000000000.json"),
+        )?;
+        for query in [
+            "../outside".to_string(),
+            temp.path().join("outside").to_string_lossy().into_owned(),
+            "..\\outside".to_string(),
+            "session_directory_1770000000000".to_string(),
+        ] {
+            assert!(
+                find_session_by_name_or_id(&query).is_err(),
+                "accepted {query:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exact_resume_resolution_preserves_journal_freshness() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        let id = "session_resume_journal_1770000000000";
+        let mut session = Session::create_with_id(id.to_string(), None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "x".repeat(1024 * 1024),
+                cache_control: None,
+            }],
+        );
+        session.save()?;
+        let snapshot = std::fs::read(session_path(id)?)?;
+        session.custom_title = Some("Newest journal title".to_string());
+        session.status = SessionStatus::Closed;
+        session.save()?;
+        assert_eq!(std::fs::read(session_path(id)?)?, snapshot);
+        assert_eq!(find_session_by_name_or_id(id)?, id);
+        let loaded = Session::load(id)?;
+        assert_eq!(loaded.custom_title.as_deref(), Some("Newest journal title"));
+        assert!(matches!(loaded.status, SessionStatus::Closed));
+        let stub = Session::load_startup_stub(id)?;
+        assert_eq!(stub.custom_title, loaded.custom_title);
+        assert_eq!(find_session_by_name_or_id("Newest journal title")?, id);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "read-only real local corpus benchmark, requires JCODE_RESUME_BENCH_IDS"]
+    fn benchmark_exact_resume_resolution_real_corpus() -> anyhow::Result<()> {
+        // Run alone with --local and --ignored --nocapture. Never save, restore,
+        // clear caches, or call the full loader (which may recover a backup).
+        // This measures resolution helpers only, NOT end-to-end TUI startup.
+        let ids = std::env::var("JCODE_RESUME_BENCH_IDS")?;
+        for id in ids.split(',') {
+            let path = session_path(id)?;
+            let before = std::fs::metadata(&path)?;
+            let mut old_us = Vec::new();
+            let mut new_us = Vec::new();
+            for _ in 0..9 {
+                let start = std::time::Instant::now();
+                assert!(Session::load_startup_stub(id).is_ok());
+                old_us.push(start.elapsed().as_micros());
+                let start = std::time::Instant::now();
+                assert_eq!(find_session_by_name_or_id(id)?, id);
+                new_us.push(start.elapsed().as_micros());
+            }
+            let after = std::fs::metadata(&path)?;
+            assert_eq!(before.len(), after.len());
+            assert_eq!(before.modified()?, after.modified()?);
+            let first_baseline_us = old_us[0];
+            old_us.sort_unstable();
+            new_us.sort_unstable();
+            println!(
+                "resolution_helper id={id} bytes={} samples=9 baseline_stub_us_p50={} pmax={} exact_stat_us_p50={} pmax={} first_baseline_us={} cache=uncontrolled_no_eviction",
+                before.len(),
+                old_us[4],
+                old_us[8],
+                new_us[4],
+                new_us[8],
+                first_baseline_us
+            );
+        }
+        Ok(())
     }
 
     #[test]

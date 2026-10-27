@@ -1234,7 +1234,7 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
     ];
     let wide = render_todo_item_line_with_background(&todo, &[], &tasks, "", 160);
     let text = extract_line_text(&wide);
-    assert!(text.contains("🕒"), "{text}");
+    assert!(text.contains("◷"), "{text}");
     assert!(!text.contains('○'), "{text}");
     assert!(text.contains("构建 🦀") && text.contains("tests"), "{text}");
     assert!(text.contains('▰') && text.contains('▱'), "{text}");
@@ -1251,7 +1251,7 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
         "",
         80,
     ));
-    assert!(!resolved.contains("🕒") && !resolved.contains('%'));
+    assert!(!resolved.contains("◷") && !resolved.contains('%'));
     assert!(resolved.contains('○'));
     for status in ["completed", "cancelled"] {
         let mut done = todo.clone();
@@ -1263,8 +1263,74 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
             "",
             80,
         ));
-        assert!(!text.contains("🕒") && !text.contains('%'));
+        assert!(!text.contains("◷") && !text.contains('%'));
     }
+}
+
+#[test]
+fn complete_blocker_row_precedes_background_clock_and_preserves_reason() {
+    let mut todo = crate::todo::TodoItem {
+        id: "user".into(),
+        content: "Connect account".into(),
+        status: "in_progress".into(),
+        waiting_on: vec!["build".into()],
+        completely_blocked: Some(crate::todo::TodoCompleteBlocker {
+            reason: "Only you can authorize\nthis account ✋".into(),
+        }),
+        ..Default::default()
+    };
+    let tasks = [TodoCardBackgroundTask {
+        task_id: "build".into(),
+        label: "Build".into(),
+        percent: Some(50.0),
+    }];
+    let wide = render_todo_item_line_with_background(&todo, &[], &tasks, "", 240).to_string();
+    assert!(wide.contains("✋"));
+    assert!(wide.contains("Completely blocked: Only you can authorize this account ✋"));
+    assert!(wide.contains("Only you can authorize this account ✋"));
+    assert!(!wide.contains('◷'));
+    assert!(!wide.contains('\n'));
+    for width in 0..140 {
+        let row = render_todo_item_line_with_background(&todo, &[], &tasks, "", width);
+        assert!(row.width() <= width, "{width}: {row:?}");
+    }
+    todo.completely_blocked = None;
+    assert!(
+        render_todo_item_line_with_background(&todo, &[], &tasks, "", 240)
+            .to_string()
+            .contains('◷')
+    );
+    todo.waiting_on.clear();
+    assert!(
+        !render_todo_card_item_line(&todo, "", 240)
+            .to_string()
+            .contains("Completely blocked")
+    );
+    for status in ["completed", "cancelled"] {
+        todo.status = status.into();
+        todo.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            reason: "Only you".into(),
+        });
+        assert!(
+            !render_todo_card_item_line(&todo, "", 240)
+                .to_string()
+                .contains("✋")
+        );
+    }
+}
+
+#[test]
+fn complete_blocker_detail_displays_reason_without_user_action_framing() {
+    let todo = crate::todo::TodoItem {
+        completely_blocked: Some(crate::todo::TodoCompleteBlocker {
+            reason: "No way forward.".into(),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        todo_complete_blocker_detail(&todo),
+        "Completely blocked: No way forward."
+    );
 }
 
 #[test]
@@ -1327,7 +1393,7 @@ fn background_dependency_indeterminate_progress_is_not_fabricated() {
         "",
         80,
     ));
-    assert!(text.contains("🕒") && text.contains("running"));
+    assert!(text.contains("◷") && text.contains("running"));
     assert!(!text.contains('%'));
 }
 
@@ -1354,7 +1420,7 @@ fn background_dependency_clock_and_progress_render_in_flat_and_stage_cards() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            text.contains("🕒") && text.contains("build") && text.contains('%'),
+            text.contains("◷") && text.contains("build") && text.contains('%'),
             "{text}"
         );
         for width in 20..100 {
@@ -1383,6 +1449,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
                 .then_some(crate::todo::ConfidenceState::from_legacy_score(95)),
             confidence_history: Vec::new(),
             external_blocker: None,
+            completely_blocked: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
@@ -1465,6 +1532,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(80),
@@ -1526,6 +1594,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1611,6 +1680,7 @@ fn render_todos_message_uses_readable_semantic_colors() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1799,6 +1869,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         completion_confidence: Some(crate::todo::ConfidenceState::Validated),
         confidence_history: Vec::new(),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1853,6 +1924,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1896,6 +1968,7 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1966,6 +2039,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(92)),
         completion_confidence: None,
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(85),

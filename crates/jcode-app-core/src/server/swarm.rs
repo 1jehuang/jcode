@@ -776,16 +776,17 @@ async fn broadcast_swarm_status_now(
                 .filter(|m| member_in_status_broadcast(m, broadcast_terminal_retention))
                 .map(|m| {
                     let tokens = crate::session_metrics::token_totals(&m.session_id);
+                    let wait = crate::wait_registry::current(&m.session_id);
                     let context_limit = m
                         .runtime
                         .model
                         .as_deref()
                         .and_then(crate::provider::models::context_limit_for_model)
                         .map(|limit| limit as u64);
-                    (m, tokens, context_limit)
+                    (m, tokens, context_limit, wait)
                 })
                 .map(
-                    |(m, tokens, context_limit)| crate::protocol::SwarmMemberStatus {
+                    |(m, tokens, context_limit, wait)| crate::protocol::SwarmMemberStatus {
                         session_id: m.session_id.clone(),
                         friendly_name: m.friendly_name.clone(),
                         status: m.status.clone(),
@@ -800,6 +801,19 @@ async fn broadcast_swarm_status_now(
                         todo_progress: m.todo_progress,
                         todo_items: m.todo_items.clone(),
                         runtime: crate::protocol::SwarmMemberRuntime {
+                            live_status: super::live_status::snapshot(&m.session_id),
+                            wait_reason: wait.as_ref().map(|(reason, _)| reason.clone()).or_else(
+                                || {
+                                    (!matches!(
+                                        m.status.as_str(),
+                                        "running" | "streaming" | "thinking"
+                                    ))
+                                    .then(|| m.runtime.todo_blocked_reason.clone())
+                                    .flatten()
+                                },
+                            ),
+                            wait_age_secs: wait.map(|(_, age)| age),
+                            todo_blocked_reason: m.runtime.todo_blocked_reason.clone(),
                             todo_statuses: m.runtime.todo_statuses.clone(),
                             model: m.runtime.model.clone(),
                             provider: m.runtime.provider.clone(),
@@ -831,6 +845,46 @@ async fn broadcast_swarm_status_now(
     };
     for sid in session_ids {
         let _ = fanout_session_event(swarm_members, &sid, event.clone()).await;
+    }
+}
+
+/// Publish wait transitions immediately and refresh elapsed wait ages while a
+/// session is parked, even when it emits no tokens or tool progress events.
+pub(super) async fn monitor_wait_status(
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) {
+    let mut changes = crate::wait_registry::subscribe_changes();
+    let mut live_changes = super::live_status::subscribe_changes();
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut previous = HashSet::<String>::new();
+    loop {
+        tokio::select! {
+            result = changes.changed() => if result.is_err() { return; },
+            result = live_changes.changed() => if result.is_err() { return; },
+            _ = interval.tick() => {},
+        }
+        let current: HashSet<_> = crate::wait_registry::session_ids().into_iter().collect();
+        let affected: HashSet<_> = {
+            let members = swarm_members.read().await;
+            previous
+                .union(&current)
+                .filter_map(|sid| members.get(sid).and_then(|member| member.swarm_id.clone()))
+                .chain(
+                    members
+                        .values()
+                        .filter(|member| {
+                            matches!(member.status.as_str(), "running" | "streaming" | "thinking")
+                        })
+                        .filter_map(|member| member.swarm_id.clone()),
+                )
+                .collect()
+        };
+        previous = current;
+        for swarm_id in affected {
+            broadcast_swarm_status(&swarm_id, &swarm_members, &swarms_by_id).await;
+        }
     }
 }
 
@@ -1149,6 +1203,7 @@ pub(super) async fn remove_session_from_swarm(
     )
     .await;
     remove_plan_participant(swarm_id, session_id, swarm_plans).await;
+    super::live_status::forget(session_id);
 
     {
         let mut swarms = swarms_by_id.write().await;
@@ -1346,6 +1401,10 @@ fn member_awaits_unrestored_notice(member: &SwarmMember) -> bool {
             detail.contains(super::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE)
                 && !detail.contains(super::swarm_persistence::OWNER_NOTIFIED_NOTE)
         })
+        // Shutdown can leave a ready snapshot even for work that has a durable
+        // continuation. Startup will restore that worker, so don't tell its
+        // coordinator it had no work in flight and needs replacing.
+        && !super::reload_recovery::has_pending_for_session(&member.session_id)
 }
 
 /// Tell `owner_session_id` about idle headless workers that the last server
@@ -1356,12 +1415,20 @@ fn member_awaits_unrestored_notice(member: &SwarmMember) -> bool {
 /// worker has nothing to re-attach, so without this its coordinator only
 /// learns it is gone by polling the member list. Called when a session attaches
 /// (subscribe or resume): workers that report back to it, or whose swarm it
-/// coordinates, are listed in one swarm notification and marked notified so
-/// the notice is delivered once. Returns the number of workers reported.
+/// coordinates, are listed in one model-facing interrupt and a best-effort UI
+/// notification. Acknowledge only accepted model delivery, so an unavailable
+/// owner can retry on reconnect. Returns the number of workers reported.
 pub(super) async fn notify_owner_of_unrestored_idle_workers(
     owner_session_id: &str,
     swarm_state: &SwarmState,
+    sessions: &super::SessionAgents,
+    soft_interrupt_queues: &super::SessionInterruptQueues,
 ) -> usize {
+    // Concurrent subscribe/resume requests must not both observe an unnotified
+    // worker before either has queued its interrupt. This lock is independent
+    // of the swarm snapshot lock, which persistence acquires below.
+    static NOTICE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _notice_guard = NOTICE_LOCK.lock().await;
     let coordinated_swarms: HashSet<String> = {
         let coordinators = swarm_state.coordinators.read().await;
         coordinators
@@ -1371,12 +1438,12 @@ pub(super) async fn notify_owner_of_unrestored_idle_workers(
             .collect()
     };
     let (owner_name, reported) = {
-        let mut members = swarm_state.members.write().await;
+        let members = swarm_state.members.read().await;
         let owner_name = members
             .get(owner_session_id)
             .and_then(|member| member.friendly_name.clone());
         let mut reported: Vec<(String, String, Option<String>)> = Vec::new();
-        for member in members.values_mut() {
+        for member in members.values() {
             if member.session_id == owner_session_id || !member_awaits_unrestored_notice(member) {
                 continue;
             }
@@ -1390,11 +1457,6 @@ pub(super) async fn notify_owner_of_unrestored_idle_workers(
             if !(owned_by_report_back || owned_by_coordination) {
                 continue;
             }
-            member.detail = Some(format!(
-                "{} ({})",
-                member.detail.as_deref().unwrap_or_default(),
-                super::swarm_persistence::OWNER_NOTIFIED_NOTE
-            ));
             reported.push((
                 member.session_id.clone(),
                 member
@@ -1428,6 +1490,32 @@ pub(super) async fn notify_owner_of_unrestored_idle_workers(
              They had no work in flight. Spawn replacements if you still need them."
         )
     };
+    if !super::queue_soft_interrupt_for_session(
+        owner_session_id,
+        message.clone(),
+        false,
+        jcode_agent_runtime::SoftInterruptSource::System,
+        soft_interrupt_queues,
+        sessions,
+    )
+    .await
+    {
+        return 0;
+    }
+    {
+        let mut members = swarm_state.members.write().await;
+        for (session_id, _, _) in &reported {
+            if let Some(member) = members.get_mut(session_id)
+                && member_awaits_unrestored_notice(member)
+            {
+                member.detail = Some(format!(
+                    "{} ({})",
+                    member.detail.as_deref().unwrap_or_default(),
+                    super::swarm_persistence::OWNER_NOTIFIED_NOTE
+                ));
+            }
+        }
+    }
     crate::logging::info(&format!(
         "Notifying {owner_session_id} of {count} idle headless worker(s) not restored after restart: {names}"
     ));
@@ -1640,6 +1728,22 @@ pub(super) async fn update_member_status_with_report_tldr(
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;
+            if status_changed
+                || detail_changed
+                || super::live_status::snapshot(session_id).is_none()
+            {
+                if matches!(status, "running" | "streaming" | "thinking") {
+                    if !matches!(
+                        previous_status.as_str(),
+                        "running" | "streaming" | "thinking"
+                    ) || super::live_status::snapshot(session_id).is_none()
+                    {
+                        super::live_status::begin(session_id);
+                    }
+                } else {
+                    super::live_status::finish(session_id, status, detail.as_deref());
+                }
+            }
             let report_changed =
                 completion_report.is_some() && member.latest_completion_report != completion_report;
             let member_changed = status_changed || detail_changed || report_changed;
@@ -1993,11 +2097,11 @@ fn parse_swarm_tasks(text: &str) -> Vec<SwarmTaskSpec> {
 mod tests {
     use super::{
         broadcast_swarm_plan, broadcast_swarm_plan_with_previous, broadcast_swarm_status,
-        member_in_status_broadcast, member_status_is_dead, now_unix_ms, parse_swarm_tasks,
-        refresh_swarm_task_staleness, remove_session_from_swarm,
-        salvage_assignments_of_dead_member, swarm_ancestors, swarm_is_self_or_ancestor,
-        swarm_spawn_depth, touch_swarm_task_progress, update_member_status,
-        update_member_status_with_report,
+        broadcast_swarm_status_now, member_in_status_broadcast, member_status_is_dead,
+        monitor_wait_status, now_unix_ms, parse_swarm_tasks, refresh_swarm_task_staleness,
+        remove_session_from_swarm, salvage_assignments_of_dead_member, swarm_ancestors,
+        swarm_is_self_or_ancestor, swarm_spawn_depth, touch_swarm_task_progress,
+        update_member_status, update_member_status_with_report,
     };
     use crate::plan::PlanItem;
     use crate::protocol::{NotificationType, ServerEvent};
@@ -2083,6 +2187,196 @@ mod tests {
             },
             event_rx,
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_status_fanout_projects_worker_events_into_broadcast() {
+        let sid = "live-status-projection-worker";
+        let (worker, mut rx) = swarm_member(sid, "agent", true);
+        let members = Arc::new(RwLock::new(HashMap::from([(sid.to_string(), worker)])));
+        let swarms = Arc::new(RwLock::new(HashMap::from([(
+            "swarm-1".into(),
+            HashSet::from([sid.to_string()]),
+        )])));
+        update_member_status(sid, "running", None, &members, &swarms, None, None, None).await;
+        for event in [
+            ServerEvent::ConnectionType {
+                connection: "sse".into(),
+            },
+            ServerEvent::ConnectionPhase {
+                phase: "streaming".into(),
+            },
+            ServerEvent::TokenUsage {
+                input: 123,
+                output: 45,
+                cache_read_input: Some(999),
+                cache_creation_input: None,
+            },
+            ServerEvent::ToolStart {
+                id: "call".into(),
+                name: "bash".into(),
+            },
+            ServerEvent::ToolInput {
+                id: Some("call".into()),
+                delta: r#"{"intent":"Check telemetry"}"#.into(),
+            },
+            ServerEvent::ToolExec {
+                id: "call".into(),
+                name: "bash".into(),
+            },
+        ] {
+            super::super::fanout_session_event(&members, sid, event).await;
+        }
+        super::broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let mut projected = None;
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::SwarmStatus { members } = event {
+                projected = members[0].runtime.live_status.clone();
+            }
+        }
+        let live = projected.expect("live status included in actual wire event");
+        assert_eq!(live.phase, "running_tool");
+        assert_eq!(live.input_tokens, Some(123));
+        assert_eq!(live.output_tokens, Some(45));
+        assert_eq!(live.connection_type.as_deref(), Some("sse"));
+        assert_eq!(live.tool_intent.as_deref(), Some("Check telemetry"));
+        let monitor = tokio::spawn(super::monitor_wait_status(members.clone(), swarms.clone()));
+        // Consume the initial timer snapshot, then require a usage transition
+        // to publish before the next one-second refresh.
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        super::super::fanout_session_event(
+            &members,
+            sid,
+            ServerEvent::TokenUsage {
+                input: 124,
+                output: 46,
+                cache_read_input: None,
+                cache_creation_input: None,
+            },
+        )
+        .await;
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if let Some(ServerEvent::SwarmStatus { members }) = rx.recv().await {
+                    if members[0]
+                        .runtime
+                        .live_status
+                        .as_ref()
+                        .and_then(|s| s.input_tokens)
+                        == Some(124)
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("usage change broadcasts immediately rather than waiting for heartbeat");
+        monitor.abort();
+        update_member_status(
+            sid,
+            "stopped",
+            Some("User requested stop".into()),
+            &members,
+            &swarms,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let stopped = super::super::live_status::snapshot(sid).unwrap();
+        assert_eq!(stopped.phase, "stopped");
+        assert_eq!(stopped.stop_reason.as_deref(), Some("User requested stop"));
+        assert!(stopped.tool_name.is_none());
+        update_member_status(
+            sid,
+            "stopped",
+            Some("Owner intervention needed".into()),
+            &members,
+            &swarms,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            super::super::live_status::snapshot(sid)
+                .unwrap()
+                .stop_reason
+                .as_deref(),
+            Some("Owner intervention needed")
+        );
+        // Late queued events cannot revive the finished turn.
+        super::super::fanout_session_event(
+            &members,
+            sid,
+            ServerEvent::TextDelta {
+                text: "late".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            super::super::live_status::snapshot(sid).unwrap().phase,
+            "stopped"
+        );
+        super::super::live_status::begin(sid);
+        let restarted = super::super::live_status::snapshot(sid).unwrap();
+        assert!(restarted.connection_type.is_none());
+        assert!(restarted.input_tokens.is_none());
+        let mut todos = crate::bus::TodoEvent {
+            session_id: sid.into(),
+            todos: vec![crate::todo::TodoItem {
+                id: "login".into(),
+                content: "Authenticate".into(),
+                status: "pending".into(),
+                completely_blocked: Some(crate::todo::TodoCompleteBlocker {
+                    reason: "Required data is permanently unavailable".into(),
+                }),
+                ..Default::default()
+            }],
+        };
+        super::super::background_tasks::dispatch_swarm_todo_progress(&todos, &members, &swarms)
+            .await;
+        update_member_status(sid, "ready", None, &members, &swarms, None, None, None).await;
+        super::broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let latest = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                ServerEvent::SwarmStatus { members } => Some(members[0].runtime.clone()),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        assert!(
+            latest
+                .wait_reason
+                .as_deref()
+                .unwrap()
+                .contains("Required data is permanently unavailable")
+        );
+        assert_eq!(latest.todo_statuses, vec!["completely_blocked"]);
+        todos.todos.push(crate::todo::TodoItem {
+            id: "independent".into(),
+            content: "Run tests".into(),
+            status: "in_progress".into(),
+            ..Default::default()
+        });
+        super::super::background_tasks::dispatch_swarm_todo_progress(&todos, &members, &swarms)
+            .await;
+        update_member_status(sid, "running", None, &members, &swarms, None, None, None).await;
+        super::broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let latest = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                ServerEvent::SwarmStatus { members } => Some(members[0].runtime.clone()),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        assert!(latest.wait_reason.is_none());
+        assert_eq!(latest.live_status.unwrap().phase, "sending");
+        super::super::live_status::forget(sid);
     }
 
     fn member_with_parent(session_id: &str, parent: Option<&str>) -> SwarmMember {
@@ -2847,10 +3141,32 @@ mod tests {
             HashMap::from([("swarm-1".to_string(), "coord".to_string())]),
         );
 
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let queue: jcode_agent_runtime::SoftInterruptQueue = Default::default();
+        let queues = Arc::new(RwLock::new(HashMap::from([(
+            "coord".to_string(),
+            queue.clone(),
+        )])));
         assert_eq!(
-            super::notify_owner_of_unrestored_idle_workers("coord", &swarm_state).await,
+            super::notify_owner_of_unrestored_idle_workers(
+                "coord",
+                &swarm_state,
+                &sessions,
+                &queues
+            )
+            .await,
             1
         );
+        {
+            let pending = queue.lock().unwrap();
+            assert_eq!(pending.len(), 1);
+            assert!(pending[0].content.contains("butterfly"));
+            assert!(!pending[0].content.contains("stranger"));
+            assert_eq!(
+                pending[0].source,
+                jcode_agent_runtime::SoftInterruptSource::System
+            );
+        }
         let notices: Vec<String> = std::iter::from_fn(|| coord_rx.try_recv().ok())
             .filter_map(|event| match event {
                 ServerEvent::Notification { message, .. } => Some(message),
@@ -2863,7 +3179,13 @@ mod tests {
 
         // Delivered once: a later reattach does not repeat it.
         assert_eq!(
-            super::notify_owner_of_unrestored_idle_workers("coord", &swarm_state).await,
+            super::notify_owner_of_unrestored_idle_workers(
+                "coord",
+                &swarm_state,
+                &sessions,
+                &queues
+            )
+            .await,
             0
         );
         let members = swarm_state.members.read().await;
@@ -2874,6 +3196,215 @@ mod tests {
                 .and_then(|m| m.detail.as_deref())
                 .is_some_and(|d| !d.contains("owner notified"))
         );
+    }
+
+    #[tokio::test]
+    async fn unrestored_notice_retries_model_delivery_despite_available_ui() {
+        let owner_id = "unrestored-notice-retry-owner";
+        let (state, mut ui_rx) = unrestored_notice_state(owner_id);
+        let sessions = Default::default();
+        let queues = Default::default();
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            0
+        );
+        assert!(ui_rx.try_recv().is_err());
+        assert!(super::member_awaits_unrestored_notice(
+            &state.members.read().await["recovery-worker"]
+        ));
+
+        // Reconnect registers the model queue. The earlier failed delivery
+        // must not have consumed the durable recovery marker.
+        let queue: jcode_agent_runtime::SoftInterruptQueue = Default::default();
+        queues
+            .write()
+            .await
+            .insert(owner_id.to_string(), queue.clone());
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            1
+        );
+        assert_eq!(queue.lock().unwrap().len(), 1);
+    }
+
+    fn unrestored_notice_state(
+        owner_id: &str,
+    ) -> (
+        crate::server::SwarmState,
+        tokio::sync::mpsc::UnboundedReceiver<ServerEvent>,
+    ) {
+        let swarm_id = format!("swarm-{owner_id}");
+        let (mut owner, owner_rx) = swarm_member(owner_id, "coordinator", false);
+        owner.swarm_id = Some(swarm_id.clone());
+        let (mut worker, _worker_rx) = swarm_member("recovery-worker", "agent", true);
+        worker.swarm_id = Some(swarm_id.clone());
+        worker.status = "stopped".to_string();
+        worker.detail =
+            Some(crate::server::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE.to_string());
+        // Exercise the coordinator fallback when no explicit report-back
+        // owner survived in a legacy snapshot.
+        worker.report_back_to_session_id = None;
+        (
+            crate::server::SwarmState::new(
+                HashMap::from([
+                    (owner_id.to_string(), owner),
+                    ("recovery-worker".to_string(), worker),
+                ]),
+                HashMap::from([(
+                    swarm_id.clone(),
+                    HashSet::from([owner_id.to_string(), "recovery-worker".to_string()]),
+                )]),
+                HashMap::new(),
+                HashMap::from([(swarm_id, owner_id.to_string())]),
+            ),
+            owner_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn unrestored_notice_concurrent_reconnects_queue_once_without_ui() {
+        let owner_id = "unrestored-notice-concurrent-owner";
+        let (state, ui_rx) = unrestored_notice_state(owner_id);
+        drop(ui_rx);
+        let sessions = Default::default();
+        let queue: jcode_agent_runtime::SoftInterruptQueue = Default::default();
+        let queues = Arc::new(RwLock::new(HashMap::from([(
+            owner_id.to_string(),
+            queue.clone(),
+        )])));
+        let (first, second) = tokio::join!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues),
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues),
+        );
+        assert_eq!(first + second, 1);
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        assert!(!super::member_awaits_unrestored_notice(
+            &state.members.read().await["recovery-worker"]
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn unrestored_notice_ignores_worker_with_pending_recovery_intent() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let owner_id = "unrestored-notice-pending-owner";
+        let (state, mut ui_rx) = unrestored_notice_state(owner_id);
+        let worker_id = "pending-recovery-worker";
+        {
+            let mut members = state.members.write().await;
+            let mut worker = members.remove("recovery-worker").unwrap();
+            worker.session_id = worker_id.to_string();
+            members.insert(worker_id.to_string(), worker);
+        }
+        let sessions = Default::default();
+        let queue: jcode_agent_runtime::SoftInterruptQueue = Default::default();
+        let queues = Arc::new(RwLock::new(HashMap::from([(
+            owner_id.to_string(),
+            queue.clone(),
+        )])));
+        crate::server::reload_recovery::persist_intent(
+            "reload-notice-pending",
+            worker_id,
+            crate::server::reload_recovery::ReloadRecoveryRole::Headless,
+            crate::tool::selfdev::ReloadRecoveryDirective {
+                reconnect_notice: None,
+                continuation_message: "Continue interrupted work".to_string(),
+            },
+            "work in flight before shutdown",
+        )
+        .unwrap();
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            0
+        );
+        assert!(queue.lock().unwrap().is_empty());
+        assert!(ui_rx.try_recv().is_err());
+        let members = state.members.read().await;
+        assert_eq!(
+            members[worker_id].detail.as_deref(),
+            Some(crate::server::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE)
+        );
+        assert!(crate::server::reload_recovery::has_pending_for_session(
+            worker_id
+        ));
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn unrestored_notice_persists_for_owner_without_live_agent() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let owner_id = "unrestored-notice-durable-owner";
+        crate::session::Session::create_with_id(owner_id.to_string(), None, None)
+            .save_prepared()
+            .unwrap();
+        let (state, ui_rx) = unrestored_notice_state(owner_id);
+        drop(ui_rx);
+        let sessions = Default::default();
+        let queues = Default::default();
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            1
+        );
+        let pending = crate::soft_interrupt_store::load(owner_id).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].content.contains("recovery-worker"));
+        assert_eq!(
+            pending[0].source,
+            jcode_agent_runtime::SoftInterruptSource::System
+        );
+        // Rebuild the worker from the persisted swarm snapshot as a second
+        // restart would. A reconnect must not append another deferred notice.
+        let snapshot =
+            crate::server::swarm_persistence::read_transfer_snapshot(&format!("swarm-{owner_id}"))
+                .unwrap()
+                .unwrap();
+        let worker = snapshot
+            .members
+            .into_iter()
+            .find(|member| member.record.session_id == "recovery-worker")
+            .unwrap();
+        let recovered = crate::server::swarm_persistence::from_persisted_member(
+            worker,
+            snapshot.updated_at_unix_ms,
+            snapshot.updated_at_unix_ms,
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        assert!(!super::member_awaits_unrestored_notice(&recovered));
+        state
+            .members
+            .write()
+            .await
+            .insert("recovery-worker".to_string(), recovered);
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            0
+        );
+        assert_eq!(
+            crate::soft_interrupt_store::load(owner_id).unwrap().len(),
+            1
+        );
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[tokio::test]
@@ -2987,6 +3518,92 @@ mod tests {
                 .and_then(|member| member.runtime.elapsed_secs),
             Some(frozen)
         );
+    }
+
+    #[tokio::test]
+    async fn wait_monitor_publishes_entry_age_and_cleanup_without_tool_events() {
+        let sid = "wait_monitor_worker";
+        let swarm_id = "wait_monitor_swarm";
+        let (mut worker, mut rx) = swarm_member(sid, "agent", true);
+        worker.swarm_id = Some(swarm_id.into());
+        worker.status = "running".into();
+        let members = Arc::new(RwLock::new(HashMap::from([(sid.into(), worker)])));
+        let swarms = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.into(),
+            HashSet::from([sid.into()]),
+        )])));
+        let monitor = tokio::spawn(monitor_wait_status(members, swarms));
+        let guard = crate::wait_registry::register(sid, "Waiting for build");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ServerEvent::SwarmStatus { members }) = rx.recv().await {
+                    if members.iter().any(|member| {
+                        member.runtime.wait_reason.as_deref() == Some("Waiting for build")
+                    }) {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ServerEvent::SwarmStatus { members }) = rx.recv().await {
+                    if members
+                        .iter()
+                        .any(|member| member.runtime.wait_age_secs.is_some_and(|age| age >= 1))
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ServerEvent::SwarmStatus { members }) = rx.recv().await {
+                    if members.iter().all(|member| {
+                        member.runtime.wait_reason.is_none()
+                            && member.runtime.wait_age_secs.is_none()
+                    }) {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        monitor.abort();
+        let _ = monitor.await;
+    }
+
+    #[tokio::test]
+    async fn wait_metadata_snapshots_are_live_and_clear_after_completion() {
+        let sid = "snapshot_wait_metadata";
+        let (mut worker, mut rx) = swarm_member(sid, "agent", true);
+        worker.runtime.wait_reason = Some("stale persisted wait".into());
+        worker.runtime.wait_age_secs = Some(999);
+        let members = Arc::new(RwLock::new(HashMap::from([(sid.to_string(), worker)])));
+        let guard = crate::wait_registry::register(sid, "Waiting for background task");
+        broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let ServerEvent::SwarmStatus { members: snapshot } = rx.try_recv().unwrap() else {
+            panic!("expected swarm status");
+        };
+        assert_eq!(
+            snapshot[0].runtime.wait_reason.as_deref(),
+            Some("Waiting for background task")
+        );
+        assert_eq!(snapshot[0].runtime.wait_age_secs, Some(0));
+        drop(guard);
+        broadcast_swarm_status_now(vec![sid.into()], &members).await;
+        let ServerEvent::SwarmStatus { members: snapshot } = rx.try_recv().unwrap() else {
+            panic!("expected swarm status");
+        };
+        assert_eq!(snapshot[0].runtime.wait_reason, None);
+        assert_eq!(snapshot[0].runtime.wait_age_secs, None);
     }
 
     #[tokio::test]

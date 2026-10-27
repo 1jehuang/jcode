@@ -87,6 +87,7 @@ fn refresh_todo_card_updates_content_when_todos_change() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -135,6 +136,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -196,6 +198,7 @@ fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoI
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -780,4 +783,84 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
             .contains("\"failed\"")
     );
     let _ = crate::todo::save_todos(&session_id, &[]);
+}
+
+#[test]
+fn pinned_todo_live_status_is_full_width_without_passive_gallery() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let mut item = pinned_band_todo("a", "Verify live status", "in_progress");
+    item.stage = Some(1);
+    item.group = Some("validation".into());
+    item.assigned_to = Some("session_fox_1700000000".into());
+    crate::todo::save_todos(&app.session.id, &[item]).unwrap();
+    app.remote_swarm_members =
+        vec![
+        serde_json::from_value(serde_json::json!({
+            "session_id":"session_fox_1700000000", "friendly_name":"fox", "status":"running",
+            "runtime":{"live_status":{"phase":"running_tool", "elapsed_ms":12300,
+                "input_tokens":12345,"output_tokens":456,"connection_type":"https/sse",
+                "tool_name":"bash","tool_intent":"Verify live status"}}
+        })).unwrap(),
+        serde_json::from_value(serde_json::json!({
+            "session_id":"session_raccoon_1700000001", "friendly_name":"raccoon", "status":"running"
+        })).unwrap(),
+    ];
+    app.refresh_pinned_todos_now();
+    let (rows, _) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 160, 40);
+    let text = rows
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("↑12k ↓456") && text.contains("https") && text.contains("12s"),
+        "{text}"
+    );
+    assert!(
+        !text.contains('🦝'),
+        "Unassigned passive gallery must not appear: {text}"
+    );
+    assert!(rows.iter().all(|row| row.width() <= 160));
+    // Focus remains a separate interactive control surface, not a second passive list.
+    app.swarm_enabled = true;
+    app.debug_force_inline_gallery = true;
+    app.swarm_panel_focused = true;
+    let backend = ratatui::backend::TestBackend::new(160, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let focused = render_and_snap(&app, &mut terminal);
+    assert!(
+        focused.contains('🦝'),
+        "Focused worker navigation must remain available: {focused}"
+    );
+    crate::todo::save_todos(&app.session.id, &[]).unwrap();
+}
+
+#[test]
+fn debug_inject_todos_preserves_role_and_renders_fixture() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let mut app = create_test_app();
+    let payload = serde_json::json!({"todos":[{"id":"debug", "content":"Authorize", "status":"pending", "priority":"high", "completely_blocked":{"reason":"Only the owner can approve"}}]});
+    let response = app.handle_debug_command(&format!("inject:todos:{payload}"));
+    assert!(
+        response.starts_with("OK: injected todos message"),
+        "{response}"
+    );
+    let message = app.display_messages.last().unwrap();
+    assert_eq!(message.role, "todos");
+    assert_eq!(message.title.as_deref(), Some("Todos"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&message.content).unwrap(),
+        payload
+    );
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(
+        text.contains("✋") && text.contains("Completely blocked"),
+        "{text}"
+    );
 }

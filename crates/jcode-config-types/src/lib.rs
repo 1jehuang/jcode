@@ -288,6 +288,8 @@ pub enum UpdateChannel {
     /// Only update from tagged GitHub Releases (default).
     #[default]
     Stable,
+    /// Opt in to published v1.0.0-preview.N prereleases.
+    Preview,
     /// Update from latest commit on main branch (bleeding edge).
     Main,
 }
@@ -297,6 +299,7 @@ impl UpdateChannel {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "stable" | "release" => Some(Self::Stable),
+            "preview" => Some(Self::Preview),
             "main" | "nightly" | "edge" => Some(Self::Main),
             _ => None,
         }
@@ -323,6 +326,7 @@ impl std::fmt::Display for UpdateChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Stable => write!(f, "stable"),
+            Self::Preview => write!(f, "preview"),
             Self::Main => write!(f, "main"),
         }
     }
@@ -1238,7 +1242,7 @@ pub struct FeatureConfig {
     /// classified as misses. Harness changes without a documented cause raise a
     /// warning, while explained misses are informational (default: true).
     pub kv_cache_miss_notices: bool,
-    /// Update channel: "stable" (releases only) or "main" (latest commits)
+    /// Update channel: "stable" (default), "preview" (v1 previews), or "main" (latest commits).
     pub update_channel: UpdateChannel,
 }
 
@@ -1630,8 +1634,7 @@ mod reasoning_display_defaults_tests {
         assert_eq!(config.reactive_threshold_tokens, 400_000);
         assert_eq!(config.proactive_floor, 0.40);
         assert_eq!(config.proactive_floor_tokens, 150_000);
-        let parsed: CompactionConfig =
-            serde_json::from_str(r#"{"proactive_floor":0.15}"#).unwrap();
+        let parsed: CompactionConfig = serde_json::from_str(r#"{"proactive_floor":0.15}"#).unwrap();
         assert_eq!(parsed.proactive_floor, 0.15);
         assert_eq!(parsed.proactive_floor_tokens, 150_000);
         assert_eq!(parsed.reactive_threshold, 0.80);

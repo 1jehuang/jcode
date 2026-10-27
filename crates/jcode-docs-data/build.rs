@@ -33,7 +33,9 @@ fn main() {
     generated.push_str("];\n");
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("jcode_docs.rs");
-    fs::write(out, generated).expect("write generated Jcode documentation corpus");
+    if fs::read_to_string(&out).ok().as_deref() != Some(&generated) {
+        fs::write(out, generated).expect("write generated Jcode documentation corpus");
+    }
 }
 
 fn slash_path(path: &Path) -> String {

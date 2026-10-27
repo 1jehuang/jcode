@@ -609,23 +609,6 @@ fn collect_transport_context_labels(
     labels
 }
 
-fn transport_context_labels(app: &dyn TuiState) -> Vec<String> {
-    collect_transport_context_labels(
-        app.status_detail()
-            .and_then(|detail| normalize_status_detail(&detail)),
-        app.connection_type()
-            .map(|conn| display_connection_type(&conn))
-            .filter(|conn| !conn.is_empty()),
-        app.upstream_provider(),
-    )
-}
-
-fn append_transport_context(status_text: &mut String, app: &dyn TuiState) {
-    for label in transport_context_labels(app) {
-        status_text.push_str(&format!(" · {}", label));
-    }
-}
-
 fn streaming_liveness_label(
     time_str: String,
     stale_secs: Option<f32>,
@@ -683,6 +666,153 @@ fn append_batch_progress_spans(
             format!(" · last done: {}", tool_name),
             Style::default().fg(dim_color()),
         ));
+    }
+}
+
+/// Shared by the open session status line and its lightweight todo-lane observer.
+/// No provider or worker state is inferred here: absent telemetry stays absent.
+pub(super) fn live_processing_status_line(
+    status: &crate::protocol::SwarmLiveStatus,
+    stale_secs: Option<f32>,
+    spinner: &'static str,
+) -> Line<'static> {
+    let single_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let elapsed = format_elapsed(status.elapsed_ms as f32 / 1000.0);
+    let transport = collect_transport_context_labels(
+        status
+            .status_detail
+            .as_deref()
+            .and_then(normalize_status_detail),
+        status
+            .connection_type
+            .as_deref()
+            .map(display_connection_type),
+        None,
+    );
+    let tokens = match (status.input_tokens, status.output_tokens) {
+        (None, None) => None,
+        (input, output) => Some(format!(
+            "↑{} ↓{}",
+            input
+                .map(format_stream_tokens)
+                .unwrap_or_else(|| "?".into()),
+            output
+                .map(format_stream_tokens)
+                .unwrap_or_else(|| "?".into())
+        )),
+    };
+    let mut spans = match status.phase.as_str() {
+        "running" => {
+            let mut spans = vec![
+                Span::styled(spinner, Style::default().fg(ai_color())),
+                Span::styled(
+                    format!(" working… {elapsed}"),
+                    Style::default().fg(dim_color()),
+                ),
+            ];
+            if let Some(activity) = &status.tool_intent {
+                spans.push(Span::styled(
+                    format!(" · {}", single_line(activity)),
+                    Style::default().fg(ai_color()),
+                ));
+            }
+            spans
+        }
+        "running_tool" => running_tool_header_spans(
+            spinner,
+            &single_line(status.tool_name.as_deref().unwrap_or("tool")),
+            status.tool_intent.as_deref().map(single_line).as_deref(),
+            ai_color(),
+        ),
+        "streaming" => {
+            let mut label =
+                streaming_liveness_label(elapsed.clone(), stale_secs, status.stream_message_ended);
+            if let Some(tps) = status.output_tps_milli {
+                label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
+            }
+            streaming_status_spans(spinner, label, status.stream_message_ended, false, "")
+        }
+        "sending" | "thinking" | "connecting" => {
+            let label = if status.phase == "connecting" {
+                match status.connection_phase.as_deref().unwrap_or("connecting") {
+                    "authenticating" => "refreshing auth",
+                    "sending_request" => "sending context",
+                    "waiting_for_response" => "waiting for response",
+                    phase => phase,
+                }
+            } else {
+                status.phase.as_str()
+            };
+            vec![
+                Span::styled(spinner, Style::default().fg(ai_color())),
+                Span::styled(
+                    format!(" {}… {elapsed}", single_line(label)),
+                    Style::default().fg(dim_color()),
+                ),
+            ]
+        }
+        _ => {
+            let reason = status
+                .stop_reason
+                .as_deref()
+                .or(status.status_detail.as_deref())
+                .unwrap_or(match status.phase.as_str() {
+                    "completed" | "done" => "completed",
+                    "failed" | "crashed" => "failed",
+                    "stopped" => "stopped",
+                    "cancelled" => "cancelled",
+                    "waiting" => "waiting",
+                    "blocked" => "blocked",
+                    "waiting_network" => "network disconnected, waiting to retry",
+                    "ready" => "ready",
+                    "queued" => "queued",
+                    _ => "idle",
+                });
+            let glyph = match status.phase.as_str() {
+                "completed" | "done" => "✓",
+                "failed" | "crashed" => "✗",
+                "waiting" => "◷",
+                "blocked" => "⊘",
+                _ => "◼",
+            };
+            return Line::from(vec![Span::styled(
+                format!("{glyph} {} · {elapsed}", single_line(reason)),
+                Style::default().fg(rgb(225, 165, 90)),
+            )]);
+        }
+    };
+    if let Some(tokens) = tokens {
+        spans.push(Span::styled(
+            format!(" · {tokens}"),
+            Style::default().fg(dim_color()),
+        ));
+    }
+    for label in transport {
+        spans.push(Span::styled(
+            format!(" · {}", single_line(&label)),
+            Style::default().fg(dim_color()),
+        ));
+    }
+    if status.phase == "running_tool" {
+        spans.push(Span::styled(
+            format!(" · {elapsed}"),
+            Style::default().fg(dim_color()),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn live_status_snapshot(app: &dyn TuiState, elapsed: f32) -> crate::protocol::SwarmLiveStatus {
+    let (input, output) = app.streaming_tokens();
+    crate::protocol::SwarmLiveStatus {
+        elapsed_ms: (elapsed * 1000.0) as u64,
+        input_tokens: Some(input),
+        output_tokens: Some(output),
+        output_tps_milli: app.output_tps().map(|tps| (tps * 1000.0) as u64),
+        connection_type: app.connection_type(),
+        status_detail: app.status_detail(),
+        stream_message_ended: app.stream_message_ended(),
+        ..Default::default()
     }
 }
 
@@ -759,23 +889,16 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         match app.status() {
             ProcessingStatus::Idle => Line::from(""),
             ProcessingStatus::Sending => {
-                let mut spans = vec![
-                    Span::styled(spinner, Style::default().fg(ai_color())),
-                    Span::styled(
-                        format!(" sending… {}", format_elapsed(elapsed)),
-                        Style::default().fg(dim_color()),
-                    ),
-                ];
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "sending".into();
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
                 push_queued_suffix(&mut spans, &queued_suffix);
                 Line::from(spans)
             }
             ProcessingStatus::Connecting(ref phase) => {
-                let mut label = format!(
-                    " {}… {}",
-                    connection_phase_label(phase),
-                    format_elapsed(elapsed)
-                );
-                append_transport_context(&mut label, app);
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "connecting".into();
+                snapshot.connection_phase = Some(connection_phase_label(phase));
                 // "Suspiciously long" is measured per connection attempt, not
                 // across the whole turn, so later round-trips don't immediately
                 // render yellow just because the turn has been running a while.
@@ -795,41 +918,30 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     }
                     _ => dim_color(),
                 };
-                let mut spans = vec![
-                    Span::styled(spinner, Style::default().fg(ai_color())),
-                    Span::styled(label, Style::default().fg(label_color)),
-                ];
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
+                if let Some(label) = spans.get_mut(1) {
+                    label.style = label.style.fg(label_color);
+                }
                 push_queued_suffix(&mut spans, &queued_suffix);
                 Line::from(spans)
             }
             ProcessingStatus::Thinking(_start) => {
-                let mut label = format!(" thinking… {}", format_elapsed(elapsed));
-                append_transport_context(&mut label, app);
-                let mut spans = vec![
-                    Span::styled(spinner, Style::default().fg(ai_color())),
-                    Span::styled(label, Style::default().fg(dim_color())),
-                ];
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "thinking".into();
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
                 push_queued_suffix(&mut spans, &queued_suffix);
                 Line::from(spans)
             }
             ProcessingStatus::Streaming => {
-                let time_str = format_elapsed(elapsed);
-                let (input_tokens, output_tokens) = app.streaming_tokens();
-                let stream_message_ended = app.stream_message_ended();
-                let mut status_text =
-                    streaming_liveness_label(time_str, stale_secs, stream_message_ended);
-                if let Some(tps) = app.output_tps() {
-                    status_text = format!("{} · {:.1} tps", status_text, tps);
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "streaming".into();
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
+                if let Some(upstream) = app.upstream_provider() {
+                    spans.push(Span::styled(
+                        format!(" · via {upstream}"),
+                        Style::default().fg(dim_color()),
+                    ));
                 }
-                if input_tokens > 0 || output_tokens > 0 {
-                    status_text = format!(
-                        "{} · ↑{} ↓{}",
-                        status_text,
-                        format_stream_tokens(input_tokens),
-                        format_stream_tokens(output_tokens)
-                    );
-                }
-                append_transport_context(&mut status_text, app);
                 if let Some(problem) = kv_cache_problem {
                     let miss_tokens = problem.affected_tokens.unwrap_or(0);
                     let miss_str = if miss_tokens >= 1000 {
@@ -839,15 +951,15 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     } else {
                         "kv".to_string()
                     };
-                    status_text = format!("⚠ {} cache miss · {}", miss_str, status_text);
+                    spans.insert(
+                        1,
+                        Span::styled(
+                            format!(" ⚠ {miss_str} cache miss ·"),
+                            Style::default().fg(rgb(255, 193, 7)),
+                        ),
+                    );
                 }
-                let spans = streaming_status_spans(
-                    spinner,
-                    status_text,
-                    stream_message_ended,
-                    kv_cache_problem.is_some(),
-                    &queued_suffix,
-                );
+                push_queued_suffix(&mut spans, &queued_suffix);
                 Line::from(spans)
             }
             ProcessingStatus::WaitingForNetwork { listener } => {
@@ -890,8 +1002,11 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 let experimental_notice = app.active_experimental_feature_notice();
                 let subagent = app.subagent_status();
 
-                let mut spans =
-                    running_tool_header_spans(spinner, name, tool_detail.as_deref(), anim_color);
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "running_tool".into();
+                snapshot.tool_name = Some(name.clone());
+                snapshot.tool_intent = tool_detail;
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
 
                 // For batch tool: show "completed/total · last_tool" progress
                 if is_batch {
@@ -916,16 +1031,15 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                         Style::default().fg(dim_color()),
                     ));
                 }
-                for label in transport_context_labels(app) {
+                for label in app
+                    .upstream_provider()
+                    .map(|provider| format!("via {provider}"))
+                {
                     spans.push(Span::styled(
                         format!(" · {}", label),
                         Style::default().fg(dim_color()),
                     ));
                 }
-                spans.push(Span::styled(
-                    format!(" · {}", format_elapsed(elapsed)),
-                    Style::default().fg(dim_color()),
-                ));
 
                 if let Some(problem) = kv_cache_problem {
                     let miss_tokens = problem.affected_tokens.unwrap_or(0);
@@ -1060,6 +1174,47 @@ fn streaming_status_spans(
 mod tests {
     use super::*;
     use ratatui::style::Modifier;
+
+    #[test]
+    fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
+        let mut status = crate::protocol::SwarmLiveStatus {
+            phase: "running_tool".into(),
+            elapsed_ms: 12_300,
+            input_tokens: Some(12_345),
+            output_tokens: Some(456),
+            connection_type: Some("websocket/persistent-reuse".into()),
+            tool_name: Some("bash".into()),
+            tool_intent: Some("Verify 界\noutput".into()),
+            ..Default::default()
+        };
+        let line = live_processing_status_line(&status, Some(0.0), "⠋");
+        let text = line.to_string();
+        assert!(text.contains("running bash · Verify 界 output"), "{text}");
+        assert!(
+            text.contains("↑12k ↓456")
+                && text.contains("existing websocket")
+                && text.contains("12s"),
+            "{text}"
+        );
+        assert_eq!(line.spans[0].style.fg, Some(ai_color()));
+        assert!(!text.contains('\n'));
+        status.phase = "streaming".into();
+        status.output_tps_milli = Some(12_500);
+        assert!(
+            live_processing_status_line(&status, None, "⠋")
+                .to_string()
+                .contains("12.5 tps")
+        );
+        status.input_tokens = None;
+        status.output_tokens = None;
+        status.connection_type = None;
+        let text = live_processing_status_line(&status, None, "⠋").to_string();
+        assert!(!text.contains('↑') && !text.contains("websocket"));
+        status.phase = "stopped".into();
+        status.stop_reason = Some("Rate limit\nretry later".into());
+        let text = live_processing_status_line(&status, None, "⠋").to_string();
+        assert!(text.contains("Rate limit retry later") && !text.contains('⠋'));
+    }
 
     #[test]
     fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {

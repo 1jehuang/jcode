@@ -383,18 +383,15 @@ pub fn verify_asset_checksum_text(contents: &str, asset_name: &str, bytes: &[u8]
 }
 
 pub fn version_is_newer(release: &str, current: &str) -> bool {
-    let parse = |v: &str| -> (u32, u32, u32) {
-        let v = v.trim_start_matches('v');
-        let parts: Vec<&str> = v.split('.').collect();
-        let major = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let minor = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let patch = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-        (major, minor, patch)
+    let parse = |value: &str| semver::Version::parse(value.strip_prefix('v').unwrap_or(value));
+    let (Ok(release), Ok(current)) = (parse(release), parse(current)) else {
+        // Never install based on a partially parsed or unknown identity.
+        return false;
     };
-
-    let r = parse(release);
-    let c = parse(current);
-    r > c
+    // Ord includes build metadata as a deterministic tie-breaker, but update
+    // identity uses SemVer precedence: identical versions with +metadata are
+    // the same release.
+    release.cmp_precedence(&current).is_gt()
 }
 
 pub fn format_download_progress_bar(progress: DownloadProgress) -> String {
@@ -442,6 +439,40 @@ mod tests {
     fn version_comparison_works() {
         assert!(version_is_newer("v0.2.0", "0.1.9"));
         assert!(!version_is_newer("v0.1.0", "0.1.0"));
+    }
+
+    #[test]
+    fn update_versions_follow_semver_precedence_not_build_metadata() {
+        for (release, current) in [
+            ("v1.0.0-preview.10", "1.0.0-preview.9"),
+            ("v1.0.0", "1.0.0-preview.10"),
+            ("v1.0.0-preview.1", "0.99.999"),
+            ("v1.1.0", "1.0.99"),
+            ("v2.0.0", "1.99.99"),
+        ] {
+            assert!(version_is_newer(release, current), "{release} > {current}");
+            assert!(!version_is_newer(current, release), "{current} < {release}");
+        }
+        for (release, current) in [
+            ("v1.0.0-preview.9+build.2", "1.0.0-preview.9+build.1"),
+            ("v1.0.0-preview.9", "1.0.0-preview.9+abc"),
+            ("v1.0.0+build.2", "1.0.0+build.1"),
+        ] {
+            assert!(!version_is_newer(release, current));
+            assert!(!version_is_newer(current, release));
+        }
+        for malformed in [
+            "",
+            "unknown",
+            "main-abcdef0",
+            "vv1.0.0",
+            "1.0",
+            "1.0.x",
+            "1.0.0-preview.01",
+        ] {
+            assert!(!version_is_newer(malformed, "0.1.0"), "{malformed}");
+            assert!(!version_is_newer("1.0.0", malformed), "{malformed}");
+        }
     }
 
     /// Every UI surface renders these on one line, so the summary must stay

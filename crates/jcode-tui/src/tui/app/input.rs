@@ -1581,7 +1581,7 @@ impl App {
         if self.has_pending_user_followup() {
             return false;
         }
-        if self.all_open_todos_wait_on_background_tasks() {
+        if self.all_open_todos_are_paused() {
             self.last_auto_poke_fingerprint = None;
             self.auto_poke_attempts = 0;
             return false;
@@ -1636,12 +1636,12 @@ impl App {
         let incomplete: Vec<_> = todos
             .iter()
             .filter(|todo| super::commands::is_incomplete_poke_todo(todo))
-            .filter(|todo| !self.todo_waits_on_background_task(todo))
+            .filter(|todo| !self.todo_is_paused_for_auto_followup(todo))
             .cloned()
             .collect();
         if incomplete.is_empty() && todos.iter().any(super::commands::is_incomplete_poke_todo) {
-            // Completion delivery owns the next wake. Waiting is not resistance
-            // and must not spend either the work or assessment review budget.
+            // User-only blockers and live waits are neither resistance nor
+            // completion. Do not spend work or assessment review budgets.
             self.last_auto_poke_fingerprint = None;
             self.auto_poke_attempts = 0;
             return false;
@@ -1883,7 +1883,7 @@ impl App {
         let incomplete: Vec<_> = super::commands::poke_todos(self)
             .into_iter()
             .filter(super::commands::is_incomplete_poke_todo)
-            .filter(|todo| !self.todo_waits_on_background_task(todo))
+            .filter(|todo| !self.todo_is_paused_for_auto_followup(todo))
             .collect();
         if incomplete.is_empty() {
             return None;

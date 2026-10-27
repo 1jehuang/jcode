@@ -518,10 +518,10 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
     out
 }
 
-/// KV cache notices describe the response directly above them, so render
-/// them as a dim `╰` corner hanging off that response rather than a
-/// standalone notice that reads as a header for what follows.
-fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'static>>> {
+fn kv_cache_footer_body(msg: &DisplayMessage) -> Option<&str> {
+    if msg.effective_role() != "system" {
+        return None;
+    }
     let content = msg.content.trim();
     let body = content
         .trim_start_matches("⚠️")
@@ -530,11 +530,28 @@ fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'
     if !(body.starts_with("KV cache miss") || body.starts_with("KV cache refresh")) {
         return None;
     }
-    let warn = content.starts_with("⚠️");
+    Some(body)
+}
+
+/// Cache diagnostics belong to the preceding message, not a new transcript block.
+pub(super) fn is_kv_cache_footer(msg: &DisplayMessage) -> bool {
+    kv_cache_footer_body(msg).is_some()
+}
+
+/// Keep the same separator policy in full/incremental layout and overflow estimates.
+pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
+    !matches!(msg.effective_role(), "tool" | "meta" | "swarm") && !is_kv_cache_footer(msg)
+}
+
+/// KV cache notices hang directly off the preceding response. Amber distinguishes
+/// misses from ordinary dim timing metadata, matching the cache widget.
+fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'static>>> {
+    let body = kv_cache_footer_body(msg)?;
+    let is_miss = body.starts_with("KV cache miss");
     let summary = kv_cache_footer_summary(body);
     let body = summary.as_deref().unwrap_or(body);
-    let prefix = "╰ ";
-    let max = (width as usize).saturating_sub(prefix.len() + 1).max(1);
+    let prefix = if width >= 2 { "╰ " } else { "" };
+    let max = (width as usize).saturating_sub(unicode_width::UnicodeWidthStr::width(prefix));
     let text = if unicode_width::UnicodeWidthStr::width(body) > max {
         let mut out = String::new();
         let mut used = 0;
@@ -546,13 +563,15 @@ fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'
             used += w;
             out.push(ch);
         }
-        out.push('…');
+        if max > 0 {
+            out.push('…');
+        }
         out
     } else {
         body.to_string()
     };
-    let color = if warn {
-        system_message_color()
+    let color = if is_miss || msg.content.trim().starts_with("⚠️") {
+        Color::Rgb(255, 200, 100)
     } else {
         dim_color()
     };
@@ -1594,6 +1613,28 @@ fn render_todos_message_with_cap(
         }
     }
 
+    for todo in todos
+        .iter()
+        .filter(|todo| crate::todo::todo_completely_blocked(todo))
+    {
+        for chunk in wrap_todo_detail(
+            &format!(
+                "✋ {}: {}",
+                todo.content,
+                todo_complete_blocker_detail(todo)
+            ),
+            inner_width.max(1),
+        ) {
+            lines.push(todo_card_line(
+                vec![Span::styled(
+                    chunk,
+                    Style::default().fg(todo_warning_color()),
+                )],
+                base_indent,
+                inner_width,
+            ));
+        }
+    }
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
@@ -1788,16 +1829,32 @@ fn push_todo_status_pips<'a>(
     todos: impl IntoIterator<Item = &'a crate::todo::TodoItem>,
     max_pips: usize,
 ) {
-    let (completed, in_progress, total) =
-        todos
-            .into_iter()
-            .fold((0usize, 0usize, 0usize), |counts, todo| {
-                (
-                    counts.0 + usize::from(todo.status == "completed"),
-                    counts.1 + usize::from(todo.status == "in_progress"),
-                    counts.2 + 1,
-                )
-            });
+    let todos: Vec<_> = todos.into_iter().collect();
+    let mut max_pips = max_pips;
+    // The two-cell hand takes priority over ordinary progress at narrow widths.
+    for _ in todos
+        .iter()
+        .filter(|todo| crate::todo::todo_completely_blocked(todo))
+    {
+        if max_pips < 2 {
+            break;
+        }
+        spans.push(Span::styled(
+            "✋",
+            Style::default().fg(todo_warning_color()),
+        ));
+        max_pips -= 2;
+    }
+    let (completed, in_progress, total) = todos
+        .into_iter()
+        .filter(|todo| !crate::todo::todo_completely_blocked(todo))
+        .fold((0usize, 0usize, 0usize), |counts, todo| {
+            (
+                counts.0 + usize::from(todo.status == "completed"),
+                counts.1 + usize::from(todo.status == "in_progress"),
+                counts.2 + 1,
+            )
+        });
     if total == 0 || max_pips == 0 {
         return;
     }
@@ -1874,6 +1931,7 @@ fn push_todo_item_lines(
             inner_width,
         ));
     }
+    todo_stages::push_lane_status_lines(lines, todos, agents, base_indent, inner_width);
 }
 
 fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
@@ -2426,11 +2484,11 @@ fn render_todo_item_line_with_background(
     inner_width: usize,
 ) -> Line<'static> {
     let dependencies = todo_running_dependencies(todo, tasks);
-    if dependencies.is_empty() {
+    if dependencies.is_empty() || crate::todo::todo_completely_blocked(todo) {
         return render_todo_item_line(todo, agents, base_indent, inner_width);
     }
     let mut spans = todo_card_item_spans(todo, false);
-    spans[1] = Span::styled("🕒 ", Style::default().fg(todo_warning_color()));
+    spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
     let progress = todo_dependency_progress(
         &dependencies,
         inner_width.saturating_sub(12).min(inner_width / 2),
@@ -2511,9 +2569,13 @@ fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> 
 /// (optionally) the confidence suffix. Callers own indent and truncation.
 fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> Vec<Span<'static>> {
     let external_blocked = crate::todo::todo_has_external_blocker(todo);
-    let blocked = external_blocked || (!todo.blocked_by.is_empty() && todo.status != "completed");
-    let (glyph, glyph_color) = if blocked {
-        ("⊳", rgb(225, 165, 90))
+    let blocked =
+        crate::todo::is_incomplete_todo(todo) && (external_blocked || !todo.blocked_by.is_empty());
+    let is_completely_blocked = crate::todo::todo_completely_blocked(todo);
+    let (glyph, glyph_color) = if is_completely_blocked {
+        ("✋", rgb(225, 165, 90))
+    } else if blocked {
+        ("⊘", rgb(225, 165, 90))
     } else {
         match todo.status.as_str() {
             "completed" => ("✓", rgb(105, 190, 125)),
@@ -2533,6 +2595,12 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
         Span::styled(format!("{} ", glyph), Style::default().fg(glyph_color)),
         Span::styled(todo.content.clone(), Style::default().fg(text_color)),
     ];
+    if is_completely_blocked {
+        spans.push(Span::styled(
+            format!(" · {}", todo_complete_blocker_detail(todo)),
+            Style::default().fg(todo_warning_color()),
+        ));
+    }
     if crate::todo::is_incomplete_todo(todo)
         && let Some(blocker) = &todo.external_blocker
     {
@@ -2557,6 +2625,20 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
         ));
     }
     spans
+}
+
+/// Single-line chrome is normalized before width fitting. Full reasons are
+/// rendered as wrapped detail text in the card, not squeezed into its gutter.
+pub(super) fn todo_complete_blocker_detail(todo: &crate::todo::TodoItem) -> String {
+    todo.completely_blocked
+        .as_ref()
+        .map(|blocker| {
+            format!("Completely blocked: {}", blocker.reason)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
 }
 
 fn compact_run_id(run_id: &str) -> String {
@@ -5263,7 +5345,7 @@ mod kv_cache_footer_tests {
             Some("15.6K KV cache miss · low read · prefix unchanged · 22% hit")
         );
         let message = super::DisplayMessage::system(format!("ℹ️ {body}"));
-        for width in [12_u16, 30, 80, 120] {
+        for width in [0_u16, 1, 2, 3, 12, 30, 80, 120] {
             let lines = super::render_kv_cache_footer(&message, width).unwrap();
             assert_eq!(lines.len(), 1);
             assert!(lines[0].width() <= usize::from(width));
@@ -5276,6 +5358,33 @@ mod kv_cache_footer_tests {
             !super::kv_cache_footer_summary(unrelated)
                 .unwrap()
                 .contains("prefix unchanged")
+        );
+    }
+
+    #[test]
+    fn cache_miss_footer_is_amber_and_only_system_notices_attach() {
+        let body = "KV cache miss [low read]: ~4K tokens resent";
+        let message = super::DisplayMessage::system(format!("ℹ️ {body}"));
+        assert!(!super::needs_message_separator(&message));
+        let lines = super::render_kv_cache_footer(&message, 80).unwrap();
+        assert_eq!(
+            lines[0].spans[1].style.fg,
+            Some(super::Color::Rgb(255, 200, 100))
+        );
+        let assistant = super::DisplayMessage::assistant(body);
+        assert!(super::needs_message_separator(&assistant));
+        assert!(super::render_kv_cache_footer(&assistant, 80).is_none());
+        assert!(super::needs_message_separator(
+            &super::DisplayMessage::system("ordinary notice")
+        ));
+        let refresh =
+            super::DisplayMessage::system("KV cache refresh [compaction]: ~4K tokens resent");
+        assert!(!super::needs_message_separator(&refresh));
+        assert_eq!(
+            super::render_kv_cache_footer(&refresh, 80).unwrap()[0].spans[1]
+                .style
+                .fg,
+            Some(super::dim_color())
         );
     }
 

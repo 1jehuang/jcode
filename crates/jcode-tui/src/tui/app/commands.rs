@@ -1701,7 +1701,10 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         let session_id = active_session_id(app);
         if matches!(
             super::commands_cloud::parse_cloud_command(trimmed),
-            Some(super::commands_cloud::CloudCommand::Move { .. })
+            Some(
+                super::commands_cloud::CloudCommand::Move { .. }
+                    | super::commands_cloud::CloudCommand::MoveSelected { .. }
+            )
         ) && let Err(error) = app.session.save_prepared()
         {
             app.push_display_message(DisplayMessage::error(format!(

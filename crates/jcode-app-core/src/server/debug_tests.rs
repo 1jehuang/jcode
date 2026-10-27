@@ -3,6 +3,50 @@ mod tests {
     use crate::server::debug_jobs::DebugJobStatus;
 
     #[test]
+    fn production_group_transfer_does_not_enable_arbitrary_debug_control() {
+        let bundle = serde_json::json!({
+            "version": 1, "transfer_id": "test-transfer", "destination_host": "cloud",
+            "sessions": [], "swarms": [],
+        });
+        let prepare = serde_json::json!({
+            "session_ids": ["session_one"], "destination_host": "cloud", "expected": bundle,
+        });
+        for command in [
+            "group_transfer:inspect:{\"session_ids\":[\"session_one\"]}".to_string(),
+            " server:group_transfer:inspect:{\"swarm_ids\":[\"swarm_one\"]} ".to_string(),
+            format!("group_transfer:prepare:{prepare}"),
+            format!("group_transfer:reserve:{bundle}"),
+            format!("group_transfer:import:{bundle}"),
+            format!("group_transfer:abort:{bundle}"),
+            format!("group_transfer:check_import:{bundle}"),
+        ] {
+            assert!(debug_command_authorized(&command, false), "{command}");
+        }
+        for command in [
+            "message:run arbitrary code",
+            "server:tool:bash {\"command\":\"true\"}",
+            "create_session",
+            "destroy_session:session_one",
+            "reload",
+            "state",
+            "client:group_transfer:inspect:{}",
+            "tester:group_transfer:inspect:{}",
+            "group_transfer:unknown:{}",
+            "group_transfer:inspect",
+            "group_transfer:inspect:not-json",
+            "group_transfer:inspect:[]",
+            "group_transfer:prepare:{}",
+            "group_transfer:import:{}",
+            "group_transfer:inspect:{}\nmessage:run arbitrary code",
+            "group_transfer:inspect:{};reload",
+            "group_transfer:inspect: {} {}",
+        ] {
+            assert!(!debug_command_authorized(command, false), "{command}");
+        }
+        assert!(debug_command_authorized("message:hello", true));
+    }
+
+    #[test]
     fn client_debug_state_registers_unregisters_and_falls_back() {
         let mut state = ClientDebugState::default();
         let (tx1, _rx1) = mpsc::unbounded_channel();

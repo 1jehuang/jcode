@@ -512,11 +512,7 @@ pub(super) fn draw_messages(
                 .y
                 .saturating_add(prompt_preview_lines)
                 .saturating_add(line as u16),
-            width: if swarm_beside_pinned_todos(app, text_render_area.width) {
-                text_render_area.width / 2
-            } else {
-                text_render_area.width
-            },
+            width: text_render_area.width,
             height: 1,
         }
     }));
@@ -1499,10 +1495,10 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
     out
 }
 
-/// Whether the pinned band has room for a separate swarm column.
-pub(crate) fn swarm_beside_pinned_todos(app: &dyn TuiState, width: u16) -> bool {
-    width >= 120
-        && crate::config::config().display.pin_todos
+/// Passive worker status lives in the todo lanes. The focused swarm panel
+/// remains available for keyboard navigation and its transcript controls.
+pub(crate) fn pinned_todos_show_workers(app: &dyn TuiState, width: u16) -> bool {
+    crate::config::config().display.pin_todos
         && app.pinned_todos_payload().is_some()
         && app.inline_swarm_gallery_active()
         && !app.inline_swarm_members().is_empty()
@@ -1510,7 +1506,7 @@ pub(crate) fn swarm_beside_pinned_todos(app: &dyn TuiState, width: u16) -> bool 
             app.pinned_todos_payload(),
             app.pinned_todos_expanded(),
             app.diff_mode(),
-            width / 2,
+            width,
             3,
         )
         .0
@@ -1522,37 +1518,37 @@ pub(crate) fn pinned_todo_band_lines(
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    let beside = swarm_beside_pinned_todos(app, width);
-    let todo_width = if beside { width / 2 } else { width };
     let (mut lines, more) = pinned_todo_band_lines_for_payload(
         app.pinned_todos_payload(),
         app.pinned_todos_expanded(),
         app.diff_mode(),
-        todo_width,
+        width,
         viewport_height,
     );
-    if beside && !lines.is_empty() {
-        let right_width = width.saturating_sub(todo_width + 2) as usize;
-        let members = app.inline_swarm_members();
-        let swarm = super::info_widget::swarm_gallery::render_swarm_strip_lines(
-            &members,
-            app.swarm_panel_selected(),
-            app.swarm_panel_focused(),
-            &crate::tui::keybind::swarm_panel_focus_key_label(),
-            (app.animation_elapsed() * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS) as usize,
-            right_width,
-            ((viewport_height as usize) / 3).clamp(3, 16),
-        );
-        lines.resize_with(lines.len().max(swarm.len()), || Line::from(""));
-        for (index, line) in lines.iter_mut().enumerate() {
-            *line = super::truncate_line_with_ellipsis_to_width(line, todo_width as usize);
-            if let Some(right) = swarm.get(index) {
-                line.spans.push(Span::raw(
-                    " ".repeat((todo_width as usize).saturating_sub(line.width()) + 2),
-                ));
-                line.spans.extend(right.spans.clone());
-            }
-        }
+    if width > 0
+        && viewport_height >= 3
+        && let Some(status) = app.justrust_status()
+    {
+        let color = match status.tone {
+            crate::tui::justrust_status::Tone::Active => ratatui::style::Color::Cyan,
+            crate::tui::justrust_status::Tone::Success => ratatui::style::Color::Green,
+            crate::tui::justrust_status::Tone::Failure => ratatui::style::Color::Red,
+        };
+        let label_color = if status.own_session {
+            ratatui::style::Color::Cyan
+        } else {
+            ratatui::style::Color::Magenta
+        };
+        let (label, rest) = status.text.split_once(' ').unwrap_or((&status.text, ""));
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::styled(label.to_owned(), Style::default().fg(label_color)),
+            Span::styled(format!(" {rest}"), Style::default().fg(color)),
+        ]);
+        lines.push(super::truncate_line_with_ellipsis_to_width(
+            &line,
+            width as usize,
+        ));
     }
     (lines, more)
 }

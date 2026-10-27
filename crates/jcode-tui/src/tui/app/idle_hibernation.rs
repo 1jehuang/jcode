@@ -55,6 +55,7 @@ impl App {
     /// Rechecked at the point of eviction, not just when scheduling a frame.
     fn hibernation_has_work(&self) -> bool {
         self.is_processing()
+            || self.justrust_status.row().is_some()
             || self.pending_turn
             || self.session_save_pending
             || !self.queued_messages.is_empty()

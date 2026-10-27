@@ -20,6 +20,8 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TodoCardAgent {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_status: Option<crate::protocol::SwarmLiveStatus>,
     /// Global swarm navigation digit, assigned by session id in display order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcut: Option<u8>,
@@ -34,6 +36,11 @@ pub(crate) struct TodoCardAgent {
     /// Seconds since the worker's last tool event or token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_age_secs: Option<u64>,
+    /// Explicit scoped wait metadata, independent of todo intent history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_age_secs: Option<u64>,
     /// Ordered statuses of the worker's own todos, not the coordinator's lane tasks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todo_statuses: Vec<String>,
@@ -41,7 +48,7 @@ pub(crate) struct TodoCardAgent {
 
 impl TodoCardAgent {
     pub(crate) fn from_member(member: &crate::protocol::SwarmMemberStatus) -> Self {
-        let activity = member
+        let task_activity = member
             .todo_items
             .iter()
             .find(|item| item.status == "in_progress")
@@ -60,15 +67,36 @@ impl TodoCardAgent {
                         }
                     })
                     .or_else(|| Some(item.content.clone()))
-            })
-            .or_else(|| member.detail.clone())
-            .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
-            .filter(|text| !text.is_empty());
+            });
+        let activity = if !is_live_status(&member.status) {
+            member
+                .detail
+                .clone()
+                .filter(|detail| !detail.trim().is_empty())
+                .or_else(|| {
+                    member
+                        .runtime
+                        .live_status
+                        .as_ref()
+                        .and_then(|live| live.stop_reason.clone())
+                })
+        } else {
+            task_activity.or_else(|| member.detail.clone())
+        }
+        .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
+        .filter(|text| !text.is_empty());
         Self {
             session_id: member.session_id.clone(),
+            live_status: member.runtime.live_status.clone(),
             shortcut: None,
             name: member.friendly_name.clone(),
-            status: member.status.clone(),
+            status: if member.runtime.wait_reason.is_some() && is_live_status(&member.status) {
+                "waiting".to_string()
+            } else {
+                member.status.clone()
+            },
+            wait_reason: member.runtime.wait_reason.clone(),
+            wait_age_secs: member.runtime.wait_age_secs,
             activity,
             age_secs: member.status_age_secs,
             activity_age_secs: member.runtime.activity_age_secs,
@@ -82,15 +110,6 @@ impl TodoCardAgent {
                 member.runtime.todo_statuses.clone()
             },
         }
-    }
-
-    fn shortcut_span(&self) -> Option<Span<'static>> {
-        self.shortcut.filter(|digit| *digit <= 9).map(|digit| {
-            Span::styled(
-                format!(" [alt+{digit}]"),
-                Style::default().fg(todo_meta_color()),
-            )
-        })
     }
 
     fn matches(&self, key: &str) -> bool {
@@ -219,6 +238,7 @@ pub(crate) fn agent_roster_spans(
 
 fn agent_state_mark(status: &str) -> Option<(&'static str, Color)> {
     match status {
+        "waiting" => Some(("◷", rgb(225, 165, 90))),
         "failed" | "crashed" => Some(("✗", todo_failure_color())),
         "blocked" | "waiting_network" | "running_stale" => Some(("⏸", rgb(225, 165, 90))),
         "stopped" => Some(("◼", todo_meta_color())),
@@ -271,12 +291,26 @@ fn current_stage(
         .position(|stage| stage.item_indices().any(|i| !is_done(todos[i])))
 }
 
+fn todo_pip_status(todo: &crate::todo::TodoItem) -> &str {
+    if crate::todo::todo_completely_blocked(todo) {
+        "completely_blocked"
+    } else if crate::todo::is_incomplete_todo(todo)
+        && (crate::todo::todo_has_external_blocker(todo) || !todo.blocked_by.is_empty())
+    {
+        "blocked"
+    } else {
+        &todo.status
+    }
+}
+
 fn pip_span(todo: &crate::todo::TodoItem) -> Span<'static> {
-    status_pip_span(&todo.status)
+    status_pip_span(todo_pip_status(todo))
 }
 
 fn status_pip_span(status: &str) -> Span<'static> {
     let (glyph, color) = match status {
+        "completely_blocked" => ("✋", rgb(225, 165, 90)),
+        "blocked" => ("⊘", rgb(225, 165, 90)),
         "completed" => ("●", rgb(100, 180, 100)),
         "in_progress" => ("●", asap_color()),
         _ => ("○", rgb(90, 90, 105)),
@@ -301,19 +335,11 @@ const QUIET_AFTER_SECS: u64 = 120;
 /// Replace live-dot placeholders with the wall-clock spinner frame. Cheap:
 /// only lines that contain the placeholder are touched.
 pub(crate) fn animate_lane_spinners(lines: &mut [Line<'static>]) {
-    let frame = std::time::SystemTime::now()
+    let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| {
-            (d.as_millis() / jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAME_MS as u128)
-                as usize
-        })
-        .unwrap_or(0);
-    let frames = jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAMES;
-    let glyph = if crate::perf::tui_policy().enable_decorative_animations {
-        frames[frame % frames.len()]
-    } else {
-        "●"
-    };
+        .map(|d| (d.as_millis() % 10_000) as f32 / 1000.0)
+        .unwrap_or(0.0);
+    let glyph = super::super::activity_indicator(elapsed, 12.5);
     for line in lines {
         for span in &mut line.spans {
             if span.content.contains(LIVE_DOT_SENTINEL) {
@@ -354,6 +380,13 @@ pub(crate) fn push_stage_pips(
                 out.push(Span::styled(label, label_style(index)));
             }
             if counts {
+                if stage
+                    .item_indices()
+                    .any(|i| crate::todo::todo_completely_blocked(todos[i]))
+                {
+                    out.push(status_pip_span("completely_blocked"));
+                    continue;
+                }
                 let total = stage.len();
                 let done = stage.item_indices().filter(|&i| is_done(todos[i])).count();
                 if done == total {
@@ -419,9 +452,6 @@ fn lane_agent_chip(
                 .unwrap_or_else(|| fallback_icon(assigned)),
         ));
         if let Some(agent) = agent {
-            if let Some(badge) = agent.shortcut_span() {
-                spans.push(badge);
-            }
             if let Some((mark, color)) = agent_state_mark(&agent.status) {
                 spans.push(Span::styled(mark, Style::default().fg(color)));
             }
@@ -442,12 +472,25 @@ fn activity_matches_title(activity: &str, todos: &[&crate::todo::TodoItem]) -> b
 }
 
 fn agent_note(agent: &TodoCardAgent, todos: &[&crate::todo::TodoItem]) -> String {
-    let mut note = agent
-        .activity
-        .clone()
-        .filter(|activity| !activity_matches_title(activity, todos))
-        .unwrap_or_default();
-    if let Some(age) = agent.age_secs.filter(|age| *age >= 2) {
+    let waiting = agent.status == "waiting";
+    let mut note = if waiting {
+        agent
+            .wait_reason
+            .clone()
+            .unwrap_or_else(|| "waiting".into())
+    } else {
+        agent
+            .activity
+            .clone()
+            .filter(|activity| !activity_matches_title(activity, todos))
+            .unwrap_or_default()
+    };
+    let age = if waiting {
+        agent.wait_age_secs
+    } else {
+        agent.age_secs
+    };
+    if let Some(age) = age.filter(|age| *age >= 2) {
         if !note.is_empty() {
             note.push_str(" · ");
         }
@@ -499,6 +542,10 @@ fn lane_item_statuses<'a>(
     let mut seen = std::collections::HashSet::new();
     let mut statuses = Vec::new();
     for todo in lane_todos {
+        if matches!(todo_pip_status(todo), "blocked" | "completely_blocked") {
+            statuses.push((todo_pip_status(todo), false));
+            continue;
+        }
         let agent = todo
             .assigned_to
             .as_deref()
@@ -564,6 +611,15 @@ fn lane_note_spans(
     lane_todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
 ) -> Vec<Span<'static>> {
+    if let Some(todo) = lane_todos
+        .iter()
+        .find(|todo| crate::todo::todo_completely_blocked(todo))
+    {
+        return vec![Span::styled(
+            todo_complete_blocker_detail(todo),
+            Style::default().fg(rgb(225, 165, 90)),
+        )];
+    }
     let meta = Style::default().fg(todo_meta_color());
     let assigned: Vec<&TodoCardAgent> = lane_todos
         .iter()
@@ -571,6 +627,9 @@ fn lane_note_spans(
         .filter_map(|todo| todo.assigned_to.as_deref())
         .filter_map(|assigned| agents.iter().find(|agent| agent.matches(assigned)))
         .collect();
+    if assigned.iter().any(|agent| agent.live_status.is_some()) {
+        return Vec::new(); // The shared processing line below owns live status.
+    }
     if let Some(agent) = assigned
         .iter()
         .find(|agent| matches!(agent.status.as_str(), "failed" | "crashed"))
@@ -601,6 +660,22 @@ fn lane_note_spans(
             format!("⏸ {reason}"),
             Style::default().fg(rgb(225, 165, 90)),
         )];
+    }
+    if let Some(agent) = assigned.iter().find(|agent| agent.status == "waiting") {
+        let reason = agent.wait_reason.as_deref().unwrap_or("waiting");
+        let mut note = reason
+            .lines()
+            .next()
+            .unwrap_or("waiting")
+            .trim()
+            .to_string();
+        if let Some(age) = agent.wait_age_secs.filter(|age| *age >= 2) {
+            note.push_str(&format!(
+                " · {}",
+                jcode_tui_render::swarm_gallery::humanize_age(age)
+            ));
+        }
+        return vec![Span::styled(note, Style::default().fg(rgb(225, 165, 90)))];
     }
     let Some(agent) = lane_live_agent(lane_todos, agents) else {
         return Vec::new();
@@ -772,7 +847,12 @@ pub(crate) fn push_stage_lines(
     };
     let strip_width = lanes
         .iter()
-        .map(|(_, lane)| lane_item_statuses(&items_of(lane), agents).len())
+        .map(|(_, lane)| {
+            lane_item_statuses(&items_of(lane), agents)
+                .iter()
+                .map(|(status, _)| status_pip_span(status).content.width())
+                .sum::<usize>()
+        })
         .max()
         .unwrap_or(0)
         .min((inner_width / 3).max(1));
@@ -797,10 +877,10 @@ pub(crate) fn push_stage_lines(
         let items = items_of(lane);
         // Expand a waiting lane so its dependency progress belongs to the
         // corresponding todo rather than an ambiguous lane-wide status dot.
-        if items
-            .iter()
-            .any(|todo| !todo_running_dependencies(todo, background_tasks).is_empty())
-        {
+        if items.iter().any(|todo| {
+            crate::todo::todo_completely_blocked(todo)
+                || !todo_running_dependencies(todo, background_tasks).is_empty()
+        }) {
             for todo in &items {
                 lines.push(render_todo_item_line_with_background(
                     todo,
@@ -810,9 +890,78 @@ pub(crate) fn push_stage_lines(
                     inner_width,
                 ));
             }
+            push_lane_status_lines(lines, &items, agents, base_indent, inner_width);
             continue;
         }
         let statuses = lane_item_statuses(&items, agents);
+        let mut telemetry = Vec::new();
+        if items.iter().any(|todo| {
+            todo.assigned_to.as_deref().is_some_and(|owner| {
+                agents
+                    .iter()
+                    .any(|agent| agent.matches(owner) && agent.live_status.is_some())
+            })
+        }) {
+            push_lane_status_lines(&mut telemetry, &items, agents, "", inner_width);
+        }
+        if !telemetry.is_empty() {
+            // Column budgets depend only on terminal width, never changing
+            // worker names, task counts, token totals, or live status text.
+            let pip_width = 6.min((inner_width / 10).max(1));
+            let worker_width = 24.min(inner_width / 4);
+            // Progress pips stay static when the same row already has a live
+            // activity indicator beside the worker's status.
+            let static_statuses: Vec<_> = statuses
+                .iter()
+                .map(|(status, _)| (*status, false))
+                .collect();
+            let mut row = lane_strip_spans(&static_statuses, pip_width);
+            if let Some(padding) = row.last_mut() {
+                // Retain the unused pip cells, replacing only the separator.
+                let pad = padding.content.width().saturating_sub(1);
+                padding.content = " ".repeat(pad).into();
+            }
+            let name = lane_name_spans(
+                lane.group.as_deref(),
+                phase_style(phase, current),
+                &items,
+                agents,
+            );
+            let name = super::truncate_line_with_ellipsis_to_width(&Line::from(name), worker_width);
+            let name_padding = worker_width.saturating_sub(name.width());
+            row.extend(name.spans);
+            row.push(Span::raw(" ".repeat(name_padding)));
+            row.push(Span::raw(" · "));
+            let room = inner_width.saturating_sub(width_of(&row));
+            let mut status = Vec::new();
+            for (index, line) in telemetry.into_iter().enumerate() {
+                if index > 0 {
+                    status.push(Span::raw(" · "));
+                }
+                // Strip only the legacy continuation-row indent.
+                status.extend(line.spans.into_iter().skip(2));
+            }
+            if let Some(live) =
+                lane_live_agent(&items, agents).and_then(|agent| agent.live_status.as_ref())
+            {
+                if live.phase != "streaming" {
+                    if let Some(tps) = live.output_tps_milli {
+                        status.push(Span::styled(
+                            format!(" · {:.1} tps", tps as f64 / 1000.0),
+                            Style::default().fg(todo_meta_color()),
+                        ));
+                    }
+                }
+            }
+            // Live activity owns the remaining width instead of repeating task titles.
+            let status = super::truncate_line_with_ellipsis_to_width(&Line::from(status), room);
+            row.extend(status.spans);
+            if later {
+                row = row.into_iter().map(dim_span).collect();
+            }
+            lines.push(todo_card_line(row, base_indent, inner_width));
+            continue;
+        }
         let mut row = lane_strip_spans(&statuses, strip_width);
         if name_width > 0 {
             let name = lane_name_spans(
@@ -856,6 +1005,94 @@ pub(crate) fn push_stage_lines(
     }
 }
 
+/// Keep telemetry on its own bounded logical row instead of squeezing it into
+/// the task title or duplicating a passive worker gallery beside the todo band.
+pub(super) fn push_lane_status_lines(
+    lines: &mut Vec<Line<'static>>,
+    todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
+    indent: &str,
+    width: usize,
+) {
+    let mut seen = std::collections::HashSet::new();
+    for todo in todos {
+        if crate::todo::todo_completely_blocked(todo) || is_done(todo) {
+            continue; // Pause this item, not independent workers sharing its lane.
+        }
+        let Some(agent) = todo
+            .assigned_to
+            .as_deref()
+            .and_then(|owner| agents.iter().find(|agent| agent.matches(owner)))
+        else {
+            continue;
+        };
+        if agent.live_status.is_none() && todo.status != "in_progress" {
+            continue;
+        }
+        if !seen.insert(agent.session_id.as_str()) {
+            continue;
+        }
+        let mut live =
+            agent
+                .live_status
+                .clone()
+                .unwrap_or_else(|| crate::protocol::SwarmLiveStatus {
+                    phase: agent.status.clone(),
+                    elapsed_ms: agent.age_secs.unwrap_or(0).saturating_mul(1000),
+                    // Legacy activity is already displayed in the heading or task row.
+                    tool_intent: None,
+                    stop_reason: (!is_live_status(&agent.status))
+                        .then(|| agent.activity.clone())
+                        .flatten(),
+                    ..Default::default()
+                });
+        if matches!(
+            agent.status.as_str(),
+            "completed" | "done" | "failed" | "crashed" | "stopped" | "cancelled"
+        ) {
+            live.phase = agent.status.clone();
+            live.stop_reason = agent.activity.clone().or(live.stop_reason);
+        } else if let Some(reason) = &agent.wait_reason {
+            live.phase = "waiting".into();
+            live.stop_reason = Some(reason.clone());
+        } else if is_done(todo) && todos.iter().all(|todo| is_done(todo)) {
+            live.phase = "completed".into();
+            live.stop_reason = Some("lane completed".into());
+        } else if !is_live_status(&agent.status) {
+            live.phase = agent.status.clone();
+            if live.stop_reason.is_none() {
+                live.stop_reason = agent.activity.clone();
+            }
+        }
+        // The lane heading already identifies the worker. Transport diagnostics
+        // belong in its opened view, not repeated under every pinned lane.
+        live.connection_type = None;
+        if matches!(
+            live.phase.as_str(),
+            "running" | "running_tool" | "streaming" | "sending" | "thinking" | "connecting"
+        ) {
+            live.status_detail = None;
+        }
+        if live.tool_intent.as_deref().is_some_and(|intent| {
+            todos
+                .iter()
+                .any(|todo| todo.content.trim() == intent.trim())
+        }) {
+            live.tool_intent = None;
+        }
+        let mut row = vec![Span::raw("  ")];
+        row.extend(
+            super::super::input_ui::live_processing_status_line(
+                &live,
+                agent.activity_age_secs.map(|age| age as f32),
+                LIVE_DOT_SENTINEL,
+            )
+            .spans,
+        );
+        lines.push(todo_card_line(row, indent, width));
+    }
+}
+
 /// Grey out a span for a phase that has not started yet, keeping emoji intact.
 fn dim_span(span: Span<'static>) -> Span<'static> {
     let style = span.style.fg(later_phase_color()).not_bold();
@@ -872,7 +1109,8 @@ pub(crate) fn render_todo_item_line(
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
-    if todo.status != "in_progress"
+    if crate::todo::todo_completely_blocked(todo)
+        || todo.status != "in_progress"
         || todo
             .group
             .as_deref()
@@ -897,13 +1135,10 @@ pub(crate) fn render_todo_item_line(
     let mut chip = vec![Span::raw("  "), Span::raw(icon)];
     let mut note = String::new();
     if let Some(agent) = agent {
-        if let Some(badge) = agent.shortcut_span() {
-            chip.push(badge);
-        }
         if let Some((mark, color)) = agent_state_mark(&agent.status) {
             chip.push(Span::styled(mark, Style::default().fg(color)));
         }
-        if todo.status != "completed" {
+        if todo.status != "completed" && agent.live_status.is_none() {
             note = agent_note(agent, &[todo]);
         }
     }
@@ -967,6 +1202,19 @@ pub(crate) fn blocked_phase_spans(
         return Vec::new();
     };
     let stage = &stages[current];
+    if stage
+        .item_indices()
+        .any(|i| crate::todo::todo_completely_blocked(todos[i]))
+    {
+        let phase = stage
+            .number
+            .map(|n| format!("phase {n}: "))
+            .unwrap_or_default();
+        return vec![Span::styled(
+            format!("  ✋ {phase}Completely blocked"),
+            Style::default().fg(rgb(225, 165, 90)),
+        )];
+    }
     let failed = stage.item_indices().any(|i| {
         !is_done(todos[i])
             && todos[i].assigned_to.as_deref().is_some_and(|owner| {

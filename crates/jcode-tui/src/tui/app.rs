@@ -116,6 +116,7 @@ mod update_sim;
 mod usage_reset;
 mod voice_input;
 pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
+mod justrust_status;
 mod state_ui_maintenance;
 mod state_ui_messages;
 mod state_ui_runtime;
@@ -643,6 +644,12 @@ pub struct RunResult {
 pub enum CloudHandoff {
     /// Attach to the session on a cloud host over SSH.
     Remote {
+        session_id: String,
+        host: String,
+        working_dir: Option<String>,
+    },
+    /// Attach to an already cloud-owned session without submitting a continuation.
+    RemoteResume {
         session_id: String,
         host: String,
         working_dir: Option<String>,
@@ -1556,6 +1563,8 @@ pub struct App {
     pinned_todos_expanded: bool,
     /// Running and terminal background tasks shown beneath the pinned todo band.
     background_task_rows: Vec<crate::tui::BackgroundTaskRow>,
+    /// Asynchronous, bounded queries of justrust's public live-status API.
+    justrust_status: crate::tui::justrust_status::Poller,
     last_side_panel_refresh: Option<Instant>,
     // Most recently persisted focus target for dictation routing.
     last_client_focus_recorded_at: Option<Instant>,

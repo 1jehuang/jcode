@@ -20,6 +20,7 @@ pub fn status_accent(status: &str) -> Color {
         "ready" => rgb(120, 180, 120),
         "running" | "streaming" => rgb(255, 200, 100),
         "thinking" => rgb(140, 180, 255),
+        "waiting" => rgb(255, 170, 80),
         "blocked" | "waiting_network" => rgb(255, 170, 80),
         "failed" | "crashed" => rgb(255, 100, 100),
         "completed" | "done" => rgb(100, 200, 100),
@@ -75,6 +76,7 @@ pub fn status_glyph(status: &str, spinner_frame: usize) -> &'static str {
         }
         "completed" | "done" => "✓",
         "ready" => "•",
+        "waiting" => "◷",
         "blocked" | "waiting_network" => "⏸",
         "failed" | "crashed" => "✗",
         "stopped" => "◼",
@@ -92,6 +94,7 @@ fn card_status_glyph(status: &str) -> &'static str {
         "running" | "streaming" | "thinking" => "●",
         "completed" | "done" => "✓",
         "ready" => "•",
+        "waiting" => "◷",
         "blocked" | "waiting_network" => "⏸",
         "failed" | "crashed" => "✗",
         "stopped" => "◼",
@@ -105,6 +108,7 @@ fn card_status_label(status: &str) -> &'static str {
         "running" | "streaming" | "thinking" => "Working",
         "completed" | "done" => "Completed",
         "ready" | "spawned" => "Ready",
+        "waiting" => "Waiting",
         "blocked" | "waiting_network" => "Blocked",
         "failed" | "crashed" => "Failed",
         "stopped" => "Stopped",
@@ -219,6 +223,7 @@ fn role_rank(role: Option<&str>) -> u8 {
 fn status_rank(status: &str) -> u8 {
     match status {
         s if is_active_status(s) => 0,
+        "waiting" => 0,
         "blocked" | "waiting_network" | "failed" | "crashed" => 1,
         "completed" | "done" | "stopped" => 3,
         // ready/spawned/unknown: idle but not finished.

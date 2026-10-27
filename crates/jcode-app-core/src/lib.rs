@@ -51,6 +51,7 @@ pub mod startup_profile;
 pub mod tool;
 pub mod turn_cancel_registry;
 pub mod update;
+pub mod wait_registry;
 
 use std::sync::Mutex;
 

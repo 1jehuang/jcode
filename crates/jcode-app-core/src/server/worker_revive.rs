@@ -78,6 +78,12 @@ pub(super) async fn live_or_revived_agent(
             return None;
         }
     };
+    // A migrated source or partially received destination must not be revived
+    // by a delayed wake. The transfer importer clears the inbound lease only
+    // after every selected transcript and swarm snapshot has landed.
+    if session.migration_lease_block().is_some() {
+        return None;
+    }
     let provider = context.provider.fork();
     let registry = crate::tool::Registry::new(provider.clone()).await;
     if session.is_canary {

@@ -309,6 +309,7 @@ mod tests {
             completion_confidence: None,
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: Vec::new(),
             assigned_to: None,
@@ -598,6 +599,7 @@ mod lane_sync_tests {
             content: "add lexer tests".into(),
             status: "pending".into(),
             priority: "high".into(),
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: vec!["fox-new-task".into()],
             ..Default::default()

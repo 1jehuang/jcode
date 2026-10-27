@@ -297,6 +297,14 @@ impl SessionPicker {
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        if session.server_icon.as_deref() == Some("☁")
+            && let Some(host) = session.server_name.as_deref()
+        {
+            line1_spans.push(Span::styled(
+                format!("  ☁ {host}"),
+                Style::default().fg(rgb(120, 210, 255)),
+            ));
+        }
         if in_batch_restore {
             line1_spans.push(Span::styled(
                 "  [BATCH]",
@@ -489,7 +497,11 @@ impl SessionPicker {
                                         .add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(
-                                    format!("  {} · {} sessions", version, session_count),
+                                    if version.is_empty() {
+                                        format!("  {} sessions", session_count)
+                                    } else {
+                                        format!("  {} · {} sessions", version, session_count)
+                                    },
                                     Style::default().fg(dim),
                                 ),
                             ]);

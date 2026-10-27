@@ -725,6 +725,11 @@ pub(super) fn mask_email(email: &str) -> String {
 /// Spawn a new terminal window that resumes a jcode session.
 /// Returns Ok(true) if a terminal was successfully launched, Ok(false) if no terminal found.
 fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String> {
+    if let Some(lease) = crate::storage::read_session_lease(session_id)
+        && let Some(host) = lease.away_host
+    {
+        return remote_resume_invocation_args(session_id, &host, lease.repo_root.as_deref());
+    }
     let mut args = vec![
         "--fresh-spawn".to_string(),
         "--resume".to_string(),
@@ -734,6 +739,22 @@ fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String>
         args.push("--socket".to_string());
         args.push(socket.to_string());
     }
+    args
+}
+
+fn remote_resume_invocation_args(
+    session_id: &str,
+    host: &str,
+    working_dir: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec!["--fresh-spawn".into(), "--ssh".into(), host.into()];
+    if let Ok(binary) = std::env::var("JCODE_CLOUD_REMOTE_BINARY") {
+        args.extend(["--ssh-binary".into(), binary]);
+    }
+    if let Some(dir) = working_dir {
+        args.extend(["--remote-working-dir".into(), dir.into()]);
+    }
+    args.extend(["--resume".into(), session_id.into()]);
     args
 }
 
@@ -822,8 +843,14 @@ fn spawn_command_in_new_terminal(
         // tests is the libtest harness and would pop up a broken window.
         return Ok(false);
     }
-    let command = crate::terminal_launch::TerminalCommand::new(program, args.to_vec())
+    let mut command = crate::terminal_launch::TerminalCommand::new(program, args.to_vec())
         .title(title.to_string());
+    if args.iter().any(|arg| arg == "--ssh") {
+        // Resuming is an attachment, never a request to start another turn.
+        command = command
+            .spawn_env("JCODE_CLOUD_CONTINUE_MESSAGE", "")
+            .spawn_env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "");
+    }
     crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
 }
 

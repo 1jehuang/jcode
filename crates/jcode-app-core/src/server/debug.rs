@@ -36,6 +36,12 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
+fn debug_command_authorized(command: &str, general_debug_control: bool) -> bool {
+    let (namespace, command) = parse_namespaced_command(command);
+    general_debug_control
+        || (namespace == "server" && super::group_transfer::is_production_command(command))
+}
+
 #[derive(Default)]
 pub(super) struct ClientDebugState {
     pub(super) active_id: Option<String>,
@@ -297,7 +303,15 @@ pub(super) async fn handle_debug_client(
             }
         };
 
-        let _request_activity = match crate::runtime_activity::global().try_enter() {
+        // Transfer control acquires the exclusive idle gate itself. Keeping a
+        // shared request reservation here would make it reject its own request.
+        let transfer_control = matches!(&request, Request::DebugCommand { command, .. }
+            if command.trim().starts_with("group_transfer:") || command.trim().starts_with("server:group_transfer:"));
+        let _request_activity = match if transfer_control {
+            Ok(None)
+        } else {
+            crate::runtime_activity::global().try_enter().map(Some)
+        } {
             Ok(activity) => activity,
             Err(error) => {
                 writer
@@ -374,7 +388,7 @@ pub(super) async fn handle_debug_client(
                 command,
                 session_id: requested_session,
             } => {
-                if !debug_control_allowed() {
+                if !debug_command_authorized(&command, debug_control_allowed()) {
                     let event = ServerEvent::Error {
                         id,
                         message: "Debug control is disabled. Set JCODE_DEBUG_CONTROL=1, enable display.debug_socket, or start the shared server from a self-dev session.".to_string(),
@@ -446,7 +460,22 @@ pub(super) async fn handle_debug_client(
                     }
                     _ => {
                         // Server commands (default)
-                        if let Some(output) = maybe_handle_job_command(cmd, &debug_jobs).await? {
+                        if let Some(output) = super::group_transfer::handle(
+                            cmd,
+                            &sessions,
+                            &super::SwarmState {
+                                members: Arc::clone(&swarm_members),
+                                swarms_by_id: Arc::clone(&swarms_by_id),
+                                plans: Arc::clone(&swarm_plans),
+                                coordinators: Arc::clone(&swarm_coordinators),
+                            },
+                        )
+                        .await?
+                        {
+                            Ok(output)
+                        } else if let Some(output) =
+                            maybe_handle_job_command(cmd, &debug_jobs).await?
+                        {
                             Ok(output)
                         } else if let Some(output) = maybe_handle_session_admin_command(
                             cmd,

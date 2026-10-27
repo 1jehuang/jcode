@@ -502,6 +502,16 @@ fn environment_relative(root: &Path) -> Result<PathBuf> {
         Sha256::digest(root.as_os_str().as_encoded_bytes())
     )))
 }
+
+/// Serialize hydration for a shared checkout, without granting any transfer
+/// authority. Keep this guard across validation and publication. Lock acquisition
+/// is bounded to five seconds; dropping it (including process exit) releases it.
+/// This is separate from the map locks acquired during publication.
+pub fn lock_workspace_hydration(root: &Path) -> Result<std::fs::File> {
+    let home = crate::storage::jcode_dir()?;
+    let relative = environment_relative(root)?.with_extension("hydrate.lock");
+    lock_private(&home, &relative)
+}
 pub fn load_environment(root: &Path) -> Result<BTreeMap<String, String>> {
     let home = crate::storage::jcode_dir()?;
     let relative = environment_relative(root)?;
@@ -582,6 +592,21 @@ pub fn migration_guidance(session_id: &str) -> String {
         "You are continuing session {session_id} after a machine handoff. {} Local callback access expires 15 minutes after handoff and may already be unavailable.",
         parity_guidance()
     )
+}
+
+/// Group transfers share a canonical checkout and private environment map.
+/// Guidance is not authorization: only the coordinator's explicitly scoped
+/// temporary lease/callback may request local resources.
+pub fn group_migration_guidance(session_id: &str, coordinator_session_id: &str) -> String {
+    if session_id == coordinator_session_id {
+        format!(
+            "You are coordinator {session_id} continuing after a group machine handoff. Root and members share one repository and its hydrated environment. Coordinate runtime/package setup once for the workspace, checking actual state first; do not claim setup succeeded until verified. Only you own the temporary local bridge, if granted. Check callback status and sync saved requirements once for the group when needed, not once per member. Deduplicate members' metadata-only missing-resource requests and fetch only resources still missing. Relay nonsecret completion or failure to members. Callback access remains scoped to your session, destination, epoch and 15-minute lease; group membership grants no additional authorization. If unavailable, arrange an explicit local push, never delegate unrestricted callback access to members. Never print or relay secret values. Record runtime/package dependencies in setup documentation and only typed resource identifiers in .jcode/cloud-environment.json. Allowed resources are explicit relative project files, named environment variables and fixed github/aws/npm credentials, never SSH private keys, keychains or arbitrary home paths."
+        )
+    } else {
+        format!(
+            "You are member {session_id} continuing after a group machine handoff. Coordinator {coordinator_session_id} owns workspace environment setup and any temporary local bridge. You share the same repository and hydrated private environment as the coordinator and other members. Check actual prerequisites for your task, but do not independently repeat workspace setup, sync saved requirements, invoke the local callback, or request a separate local push. Send specific missing-resource identifiers and a nonsecret reason to the coordinator, then wait for confirmation and recheck availability. Group membership does not grant callback authorization. Newly hydrated environment variables apply to subsequent tool processes, not already-running processes. Never put secret values in messages, command arguments, logs or setup documentation. Do not assume this machine is identical or that setup has completed."
+        )
+    }
 }
 pub fn replacement_guidance(host: Option<&str>) -> String {
     let target = host.filter(|s| !s.is_empty()).unwrap_or("<cloud-host>");
@@ -677,6 +702,48 @@ mod tests {
             "test-value"
         );
     }
+    #[test]
+    fn group_guidance_keeps_callback_with_coordinator() {
+        let coordinator = group_migration_guidance("root", "root");
+        let member = group_migration_guidance("worker", "root");
+        assert!(coordinator.contains("sync saved requirements once for the group"));
+        assert!(coordinator.contains("do not claim setup succeeded until verified"));
+        assert!(coordinator.contains("session, destination, epoch"));
+        assert!(member.contains("Coordinator root"));
+        assert!(member.contains("do not independently repeat workspace setup"));
+        assert!(member.contains("Group membership does not grant callback authorization"));
+        assert!(!member.contains("jcode cloud env push"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_hydration_lock_is_shared_and_released() {
+        use std::os::fd::AsRawFd;
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let nested = project.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let guard = lock_workspace_hydration(project.path()).unwrap();
+        let relative = environment_relative(&nested)
+            .unwrap()
+            .with_extension("hydrate.lock");
+        let contender = std::fs::File::open(home.path().join(relative)).unwrap();
+        assert_ne!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        // Hydration does not recursively acquire the map lock.
+        assert!(save_environment(&nested, "TEST_TOKEN", "test-value").unwrap());
+        drop(guard);
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+
     #[test]
     fn shared_guidance_preserves_local_replacement_role() {
         let migration = migration_guidance("session-test");

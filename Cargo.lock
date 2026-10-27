@@ -3185,6 +3185,7 @@ dependencies = [
  "hex",
  "jcode-build-meta",
  "jcode-companion",
+ "jcode-docs-data",
  "jcode-harness-api",
  "jcode-harness-api-server",
  "jcode-provider-anthropic-runtime",
@@ -3267,6 +3268,7 @@ dependencies = [
  "jcode-command-risk",
  "jcode-core",
  "jcode-desktop-open",
+ "jcode-docs-data",
  "jcode-harness-api",
  "jcode-import-core",
  "jcode-message-types",
@@ -3516,6 +3518,10 @@ dependencies = [
  "tokio",
  "url",
 ]
+
+[[package]]
+name = "jcode-docs-data"
+version = "0.1.0"
 
 [[package]]
 name = "jcode-embedding"
@@ -4464,6 +4470,7 @@ name = "jcode-update-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "semver",
  "serde",
  "sha2 0.10.9",
 ]

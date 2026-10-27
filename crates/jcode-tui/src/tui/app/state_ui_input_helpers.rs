@@ -219,7 +219,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
     RegisteredCommand::public(
         "/cloud",
-        "Move this session to cloud, or /cloud replace to copy local code",
+        "Move this session and swarm to cloud, or /cloud replace to copy local code",
     ),
     RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
@@ -566,6 +566,10 @@ impl App {
 
         if prefix.starts_with("/cloud ") {
             let mut candidates = vec![
+                (
+                    "/cloud --dry-run".into(),
+                    "Preview moving this session and its swarm",
+                ),
                 (
                     "/cloud replace".into(),
                     "Show safe repository replacement commands",

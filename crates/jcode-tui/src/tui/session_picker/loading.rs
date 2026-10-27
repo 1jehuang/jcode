@@ -1944,6 +1944,11 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
     });
     sessions.extend(external_sessions);
 
+    // A moved session's local snapshot stops changing. Keep it discoverable
+    // even after it falls outside the recency window, without waking the host
+    // or making an SSH connection just to open the picker.
+    include_cloud_sessions(&sessions_dir, &catchup_seen, &mut sessions);
+
     sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
 
     #[cfg(test)]
@@ -3021,6 +3026,103 @@ pub fn load_servers() -> Vec<ServerInfo> {
     }
 }
 
+fn include_cloud_sessions(
+    sessions_dir: &Path,
+    catchup_seen: &crate::catchup::CatchupSeenSnapshot,
+    sessions: &mut Vec<SessionInfo>,
+) {
+    let Some(entries) = storage::session_leases_dir().and_then(|dir| std::fs::read_dir(dir).ok())
+    else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(lease) = storage::read_session_lease(id) else {
+            continue;
+        };
+        let Some(host) = lease
+            .away_host
+            .as_ref()
+            .filter(|host| !host.trim().is_empty())
+        else {
+            continue;
+        };
+        if lease.session_id != id {
+            continue;
+        }
+        if !sessions.iter().any(|session| session.id == id) {
+            let session = parse_jcode_session_info(sessions_dir, id, catchup_seen)
+                .unwrap_or_else(|| cloud_session_stub(&lease));
+            sessions.push(session);
+        }
+        if let Some(session) = sessions.iter_mut().find(|session| session.id == id) {
+            session.server_name = Some(format!("cloud: {host}"));
+            session.server_icon = Some("☁".to_string());
+            session
+                .search_index
+                .push_str(&format!(" cloud {}", host.to_lowercase()));
+        }
+    }
+}
+
+/// A migration can leave only a lease or a hidden handoff notice locally.
+/// The ownership record is enough to attach without inventing transcript data.
+fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
+    let id = &lease.session_id;
+    let short_name = extract_session_name(id).unwrap_or(id).to_string();
+    let updated_at = chrono::DateTime::parse_from_rfc3339(&lease.updated_at)
+        .map(|time| time.with_timezone(&chrono::Utc))
+        .unwrap_or_default();
+    let title = format!("{short_name} (cloud session)");
+    let search_index = build_search_index(
+        id,
+        &short_name,
+        &title,
+        lease.repo_root.as_deref(),
+        None,
+        &[],
+    );
+    SessionInfo {
+        id: id.clone(),
+        parent_id: None,
+        icon: session_icon(&short_name).to_string(),
+        short_name,
+        title,
+        message_count: 0,
+        user_message_count: 0,
+        assistant_message_count: 0,
+        created_at: updated_at,
+        last_message_time: updated_at,
+        last_active_at: Some(updated_at),
+        working_dir: lease.repo_root.clone(),
+        model: None,
+        provider_key: None,
+        is_canary: false,
+        is_debug: false,
+        saved: false,
+        save_label: None,
+        status: SessionStatus::Closed,
+        needs_catchup: false,
+        estimated_tokens: 0,
+        first_user_prompt: None,
+        messages_preview: Vec::new(),
+        search_index,
+        server_name: None,
+        server_icon: None,
+        source: SessionSource::Jcode,
+        resume_target: ResumeTarget::JcodeSession {
+            session_id: id.clone(),
+        },
+        external_path: None,
+    }
+}
+
 pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
@@ -3035,9 +3137,17 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     }
 
     let mut server_sessions: HashMap<String, Vec<SessionInfo>> = HashMap::new();
+    let mut cloud_sessions: HashMap<String, Vec<SessionInfo>> = HashMap::new();
     let mut orphan_sessions: Vec<SessionInfo> = Vec::new();
 
     for mut session in all_sessions {
+        // Remote ownership wins over a stale entry in the local live registry.
+        if session.server_icon.as_deref() == Some("☁")
+            && let Some(name) = session.server_name.clone()
+        {
+            cloud_sessions.entry(name).or_default().push(session);
+            continue;
+        }
         if let Some(server) = session_to_server.get(&session.short_name) {
             session.server_name = Some(server.name.clone());
             session.server_icon = Some(server.icon.clone());
@@ -3064,6 +3174,20 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
             }
         })
         .collect();
+
+    groups.extend(
+        cloud_sessions
+            .into_iter()
+            .map(|(name, sessions)| ServerGroup {
+                name,
+                icon: "☁".to_string(),
+                version: String::new(),
+                git_hash: String::new(),
+                // The lease records ownership, not whether the remote daemon is live.
+                is_running: false,
+                sessions,
+            }),
+    );
 
     groups.sort_by(|a, b| {
         let a_latest = a.sessions.iter().map(|s| s.last_message_time).max();

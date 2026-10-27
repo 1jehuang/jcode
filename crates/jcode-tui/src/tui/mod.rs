@@ -1,5 +1,6 @@
 pub mod account_picker;
 pub(crate) mod app;
+pub mod justrust_status;
 
 #[derive(Clone)]
 pub struct ContextSnapshot {
@@ -741,6 +742,10 @@ pub trait TuiState {
     /// Whether the pinned todo band is temporarily expanded to show every row.
     fn pinned_todos_expanded(&self) -> bool {
         false
+    }
+    /// Live build telemetry displayed below the pinned todo band.
+    fn justrust_status(&self) -> Option<&justrust_status::StatusRow> {
+        None
     }
     /// Running and recently completed background tasks for the session.
     fn background_task_rows(&self) -> &[BackgroundTaskRow] {

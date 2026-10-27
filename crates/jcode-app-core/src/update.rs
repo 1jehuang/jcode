@@ -239,6 +239,93 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     Ok(release)
 }
 
+/// GitHub's latest endpoint deliberately excludes prereleases. Keep preview
+/// discovery separate so stable users never see opt-in builds.
+#[derive(serde::Deserialize)]
+struct PreviewRelease {
+    #[serde(flatten)]
+    release: GitHubRelease,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+}
+
+fn preview_number(tag: &str) -> Option<u64> {
+    let number = tag.strip_prefix("v1.0.0-preview.")?;
+    if number.is_empty()
+        || !number.bytes().all(|b| b.is_ascii_digit())
+        || (number.len() > 1 && number.starts_with('0'))
+    {
+        return None;
+    }
+    number.parse().ok().filter(|number| *number > 0)
+}
+
+fn preview_is_installable(candidate: &PreviewRelease) -> bool {
+    let release = &candidate.release;
+    !candidate.draft
+        && candidate.prerelease
+        && release
+            ._published_at
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
+        && preview_number(&release.tag_name).is_some()
+        && release.assets.iter().any(|asset| {
+            (asset.name == get_asset_name() || asset.name == format!("{}.tar.gz", get_asset_name()))
+                && asset._size > 0
+                && !asset.browser_download_url.is_empty()
+        })
+        && checksum_asset(release)
+            .is_some_and(|asset| asset._size > 0 && !asset.browser_download_url.is_empty())
+}
+
+fn select_latest_preview(
+    latest: &mut Option<GitHubRelease>,
+    releases: impl IntoIterator<Item = PreviewRelease>,
+) {
+    for candidate in releases.into_iter().filter(preview_is_installable) {
+        if latest.as_ref().is_none_or(|previous| {
+            preview_number(&candidate.release.tag_name) > preview_number(&previous.tag_name)
+        }) {
+            *latest = Some(candidate.release);
+        }
+    }
+}
+
+pub fn fetch_latest_preview_blocking() -> Result<Option<GitHubRelease>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .user_agent("jcode-updater")
+        .build()?;
+    let mut latest: Option<GitHubRelease> = None;
+    // Paginate because stable releases may otherwise bury preview releases.
+    // Bound work to avoid an unbounded automatic network check.
+    for page in 1..=20 {
+        let url =
+            format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=100&page={page}");
+        let response = github_api_request(&client, &url)
+            .send()
+            .context("Failed to fetch preview releases")?;
+        if let Some(error) = rate_limit_error(&response) {
+            return Err(error);
+        }
+        if !response.status().is_success() {
+            anyhow::bail!("GitHub API error: {}", response.status());
+        }
+        let releases: Vec<PreviewRelease> = response
+            .json()
+            .context("Failed to parse preview releases")?;
+        let last_page = releases.len() < 100;
+        select_latest_preview(&mut latest, releases);
+        if last_page {
+            break;
+        }
+    }
+    clear_rate_limit_backoff();
+    Ok(latest)
+}
+
 fn github_api_request(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -290,7 +377,15 @@ fn platform_asset(release: &GitHubRelease) -> Result<&GitHubAsset> {
     release
         .assets
         .iter()
-        .find(|a| a.name.starts_with(asset_name))
+        .find(|a| {
+            if preview_number(&release.tag_name).is_some() {
+                (a.name == asset_name || a.name == format!("{asset_name}.tar.gz"))
+                    && a._size > 0
+                    && !a.browser_download_url.is_empty()
+            } else {
+                a.name.starts_with(asset_name)
+            }
+        })
         .ok_or_else(|| anyhow::anyhow!("No asset found for platform: {}", asset_name))
 }
 
@@ -305,6 +400,9 @@ fn verify_asset_checksum_if_available(
     bytes: &[u8],
 ) -> Result<()> {
     let Some(checksum_asset) = checksum_asset(release) else {
+        if preview_number(&release.tag_name).is_some() {
+            anyhow::bail!("Preview release is missing SHA256SUMS");
+        }
         crate::logging::info(&format!(
             "Release {} does not include SHA256SUMS; skipping checksum verification",
             release.tag_name
@@ -369,14 +467,26 @@ fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
 }
 
 fn prepare_stable_update_blocking() -> Result<PreparedUpdate> {
-    let current_version = jcode_build_meta::version();
     let release = fetch_latest_release_blocking()?;
-
     if !release_is_update(&release)? {
         return Ok(PreparedUpdate::None {
-            current: current_version.to_string(),
+            current: jcode_build_meta::version().to_string(),
         });
     }
+    prepare_release_update(release)
+}
+
+fn prepare_preview_update_blocking() -> Result<PreparedUpdate> {
+    match fetch_latest_preview_blocking()? {
+        Some(release) if release_is_update(&release)? => prepare_release_update(release),
+        _ => Ok(PreparedUpdate::None {
+            current: jcode_build_meta::version().to_string(),
+        }),
+    }
+}
+
+fn prepare_release_update(release: GitHubRelease) -> Result<PreparedUpdate> {
+    let current_version = jcode_build_meta::version();
 
     let Ok(asset) = platform_asset(&release) else {
         return Ok(PreparedUpdate::None {
@@ -480,6 +590,7 @@ pub fn prepare_update_blocking() -> Result<PreparedUpdate> {
     match channel {
         crate::config::UpdateChannel::Main => prepare_main_update_blocking(),
         crate::config::UpdateChannel::Stable => prepare_stable_update_blocking(),
+        crate::config::UpdateChannel::Preview => prepare_preview_update_blocking(),
     }
 }
 
@@ -588,10 +699,48 @@ pub fn spawn_background_session_update(session_id: String) {
 }
 
 pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
-    let channel = crate::config::config().features.update_channel;
+    check_for_update_with_channel_blocking(None)
+}
+
+fn release_identity(version: &str) -> &str {
+    version
+        .trim_start_matches('v')
+        .split('+')
+        .next()
+        .unwrap_or(version)
+}
+
+fn explicit_stable_is_update(release: &str, current: &str, release_build: bool) -> bool {
+    !release_build || release_identity(release) != release_identity(current)
+}
+
+/// An explicit stable selection can intentionally return from a newer preview
+/// or development build. Automatic checks never downgrade.
+pub fn check_for_update_with_channel_blocking(
+    explicit_channel: Option<crate::config::UpdateChannel>,
+) -> Result<Option<GitHubRelease>> {
+    let channel =
+        explicit_channel.unwrap_or_else(|| crate::config::config().features.update_channel);
     match channel {
         crate::config::UpdateChannel::Main => check_for_main_update_blocking(),
+        crate::config::UpdateChannel::Stable if explicit_channel.is_some() => {
+            let release = fetch_latest_release_blocking()?;
+            if explicit_stable_is_update(
+                &release.tag_name,
+                current_update_semver(),
+                is_release_build(),
+            ) && platform_asset(&release).is_ok()
+            {
+                Ok(Some(release))
+            } else {
+                Ok(None)
+            }
+        }
         crate::config::UpdateChannel::Stable => check_for_stable_update_blocking(),
+        crate::config::UpdateChannel::Preview => match fetch_latest_preview_blocking()? {
+            Some(release) if release_is_update(&release)? => Ok(Some(release)),
+            _ => Ok(None),
+        },
     }
 }
 
@@ -972,12 +1121,7 @@ pub fn download_and_install_blocking_with_progress(
     mut on_progress: impl FnMut(DownloadProgress),
 ) -> Result<PathBuf> {
     let started = Instant::now();
-    let asset_name = get_asset_name();
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name.starts_with(asset_name))
-        .ok_or_else(|| anyhow::anyhow!("No asset found for platform: {}", asset_name))?;
+    let asset = platform_asset(release)?;
 
     let download_url = asset.browser_download_url.clone();
 
