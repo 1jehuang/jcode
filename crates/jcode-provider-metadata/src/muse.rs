@@ -1,5 +1,5 @@
 //! Meta Muse provider metadata: pay-as-you-go Model API and the native
-//! Muse subscription (experimental opt-in).
+//! Muse subscription device flow.
 //!
 //! The two entries are intentionally distinct:
 //! - `meta-muse`: pay-as-you-go Meta Model API key (`META_MUSE_API_KEY`).
@@ -29,7 +29,7 @@ pub const META_MUSE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
 
 pub const MUSE_SUBSCRIPTION_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "muse-subscription",
-    display_name: "Muse subscription (experimental)",
+    display_name: "Muse subscription",
     api_base: "https://api.meta.ai/v1",
     api_key_env: "JCODE_MUSE_SUBSCRIPTION_API_KEY",
     env_file: "muse-subscription.env",
@@ -54,7 +54,7 @@ pub const META_MUSE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescr
     order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
 };
 
-/// Native Muse subscription login (experimental, explicit opt-in).
+/// Native Muse subscription login via device flow.
 ///
 /// Shares the `OpenAiCompatible` target so no new exhaustive enum variant is
 /// needed; login dispatch special-cases on `profile.id == "muse-subscription"`
@@ -63,12 +63,12 @@ pub const META_MUSE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescr
 /// alias here.
 pub const MUSE_SUBSCRIPTION_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "muse-subscription",
-    display_name: "Muse subscription (experimental)",
+    display_name: "Muse subscription",
     auth_kind: LoginProviderAuthKind::DeviceCode,
     auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
     auth_status_method: "device code",
     aliases: &["muse-sub"],
-    menu_detail: "native Muse subscription device flow (experimental opt-in)",
+    menu_detail: "native Muse subscription device flow",
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(MUSE_SUBSCRIPTION_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(41), Some(41), Some(41), Some(41), Some(41)),

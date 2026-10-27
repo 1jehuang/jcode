@@ -457,7 +457,7 @@ mod tests {
         let provider = resolve_login_provider("muse-subscription").expect("muse-subscription");
         assert_eq!(provider, MUSE_SUBSCRIPTION_LOGIN_PROVIDER);
         assert_eq!(provider.auth_kind, LoginProviderAuthKind::DeviceCode);
-        assert_eq!(provider.display_name, "Muse subscription (experimental)");
+        assert_eq!(provider.display_name, "Muse subscription");
         // The bare `muse` alias stays with pay-as-you-go meta-muse.
         assert_eq!(
             resolve_login_provider("muse").map(|provider| provider.id),

@@ -107,7 +107,7 @@ pub enum ProviderChoice {
         alias = "meta-ai"
     )]
     MetaMuse,
-    /// Native Muse subscription (experimental opt-in device flow). Distinct
+    /// Native Muse subscription (device flow). Distinct
     /// from `MetaMuse`, which is the pay-as-you-go Model API key path; no local
     /// Muse installation is required.
     #[value(name = "muse-subscription", alias = "muse-sub")]

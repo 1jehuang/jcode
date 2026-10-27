@@ -1,6 +1,6 @@
 # Native Muse subscription login investigation and testing
 
-Date: October 18, 2026
+Date: October 18, 2026. Availability updated October 27, 2026.
 
 ## What the user asked for
 
@@ -10,7 +10,7 @@ Use a Muse Code subscription through Jcode's `/login` without installing or runn
 
 An earlier proposal drove `muse serve` over the Muse Session Protocol (MSP): a process adapter that lets the `muse` binary own credentials, tools and its agent loop, and displays that process's events. Its binary dependency follows from that architecture, not from OAuth itself. It is not native account authentication, and it does not satisfy a no-Muse-install requirement, so it is not part of this change.
 
-The `muse-subscription` route added here is a separate, experimental native device-login route. It uses Jcode's ordinary compatible-provider runtime with the Responses wire. Jcode retains its own system prompt, complete supplied conversation history, tools, workspace and stream lifetime. It does not read Muse's credential files or spawn a Muse executable.
+The `muse-subscription` route is a separate native device-login route. It uses Jcode's ordinary compatible-provider runtime with the Responses wire. Jcode retains its own system prompt, complete supplied conversation history, tools, workspace and stream lifetime. It does not read Muse's credential files or spawn a Muse executable.
 
 `meta-muse` remains pay-as-you-go API-key authentication, unchanged by this change. Its keys are never a fallback for `muse-subscription`. Existing aliases such as `muse` continue to mean what they meant before. Select the new route explicitly as `muse-subscription`.
 
@@ -23,7 +23,7 @@ These are descriptions of Jcode's implementation, not a statement that every ven
 | Claude | Authorization-code browser flow with PKCE, authorization-code exchange and a public client identifier | Jcode-managed `auth.json`, account selection, refresh-token handling | Bearer OAuth on Anthropic Messages with OAuth-specific beta headers. Direct Anthropic API-key auth is a separate route. |
 | OpenAI | Browser authorization-code flow with PKCE and state validation | Jcode-managed `openai-auth.json`, account selection and coordinated refresh-token handling | The existing subscription implementation uses the ChatGPT/Codex backend rather than treating a ChatGPT login as an ordinary API key. Direct OpenAI API-key auth is separate. |
 | Antigravity | Google authorization-code browser flow with PKCE, state and a loopback callback | Jcode-managed `antigravity_oauth.json`, Google access-token refresh and project discovery | Cloud Code Assist transport with project/model discovery, not the AI Studio API-key endpoint. |
-| Muse subscription, experimental | RFC 8628 device flow followed by a separate API-key mint | Jcode-owned native credential file, conditional key re-minting from its saved device grant. No claim that the device grant has a supported refresh-token mechanism. | Direct Meta Responses using the minted credential, behind explicit experimental opt-in. Subscription billing for a third-party client is not verified. |
+| Muse subscription | RFC 8628 device flow followed by a separate API-key mint | Jcode-owned native credential file, conditional key re-minting from its saved device grant. No claim that the device grant has a supported refresh-token mechanism. | Direct Meta Responses using the minted credential, without an environment opt-in. Subscription billing for a third-party client is not verified. |
 
 Relevant source files:
 
@@ -42,7 +42,7 @@ The reusable architecture is login, private credential storage, renewal, explici
 
 Meta's subscription documentation says the subscription credential is for Muse Code only and that subscriptions work through the Muse Code CLI. No published third-party OAuth registration or native subscription billing contract was identified in this investigation.
 
-This implementation is therefore explicitly experimental and disabled unless the operator sets `JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION=1`. That is acknowledgement of the disclosed limitation, not proof of vendor authorization or subscription settlement. Review Meta's current terms and obtain vendor confirmation before relying on this route.
+This native route is available without an experimental opt-in. The legacy `JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION` variable is no longer required, including when set to `0`. Removing a local feature gate is not proof of vendor authorization or subscription settlement. Review Meta's current terms and obtain vendor confirmation before relying on this route.
 
 The implementation refuses a mint response without an explicitly active subscription, refuses payment-required responses, and does not substitute a pay-as-you-go key. These checks do **not** prove that a subsequent third-party inference request is covered by the subscription. Model-list success, token acquisition and even inference success are not billing receipts.
 
@@ -69,7 +69,6 @@ Sources reviewed:
 Use the built branch binary, not an older globally installed Jcode. The examples assume the repository root.
 
 ```sh
-export JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION=1
 ./target/debug/jcode login --provider muse-subscription
 ```
 
