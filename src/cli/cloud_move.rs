@@ -562,7 +562,63 @@ impl Target {
     fn prepare_development_binary(&self, host: &str, home: &str) -> Result<()> {
         let executable =
             std::env::current_exe().context("locate running development executable")?;
-        let mut file = std::fs::File::open(&executable)?;
+        let bundle = tempfile::tempdir()?;
+        let payload = bundle.path().join("payload");
+        std::fs::create_dir(&payload)?;
+        std::fs::copy(&executable, payload.join("jcode.bin"))?;
+        // Bundle the current executable's dependency closure, including its
+        // loader. Never install these libraries into the cloud system paths.
+        let dependencies = Command::new("ldd")
+            .arg(&executable)
+            .env_remove("LD_PRELOAD")
+            .env_remove("LD_LIBRARY_PATH")
+            .output()
+            .context("inspect development executable libraries")?;
+        if !dependencies.status.success() {
+            bail!(
+                "cannot bundle development executable libraries: {}",
+                String::from_utf8_lossy(&dependencies.stderr)
+            );
+        }
+        let mut members = vec!["jcode".to_string(), "jcode.bin".to_string()];
+        let mut loader = None;
+        for line in String::from_utf8_lossy(&dependencies.stdout).lines() {
+            if line.contains("not found") {
+                bail!("missing development dependency: {line}");
+            }
+            let Some(path) = line.split_whitespace().find(|part| part.starts_with('/')) else {
+                continue;
+            };
+            let path = Path::new(path);
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("invalid shared library filename")?;
+            if !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            {
+                bail!("unsupported shared library filename {name:?}");
+            }
+            if name.starts_with("ld-linux") {
+                loader = Some(name.to_string());
+            }
+            if !members.iter().any(|member| member == name) {
+                std::fs::copy(path, payload.join(name))?;
+                members.push(name.to_string());
+            }
+        }
+        let loader = loader.context("development executable has no supported Linux loader")?;
+        std::fs::write(
+            payload.join("jcode"),
+            format!(
+                "#!/bin/sh\nset -eu\np=$(readlink -f \"$0\")\nd=$(dirname \"$p\")\nexec \"$d/{loader}\" --library-path \"$d\" \"$p.bin\" \"$@\"\n"
+            ),
+        )?;
+        let archive = bundle.path().join("development.tar.gz");
+        let member_refs = members.iter().map(String::as_str).collect::<Vec<_>>();
+        tar_dir(&payload, &archive, &member_refs)?;
+        let mut file = std::fs::File::open(&archive)?;
         let mut digest = Sha256::new();
         let mut buffer = [0u8; 64 * 1024];
         loop {
@@ -577,12 +633,12 @@ impl Target {
         // shell owns its cleanup independently of the installer's own traps.
         let prepare = super::cloud_managed::prepare_script_with_candidate(home, Some("jcode"))?;
         let script = format!(
-            "set -eu\numask 077\nupload=$(mktemp -d)\ntrap 'rm -rf \"$upload\"' EXIT\ncat > \"$upload/jcode\"\nprintf '%s  %s\\n' '{checksum}' \"$upload/jcode\" | sha256sum --check --status\nchmod 755 \"$upload/jcode\"\n(\ncd \"$upload\"\n{prepare}\n)\n"
+            "set -eu\numask 077\nupload=$(mktemp -d)\ntrap 'rm -rf \"$upload\"' EXIT\ncat > \"$upload/bundle.tar.gz\"\nprintf '%s  %s\\n' '{checksum}' \"$upload/bundle.tar.gz\" | sha256sum --check --status\ntar xzf \"$upload/bundle.tar.gz\" --no-same-owner --no-same-permissions -C \"$upload\"\nchmod 755 \"$upload/jcode\" \"$upload/jcode.bin\" \"$upload\"/ld-linux*.so*\n(\ncd \"$upload\"\n{prepare}\n)\n"
         );
         let mut command = Self::ssh_command(host)?;
         command.arg(format!("bash -c {}", shell_quote(&script)));
         command
-            .stdin(Stdio::from(std::fs::File::open(&executable)?))
+            .stdin(Stdio::from(std::fs::File::open(&archive)?))
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let output = command

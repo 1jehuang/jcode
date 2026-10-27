@@ -507,6 +507,7 @@ pub(crate) fn prepare_script_with_candidate(home: &str, candidate: Option<&str>)
     ))
 }
 
+#[cfg(test)]
 fn prepare_script_for_paths(
     home: &str,
     target: Option<&str>,
@@ -666,6 +667,16 @@ if ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! version
     echo '[cloud prepare] installing verified local development CLI (live sessions are unchanged)' >&2
     mkdir "$stage/bin"
     cp "$development_candidate" "$stage/bin/jcode-linux-x86_64"
+    # A native development build can require a newer loader/libc than the
+    # managed image. Its verified private bundle carries those dependencies.
+    if [ -f "$development_candidate.bin" ]; then
+      cp "$development_candidate.bin" "$stage/bin/jcode-linux-x86_64.bin"
+      source_dir=$(dirname "$development_candidate")
+      for library in "$source_dir"/lib*.so* "$source_dir"/ld-linux*.so*; do
+        [ ! -f "$library" ] || cp "$library" "$stage/bin/"
+      done
+      chmod 755 "$stage/bin/jcode-linux-x86_64.bin"
+    fi
     candidate="$stage/bin/jcode-linux-x86_64"
     chmod 755 "$candidate"
   else
@@ -700,7 +711,8 @@ if ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! version
   chmod 755 "$candidate" "$candidate.bin"
   fi
   capable "$candidate" && version_matches "$candidate" || {{
-    echo '[cloud prepare] downloaded release lacks required protocol capabilities or exact version' >&2; exit 1;
+    version_output "$candidate" >&2 || true
+    echo '[cloud prepare] candidate CLI lacks required protocol capabilities or exact version' >&2; exit 1;
   }}
   # Save regular files as well as symlinks, without changing their original target.
   if [ -e "$backend" ] || [ -L "$backend" ]; then

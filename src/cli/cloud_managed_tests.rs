@@ -269,6 +269,24 @@ cp "$HOME/fixtures/${url##*/}" "$dest"
     }
 
     #[test]
+    fn development_bundle_keeps_wrapper_binary_and_private_libraries_together() {
+        let f = Fixture::new();
+        f.installed(false);
+        f.artifact(true, false, None);
+        let candidate = f.dir.path().join("payload/jcode-linux-x86_64");
+        let result = f.run_candidate(None, candidate.to_str());
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let installed = std::fs::read_link(f.backend()).unwrap();
+        assert!(installed.with_extension("bin").is_file());
+        assert!(installed.parent().unwrap().join("libssl.so.10").is_file());
+        assert!(!f.dir.path().join("downloads").exists());
+    }
+
+    #[test]
     fn development_candidate_rolls_back_when_effective_cli_is_broken() {
         let f = Fixture::new();
         f.installed(false);
