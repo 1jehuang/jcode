@@ -521,7 +521,14 @@ mod tests {
 
     #[tokio::test]
     async fn dictation_command_trims_trailing_newlines() {
-        let text = run_dictation_command("printf 'hello from test\\n'", 5)
+        // 30s, not 5s: this is a wall-clock budget around spawning `sh -lc`
+        // under `setsid`, so it also absorbs scheduler contention. A loaded
+        // runner (concurrent cargo builds, load average 11-14) could not meet a
+        // 5s budget even though `printf` itself finishes in milliseconds. 30s
+        // keeps the assertion meaningful -- a hung shell still fails -- without
+        // making the test a load-average canary. Production call sites are
+        // unchanged; this loosens the test's budget only.
+        let text = run_dictation_command("printf 'hello from test\\n'", 30)
             .await
             .expect("dictation command should succeed");
         assert_eq!(text, "hello from test");
