@@ -1,0 +1,34 @@
+{
+  "format_version": 1,
+  "conditions": {"repetitions":7,"order":"alternating fresh processes","external_sessions":false,"scan_limit":400,"filesystem_cache":"warm; no global eviction","profile":"unoptimized dev","host":"shared, concurrent workloads"},
+  "database_only": {
+    "backends": {
+      "files": {
+        "wall":{"median_ms":3654.193543829024,"min_ms":2936.74462614581,"max_ms":4417.9945681244135,"p95_ms":4417.9945681244135},
+        "load_sessions":{"median_ms":3583.022393,"min_ms":2901.807632,"max_ms":4358.947089,"p95_ms":4358.947089},
+        "row_counts":[800],"metadata_consistent":true
+      },
+      "sqlite": {
+        "wall":{"median_ms":1315.6687458977103,"min_ms":1000.5753440782428,"max_ms":3241.629215888679,"p95_ms":3241.629215888679},
+        "load_sessions":{"median_ms":1249.385802,"min_ms":943.504609,"max_ms":3211.534948,"p95_ms":3211.534948},
+        "row_counts":[800],"metadata_consistent":true
+      }
+    },
+    "metadata_equal":true,"rows_equal":true
+  },
+  "retained_legacy_files": {
+    "backends": {
+      "files": {
+        "wall":{"median_ms":3466.861422173679,"min_ms":2680.6603563018143,"max_ms":4661.4967016503215,"p95_ms":4661.4967016503215},
+        "load_sessions":{"median_ms":3418.653929,"min_ms":2639.579686,"max_ms":4556.125921,"p95_ms":4556.125921},
+        "row_counts":[800],"metadata_consistent":true
+      },
+      "sqlite": {
+        "wall":{"median_ms":1183.263842947781,"min_ms":884.7339390777051,"max_ms":8166.754725854844,"p95_ms":8166.754725854844},
+        "load_sessions":{"median_ms":1145.697142,"min_ms":851.274067,"max_ms":8130.5335159999995,"p95_ms":8130.5335159999995},
+        "row_counts":[800],"metadata_consistent":true
+      }
+    },
+    "metadata_equal":true,"rows_equal":true
+  }
+}

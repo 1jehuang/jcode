@@ -2332,6 +2332,59 @@ fn test_transcript_path_command_reports_current_session_file() {
 }
 
 #[test]
+fn test_transcript_path_exports_sqlite_session_as_existing_json() {
+    with_temp_jcode_home(|| {
+        struct RestoreBackend(Option<std::ffi::OsString>);
+        impl Drop for RestoreBackend {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => crate::env::set_var("JCODE_SESSION_BACKEND", value),
+                    None => crate::env::remove_var("JCODE_SESSION_BACKEND"),
+                }
+            }
+        }
+        let _backend = RestoreBackend(std::env::var_os("JCODE_SESSION_BACKEND"));
+        crate::env::set_var("JCODE_SESSION_BACKEND", "sqlite");
+        let mut app = create_test_app();
+        app.session.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "Export this transcript".into(),
+                cache_control: None,
+            }],
+        );
+        let store = crate::session::SessionStore::configured().expect("SQLite store");
+        store
+            .save_prepared(&mut app.session)
+            .expect("save SQLite session");
+        assert!(super::commands::handle_session_command(
+            &mut app,
+            "/transcript path"
+        ));
+        let exported = store
+            .root()
+            .join("cache/session-exports")
+            .join(format!("{}.json", app.session.id));
+        let loaded =
+            crate::session::Session::load_from_path(&exported).expect("read exported JSON");
+        assert_eq!(loaded.id, app.session.id);
+        assert!(loaded.messages.iter().flat_map(|message| &message.content).any(|block| {
+            matches!(block, crate::message::ContentBlock::Text { text, .. } if text == "Export this transcript")
+        }));
+        assert!(
+            !crate::session::session_path(&app.session.id)
+                .expect("legacy path")
+                .exists()
+        );
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|message| { message.content.contains(&exported.display().to_string()) })
+        );
+    });
+}
+
+#[test]
 fn test_poke_arms_auto_poke_until_todos_are_done() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();

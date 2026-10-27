@@ -33,6 +33,36 @@ impl Drop for EnvVarGuard {
 }
 
 #[test]
+fn sqlite_only_sessions_are_available_to_replay() -> anyhow::Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let _backend = EnvVarGuard::set("JCODE_SESSION_BACKEND", "sqlite");
+    let mut session = Session::create_with_id(
+        "session_sqlitereplay_1234567890123".into(),
+        None,
+        Some("Replay from database".into()),
+    );
+    session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "A persisted replay message".into(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+    assert!(!home.path().join("sessions").exists());
+    assert_eq!(load_session(&session.id)?.id, session.id);
+    assert_eq!(
+        serde_json::to_value(load_session("sqlitereplay")?.messages)?,
+        serde_json::to_value(&session.messages)?
+    );
+    let swarm = load_swarm_sessions(&session.id, false)?;
+    assert!(swarm.iter().any(|entry| entry.session.id == session.id));
+    Ok(())
+}
+
+#[test]
 fn test_timeline_roundtrip() {
     let events = vec![
         TimelineEvent {

@@ -47,6 +47,7 @@ mod persistence;
 pub mod prewarm;
 mod render;
 mod storage_paths;
+mod store;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
@@ -74,6 +75,10 @@ pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
 pub use storage_paths::{session_exists, session_journal_path, session_path};
+pub use store::{
+    SessionBackend, SessionListOptions, SessionSearchCandidate, SessionStorage, SessionStore,
+    SessionSummary,
+};
 pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
@@ -212,6 +217,9 @@ pub struct Session {
     /// (`jcode cloud move` / `return`). Zero for sessions that never moved.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub migration_epoch: u64,
+    /// Metadata from newer versions survives load, import, and export.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
     persist_state: SessionPersistState,
     #[serde(skip)]
@@ -549,6 +557,8 @@ impl Session {
             model_usage_turn_id: self.model_usage_turn_id.clone(),
             provider_key: self.provider_key.clone(),
             model: self.model.clone(),
+            route_api_method: self.route_api_method.clone(),
+            migration_epoch: self.migration_epoch,
             reasoning_effort: self.reasoning_effort.clone(),
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
@@ -565,6 +575,7 @@ impl Session {
             is_debug: self.is_debug,
             saved: self.saved,
             save_label: self.save_label.clone(),
+            extra: self.extra.clone(),
         }
     }
 
@@ -581,6 +592,10 @@ impl Session {
             replay_events_mode: PersistVectorMode::Clean,
             last_meta: Some(self.journal_meta()),
             transcript_stripped: self.persist_state.transcript_stripped,
+            store_key: self.persist_state.store_key.clone(),
+            sqlite_revision: self.persist_state.sqlite_revision,
+            sqlite_transcript_revision: self.persist_state.sqlite_transcript_revision,
+            sqlite_metadata: self.persist_state.sqlite_metadata.clone(),
         };
     }
 
@@ -752,6 +767,10 @@ impl Session {
         self.model_usage_turn_id = meta.model_usage_turn_id;
         self.provider_key = meta.provider_key;
         self.model = meta.model;
+        if meta.route_api_method.is_some() {
+            self.route_api_method = meta.route_api_method;
+        }
+        self.migration_epoch = self.migration_epoch.max(meta.migration_epoch);
         self.reasoning_effort = meta.reasoning_effort;
         self.subagent_model = meta.subagent_model;
         self.agent_model_overrides = meta.agent_model_overrides;
@@ -768,6 +787,7 @@ impl Session {
         self.is_debug = meta.is_debug;
         self.saved = meta.saved;
         self.save_label = meta.save_label;
+        self.extra.extend(meta.extra);
         self.mark_memory_profile_dirty();
     }
 
@@ -815,6 +835,7 @@ impl Session {
             memory_injections: Vec::new(),
             replay_events: Vec::new(),
             migration_epoch: 0,
+            extra: BTreeMap::new(),
             persist_state: SessionPersistState::default(),
             provider_messages_cache: Vec::new(),
             provider_message_prefix_hashes_cache: Vec::new(),
@@ -873,6 +894,7 @@ impl Session {
             memory_injections: Vec::new(),
             replay_events: Vec::new(),
             migration_epoch: 0,
+            extra: BTreeMap::new(),
             persist_state: SessionPersistState::default(),
             provider_messages_cache: Vec::new(),
             provider_message_prefix_hashes_cache: Vec::new(),
@@ -1218,6 +1240,13 @@ request in this new forked session, using the inherited conversation only as con
 
     pub fn redacted_for_export(&self) -> Self {
         let mut redacted = self.clone();
+        for (key, value) in &mut redacted.extra {
+            if is_sensitive_json_key(key) {
+                *value = serde_json::Value::String("[REDACTED_SECRET]".into());
+            } else {
+                redact_json_value(value);
+            }
+        }
         if let Some(title) = redacted.title.as_mut() {
             *title = crate::message::redact_secrets(title);
         }

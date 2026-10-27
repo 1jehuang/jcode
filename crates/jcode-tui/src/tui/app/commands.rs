@@ -1623,7 +1623,21 @@ fn handle_transcript_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     let session_id = active_session_id(app);
-    let path = match crate::session::session_path(&session_id) {
+    if !app.is_remote && app.session.id == session_id {
+        let _ = app.session.save();
+    }
+    let path = match (|| -> anyhow::Result<std::path::PathBuf> {
+        if crate::session::SessionBackend::configured()? == crate::session::SessionBackend::Files {
+            return crate::session::session_path(&session_id);
+        }
+        let store = crate::session::SessionStore::configured()?;
+        let path = store
+            .root()
+            .join("cache/session-exports")
+            .join(format!("{session_id}.json"));
+        store.export(&session_id, &path)?;
+        Ok(path)
+    })() {
         Ok(path) => path,
         Err(error) => {
             app.push_display_message(DisplayMessage::error(format!(
@@ -1633,10 +1647,6 @@ fn handle_transcript_command(app: &mut App, trimmed: &str) -> bool {
             return true;
         }
     };
-
-    if !app.is_remote && app.session.id == session_id {
-        let _ = app.session.save();
-    }
 
     if trimmed == "/transcript path" {
         app.push_display_message(DisplayMessage::system(transcript_path_message(&path)));

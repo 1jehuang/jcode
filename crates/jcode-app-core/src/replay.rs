@@ -586,6 +586,22 @@ pub fn load_session(id_or_path: &str) -> Result<Session> {
         return Session::load_from_path(path);
     }
 
+    if crate::session::SessionBackend::configured()? != crate::session::SessionBackend::Files {
+        let store = crate::session::SessionStore::configured()?;
+        if store.exists(id_or_path)? {
+            return store.load(id_or_path);
+        }
+        for summary in store.list()? {
+            if summary.id.contains(id_or_path) {
+                return store.load(&summary.id);
+            }
+        }
+        anyhow::bail!(
+            "Session not found: '{}'. Provide a session ID, name, or file path.",
+            id_or_path
+        );
+    }
+
     // Try as session ID in the sessions directory
     let sessions_dir = crate::storage::jcode_dir()?.join("sessions");
     // Try exact match
@@ -624,25 +640,28 @@ pub fn load_swarm_sessions(
     let lower_bound = seed.created_at - Duration::hours(6);
     let upper_bound = seed.updated_at + Duration::hours(6);
 
-    let sessions_dir = crate::storage::jcode_dir()?.join("sessions");
-    if !sessions_dir.exists() {
-        return Ok(vec![SwarmReplaySession {
-            timeline: maybe_auto_edit(&seed, auto_edit),
-            session: seed,
-        }]);
-    }
-
     let mut all_sessions: Vec<Session> = Vec::new();
-    for entry in std::fs::read_dir(&sessions_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.extension().map(|e| e == "json").unwrap_or(false) {
-            continue;
+    if crate::session::SessionBackend::configured()? != crate::session::SessionBackend::Files {
+        let store = crate::session::SessionStore::configured()?;
+        for summary in store.list()? {
+            if let Ok(session) = store.load(&summary.id) {
+                all_sessions.push(session);
+            }
         }
-        let Ok(session) = Session::load_from_path(&path) else {
-            continue;
-        };
-        all_sessions.push(session);
+    } else {
+        let sessions_dir = crate::storage::jcode_dir()?.join("sessions");
+        if sessions_dir.exists() {
+            for entry in std::fs::read_dir(&sessions_dir)? {
+                let path = entry?.path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                    && let Ok(session) = Session::load_from_path(&path)
+                {
+                    all_sessions.push(session);
+                }
+            }
+        }
     }
 
     let mut selected_ids: BTreeSet<String> = BTreeSet::new();
