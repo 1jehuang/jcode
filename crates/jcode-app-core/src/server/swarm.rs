@@ -1401,6 +1401,10 @@ fn member_awaits_unrestored_notice(member: &SwarmMember) -> bool {
             detail.contains(super::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE)
                 && !detail.contains(super::swarm_persistence::OWNER_NOTIFIED_NOTE)
         })
+        // Shutdown can leave a ready snapshot even for work that has a durable
+        // continuation. Startup will restore that worker, so don't tell its
+        // coordinator it had no work in flight and needs replacing.
+        && !super::reload_recovery::has_pending_for_session(&member.session_id)
 }
 
 /// Tell `owner_session_id` about idle headless workers that the last server
@@ -3279,6 +3283,61 @@ mod tests {
         assert!(!super::member_awaits_unrestored_notice(
             &state.members.read().await["recovery-worker"]
         ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn unrestored_notice_ignores_worker_with_pending_recovery_intent() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let owner_id = "unrestored-notice-pending-owner";
+        let (state, mut ui_rx) = unrestored_notice_state(owner_id);
+        let worker_id = "pending-recovery-worker";
+        {
+            let mut members = state.members.write().await;
+            let mut worker = members.remove("recovery-worker").unwrap();
+            worker.session_id = worker_id.to_string();
+            members.insert(worker_id.to_string(), worker);
+        }
+        let sessions = Default::default();
+        let queue: jcode_agent_runtime::SoftInterruptQueue = Default::default();
+        let queues = Arc::new(RwLock::new(HashMap::from([(
+            owner_id.to_string(),
+            queue.clone(),
+        )])));
+        crate::server::reload_recovery::persist_intent(
+            "reload-notice-pending",
+            worker_id,
+            crate::server::reload_recovery::ReloadRecoveryRole::Headless,
+            crate::tool::selfdev::ReloadRecoveryDirective {
+                reconnect_notice: None,
+                continuation_message: "Continue interrupted work".to_string(),
+            },
+            "work in flight before shutdown",
+        )
+        .unwrap();
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers(owner_id, &state, &sessions, &queues)
+                .await,
+            0
+        );
+        assert!(queue.lock().unwrap().is_empty());
+        assert!(ui_rx.try_recv().is_err());
+        let members = state.members.read().await;
+        assert_eq!(
+            members[worker_id].detail.as_deref(),
+            Some(crate::server::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE)
+        );
+        assert!(crate::server::reload_recovery::has_pending_for_session(
+            worker_id
+        ));
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[tokio::test]
