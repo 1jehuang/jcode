@@ -12,6 +12,40 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[test]
+fn ndjson_preserves_reasoning_separately_from_the_final_answer() {
+    let mut state = NdjsonRunState::default();
+    let mut output = Vec::new();
+    for event in [
+        crate::protocol::ServerEvent::ReasoningDelta {
+            text: "Verify the multiplication.\n".into(),
+        },
+        crate::protocol::ServerEvent::ReasoningDelta {
+            text: "Check once more.".into(),
+        },
+        crate::protocol::ServerEvent::TextDelta {
+            text: "1813".into(),
+        },
+    ] {
+        emit_ndjson_event(&mut output, &mut state, event).unwrap();
+    }
+    let events: Vec<serde_json::Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0],
+        serde_json::json!({
+            "type": "reasoning_delta", "text": "Verify the multiplication.\n"
+        })
+    );
+    assert_eq!(events[1]["type"], "reasoning_delta");
+    assert_eq!(events[2]["type"], "text_delta");
+    assert_eq!(state.text, "1813");
+}
+
+#[test]
 fn ndjson_preserves_provider_reported_service_tier_without_inferring_it() {
     let mut state = NdjsonRunState::default();
     assert_eq!(state.served_service_tier, None);

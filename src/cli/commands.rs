@@ -3727,6 +3727,10 @@ fn emit_ndjson_event(
     use crate::protocol::ServerEvent;
 
     match event {
+        ServerEvent::ReasoningDelta { text } => write_json_line(
+            stdout,
+            &serde_json::json!({ "type": "reasoning_delta", "text": text }),
+        ),
         ServerEvent::TextDelta { text } => {
             state.text.push_str(&text);
             write_json_line(
