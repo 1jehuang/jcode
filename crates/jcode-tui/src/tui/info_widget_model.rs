@@ -257,9 +257,9 @@ mod tests {
     }
 
     #[test]
-    fn compact_tier_reports_keep_actual_tier_visible() {
+    fn compact_tier_reports_keep_reported_tier_visible() {
         let mut d = data();
-        for status in ["Standard ← Ultrafast", "Ultrafast ?"] {
+        for status in ["default ← Ultrafast", "Ultrafast ?"] {
             d.service_tier = Some(status.into());
             let out = text(render_model_info(&d, Rect::new(0, 0, 34, 8)));
             assert!(out.contains(status), "{out}");
@@ -271,8 +271,8 @@ mod tests {
                 for line in &lines {
                     assert!(line.width() <= width as usize, "{line:?}");
                 }
-                if status.starts_with("Standard") {
-                    assert!(text(lines).contains("Standard"));
+                if status.starts_with("default") {
+                    assert!(text(lines).contains("default"));
                 }
             }
         }

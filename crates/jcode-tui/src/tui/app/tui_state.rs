@@ -1870,10 +1870,9 @@ impl crate::tui::TuiState for App {
                                 if super::service_tier_display_label(reported) == label {
                                     requested
                                 } else {
-                                    format!(
-                                        "{} ← {label}",
-                                        super::service_tier_display_label(reported)
-                                    )
+                                    // Keep the raw report: a generic `default`
+                                    // response tier is not a throughput measurement.
+                                    format!("{reported} ← {label}")
                                 }
                             }
                             _ => format!("{label} ?"),

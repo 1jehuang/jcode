@@ -434,7 +434,7 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     let badge = app.info_widget_data().service_tier.unwrap();
     assert_eq!(
         badge,
-        "Standard ← Ultrafast"
+        "default ← Ultrafast"
     );
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
@@ -520,7 +520,7 @@ fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
     let badge = app.info_widget_data().service_tier.unwrap();
     assert_eq!(
         badge,
-        "Standard ← Fast"
+        "default ← Fast"
     );
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
