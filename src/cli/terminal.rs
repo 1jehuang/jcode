@@ -616,6 +616,7 @@ fn signal_crash_reason(sig: i32) -> String {
     }
 }
 
+#[cfg(test)]
 fn restore_terminal_modes_for_signal_to(
     writer: &mut impl std::io::Write,
     inside_tmux: bool,
