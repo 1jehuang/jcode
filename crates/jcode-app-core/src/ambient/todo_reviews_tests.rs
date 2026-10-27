@@ -17,7 +17,7 @@ fn blocked(id: &str) -> TodoItem {
         id: id.into(),
         content: id.into(),
         status: "pending".into(),
-        requires_user_action: None,
+        completely_blocked: None,
         external_blocker: Some(TodoExternalBlocker {
             reason: "Coordinator acceptance of frozen source".into(),
             review_at: chrono::Utc::now() + chrono::Duration::minutes(20),
@@ -27,7 +27,7 @@ fn blocked(id: &str) -> TodoItem {
 }
 
 #[test]
-fn requires_user_action_cancels_reviews_and_rejects_claimed_stale_wakes() {
+fn completely_blocked_cancels_reviews_and_rejects_claimed_stale_wakes() {
     let _lock = crate::storage::lock_test_env();
     let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
     let dir = tempfile::tempdir().unwrap();
@@ -40,9 +40,8 @@ fn requires_user_action_cancels_reviews_and_rejects_claimed_stale_wakes() {
     if let ScheduleTarget::TodoReview { blocker, .. } = &mut claimed.target {
         blocker.review_at = due;
     }
-    todo.requires_user_action = Some(crate::todo::TodoUserAction {
-        action: "Approve transfer".into(),
-        reason: "Only the owner can authorize it".into(),
+    todo.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        reason: "Required data is permanently unavailable".into(),
     });
     crate::todo::save_todos("owner", std::slice::from_ref(&todo)).unwrap();
     assert!(!scheduled_todo_review_is_current(&claimed));

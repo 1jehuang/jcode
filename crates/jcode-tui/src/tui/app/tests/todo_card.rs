@@ -87,7 +87,7 @@ fn refresh_todo_card_updates_content_when_todos_change() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
-        requires_user_action: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -136,7 +136,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
-        requires_user_action: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -198,7 +198,7 @@ fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoI
         completion_confidence: None,
         confidence_history: Vec::new(),
         external_blocker: None,
-        requires_user_action: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -843,7 +843,7 @@ fn debug_inject_todos_preserves_role_and_renders_fixture() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let mut app = create_test_app();
-    let payload = serde_json::json!({"todos":[{"id":"debug", "content":"Authorize", "status":"pending", "priority":"high", "requires_user_action":{"action":"Approve access", "reason":"Only the owner can approve"}}]});
+    let payload = serde_json::json!({"todos":[{"id":"debug", "content":"Authorize", "status":"pending", "priority":"high", "completely_blocked":{"reason":"Only the owner can approve"}}]});
     let response = app.handle_debug_command(&format!("inject:todos:{payload}"));
     assert!(
         response.starts_with("OK: injected todos message"),
@@ -860,7 +860,7 @@ fn debug_inject_todos_preserves_role_and_renders_fixture() {
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     let text = render_and_snap(&app, &mut terminal);
     assert!(
-        text.contains("✋") && text.contains("Absolutely requires user action"),
+        text.contains("✋") && text.contains("Completely blocked"),
         "{text}"
     );
 }

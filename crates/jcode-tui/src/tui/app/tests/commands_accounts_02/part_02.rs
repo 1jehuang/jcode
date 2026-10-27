@@ -152,7 +152,7 @@ fn test_refactor_status_summarizes_current_todos() {
                     completion_confidence: None,
                     confidence_history: Vec::new(),
                     external_blocker: None,
-                    requires_user_action: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
@@ -169,7 +169,7 @@ fn test_refactor_status_summarizes_current_todos() {
                     completion_confidence: None,
                     confidence_history: Vec::new(),
                     external_blocker: None,
-                    requires_user_action: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                 },
             ],
@@ -216,7 +216,7 @@ fn test_refactor_resume_uses_saved_mode_and_current_todos() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
-                requires_user_action: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )

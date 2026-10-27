@@ -1201,7 +1201,7 @@ fn test_context_command_reports_session_context_snapshot() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
-                requires_user_action: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )

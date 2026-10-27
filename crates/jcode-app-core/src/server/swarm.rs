@@ -808,12 +808,12 @@ async fn broadcast_swarm_status_now(
                                         m.status.as_str(),
                                         "running" | "streaming" | "thinking"
                                     ))
-                                    .then(|| m.runtime.todo_user_action_reason.clone())
+                                    .then(|| m.runtime.todo_blocked_reason.clone())
                                     .flatten()
                                 },
                             ),
                             wait_age_secs: wait.map(|(_, age)| age),
-                            todo_user_action_reason: m.runtime.todo_user_action_reason.clone(),
+                            todo_blocked_reason: m.runtime.todo_blocked_reason.clone(),
                             todo_statuses: m.runtime.todo_statuses.clone(),
                             model: m.runtime.model.clone(),
                             provider: m.runtime.provider.clone(),
@@ -2299,9 +2299,8 @@ mod tests {
                 id: "login".into(),
                 content: "Authenticate".into(),
                 status: "pending".into(),
-                requires_user_action: Some(crate::todo::TodoUserAction {
-                    action: "Sign in".into(),
-                    reason: "Only the owner can authenticate".into(),
+                completely_blocked: Some(crate::todo::TodoCompleteBlocker {
+                    reason: "Required data is permanently unavailable".into(),
                 }),
                 ..Default::default()
             }],
@@ -2322,9 +2321,9 @@ mod tests {
                 .wait_reason
                 .as_deref()
                 .unwrap()
-                .contains("Only the owner can authenticate")
+                .contains("Required data is permanently unavailable")
         );
-        assert_eq!(latest.todo_statuses, vec!["requires_user_action"]);
+        assert_eq!(latest.todo_statuses, vec!["completely_blocked"]);
         todos.todos.push(crate::todo::TodoItem {
             id: "independent".into(),
             content: "Run tests".into(),

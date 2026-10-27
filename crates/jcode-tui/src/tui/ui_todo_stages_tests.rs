@@ -2,10 +2,9 @@ use super::*;
 use crate::todo::TodoItem;
 
 #[test]
-fn mixed_user_action_lane_keeps_independent_peer_visible() {
+fn mixed_complete_blocker_lane_keeps_independent_peer_visible() {
     let mut paused = assigned(todo("paused", "Approve", "in_progress", Some(1)), "fox");
-    paused.requires_user_action = Some(crate::todo::TodoUserAction {
-        action: "Approve access".into(),
+    paused.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
         reason: "Owner only".into(),
     });
     let active = assigned(todo("active", "Test", "in_progress", Some(1)), "wolf");
@@ -98,13 +97,15 @@ fn lane_live_status_omits_transport_and_preserves_stop_precedence() {
     push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", 160);
     assert!(rows[0].to_string().contains("Waiting for hosted build"));
     assert!(!rows[0].to_string().contains(LIVE_DOT_SENTINEL));
-    item.requires_user_action = Some(crate::todo::TodoUserAction {
-        action: "Approve".into(),
+    item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
         reason: "Owner only".into(),
     });
     rows.clear();
     push_lane_status_lines(&mut rows, &[&item], &[worker], "", 160);
-    assert!(rows.is_empty(), "User action suppresses live telemetry");
+    assert!(
+        rows.is_empty(),
+        "Complete blocker suppresses live telemetry"
+    );
 }
 
 #[test]
@@ -382,15 +383,14 @@ fn inline_tool_intent_is_single_line_and_bounded() {
 }
 
 #[test]
-fn user_action_overrides_live_workers_and_has_two_cell_phase_and_lane_pips() {
+fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips() {
     let mut item = assigned(
         todo("action", "Authorize 界", "in_progress", Some(1)),
         "fox",
     );
     item.group = Some("Setup".into());
     item.blocked_by = vec!["dependency".into()];
-    item.requires_user_action = Some(crate::todo::TodoUserAction {
-        action: "Approve access ✋".into(),
+    item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
         reason: "Only the account owner can approve access".into(),
     });
     let mut worker = agent("fox", "running", Some("Working"), Some(1));
@@ -399,14 +399,14 @@ fn user_action_overrides_live_workers_and_has_two_cell_phase_and_lane_pips() {
     assert_eq!(pip_span(&item).content, "✋");
     assert_eq!(pip_span(&item).width(), 2);
     let statuses = lane_item_statuses(&[&item], &workers);
-    assert_eq!(statuses, vec![("requires_user_action", false)]);
+    assert_eq!(statuses, vec![("completely_blocked", false)]);
     let strip = lane_strip_spans(&statuses, 2);
     assert_eq!(strip[0].content, "✋");
     assert_eq!(width_of(&strip), 4);
     let label = Line::from(blocked_phase_spans(&[&item], &workers)).to_string();
-    assert!(label.contains("phase 1: Absolutely requires user action"));
+    assert!(label.contains("phase 1: Completely blocked"));
     let note = Line::from(lane_note_spans(&[&item], &workers)).to_string();
-    assert!(note.contains("Absolutely requires user action: Approve access ✋"));
+    assert!(note.contains("Completely blocked: Only the account owner can approve access"));
     for width in 0..120 {
         let mut pips = Vec::new();
         push_stage_pips(&mut pips, &[&item], width);
@@ -416,28 +416,22 @@ fn user_action_overrides_live_workers_and_has_two_cell_phase_and_lane_pips() {
             assert!(!row.contains(LIVE_DOT_SENTINEL));
         }
     }
-    item.requires_user_action = None;
+    item.completely_blocked = None;
     assert_eq!(todo_pip_status(&item), "blocked");
     item.blocked_by.clear();
     assert_eq!(lane_item_statuses(&[&item], &workers).len(), 2);
 }
 
 #[test]
-fn user_action_requires_both_fields_and_never_marks_terminal_todos() {
+fn complete_blocker_requires_reason_and_never_marks_terminal_todos() {
     let mut item = todo("1", "Activation", "pending", Some(1));
-    for (action, reason, marked) in [
-        ("Approve", "Owner only", true),
-        (" ", "Owner only", false),
-        ("Approve", "\n", false),
-    ] {
-        item.requires_user_action = Some(crate::todo::TodoUserAction {
-            action: action.into(),
+    for (reason, marked) in [("Owner only", true), (" ", false), ("\n", false)] {
+        item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
             reason: reason.into(),
         });
         assert_eq!(pip_span(&item).content == "✋", marked);
     }
-    item.requires_user_action = Some(crate::todo::TodoUserAction {
-        action: "Approve".into(),
+    item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
         reason: "Owner only".into(),
     });
     for status in ["completed", "cancelled"] {
@@ -447,7 +441,7 @@ fn user_action_requires_both_fields_and_never_marks_terminal_todos() {
         assert!(
             !Line::from(lane_note_spans(&[&item], &[]))
                 .to_string()
-                .contains("Absolutely requires")
+                .contains("Completely blocked")
         );
     }
 }

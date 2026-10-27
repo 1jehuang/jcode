@@ -23,13 +23,13 @@ fn context() -> ToolContext {
 }
 
 #[tokio::test]
-async fn requires_user_action_tool_validates_updates_clears_and_cancels_reviews() {
+async fn completely_blocked_tool_validates_updates_clears_and_cancels_reviews() {
     let _lock = crate::storage::lock_test_env();
     let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
     let dir = tempfile::tempdir().unwrap();
     crate::env::set_var("JCODE_HOME", dir.path());
     let tool = TodoTool::new();
-    let required = json!({"action":"Approve the account transfer", "reason":"Only the account owner can authorize the transfer"});
+    let required = json!({"reason":"No implementation or alternative exists"});
     let review = chrono::Utc::now() + chrono::Duration::minutes(5);
     tool.execute(
         json!({"add":[{
@@ -46,19 +46,14 @@ async fn requires_user_action_tool_validates_updates_clears_and_cancels_reviews(
         1
     );
     // A historical task may have been cleaned up. Retaining its useful
-    // dependency reference must not block or erase the new user-only wait.
+    // dependency reference must not block or erase the new complete blocker.
     let mut prior = load_todos("external-blocker-tool").unwrap();
     prior[0].waiting_on = vec!["historical-task".into()];
     save_todos("external-blocker-tool", &prior).unwrap();
-    for bad in [
-        json!({"action":"", "reason":"owner only"}),
-        json!({"action":"verify", "reason":" \t\n"}),
-        json!({"action":"verify"}),
-        json!({"reason":"owner only"}),
-    ] {
+    for bad in [json!({"reason":""}), json!({"reason":" \t\n"}), json!({})] {
         assert!(
             tool.execute(
-                json!({"update":[{"id":"a", "requires_user_action":bad}]}),
+                json!({"update":[{"id":"a", "completely_blocked":bad}]}),
                 context()
             )
             .await
@@ -66,18 +61,18 @@ async fn requires_user_action_tool_validates_updates_clears_and_cancels_reviews(
         );
         assert!(
             load_todos("external-blocker-tool").unwrap()[0]
-                .requires_user_action
+                .completely_blocked
                 .is_none()
         );
     }
     tool.execute(
-        json!({"update":[{"id":"a", "requires_user_action":required}]}),
+        json!({"update":[{"id":"a", "completely_blocked":required}]}),
         context(),
     )
     .await
     .unwrap();
     let stored = load_todos("external-blocker-tool").unwrap();
-    assert!(crate::todo::todo_requires_user_action(&stored[0]));
+    assert!(crate::todo::todo_completely_blocked(&stored[0]));
     assert!(stored[0].external_blocker.is_none());
     assert_eq!(stored[0].blocked_by, vec!["prerequisite"]);
     assert_eq!(stored[0].waiting_on, vec!["historical-task"]);
@@ -88,19 +83,19 @@ async fn requires_user_action_tool_validates_updates_clears_and_cancels_reviews(
             .is_empty()
     );
     tool.execute(
-        json!({"update":[{"id":"a", "requires_user_action":null}]}),
+        json!({"update":[{"id":"a", "completely_blocked":null}]}),
         context(),
     )
     .await
     .unwrap();
     assert!(
         load_todos("external-blocker-tool").unwrap()[0]
-            .requires_user_action
+            .completely_blocked
             .is_none()
     );
     for status in ["completed", "cancelled"] {
         tool.execute(
-            json!({"update":[{"id":"a", "status":"pending", "requires_user_action":required}]}),
+            json!({"update":[{"id":"a", "status":"pending", "completely_blocked":required}]}),
             context(),
         )
         .await
@@ -110,7 +105,7 @@ async fn requires_user_action_tool_validates_updates_clears_and_cancels_reviews(
             .unwrap();
         assert!(
             load_todos("external-blocker-tool").unwrap()[0]
-                .requires_user_action
+                .completely_blocked
                 .is_none()
         );
         assert!(
@@ -120,8 +115,8 @@ async fn requires_user_action_tool_validates_updates_clears_and_cancels_reviews(
                 .is_empty()
         );
     }
-    tool.execute(json!({"add":[{"id":"b", "content":"Verify identity", "status":"pending", "priority":"high", "phase":1, "lane":"identity", "requires_user_action":required}]}), context()).await.unwrap();
-    assert!(crate::todo::todo_requires_user_action(
+    tool.execute(json!({"add":[{"id":"b", "content":"Verify identity", "status":"pending", "priority":"high", "phase":1, "lane":"identity", "completely_blocked":required}]}), context()).await.unwrap();
+    assert!(crate::todo::todo_completely_blocked(
         &load_todos("external-blocker-tool").unwrap()[1]
     ));
     assert!(
@@ -133,21 +128,28 @@ async fn requires_user_action_tool_validates_updates_clears_and_cancels_reviews(
 }
 
 #[test]
-fn requires_user_action_schema_is_shared_and_strict() {
+fn completely_blocked_schema_is_shared_and_strict() {
     let schema = TodoTool::new().parameters_schema();
-    let update = &schema["properties"]["update"]["items"]["properties"]["requires_user_action"];
-    let add = &schema["properties"]["add"]["items"]["properties"]["requires_user_action"];
+    let update = &schema["properties"]["update"]["items"]["properties"]["completely_blocked"];
+    let add = &schema["properties"]["add"]["items"]["properties"]["completely_blocked"];
     let phase = &schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]["properties"]
-        ["items"]["items"]["properties"]["requires_user_action"];
+        ["items"]["items"]["properties"]["completely_blocked"];
     assert_eq!(update, add);
     assert_eq!(update, phase);
     assert_eq!(update["type"], json!(["object", "null"]));
-    assert_eq!(update["required"], json!(["action", "reason"]));
+    assert_eq!(update["required"], json!(["reason"]));
     assert_eq!(update["additionalProperties"], false);
+    assert_eq!(update["description"], "No way forward.");
+    assert!(update["properties"].get("action").is_none());
+    assert!(
+        schema["properties"]["update"]["items"]["properties"]
+            .get("requires_user_action")
+            .is_none()
+    );
     assert!(
         TodoTool::new()
             .description()
-            .contains("no safe authorized agent alternative")
+            .contains("completely_blocked: No way forward.")
     );
 }
 

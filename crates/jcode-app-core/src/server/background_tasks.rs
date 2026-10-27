@@ -368,7 +368,7 @@ pub(super) async fn dispatch_swarm_todo_progress(
         Some((completed, total))
     };
     let mut items = compact_todo_items(&event.todos);
-    let (statuses, user_wait) = todo_runtime_projection(&event.todos);
+    let (statuses, blocked_reason) = todo_runtime_projection(&event.todos);
 
     let swarm_id = {
         let mut members = swarm_members.write().await;
@@ -390,14 +390,14 @@ pub(super) async fn dispatch_swarm_todo_progress(
         if member.todo_progress == progress
             && member.todo_items == items
             && member.runtime.todo_statuses == statuses
-            && member.runtime.todo_user_action_reason == user_wait
+            && member.runtime.todo_blocked_reason == blocked_reason
         {
             return; // no change, skip the broadcast
         }
         member.todo_progress = progress;
         member.todo_items = items;
         member.runtime.todo_statuses = statuses;
-        member.runtime.todo_user_action_reason = user_wait;
+        member.runtime.todo_blocked_reason = blocked_reason;
         member.swarm_id.clone()
     };
     if let Some(swarm_id) = swarm_id {
@@ -559,15 +559,15 @@ const SWARM_TOOL_INTENTS_CAP: usize = 3;
 const SWARM_TOOL_INTENT_CAP: usize = 120;
 
 fn todo_display_status(todo: &crate::todo::TodoItem) -> String {
-    if crate::todo::todo_requires_user_action(todo) {
-        "requires_user_action".into()
+    if crate::todo::todo_completely_blocked(todo) {
+        "completely_blocked".into()
     } else {
         todo.status.clone()
     }
 }
 
-/// A user-only pause applies to the worker only when every unfinished item
-/// needs the user. Independent pending/running work must remain actionable.
+/// A complete blocker applies to the worker only when every unfinished item
+/// is completely blocked. Independent pending/running work must remain actionable.
 pub(super) fn todo_runtime_projection(
     todos: &[crate::todo::TodoItem],
 ) -> (Vec<String>, Option<String>) {
@@ -579,16 +579,16 @@ pub(super) fn todo_runtime_projection(
     let reason = (!unfinished.is_empty()
         && unfinished
             .iter()
-            .all(|todo| crate::todo::todo_requires_user_action(todo)))
+            .all(|todo| crate::todo::todo_completely_blocked(todo)))
     .then(|| {
         unfinished
             .iter()
-            .filter_map(|todo| todo.requires_user_action.as_ref())
-            .map(|required| format!("{} ({})", required.action.trim(), required.reason.trim()))
+            .filter_map(|todo| todo.completely_blocked.as_ref())
+            .map(|required| required.reason.trim().to_string())
             .collect::<Vec<_>>()
             .join("; ")
     })
-    .map(|reason| format!("User action required: {reason}"));
+    .map(|reason| format!("Completely blocked: {reason}"));
     (statuses, reason)
 }
 
@@ -720,9 +720,8 @@ mod tests {
             "in_progress"
         );
         for todo in &mut event.todos {
-            todo.requires_user_action = Some(crate::todo::TodoUserAction {
-                action: "Sign in".into(),
-                reason: "Only the owner can authenticate".into(),
+            todo.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+                reason: "Required data is permanently unavailable".into(),
             });
         }
         dispatch_swarm_todo_progress(&event, &members, &swarms).await;
@@ -733,26 +732,23 @@ mod tests {
                 runtime
                     .todo_statuses
                     .iter()
-                    .all(|s| s == "requires_user_action")
+                    .all(|s| s == "completely_blocked")
             );
             assert!(
                 runtime
-                    .todo_user_action_reason
+                    .todo_blocked_reason
                     .as_deref()
                     .unwrap()
-                    .contains("Only the owner can authenticate")
+                    .contains("Required data is permanently unavailable")
             );
-            assert_eq!(
-                members["worker"].todo_items[0].status,
-                "requires_user_action"
-            );
+            assert_eq!(members["worker"].todo_items[0].status, "completely_blocked");
         }
-        event.todos[19].requires_user_action = None;
+        event.todos[19].completely_blocked = None;
         dispatch_swarm_todo_progress(&event, &members, &swarms).await;
         assert!(
             members.read().await["worker"]
                 .runtime
-                .todo_user_action_reason
+                .todo_blocked_reason
                 .is_none(),
             "independent in-progress work prevents a worker-wide pause"
         );

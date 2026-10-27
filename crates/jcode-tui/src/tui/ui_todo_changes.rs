@@ -14,7 +14,7 @@
 //!   first plan, or more than one status change) show a header plus one line
 //!   per changed item.
 
-use super::messages::todo_user_action_detail;
+use super::messages::todo_complete_blocker_detail;
 use super::*;
 use crate::message::ToolCall;
 use crate::todo::TodoItem;
@@ -86,7 +86,7 @@ pub(super) fn previous_todos(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TodoChangeKind {
-    RequiresUserAction,
+    CompletelyBlocked,
     Added,
     Removed,
     StatusChanged { to: String, blocked: bool },
@@ -141,19 +141,19 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
 
     for item in next {
         let previous = find_prev(&item.id);
-        let action_changed = previous
+        let blocker_changed = previous
             .map(|old| {
-                old.requires_user_action
+                old.completely_blocked
                     .as_ref()
-                    .map(|a| (&a.action, &a.reason))
+                    .map(|blocker| &blocker.reason)
                     != item
-                        .requires_user_action
+                        .completely_blocked
                         .as_ref()
-                        .map(|a| (&a.action, &a.reason))
+                        .map(|blocker| &blocker.reason)
             })
             .unwrap_or(true);
-        if crate::todo::todo_requires_user_action(item)
-            && (action_changed
+        if crate::todo::todo_completely_blocked(item)
+            && (blocker_changed
                 || previous
                     .is_some_and(|old| old.status != item.status || old.content != item.content))
         {
@@ -163,8 +163,8 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
                 diff.edited += 1;
             }
             diff.changes.push(TodoChange {
-                kind: TodoChangeKind::RequiresUserAction,
-                content: format!("{} · {}", todo_user_action_detail(item), item.content),
+                kind: TodoChangeKind::CompletelyBlocked,
+                content: format!("{} · {}", todo_complete_blocker_detail(item), item.content),
             });
             continue;
         }
@@ -177,7 +177,7 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
                 });
             }
             Some(prev_item) => {
-                if prev_item.status != item.status || action_changed {
+                if prev_item.status != item.status || blocker_changed {
                     diff.status_changes += 1;
                     match item.status.as_str() {
                         "completed" => diff.to_completed += 1,
@@ -234,7 +234,7 @@ fn status_icon(status: &str, blocked: bool) -> (&'static str, Color) {
 /// Leading marker (glyph + color) and the text color used for a change line.
 fn change_marker(kind: &TodoChangeKind) -> (&'static str, Color, Color) {
     match kind {
-        TodoChangeKind::RequiresUserAction => ("✋", rgb(225, 165, 90), rgb(225, 165, 90)),
+        TodoChangeKind::CompletelyBlocked => ("✋", rgb(225, 165, 90), rgb(225, 165, 90)),
         TodoChangeKind::Added => ("+", rgb(100, 180, 100), rgb(190, 200, 195)),
         TodoChangeKind::Removed => ("-", rgb(200, 110, 100), rgb(120, 120, 125)),
         TodoChangeKind::StatusChanged { to, blocked } => {
@@ -368,11 +368,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn user_action_changes_are_visible_and_width_safe() {
+    fn complete_blocker_changes_are_visible_and_width_safe() {
         let before = todo("1", "Connect", "pending");
         let mut after = before.clone();
-        after.requires_user_action = Some(crate::todo::TodoUserAction {
-            action: "Approve 界 access".into(),
+        after.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
             reason: "Only the owner can approve".into(),
         });
         let lines = render_todo_change_lines(Some(&[before.clone()]), &[after.clone()], 200);
@@ -381,7 +380,7 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("✋ Absolutely requires user action: Approve 界 access"));
+        assert!(text.contains("✋ Completely blocked: Only the owner can approve"));
         assert!(text.contains("Only the owner can approve"));
         for width in 0..100 {
             assert!(
@@ -491,7 +490,7 @@ mod tests {
             completion_confidence: None,
             confidence_history: Vec::new(),
             external_blocker: None,
-            requires_user_action: None,
+            completely_blocked: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,

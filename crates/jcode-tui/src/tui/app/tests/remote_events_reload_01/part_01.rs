@@ -1396,7 +1396,7 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 external_blocker: None,
-                requires_user_action: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )

@@ -32,13 +32,12 @@ fn kind(decision: &Decision) -> Option<FollowUpKind> {
 }
 
 #[test]
-fn requires_user_action_pauses_retries_but_not_independent_work() {
-    let mut blocked = todo("user-only", "pending");
-    blocked.requires_user_action = Some(crate::TodoUserAction {
-        action: "Complete identity verification".into(),
-        reason: "Only the account owner may verify their identity".into(),
+fn completely_blocked_pauses_retries_but_not_independent_work() {
+    let mut blocked = todo("no-way-forward", "pending");
+    blocked.completely_blocked = Some(crate::TodoCompleteBlocker {
+        reason: "Required data is permanently unavailable".into(),
     });
-    assert!(todo_requires_user_action(&blocked));
+    assert!(todo_completely_blocked(&blocked));
     let mut state = snapshot(vec![blocked]);
     state.long_session_review_due = true;
     let mut policy = FollowUpPolicy::new(true);
@@ -49,74 +48,81 @@ fn requires_user_action_pauses_retries_but_not_independent_work() {
     state.todos.push(todo("independent", "pending"));
     let followup = policy.decide(&state).follow_up.unwrap();
     assert!(followup.message.contains("independent"));
-    assert!(!followup.message.contains("user-only"));
+    assert!(!followup.message.contains("no-way-forward"));
     state.todos.pop();
-    state.todos[0].requires_user_action = None;
+    state.todos[0].completely_blocked = None;
     assert_eq!(
         kind(&policy.decide(&state)),
         Some(FollowUpKind::IncompleteTodos)
     );
     for status in ["completed", "cancelled", "done"] {
         state.todos[0].status = status.into();
-        state.todos[0].requires_user_action = Some(crate::TodoUserAction::default());
-        assert!(!todo_requires_user_action(&state.todos[0]));
+        state.todos[0].completely_blocked = Some(crate::TodoCompleteBlocker::default());
+        assert!(!todo_completely_blocked(&state.todos[0]));
     }
 }
 
 #[test]
-fn requires_user_action_ignores_invalid_programmatic_snapshots() {
-    for (action, reason) in [
-        ("", "owner only"),
-        ("verify", ""),
-        (" \n\t", "owner only"),
-        ("verify", " \t"),
-    ] {
+fn completely_blocked_ignores_invalid_programmatic_snapshots() {
+    for reason in ["", " \n\t"] {
         let mut item = todo("still actionable", "pending");
-        item.requires_user_action = Some(crate::TodoUserAction {
-            action: action.into(),
+        item.completely_blocked = Some(crate::TodoCompleteBlocker {
             reason: reason.into(),
         });
-        assert!(!todo_requires_user_action(&item));
+        assert!(!todo_completely_blocked(&item));
         let mut policy = FollowUpPolicy::new(true);
         let decision = policy.decide(&snapshot(vec![item]));
         assert_eq!(kind(&decision), Some(FollowUpKind::IncompleteTodos));
     }
     let mut valid = todo("owner approval", "pending");
-    valid.requires_user_action = Some(crate::TodoUserAction {
-        action: " Approve access ".into(),
-        reason: " Only the owner can authorize access ".into(),
+    valid.completely_blocked = Some(crate::TodoCompleteBlocker {
+        reason: " Required data is permanently unavailable ".into(),
     });
-    assert!(todo_requires_user_action(&valid));
+    assert!(todo_completely_blocked(&valid));
     valid.status = "completed".into();
-    assert!(!todo_requires_user_action(&valid));
+    assert!(!todo_completely_blocked(&valid));
 }
 
 #[test]
-fn requires_user_action_serialization_rejects_missing_or_blank_fields() {
+fn removed_user_action_condition_does_not_pause_work() {
+    let item: TodoItem = serde_json::from_value(serde_json::json!({
+        "id": "old", "content": "Continue work", "status": "pending", "priority": "high",
+        "requires_user_action": {"action": "Choose an option", "reason": "Preference"}
+    }))
+    .unwrap();
+    assert!(item.completely_blocked.is_none());
+    let mut policy = FollowUpPolicy::new(true);
+    assert_eq!(
+        kind(&policy.decide(&snapshot(vec![item]))),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+}
+
+#[test]
+fn completely_blocked_serialization_rejects_missing_or_blank_fields() {
     let legacy =
         serde_json::json!({"id":"a", "content":"A", "status":"pending", "priority":"high"});
     assert!(
         serde_json::from_value::<TodoItem>(legacy.clone())
             .unwrap()
-            .requires_user_action
+            .completely_blocked
             .is_none()
     );
     for required in [
-        serde_json::json!({"action":"", "reason":"owner only"}),
-        serde_json::json!({"action":"verify", "reason":" \n\t"}),
-        serde_json::json!({"action":"verify"}),
-        serde_json::json!({"reason":"owner only"}),
+        serde_json::json!({"reason":""}),
+        serde_json::json!({"reason":" \n\t"}),
+        serde_json::json!({}),
     ] {
         let mut value = legacy.clone();
-        value["requires_user_action"] = required;
+        value["completely_blocked"] = required;
         assert!(serde_json::from_value::<TodoItem>(value).is_err());
     }
     let mut value = legacy;
-    value["requires_user_action"] = serde_json::json!({"action":"verify", "reason":"owner only"});
+    value["completely_blocked"] = serde_json::json!({"reason":"No implementation exists"});
     let item: TodoItem = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(
-        serde_json::to_value(item).unwrap()["requires_user_action"],
-        value["requires_user_action"]
+        serde_json::to_value(item).unwrap()["completely_blocked"],
+        value["completely_blocked"]
     );
 }
 
@@ -187,7 +193,7 @@ fn external_blocker_requires_typed_finite_deadline_and_preserves_legacy_todos() 
 fn running_dependencies_pause_without_consuming_budget_or_reviews() {
     let mut policy = FollowUpPolicy::new(true);
     let mut state = snapshot(vec![TodoItem {
-        requires_user_action: None,
+        completely_blocked: None,
         external_blocker: None,
         waiting_on: vec!["build".into()],
         ..todo("validate", "in_progress")
@@ -221,7 +227,7 @@ fn mixed_dependencies_poke_only_actionable_todos() {
     let mut policy = FollowUpPolicy::new(true);
     let mut state = snapshot(vec![
         TodoItem {
-            requires_user_action: None,
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: vec!["build".into()],
             ..todo("blocked-validation", "pending")
@@ -243,7 +249,7 @@ fn mixed_dependencies_poke_only_actionable_todos() {
 #[test]
 fn dependencies_only_block_when_runtime_confirms_running() {
     let todo = TodoItem {
-        requires_user_action: None,
+        completely_blocked: None,
         external_blocker: None,
         waiting_on: vec!["first".into(), "second".into()],
         ..todo("work", "pending")

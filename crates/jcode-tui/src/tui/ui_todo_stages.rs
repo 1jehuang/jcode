@@ -292,8 +292,8 @@ fn current_stage(
 }
 
 fn todo_pip_status(todo: &crate::todo::TodoItem) -> &str {
-    if crate::todo::todo_requires_user_action(todo) {
-        "requires_user_action"
+    if crate::todo::todo_completely_blocked(todo) {
+        "completely_blocked"
     } else if crate::todo::is_incomplete_todo(todo)
         && (crate::todo::todo_has_external_blocker(todo) || !todo.blocked_by.is_empty())
     {
@@ -309,7 +309,7 @@ fn pip_span(todo: &crate::todo::TodoItem) -> Span<'static> {
 
 fn status_pip_span(status: &str) -> Span<'static> {
     let (glyph, color) = match status {
-        "requires_user_action" => ("✋", rgb(225, 165, 90)),
+        "completely_blocked" => ("✋", rgb(225, 165, 90)),
         "blocked" => ("⊘", rgb(225, 165, 90)),
         "completed" => ("●", rgb(100, 180, 100)),
         "in_progress" => ("●", asap_color()),
@@ -382,9 +382,9 @@ pub(crate) fn push_stage_pips(
             if counts {
                 if stage
                     .item_indices()
-                    .any(|i| crate::todo::todo_requires_user_action(todos[i]))
+                    .any(|i| crate::todo::todo_completely_blocked(todos[i]))
                 {
-                    out.push(status_pip_span("requires_user_action"));
+                    out.push(status_pip_span("completely_blocked"));
                     continue;
                 }
                 let total = stage.len();
@@ -542,7 +542,7 @@ fn lane_item_statuses<'a>(
     let mut seen = std::collections::HashSet::new();
     let mut statuses = Vec::new();
     for todo in lane_todos {
-        if matches!(todo_pip_status(todo), "blocked" | "requires_user_action") {
+        if matches!(todo_pip_status(todo), "blocked" | "completely_blocked") {
             statuses.push((todo_pip_status(todo), false));
             continue;
         }
@@ -613,10 +613,10 @@ fn lane_note_spans(
 ) -> Vec<Span<'static>> {
     if let Some(todo) = lane_todos
         .iter()
-        .find(|todo| crate::todo::todo_requires_user_action(todo))
+        .find(|todo| crate::todo::todo_completely_blocked(todo))
     {
         return vec![Span::styled(
-            todo_user_action_detail(todo),
+            todo_complete_blocker_detail(todo),
             Style::default().fg(rgb(225, 165, 90)),
         )];
     }
@@ -878,7 +878,7 @@ pub(crate) fn push_stage_lines(
         // Expand a waiting lane so its dependency progress belongs to the
         // corresponding todo rather than an ambiguous lane-wide status dot.
         if items.iter().any(|todo| {
-            crate::todo::todo_requires_user_action(todo)
+            crate::todo::todo_completely_blocked(todo)
                 || !todo_running_dependencies(todo, background_tasks).is_empty()
         }) {
             for todo in &items {
@@ -954,8 +954,7 @@ pub(crate) fn push_stage_lines(
                 }
             }
             // Live activity owns the remaining width instead of repeating task titles.
-            let status =
-                super::truncate_line_with_ellipsis_to_width(&Line::from(status), room);
+            let status = super::truncate_line_with_ellipsis_to_width(&Line::from(status), room);
             row.extend(status.spans);
             if later {
                 row = row.into_iter().map(dim_span).collect();
@@ -1017,7 +1016,7 @@ pub(super) fn push_lane_status_lines(
 ) {
     let mut seen = std::collections::HashSet::new();
     for todo in todos {
-        if crate::todo::todo_requires_user_action(todo) || is_done(todo) {
+        if crate::todo::todo_completely_blocked(todo) || is_done(todo) {
             continue; // Pause this item, not independent workers sharing its lane.
         }
         let Some(agent) = todo
@@ -1110,7 +1109,7 @@ pub(crate) fn render_todo_item_line(
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
-    if crate::todo::todo_requires_user_action(todo)
+    if crate::todo::todo_completely_blocked(todo)
         || todo.status != "in_progress"
         || todo
             .group
@@ -1205,14 +1204,14 @@ pub(crate) fn blocked_phase_spans(
     let stage = &stages[current];
     if stage
         .item_indices()
-        .any(|i| crate::todo::todo_requires_user_action(todos[i]))
+        .any(|i| crate::todo::todo_completely_blocked(todos[i]))
     {
         let phase = stage
             .number
             .map(|n| format!("phase {n}: "))
             .unwrap_or_default();
         return vec![Span::styled(
-            format!("  ✋ {phase}Absolutely requires user action"),
+            format!("  ✋ {phase}Completely blocked"),
             Style::default().fg(rgb(225, 165, 90)),
         )];
     }

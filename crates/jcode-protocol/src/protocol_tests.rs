@@ -47,13 +47,13 @@ fn swarm_live_status_defaults_and_roundtrips() {
     let legacy: super::SwarmMemberRuntime =
         serde_json::from_str(r#"{"context_tokens":4200,"output_tokens":99}"#).unwrap();
     assert!(legacy.live_status.is_none());
-    assert!(legacy.todo_user_action_reason.is_none());
+    assert!(legacy.todo_blocked_reason.is_none());
     let partial: super::SwarmLiveStatus =
         serde_json::from_str(r#"{"phase":"streaming","future_field":true}"#).unwrap();
     assert_eq!(partial.input_tokens, None);
     assert_eq!(partial.connection_type, None);
     let runtime = super::SwarmMemberRuntime {
-        todo_user_action_reason: Some("Sign in (only the owner can authenticate)".into()),
+        todo_blocked_reason: Some("Required data is permanently unavailable".into()),
         live_status: Some(super::SwarmLiveStatus {
             phase: "streaming".into(),
             input_tokens: Some(0),

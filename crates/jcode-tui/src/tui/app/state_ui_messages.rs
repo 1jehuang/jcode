@@ -227,7 +227,7 @@ impl App {
     /// User-only blockers and live waits suppress all automatic continuations.
     /// Disk state survives a TUI reload and overrides stale retained UI rows.
     pub(super) fn todo_is_paused_for_auto_followup(&self, todo: &crate::todo::TodoItem) -> bool {
-        crate::todo::todo_requires_user_action(todo)
+        crate::todo::todo_completely_blocked(todo)
             || crate::todo::todo_has_external_blocker(todo)
             || crate::todo::todo_waits_on_running_task(todo, |task_id| {
                 self.running_todo_await_dependency(task_id)

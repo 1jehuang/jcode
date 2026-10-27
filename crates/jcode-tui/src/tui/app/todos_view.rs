@@ -677,21 +677,18 @@ fn format_todo_compact_markdown(todo: &TodoItem) -> String {
         .filter(|group| !group.is_empty())
         .map(|group| format!(" _({group})_"))
         .unwrap_or_default();
-    let action = if crate::todo::todo_requires_user_action(todo) {
-        let action = todo
-            .requires_user_action
+    let blocker_detail = if crate::todo::todo_completely_blocked(todo) {
+        let blocker = todo
+            .completely_blocked
             .as_ref()
-            .expect("validated user action");
-        format!(
-            "\n  ✋ **Absolutely requires user action**: {}\n\n  {}\n",
-            action.action, action.reason
-        )
+            .expect("validated complete blocker");
+        format!("\n  ✋ **Completely blocked**: {}\n", blocker.reason)
     } else {
         String::new()
     };
     format!(
-        "- {} {}{group}{action}\n",
-        if crate::todo::todo_requires_user_action(todo) {
+        "- {} {}{group}{blocker_detail}\n",
+        if crate::todo::todo_completely_blocked(todo) {
             "✋"
         } else {
             status_badge(&todo.status, !todo.blocked_by.is_empty())
@@ -748,9 +745,8 @@ fn hash_todos_payload(
         todo.confidence.hash(&mut hasher);
         todo.completion_confidence.hash(&mut hasher);
         todo.blocked_by.hash(&mut hasher);
-        if let Some(action) = &todo.requires_user_action {
-            action.action.hash(&mut hasher);
-            action.reason.hash(&mut hasher);
+        if let Some(blocker) = &todo.completely_blocked {
+            blocker.reason.hash(&mut hasher);
         }
         todo.assigned_to.hash(&mut hasher);
         todo.stage.hash(&mut hasher);
@@ -872,7 +868,7 @@ mod tests {
                 .map(crate::todo::ConfidenceState::from_legacy_score),
             confidence_history: Vec::new(),
             external_blocker: None,
-            requires_user_action: None,
+            completely_blocked: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
@@ -882,11 +878,10 @@ mod tests {
     }
 
     #[test]
-    fn user_action_panel_preserves_action_reason_and_invalidates_cache() {
+    fn complete_blocker_panel_preserves_reason_and_invalidates_cache() {
         let mut item = todo("1", "Connect", "pending", "high", None, None);
         let before = hash_todos_payload(None, &[item.clone()], &plan(), &[]);
-        item.requires_user_action = Some(crate::todo::TodoUserAction {
-            action: "Approve access".into(),
+        item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
             reason: "Only the account owner can grant access.\nKeep this entire explanation."
                 .into(),
         });
@@ -894,10 +889,10 @@ mod tests {
         assert_ne!(before, after);
         let markdown = format_todo_compact_markdown(&item);
         assert!(markdown.contains("✋"));
-        assert!(markdown.contains("Absolutely requires user action"));
-        assert!(markdown.contains("Approve access"));
+        assert!(markdown.contains("Completely blocked"));
+        assert!(!markdown.contains("Approve access"));
         assert!(markdown.contains("Keep this entire explanation."));
-        item.requires_user_action.as_mut().unwrap().reason.push('!');
+        item.completely_blocked.as_mut().unwrap().reason.push('!');
         assert_ne!(
             after,
             hash_todos_payload(None, &[item.clone()], &plan(), &[])

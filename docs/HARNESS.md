@@ -44,29 +44,30 @@ Define plans as **phases → lanes → items**, including plans with only one ph
 
 Phases execute in declared order. Lanes within a phase can run in parallel, while items within a lane run in order. Items inherit phase and lane membership from their enclosing containers. Update existing items by `id` rather than resending the hierarchy. Flat saved todo lists remain compatible internally with storage, swarm coordination, and rendering.
 
-## Absolutely requires user action
+## Completely blocked
 
-`requires_user_action` is a condition on an unfinished todo, not another lifecycle status. Use it only when a specific action genuinely requires the user and no safe, authorized agent alternative exists. Examples include approval for an otherwise unauthorized side effect, account access only the user controls, or a necessary decision that cannot safely be inferred. Difficulty, a failed build, or a preference for clarification are not sufficient reasons.
+No way forward.
+
+`completely_blocked` is a condition on an unfinished todo, not another lifecycle status. Its object contains only a nonempty `reason` string explaining the blocker.
 
 ```json
 {
   "update": [
     {
-      "id": "publish",
-      "requires_user_action": {
-        "action": "Approve publishing these commits",
-        "reason": "Publishing includes unrelated local commits and requires your authorization"
+      "id": "recover-source",
+      "completely_blocked": {
+        "reason": "Required source data no longer exists"
       }
     }
   ]
 }
 ```
 
-The TUI labels this condition **✋ Absolutely requires user action** and shows the concrete action. Both `action` and `reason` must be nonempty. Keep the todo pending or in progress. Automatic continuation skips that item without scheduling timed review reminders; independent work remains actionable. Clear the condition with `"requires_user_action": null` when the user has taken the action, then reassess rather than assuming the task is complete.
+The TUI labels this condition **✋ Completely blocked** and shows the reason. Keep the todo pending or in progress. Automatic continuation skips that item without scheduling timed review reminders; independent work remains actionable. Clear the condition with `"completely_blocked": null` when a way forward exists, then reassess rather than assuming the task is complete.
 
 ## Live worker status in todo lanes
 
-An assigned worker's todo lane shares the opened session's live status renderer: activity spinner, observed input/output tokens, streaming throughput, connection, elapsed time, and current tool intent. Missing telemetry is not guessed from context size or lifetime totals. Waiting and stopped workers show their available reason instead of a live spinner. A user-only condition pauses its item without hiding independent work in the same lane.
+An assigned worker's todo lane shares the opened session's live status renderer: activity spinner, observed input/output tokens, streaming throughput, connection, elapsed time, and current tool intent. Missing telemetry is not guessed from context size or lifetime totals. Waiting and stopped workers show their available reason instead of a live spinner. A completely blocked condition pauses its item without hiding independent work in the same lane.
 
 Passive worker status is displayed with the todo lanes rather than in a second list beside the pinned todo band. Focused worker navigation and transcript controls remain available.
 

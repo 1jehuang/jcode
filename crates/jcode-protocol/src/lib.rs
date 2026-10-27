@@ -663,14 +663,14 @@ pub struct SwarmMemberRuntime {
     /// sessions that have not emitted live telemetry. Never session totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_status: Option<SwarmLiveStatus>,
-    /// Foreground blocking operation or user-only todo pause. A display reason,
+    /// Foreground blocking operation or completely blocked todo pause. A display reason,
     /// not an automatically waking durable dependency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_reason: Option<String>,
-    /// User-only pause derived from the worker's own unfinished todos. Kept
+    /// Complete blocker derived from the worker's own unfinished todos. Kept
     /// separate so stale foreground waits can never masquerade as todo gates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub todo_user_action_reason: Option<String>,
+    pub todo_blocked_reason: Option<String>,
     /// Monotonic seconds spent in the current blocking operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_age_secs: Option<u64>,
@@ -707,7 +707,7 @@ impl SwarmMemberRuntime {
     fn is_empty(&self) -> bool {
         self.live_status.is_none()
             && self.wait_reason.is_none()
-            && self.todo_user_action_reason.is_none()
+            && self.todo_blocked_reason.is_none()
             && self.wait_age_secs.is_none()
             && self.todo_statuses.is_empty()
             && self.model.is_none()

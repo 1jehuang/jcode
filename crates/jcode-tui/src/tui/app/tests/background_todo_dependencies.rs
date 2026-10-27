@@ -7,13 +7,12 @@ fn waiting_dependency_test_app() -> App {
 }
 
 #[test]
-fn user_action_pauses_auto_pokes_until_cleared_but_not_independent_work() {
+fn complete_blocker_pauses_auto_pokes_until_cleared_but_not_independent_work() {
     with_temp_jcode_home(|| {
         let mut app = waiting_dependency_test_app();
         let mut blocked = dependency_todo("licensed-sdk", "unused");
         blocked.waiting_on.clear();
-        blocked.requires_user_action = Some(crate::todo::TodoUserAction {
-            action: "Authorize SDK use".into(),
+        blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
             reason: "Only the user can authorize the license".into(),
         });
         crate::todo::save_todos(&app.session.id, &[blocked.clone()]).unwrap();
@@ -36,7 +35,7 @@ fn user_action_pauses_auto_pokes_until_cleared_but_not_independent_work() {
         assert!(app.queued_messages[0].contains("- independent:"));
         assert!(!app.queued_messages[0].contains("- licensed-sdk:"));
 
-        blocked.requires_user_action = None;
+        blocked.completely_blocked = None;
         crate::todo::save_todos(&app.session.id, &[blocked]).unwrap();
         assert!(reloaded.schedule_turn_end_followups());
         assert!(reloaded.queued_messages[0].contains("- licensed-sdk:"));
@@ -147,7 +146,7 @@ fn dependency_todo(id: &str, task_id: &str) -> crate::todo::TodoItem {
         status: "pending".into(),
         priority: "high".into(),
         external_blocker: None,
-        requires_user_action: None,
+        completely_blocked: None,
         waiting_on: vec![task_id.into()],
         ..Default::default()
     }

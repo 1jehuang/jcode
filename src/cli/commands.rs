@@ -2877,7 +2877,7 @@ fn run_actionable_todos(
         .iter()
         .filter(|todo| {
             !crate::todo::is_incomplete_todo(todo)
-                || (!crate::todo::todo_requires_user_action(todo)
+                || (!crate::todo::todo_completely_blocked(todo)
                     && !crate::todo::todo_has_external_blocker(todo)
                     && !crate::todo::todo_waits_on_running_task(todo, |id| {
                         crate::todo::await_dependency::running(
@@ -2901,7 +2901,7 @@ fn run_actionable_poke_message(
     if todos.iter().any(|todo| {
         !todo.waiting_on.is_empty()
             || todo.external_blocker.is_some()
-            || crate::todo::todo_requires_user_action(todo)
+            || crate::todo::todo_completely_blocked(todo)
     }) {
         let incomplete: Vec<_> = actionable
             .iter()
@@ -2913,30 +2913,29 @@ fn run_actionable_poke_message(
     message
 }
 
-fn run_user_action_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
-    let actions: Vec<_> = todos
+fn run_completely_blocked_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
+    let blockers: Vec<_> = todos
         .iter()
-        .filter(|todo| crate::todo::todo_requires_user_action(todo))
+        .filter(|todo| crate::todo::todo_completely_blocked(todo))
         .map(|todo| {
-            let required = todo
-                .requires_user_action
+            let blocker = todo
+                .completely_blocked
                 .as_ref()
-                .expect("checked user action");
-            format!(
-                "{}: {}\nWhy the agent cannot do this: {}",
-                todo.id, required.action, required.reason
-            )
+                .expect("checked complete blocker");
+            format!("{}: {}", todo.id, blocker.reason)
         })
         .collect();
-    (!actions.is_empty()).then(|| format!(
-        "✋ Absolutely requires user action. These tasks remain unfinished; automatic retries are paused until the condition is cleared.\n{}",
-        actions.join("\n")
-    ))
+    (!blockers.is_empty()).then(|| {
+        format!(
+            "✋ Completely blocked. No way forward.\n{}",
+            blockers.join("\n")
+        )
+    })
 }
 
 fn run_blocked_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
     let notices: Vec<_> = [
-        run_user_action_notice(todos),
+        run_completely_blocked_notice(todos),
         run_external_blocker_notice(todos),
     ]
     .into_iter()
@@ -2977,7 +2976,7 @@ async fn prepare_run_todo_follow_up(
     let dependencies: BTreeSet<_> = todos
         .iter()
         .filter(|todo| {
-            crate::todo::is_incomplete_todo(todo) && !crate::todo::todo_requires_user_action(todo)
+            crate::todo::is_incomplete_todo(todo) && !crate::todo::todo_completely_blocked(todo)
         })
         .flat_map(|todo| todo.waiting_on.iter().cloned())
         .filter(|id| {
@@ -3564,9 +3563,9 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "auto_poke_stopped",
                     "session_id": session_id,
-                    "reason": if run_user_action_notice(&todos).is_some() { "requires_user_action" } else if run_external_blocker_notice(&todos).is_some() { "external_blocker" } else { "turn_limit" },
+                    "reason": if run_completely_blocked_notice(&todos).is_some() { "completely_blocked" } else if run_external_blocker_notice(&todos).is_some() { "external_blocker" } else { "turn_limit" },
                     "message": run_blocked_notice(&todos),
-                    "requires_user_action": todos.iter().any(crate::todo::todo_requires_user_action),
+                    "completely_blocked": todos.iter().any(crate::todo::todo_completely_blocked),
                     "waiting_on_background": todos.iter().any(|todo| !todo.waiting_on.is_empty()),
                     "waiting_on_external": todos.iter().any(crate::todo::todo_has_external_blocker),
                     "max_turns": max_turns,

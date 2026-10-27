@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn background_dependencies_block_only_for_running_ids() {
     let todo = TodoItem {
-        requires_user_action: None,
+        completely_blocked: None,
         external_blocker: None,
         waiting_on: vec!["task-a".into()],
         ..Default::default()
@@ -613,7 +613,7 @@ fn todo(content: &str, status: &str, group: Option<&str>) -> TodoItem {
         completion_confidence: None,
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
-        requires_user_action: None,
+        completely_blocked: None,
         external_blocker: None,
         waiting_on: Vec::new(),
         assigned_to: None,

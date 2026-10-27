@@ -1615,10 +1615,14 @@ fn render_todos_message_with_cap(
 
     for todo in todos
         .iter()
-        .filter(|todo| crate::todo::todo_requires_user_action(todo))
+        .filter(|todo| crate::todo::todo_completely_blocked(todo))
     {
         for chunk in wrap_todo_detail(
-            &format!("✋ {}: {}", todo.content, todo_user_action_detail(todo)),
+            &format!(
+                "✋ {}: {}",
+                todo.content,
+                todo_complete_blocker_detail(todo)
+            ),
             inner_width.max(1),
         ) {
             lines.push(todo_card_line(
@@ -1830,7 +1834,7 @@ fn push_todo_status_pips<'a>(
     // The two-cell hand takes priority over ordinary progress at narrow widths.
     for _ in todos
         .iter()
-        .filter(|todo| crate::todo::todo_requires_user_action(todo))
+        .filter(|todo| crate::todo::todo_completely_blocked(todo))
     {
         if max_pips < 2 {
             break;
@@ -1843,7 +1847,7 @@ fn push_todo_status_pips<'a>(
     }
     let (completed, in_progress, total) = todos
         .into_iter()
-        .filter(|todo| !crate::todo::todo_requires_user_action(todo))
+        .filter(|todo| !crate::todo::todo_completely_blocked(todo))
         .fold((0usize, 0usize, 0usize), |counts, todo| {
             (
                 counts.0 + usize::from(todo.status == "completed"),
@@ -2480,7 +2484,7 @@ fn render_todo_item_line_with_background(
     inner_width: usize,
 ) -> Line<'static> {
     let dependencies = todo_running_dependencies(todo, tasks);
-    if dependencies.is_empty() || crate::todo::todo_requires_user_action(todo) {
+    if dependencies.is_empty() || crate::todo::todo_completely_blocked(todo) {
         return render_todo_item_line(todo, agents, base_indent, inner_width);
     }
     let mut spans = todo_card_item_spans(todo, false);
@@ -2567,8 +2571,8 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
     let external_blocked = crate::todo::todo_has_external_blocker(todo);
     let blocked =
         crate::todo::is_incomplete_todo(todo) && (external_blocked || !todo.blocked_by.is_empty());
-    let requires_action = crate::todo::todo_requires_user_action(todo);
-    let (glyph, glyph_color) = if requires_action {
+    let is_completely_blocked = crate::todo::todo_completely_blocked(todo);
+    let (glyph, glyph_color) = if is_completely_blocked {
         ("✋", rgb(225, 165, 90))
     } else if blocked {
         ("⊘", rgb(225, 165, 90))
@@ -2591,9 +2595,9 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
         Span::styled(format!("{} ", glyph), Style::default().fg(glyph_color)),
         Span::styled(todo.content.clone(), Style::default().fg(text_color)),
     ];
-    if requires_action {
+    if is_completely_blocked {
         spans.push(Span::styled(
-            format!(" · {}", todo_user_action_detail(todo)),
+            format!(" · {}", todo_complete_blocker_detail(todo)),
             Style::default().fg(todo_warning_color()),
         ));
     }
@@ -2625,17 +2629,14 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
 
 /// Single-line chrome is normalized before width fitting. Full reasons are
 /// rendered as wrapped detail text in the card, not squeezed into its gutter.
-pub(super) fn todo_user_action_detail(todo: &crate::todo::TodoItem) -> String {
-    todo.requires_user_action
+pub(super) fn todo_complete_blocker_detail(todo: &crate::todo::TodoItem) -> String {
+    todo.completely_blocked
         .as_ref()
-        .map(|action| {
-            format!(
-                "Absolutely requires user action: {} · {}",
-                action.action, action.reason
-            )
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+        .map(|blocker| {
+            format!("Completely blocked: {}", blocker.reason)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
         })
         .unwrap_or_default()
 }
