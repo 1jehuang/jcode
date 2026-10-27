@@ -953,19 +953,10 @@ pub(crate) fn push_stage_lines(
                     }
                 }
             }
-            // Reserve a third of the remaining row for the task title and
-            // pad short statuses so the title never slides left or right.
-            let status_budget = room.saturating_sub(3) * 2 / 3;
+            // Live activity owns the remaining width instead of repeating task titles.
             let status =
-                super::truncate_line_with_ellipsis_to_width(&Line::from(status), status_budget);
-            let status_padding = status_budget.saturating_sub(status.width());
+                super::truncate_line_with_ellipsis_to_width(&Line::from(status), room);
             row.extend(status.spans);
-            row.push(Span::raw(" ".repeat(status_padding)));
-            let room = inner_width.saturating_sub(width_of(&row));
-            if room > 3 {
-                row.push(Span::styled(" │ ", Style::default().fg(todo_meta_color())));
-                row.extend(lane_titles_spans(&items, room - 3));
-            }
             if later {
                 row = row.into_iter().map(dim_span).collect();
             }

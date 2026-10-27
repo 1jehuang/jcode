@@ -135,7 +135,7 @@ fn pinned_worker_status_hides_duplicate_intent_but_keeps_connection_progress() {
 }
 
 #[test]
-fn live_telemetry_and_tasks_share_one_compact_lane_row() {
+fn live_telemetry_uses_one_compact_lane_row_without_task_summaries() {
     let mut item = laned(
         "Measure and optimize stock tests",
         "in_progress",
@@ -167,8 +167,6 @@ fn live_telemetry_and_tasks_share_one_compact_lane_row() {
         "26.9 tps",
         "↑61k",
         "↓159",
-        " │ ",
-        "Measure and optimize stock tests",
     ] {
         assert!(lane.contains(label), "missing {label}: {rows:?}");
     }
@@ -184,7 +182,8 @@ fn live_telemetry_and_tasks_share_one_compact_lane_row() {
     );
     assert!(!lane.contains("websocket"));
     assert!(lane.contains("  "), "fixed columns use padding: {lane}");
-    assert!(lane.find("bash").unwrap() < lane.find(" │ ").unwrap());
+    assert!(!lane.contains('│'));
+    assert!(!lane.contains("Measure and optimize stock tests"));
     for width in 1..160 {
         let rows = render(&[item.clone()], &[worker.clone()], width);
         assert_eq!(rows.len(), 2, "one lane at width {width}: {rows:?}");
@@ -224,7 +223,9 @@ fn inline_columns_stay_fixed_across_activity_and_name_changes() {
             let rows = render(&[item.clone()], &[worker.clone()], width);
             assert_fits(&rows, width);
             let row = &rows[1];
-            let divider = row.find(" │ ").expect("task column divider");
+            assert!(!row.contains('│'), "{width}: {row}");
+            assert!(!row.contains("Stable task title"), "{width}: {row}");
+            let divider = row.find(" · ").expect("status column");
             let column = row[..divider].width();
             assert_eq!(*expected.get_or_insert(column), column, "{width}: {row}");
             if count == 20 {
@@ -272,8 +273,8 @@ fn simultaneous_live_lanes_keep_columns_during_animation() {
                 .map(|line| {
                     let text = line.to_string();
                     let status = text.find(" · ").expect("status column");
-                    let task = text.find(" │ ").expect("task column");
-                    (text[..status].width(), text[..task].width())
+                    assert!(!text.contains('│'));
+                    text[..status].width()
                 })
                 .collect();
             assert!(
@@ -293,10 +294,7 @@ fn simultaneous_live_lanes_keep_columns_during_animation() {
                     &new[..new_status],
                     "progress pips must not animate"
                 );
-                assert_eq!(
-                    old[..old.find(" │ ").unwrap()].width(),
-                    new[..new.find(" │ ").unwrap()].width()
-                );
+                assert!(!new.contains('│'));
             }
         }
     }
@@ -377,8 +375,8 @@ fn inline_tool_intent_is_single_line_and_bounded() {
         );
         if width >= 120 {
             assert!(rows[1].contains("Inspect 界 artifact"), "{width}: {rows:?}");
-            // A long intent may shorten the title to its reserved eight cells.
-            assert!(rows[1].contains(" │ Verify"), "{width}: {rows:?}");
+            assert!(!rows[1].contains('│'), "{width}: {rows:?}");
+            assert!(!rows[1].contains("Verify output"), "{width}: {rows:?}");
         }
     }
 }
