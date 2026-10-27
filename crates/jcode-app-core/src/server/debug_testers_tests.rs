@@ -1,12 +1,12 @@
 use super::{load_testers, save_testers};
 use std::ffi::OsString;
 
-fn lock_env() -> crate::storage::TestEnvGuard {
+fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     crate::storage::lock_test_env()
 }
 
 struct TestHomeGuard {
-    _lock: crate::storage::TestEnvGuard,
+    _lock: std::sync::MutexGuard<'static, ()>,
     prev_home: Option<OsString>,
     _temp_home: tempfile::TempDir,
 }

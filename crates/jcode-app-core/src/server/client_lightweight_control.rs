@@ -1040,7 +1040,7 @@ mod lightweight_swarm_member_tests {
     struct HomeGuard {
         prev: Option<std::ffi::OsString>,
         _temp: tempfile::TempDir,
-        _lock: crate::storage::TestEnvGuard,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Drop for HomeGuard {

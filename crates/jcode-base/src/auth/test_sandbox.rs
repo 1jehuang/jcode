@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::MutexGuard;
 
 use crate::provider_catalog::{OpenAiCompatibleProfile, openai_compatible_profiles};
 
 pub struct AuthTestSandbox {
-    _lock: crate::storage::TestEnvGuard,
+    _lock: MutexGuard<'static, ()>,
     temp: tempfile::TempDir,
     saved_env: Vec<(String, Option<String>)>,
 }

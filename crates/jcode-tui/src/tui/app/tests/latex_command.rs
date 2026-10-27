@@ -3,7 +3,7 @@ struct LatexCommandEnv {
     home: Option<std::ffi::OsString>,
     latex: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
-    _lock: crate::storage::TestEnvGuard,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl LatexCommandEnv {

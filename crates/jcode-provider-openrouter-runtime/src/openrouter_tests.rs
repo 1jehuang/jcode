@@ -23,7 +23,7 @@ impl SharedEnvLock {
     /// process env state, so a panic in one test must not cascade into a
     /// flood of unrelated `PoisonError` failures across every other test
     /// that takes this lock.
-    pub(crate) fn lock(&self) -> jcode_base::storage::TestEnvGuard {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'static, ()> {
         jcode_base::storage::lock_test_env()
     }
 }

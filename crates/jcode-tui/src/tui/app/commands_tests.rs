@@ -183,7 +183,7 @@ mod colors {
     /// still let them swap the config out from under another module's test
     /// mid-assertion, which is the race class that makes unrelated provider and
     /// header tests fail intermittently.
-    fn lock_shared_state() -> crate::storage::TestEnvGuard {
+    fn lock_shared_state() -> std::sync::MutexGuard<'static, ()> {
         crate::storage::lock_test_env()
     }
 

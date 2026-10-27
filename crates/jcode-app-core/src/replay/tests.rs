@@ -5,7 +5,7 @@ use crate::session::{StoredReplayEvent, StoredReplayEventKind};
 use chrono::{Duration, Utc};
 use std::ffi::OsString;
 
-fn lock_env() -> crate::storage::TestEnvGuard {
+fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     crate::storage::lock_test_env()
 }
 

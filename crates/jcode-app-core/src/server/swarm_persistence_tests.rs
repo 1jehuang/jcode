@@ -2,7 +2,7 @@ use super::*;
 use std::time::{Duration, Instant};
 
 struct EnvGuard {
-    _lock: crate::storage::TestEnvGuard,
+    _lock: std::sync::MutexGuard<'static, ()>,
     runtime: Option<std::ffi::OsString>,
 }
 

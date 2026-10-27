@@ -287,7 +287,7 @@ mod tests {
     use super::*;
 
     struct EnvGuard {
-        _lock: crate::storage::TestEnvGuard,
+        _lock: std::sync::MutexGuard<'static, ()>,
         entries: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
 

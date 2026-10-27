@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 // These tests serve real HTTP on ephemeral 127.0.0.1 sockets. No mocked client,
 // copied OAuth implementation, external provider, browser executable or secrets.
 struct Sandbox {
-    _lock: crate::storage::TestEnvGuard,
+    _lock: std::sync::MutexGuard<'static, ()>,
     temp: tempfile::TempDir,
     saved: Option<std::ffi::OsString>,
 }
