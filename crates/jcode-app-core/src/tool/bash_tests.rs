@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_lock)]
 use super::*;
 use crate::bus::{BackgroundTaskProgressSource, BackgroundTaskStatus};
 use crate::tool::StdinInputRequest;
