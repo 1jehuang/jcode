@@ -669,6 +669,10 @@ mod macos {
         // population of internal workers costs one metadata read each rather
         // than one read per worker every second.
         let root_visibility: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+        // Consecutive ticks a session has had no readable snapshot. Once it reaches
+        // ROOT_MISS_CACHE_TICKS the (visible) result is cached so it stops re-reading.
+        let root_misses: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
+        const ROOT_MISS_CACHE_TICKS: u32 = 5;
         let app_for_refresh = app.clone();
         let refresh = move || {
             // `[menubar] enabled = false` turns the helper off without the user
@@ -690,14 +694,28 @@ mod macos {
             root_visibility
                 .borrow_mut()
                 .retain(|session_id, _| active_ids.contains(session_id));
+            root_misses
+                .borrow_mut()
+                .retain(|session_id, _| active_ids.contains(session_id));
             sessions.retain(|presence| {
                 if let Some(visible) = root_visibility.borrow().get(&presence.session_id).copied() {
                     return visible;
                 }
                 let Some(visible) = load_user_root_session(&presence.session_id) else {
-                    // The marker may race the first session save. Retry next tick.
+                    // Unreadable stays visible (the original #507 rule). Retry for a
+                    // few ticks to cover the first-save race, then cache it so a
+                    // session with no snapshot is not re-read from disk every tick.
+                    let mut misses = root_misses.borrow_mut();
+                    let count = misses.entry(presence.session_id.clone()).or_insert(0);
+                    *count += 1;
+                    if *count >= ROOT_MISS_CACHE_TICKS {
+                        root_visibility
+                            .borrow_mut()
+                            .insert(presence.session_id.clone(), true);
+                    }
                     return true;
                 };
+                root_misses.borrow_mut().remove(&presence.session_id);
                 root_visibility
                     .borrow_mut()
                     .insert(presence.session_id.clone(), visible);
