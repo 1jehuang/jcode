@@ -273,31 +273,37 @@ async fn fetch_compatible_profile_report(
                 }
             }
         }
-        "muse-subscription" => {
-            // Native subscription: the account snapshot comes from the key mint,
-            // which reports a plan tier but no numeric quota windows. Show what
-            // exists and state plainly that remaining quota is unknown, rather
-            // than implying headroom we cannot actually see.
-            match crate::auth::muse::load_credentials() {
-                Ok(credentials) => {
-                    if let Some(tier) = credentials
-                        .subs_usage
-                        .as_ref()
-                        .and_then(|usage| usage.tier.as_deref())
-                    {
-                        extra_info.push(("Plan".to_string(), tier.to_string()));
+        "muse-subscription" => match crate::auth::muse::load_credentials() {
+            Ok(credentials) => {
+                if let Some(tier) = credentials
+                    .subs_usage
+                    .as_ref()
+                    .and_then(|usage| usage.tier.as_deref())
+                {
+                    extra_info.push(("Plan".to_string(), tier.to_string()));
+                }
+                if let Some(usage) = credentials.subs_usage.as_ref() {
+                    let parsed_limits = parse_muse_subs_usage_limits(usage);
+                    if parsed_limits.is_empty() {
+                        extra_info.push((
+                            "Quota".to_string(),
+                            "unknown (the account mint reports no usage windows)".to_string(),
+                        ));
+                    } else {
+                        limits.extend(parsed_limits);
                     }
+                } else {
                     extra_info.push((
                         "Quota".to_string(),
                         "unknown (the account mint reports no usage windows)".to_string(),
                     ));
                 }
-                Err(_) => extra_info.push((
-                    "Quota".to_string(),
-                    "unavailable (no stored account snapshot)".to_string(),
-                )),
             }
-        }
+            Err(_) => extra_info.push((
+                "Quota".to_string(),
+                "unavailable (no stored account snapshot)".to_string(),
+            )),
+        },
         _ => {
             // No provider-specific balance API: do a free `GET /models` probe
             // against the profile's own endpoint so the key status is real
@@ -765,4 +771,48 @@ async fn fetch_openai_org_cost(admin_key: &str) -> Option<f64> {
         }
     }
     saw_any.then_some(total)
+}
+
+pub(super) fn parse_muse_subs_usage_limits(
+    usage: &crate::auth::muse::SubsUsage,
+) -> Vec<UsageLimit> {
+    let mut limits = Vec::new();
+    let format_reset = |epoch_opt: Option<i64>| -> Option<String> {
+        let epoch = epoch_opt.filter(|&e| e > 0)?;
+        let secs = if epoch > 1_000_000_000_000 {
+            epoch / 1000
+        } else {
+            epoch
+        };
+        chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
+    };
+
+    if let Some(pct) = usage
+        .window_used_percent
+        .filter(|p| p.is_finite() && (0.0..=100.0).contains(p))
+    {
+        let window_label = match usage.window_duration_mins {
+            Some(300) => "5-hour window".to_string(),
+            Some(mins) if (1..=10_080).contains(&mins) => format!("{mins}-minute window"),
+            _ => "Window".to_string(),
+        };
+        limits.push(UsageLimit {
+            name: window_label,
+            usage_percent: pct as f32,
+            resets_at: format_reset(usage.window_resets_at),
+        });
+    }
+
+    if let Some(pct) = usage
+        .weekly_used_percent
+        .filter(|p| p.is_finite() && (0.0..=100.0).contains(p))
+    {
+        limits.push(UsageLimit {
+            name: "Weekly window".to_string(),
+            usage_percent: pct as f32,
+            resets_at: format_reset(usage.weekly_resets_at),
+        });
+    }
+
+    limits
 }

@@ -1372,3 +1372,42 @@ fn test_openai_transport_failure_keeps_recent_last_good_only() {
     );
     assert!(recent_good_openai_usage(&key).is_none());
 }
+
+#[test]
+fn parse_muse_subs_usage_limits_handles_windows_and_rejects_invalid() {
+    let usage = crate::auth::muse::SubsUsage {
+        window_used_percent: Some(81.0),
+        window_duration_mins: Some(300),
+        window_resets_at: Some(1793094549),
+        weekly_used_percent: Some(27.0),
+        weekly_resets_at: Some(1793577600),
+        tier: Some("pro".to_string()),
+    };
+    let limits = api_keys::parse_muse_subs_usage_limits(&usage);
+    assert_eq!(limits.len(), 2);
+    assert_eq!(limits[0].name, "5-hour window");
+    assert!((limits[0].usage_percent - 81.0).abs() < f32::EPSILON);
+    assert_eq!(
+        limits[0].resets_at.as_deref(),
+        Some("2026-10-27T09:49:09+00:00")
+    );
+    assert_eq!(limits[1].name, "Weekly window");
+    assert!((limits[1].usage_percent - 27.0).abs() < f32::EPSILON);
+    assert_eq!(
+        limits[1].resets_at.as_deref(),
+        Some("2026-11-02T00:00:00+00:00")
+    );
+
+    // Hostile / invalid numbers are rejected
+    let invalid = crate::auth::muse::SubsUsage {
+        window_used_percent: Some(f64::NAN),
+        window_duration_mins: Some(300),
+        window_resets_at: Some(1793094549),
+        weekly_used_percent: Some(120.0),
+        weekly_resets_at: Some(1793577600),
+        tier: None,
+    };
+    let limits = api_keys::parse_muse_subs_usage_limits(&invalid);
+    assert!(limits.is_empty());
+}
+
