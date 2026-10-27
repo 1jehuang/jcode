@@ -65,6 +65,9 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     // auto-promoter only accepts bare numeric ids and would skip the suffix.
     // GPT-6.1 Sol (2026-10-16): latest generation and the default.
     DEFAULT_OPENAI_MODEL,
+    // GPT-6.1 Terra: listed statically so a cold-start `-m gpt-6.1-terra`
+    // launch is accepted before the live account catalog has been fetched.
+    "gpt-6.1-terra",
     "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-pro",
@@ -116,6 +119,10 @@ mod gpt_5_6_catalog_tests {
         ] {
             assert!(ALL_OPENAI_MODELS.contains(&model), "missing {model}");
         }
+        assert!(
+            ALL_OPENAI_MODELS.contains(&"gpt-6.1-terra"),
+            "gpt-6.1-terra must be in the static list for cold-start -m launches"
+        );
         assert!(is_openai_api_only_pro_model("gpt-5.6-pro"));
         assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
         assert_eq!(DEFAULT_OPENAI_MODEL, "gpt-6.1-sol");
