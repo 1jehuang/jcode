@@ -28,12 +28,28 @@ Usage
 -----
     python3 scripts/refresh-portal-token.py            # refresh + persist
     python3 scripts/refresh-portal-token.py --check    # report only, no refresh
+    python3 scripts/refresh-portal-token.py --refresh-if-expiring 600
+                                                       # no-op unless <10 min left
+
+Concurrency
+-----------
+Refresh tokens are single-use AND rotating: every successful exchange kills the
+token it presented. Two concurrent refreshes of the same cache therefore race.
+One wins and the other gets ``invalid_grant``, and whichever writer lands last
+can leave a spent token on disk. ``mcp-remote`` also refreshes on launch, so the
+race is real rather than theoretical.
+
+The read/exchange/write cycle is therefore serialised with an advisory
+exclusive lock on ``<token-path>.lock``, and the cache is re-read *inside* the
+lock. On platforms without ``fcntl`` the lock is skipped and the atomic write is
+the only protection.
 
 Exit codes
 ----------
-    0 = refresh succeeded and the rotated tokens were persisted
+    0 = refresh succeeded and the rotated tokens were persisted, or no refresh
+        was needed under --refresh-if-expiring
     1 = the refresh failed, or the token endpoint was unreachable
-    2 = no usable token cache found
+    2 = no usable token cache found, or invalid arguments
 """
 
 from __future__ import annotations
@@ -47,6 +63,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl
+    fcntl = None  # type: ignore[assignment]
 
 TOKEN_PATH = os.path.expanduser(
     "~/.mcp-auth/mcp-remote-v1/abb316d3ba70bc7220e11618a1b43906_tokens.json"
@@ -152,6 +173,42 @@ def persist_durably(token_path: str, payload: dict) -> None:
             os.close(dir_fd)
 
 
+def remaining_seconds(cached: dict) -> float | None:
+    """Seconds until the cached access token expires, or None if unknown."""
+    expires_at = cached.get("expires_at")
+    if not isinstance(expires_at, (int, float)):
+        return None
+    return expires_at / 1000.0 - time.time()
+
+
+def acquire_lock(lock_path: str) -> int | None:
+    """Take an exclusive advisory lock; return the fd, or None if unsupported.
+
+    Blocks until the lock is available. The lock file is created 0600 next to
+    the cache. It is never unlinked: removing a lock file while another process
+    holds it reopens the race the lock exists to close.
+    """
+    if fcntl is None:
+        return None
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def release_lock(fd: int | None) -> None:
+    """Release a lock taken by :func:`acquire_lock`."""
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -164,10 +221,25 @@ def main() -> int:
         default=TOKEN_PATH,
         help="override the tokens.json path (default: %(default)s)",
     )
+    parser.add_argument(
+        "--refresh-if-expiring",
+        type=int,
+        metavar="SECONDS",
+        default=None,
+        help=(
+            "refresh only when the access token expires within SECONDS; a no-op "
+            "otherwise. Every refresh consumes a rotation, so prefer this over an "
+            "unconditional refresh when calling on a schedule."
+        ),
+    )
     args = parser.parse_args()
     # Operator-supplied path, by design: this helper manages one cache file
     # that the caller may relocate (e.g. a per-run scratch copy in the tests).
     token_path = os.path.expanduser(args.token_path)
+
+    if args.refresh_if_expiring is not None and args.refresh_if_expiring < 0:
+        print("FAIL: --refresh-if-expiring requires a non-negative number of seconds")
+        return 2
 
     if not os.path.exists(token_path):
         print(f"FAIL: no token cache at {token_path}")
@@ -180,61 +252,94 @@ def main() -> int:
         print(f"cache: {describe(cached)}")
         return 0
 
-    refresh_token = cached.get("refresh_token")
-    if not refresh_token:
-        print("FAIL: cached token set has no refresh_token")
-        return 2
+    # Cheap skip before locking. A comfortably fresh token needs no work, and
+    # skipping avoids burning a rotation (and the race window that comes with it).
+    if args.refresh_if_expiring is not None:
+        left = remaining_seconds(cached)
+        if left is not None and left > args.refresh_if_expiring:
+            print(
+                f"OK: no refresh needed ({int(left)}s left; "
+                f"threshold {args.refresh_if_expiring}s)"
+            )
+            return 0
 
-    status, body = post_form(
-        TOKEN_ENDPOINT,
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": CLIENT_ID,
-            "resource": RESOURCE,
-            "scope": cached.get("requested_scope") or cached.get("scope") or "",
-        },
-    )
+    lock_fd = acquire_lock(token_path + ".lock")
+    try:
+        # Re-read INSIDE the lock. Another process (or mcp-remote itself) may
+        # have rotated the pair between the first read and lock acquisition, and
+        # refresh tokens are single-use, so acting on a stale read would present
+        # a token that is already spent.
+        with open(token_path, encoding="utf-8") as handle:
+            cached = json.load(handle)
 
-    if status == NETWORK_ERROR:
-        print(
-            f"FAIL: could not reach the token endpoint ({body.get('reason')}). "
-            "The token cache was NOT modified; retry once the network is back."
+        if args.refresh_if_expiring is not None:
+            left = remaining_seconds(cached)
+            if left is not None and left > args.refresh_if_expiring:
+                print(
+                    f"OK: no refresh needed ({int(left)}s left; "
+                    f"threshold {args.refresh_if_expiring}s)"
+                )
+                return 0
+
+        refresh_token = cached.get("refresh_token")
+        if not refresh_token:
+            print("FAIL: cached token set has no refresh_token")
+            return 2
+
+        status, body = post_form(
+            TOKEN_ENDPOINT,
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": CLIENT_ID,
+                "resource": RESOURCE,
+                "scope": cached.get("requested_scope") or cached.get("scope") or "",
+            },
         )
-        return 1
 
-    if status != 200 or not body.get("access_token"):
-        error = body.get("error")
-        if error == "invalid_grant":
+        if status == NETWORK_ERROR:
             print(
-                f"FAIL: refresh returned HTTP {status} (invalid_grant). The cached "
-                "refresh token was already spent; re-run the consent flow to mint "
-                "a new one."
+                f"FAIL: could not reach the token endpoint ({body.get('reason')}). "
+                "The token cache was NOT modified; retry once the network is back."
             )
-        else:
-            print(
-                f"FAIL: refresh returned HTTP {status} ({error}). The token cache "
-                "was NOT modified; retry later. If this persists, re-run the "
-                "consent flow."
+            return 1
+
+        if status != 200 or not body.get("access_token"):
+            error = body.get("error")
+            if error == "invalid_grant":
+                print(
+                    f"FAIL: refresh returned HTTP {status} (invalid_grant). The cached "
+                    "refresh token was already spent; re-run the consent flow to mint "
+                    "a new one."
+                )
+            else:
+                print(
+                    f"FAIL: refresh returned HTTP {status} ({error}). The token cache "
+                    "was NOT modified; retry later. If this persists, re-run the "
+                    "consent flow."
+                )
+            return 1
+
+        # Persist the rotated pair BEFORE reporting success. The refresh token
+        # just consumed is now spent and must not remain in the cache.
+        cached["access_token"] = body["access_token"]
+        if body.get("refresh_token"):
+            cached["refresh_token"] = body["refresh_token"]
+        if body.get("id_token"):
+            cached["id_token"] = body["id_token"]
+        if body.get("expires_in"):
+            cached["expires_in"] = body["expires_in"]
+            cached["expires_at"] = (
+                int(time.time() * 1000) + int(body["expires_in"]) * 1000
             )
-        return 1
 
-    # Persist the rotated pair BEFORE reporting success. The refresh token
-    # just consumed is now spent and must not remain in the cache.
-    cached["access_token"] = body["access_token"]
-    if body.get("refresh_token"):
-        cached["refresh_token"] = body["refresh_token"]
-    if body.get("id_token"):
-        cached["id_token"] = body["id_token"]
-    if body.get("expires_in"):
-        cached["expires_in"] = body["expires_in"]
-        cached["expires_at"] = int(time.time() * 1000) + int(body["expires_in"]) * 1000
+        persist_durably(token_path, cached)
 
-    persist_durably(token_path, cached)
-
-    print("OK: refreshed (HTTP 200); rotated refresh token persisted")
-    print(f"    cache: {describe(cached)}")
-    return 0
+        print("OK: refreshed (HTTP 200); rotated refresh token persisted")
+        print(f"    cache: {describe(cached)}")
+        return 0
+    finally:
+        release_lock(lock_fd)
 
 
 if __name__ == "__main__":

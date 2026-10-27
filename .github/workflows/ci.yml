@@ -32,6 +32,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # The shell-lint gate below diffs HEAD~1..HEAD. A runner that checks
+          # out depth 1 has no HEAD~1, so the gate would silently lint nothing.
+          # Depth 2 gives the merge commit's first parent, which on a PR
+          # checkout is the base tip.
+          fetch-depth: 2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -47,6 +52,57 @@ jobs:
         # failed to resolve mod", which reads like a formatting problem and hides
         # every gate behind it. Naming the real cause first (221159294).
         run: python3 scripts/check_module_files.py
+
+      - name: Lint changed shell scripts (errors only)
+        # scripts/ holds 73 bash files and no CI job has ever linted them, so
+        # shellcheck findings could only ever arrive from review bots.
+        #
+        # Only CHANGED scripts are linted. A full scan costs ~5s per file, which
+        # would also fail today on a pre-existing warning backlog. Gating the
+        # diff keeps it fast and green while still catching regressions in
+        # anything this change touches.
+        #
+        # Error severity only, for the same reason: the tree has 0 error-level
+        # findings and 50 pre-existing warning-level ones. Warnings are reported
+        # but not enforced; raise to `-S warning` once the backlog is cleared.
+        #
+        # shellcheck is not guaranteed on every runner. Install it if missing,
+        # and if that fails downgrade to a warning annotation rather than
+        # blocking every PR on runner provisioning.
+        shell: bash
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -qq && sudo apt-get install -y shellcheck || true
+            fi
+          fi
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            echo "::warning::shellcheck is unavailable on this runner; shell lint skipped."
+            exit 0
+          fi
+
+          # Determine a base to diff against. On a PR checkout HEAD is a merge
+          # commit, so HEAD~1 is the base tip and the diff is exactly this
+          # change set. Fall back to skipping when no base can be established
+          # rather than linting the whole tree.
+          files=()
+          if git rev-parse --verify 'HEAD~1' >/dev/null 2>&1; then
+            while IFS= read -r f; do
+              [ -n "$f" ] && [ -f "$f" ] && files+=("$f")
+            done < <(git diff --name-only --diff-filter=ACMR HEAD~1 HEAD -- '*.sh')
+          fi
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no shell scripts changed in this change set; nothing to lint"
+            exit 0
+          fi
+
+          shellcheck --version | head -2
+          printf 'linting %d changed script(s):\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          shellcheck -S error -f gcc "${files[@]}"
+          warnings=$(shellcheck -S warning -f gcc "${files[@]}" 2>/dev/null | wc -l || true)
+          echo "warning-level findings in changed files (informational): $warnings"
 
       - name: Check formatting
         # These gates are independent. Report every failure in one run instead
