@@ -10,6 +10,10 @@ const COMPACTED_HISTORY_LOAD_SCROLL_THRESHOLD: usize = 2;
 const COMPACTED_HISTORY_MARKER_PREFIX: &str = "Earlier conversation compacted - ";
 const OVERNIGHT_CARD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
+#[path = "state_ui_reminder_tests.rs"]
+mod reminder_tests;
+
 fn display_message_from_stored_message(
     message: &crate::session::StoredMessage,
 ) -> Option<DisplayMessage> {
