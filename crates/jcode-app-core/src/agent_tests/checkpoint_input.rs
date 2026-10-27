@@ -28,6 +28,73 @@ impl Drop for TestHome {
     }
 }
 
+struct PendingProvider;
+
+#[async_trait]
+impl Provider for PendingProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        Ok(Box::pin(futures::stream::pending()))
+    }
+
+    fn name(&self) -> &str {
+        "checkpoint-pending-fixture"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+#[tokio::test]
+async fn immediately_cancelled_prompts_remain_visible_in_rewind_history() {
+    let _env = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    let mut agent = Agent::new(Arc::new(PendingProvider), Registry::empty());
+    let (tx, _rx) = tokio_mpsc::unbounded_channel();
+
+    for prompt in ["first promptly interrupted prompt", "second promptly interrupted prompt"] {
+        {
+            let turn = agent.run_once_streaming_mpsc(prompt, vec![], None, tx.clone());
+            tokio::pin!(turn);
+            assert!(futures::poll!(&mut turn).is_pending());
+        }
+
+        let prompts = agent
+            .rewind_checkpoints()
+            .unwrap()
+            .into_iter()
+            .filter(|checkpoint| {
+                checkpoint.target_kind == jcode_session_types::RewindTargetKind::UserPrompt
+            })
+            .map(|checkpoint| checkpoint.prompt)
+            .collect::<Vec<_>>();
+        assert!(prompts.iter().any(|saved| saved == prompt), "{prompts:?}");
+    }
+
+    let prompts = agent
+        .rewind_checkpoints()
+        .unwrap()
+        .into_iter()
+        .filter(|checkpoint| {
+            checkpoint.target_kind == jcode_session_types::RewindTargetKind::UserPrompt
+        })
+        .map(|checkpoint| checkpoint.prompt)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prompts,
+        vec![
+            "first promptly interrupted prompt".to_string(),
+            "second promptly interrupted prompt".to_string(),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn automatic_input_does_not_fail_checkpoint_binding() {
     let _env = crate::storage::lock_test_env();

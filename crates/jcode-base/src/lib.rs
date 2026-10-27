@@ -20,6 +20,7 @@
 
 pub mod account_login;
 pub mod agent_profile;
+mod plugin_components;
 pub mod instruction_sources;
 pub mod applets;
 pub mod auth;
@@ -76,6 +77,7 @@ pub mod model_usage;
 pub mod opencode_db;
 pub mod output_style;
 pub mod plan;
+pub mod plugin;
 pub mod platform;
 pub mod power_inhibit;
 pub mod process_memory;
@@ -96,6 +98,7 @@ pub mod session_metrics;
 pub mod side_panel;
 pub mod sidecar;
 pub mod skill;
+pub mod skill_overrides;
 pub mod soft_interrupt_store;
 pub mod sponsors;
 pub mod stdin_detect;

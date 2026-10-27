@@ -552,7 +552,7 @@ fn completed_background_tasks_clear_after_they_stop_being_relevant() {
 }
 
 #[test]
-fn clicking_pinned_todo_more_row_expands_the_band() {
+fn clicking_pinned_todo_control_toggles_the_band() {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
     let _env_lock = crate::storage::lock_test_env();
@@ -574,6 +574,15 @@ fn clicking_pinned_todo_more_row_expands_the_band() {
     });
 
     assert!(app.pinned_todos_expanded);
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 8,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(!app.pinned_todos_expanded);
     crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
 }
 
@@ -721,4 +730,127 @@ fn pinned_todo_more_row_click_rect_matches_rendered_row() {
         "{area:?}\n{text}"
     );
     crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
+}
+
+#[test]
+fn expanded_pinned_todo_band_shows_all_rows_and_can_collapse() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    fn click_compact_item(
+        app: &mut App,
+        terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        row_text: &str,
+    ) {
+        let compact = render_and_snap(app, terminal);
+        assert!(compact.contains("more (todo)"), "compact control missing:\n{compact}");
+        let card_area = crate::tui::ui::viewport::pinned_todo_card_area()
+            .expect("compact band should publish a card hitbox");
+        let item_row = compact
+            .lines()
+            .position(|row| row.contains(row_text))
+            .expect("clicked compact TODO row should be visible") as u16;
+        assert!(
+            item_row >= card_area.y && item_row < card_area.y + card_area.height,
+            "TODO row {item_row} is outside compact card {card_area:?}"
+        );
+        let control_area = crate::tui::ui::viewport::pinned_todo_more_area()
+            .expect("compact band should publish an expand control");
+        assert_ne!(item_row, control_area.y, "item click must be distinct from more control");
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: card_area.x + 7,
+            row: item_row,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.pinned_todos_expanded, "clicking {row_text} should expand the list");
+    }
+
+    fn click_expanded_row(
+        app: &mut App,
+        terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        row_text: &str,
+    ) {
+        let expanded = render_and_snap(app, terminal);
+        assert!(expanded.contains("many item 11"), "last TODO row missing:\n{expanded}");
+        let last_item_row = expanded
+            .lines()
+            .position(|row| row.contains("many item 11"))
+            .expect("last TODO row should be visible");
+        let collapse_row = expanded
+            .lines()
+            .position(|row| row.contains("collapse (todo)"))
+            .expect("collapse control row should be visible");
+        assert!(
+            collapse_row > last_item_row,
+            "collapse control must follow the last TODO row:\n{expanded}"
+        );
+        assert!(
+            !expanded.contains("more (todo)"),
+            "expanded list still shows a more summary:\n{expanded}"
+        );
+        let card_area = crate::tui::ui::viewport::pinned_todo_card_area()
+            .expect("expanded band should publish a card hitbox");
+        let item_row = expanded
+            .lines()
+            .position(|row| row.contains(row_text))
+            .expect("clicked TODO row should be visible") as u16;
+        assert!(
+            item_row >= card_area.y && item_row < card_area.y + card_area.height,
+            "TODO item row {item_row} is outside card area {card_area:?}"
+        );
+        let area = crate::tui::ui::viewport::pinned_todo_more_area()
+            .expect("expanded band should publish collapse label hitbox");
+        assert_ne!(item_row, area.y, "item click must be distinct from collapse label");
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: card_area.x + 7,
+            row: item_row,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!app.pinned_todos_expanded, "clicking {row_text} should collapse the list");
+    }
+
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let todos: Vec<_> = (0..12)
+        .map(|i| pinned_band_todo(&format!("t{i}"), &format!("many item {i}"), "pending"))
+        .collect();
+    let (mut app, _) = render_pinned_band_fixture(&todos, 70, 40);
+
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 40)).unwrap();
+
+    for row_text in ["many item 0", "many item 5", "many item 11"] {
+        click_compact_item(&mut app, &mut terminal, "many item 0");
+        click_expanded_row(&mut app, &mut terminal, row_text);
+        let collapsed = render_and_snap(&app, &mut terminal);
+        assert!(
+            collapsed.contains("more (todo)"),
+            "collapsed list should restore its more summary:\n{collapsed}"
+        );
+        assert!(
+            !collapsed.contains("collapse (todo)"),
+            "collapse control remained after closing:\n{collapsed}"
+        );
+    }
+
+    click_compact_item(&mut app, &mut terminal, "many item 0");
+    let expanded = render_and_snap(&app, &mut terminal);
+    let label_row = expanded
+        .lines()
+        .position(|row| row.contains("collapse (todo)"))
+        .expect("bottom collapse control row");
+    let label_area = crate::tui::ui::viewport::pinned_todo_more_area()
+        .expect("collapse label hitbox");
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: label_area.x,
+        row: label_row as u16,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(!app.pinned_todos_expanded, "bottom collapse label should collapse the list");
+
+    crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
+    crate::tui::ui::viewport::set_pinned_todo_card_area_for_test(None);
 }

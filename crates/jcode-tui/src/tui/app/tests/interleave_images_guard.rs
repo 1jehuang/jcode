@@ -43,3 +43,5 @@ fn every_interleave_send_path_carries_the_staged_images() {
          staged attachments, which silently drops them"
     );
 }
+#[path = "checkpoint_input.rs"]
+mod checkpoint_input;

@@ -168,14 +168,16 @@ pub async fn run_tui_client(
     if let Some(name) = agent_profile_name.as_deref() {
         app.set_pending_startup_notice(
             "Session instruction profile",
-            format!("Instructions only; model, tools and permissions remain unchanged. Requested profile: {name}. Only its Markdown instruction body is applied; YAML frontmatter settings are not applied."),
+            format!("Requested agent profile: {name}. Markdown profiles support optional YAML frontmatter. Once the server accepts this profile, its Markdown instructions take effect. Model, tools and permissions remain unchanged."),
         );
     }
 
     startup_profile::mark("pre_run_remote");
     startup_profile::report_to_log();
 
-    let result = app.run_remote(terminal, remote_working_dir, agent_profile_name).await;
+    let result = app
+        .run_remote(terminal, remote_working_dir, agent_profile_name)
+        .await;
 
     // On the error path, `?` returns here while `tui_runtime` is still alive, so
     // its `Drop` guarantees the terminal is restored (issue #214). On the happy

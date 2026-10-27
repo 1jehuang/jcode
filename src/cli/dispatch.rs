@@ -74,6 +74,13 @@ fn arm_debug_client_parent_death_signal() {}
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     args.validate_agent_profile_selection().map_err(anyhow::Error::msg)?;
     arm_debug_client_parent_death_signal();
+    // Plugin management is filesystem-only and must not bootstrap providers or a daemon.
+    if matches!(args.command, Some(Command::Plugin(_))) {
+        let Some(Command::Plugin(plugin)) = args.command else {
+            unreachable!("plugin command checked above");
+        };
+        return super::plugin::run(plugin);
+    }
     if !args.account.is_empty() {
         // `jcode --account <label>`: pin the new window's session. Sent once
         // with the TUI's first Subscribe.
@@ -167,6 +174,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     match args.command {
+        Some(Command::Plugin(plugin)) => super::plugin::run(plugin)?,
         Some(Command::Mcp { action }) => super::mcp::run(action).await?,
         Some(Command::Serve {
             temporary_server,

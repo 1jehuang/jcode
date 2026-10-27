@@ -429,6 +429,9 @@ fn test_load_claude_json_global_and_project_servers() {
         config.servers.get("project-srv").unwrap().command,
         "project-bin"
     );
+    // Claude Code's "local" scope, so `/mcp` groups it as Local MCPs.
+    assert_eq!(config.sources["project-srv"], LOCAL_CLAUDE_SOURCE);
+    assert!(!config.sources.contains_key("global-srv"));
 }
 
 #[test]
@@ -994,4 +997,116 @@ fn mcp_source_logs_explain_provenance_without_config_values() {
     assert!(imported.contains("Claude Code MCP configuration remains live and was not copied"));
     assert!(!imported.contains("TOKEN"));
     assert!(!imported.contains("inline-secret"));
+}
+
+#[test]
+fn tool_result_tolerates_new_content_block_types() {
+    let result: ToolCallResult = serde_json::from_value(serde_json::json!({
+        "content": [
+            {"type": "text", "text": "ok"},
+            {"type": "resource_link", "uri": "file:///a.txt", "name": "a.txt"},
+            {"type": "audio", "data": "AAAA", "mimeType": "audio/wav"}
+        ]
+    }))
+    .expect("unknown block types must not fail the whole result");
+    assert_eq!(
+        crate::mcp::render_content(result.content, "session", "call"),
+        "ok\n[Resource link: a.txt file:///a.txt]\n[Unsupported MCP content block omitted]"
+    );
+}
+
+#[test]
+fn load_for_dir_records_sources_and_applies_mcp_dialog_overrides() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    std::fs::write(
+        home.path().join("mcp.json"),
+        r#"{"mcpServers":{"global-only":{"command":"g"},"shadowed":{"command":"g"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join(".mcp.json"),
+        r#"{"mcpServers":{"shadowed":{"command":"p","disabled":false},"remote-twin":{"url":"https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+
+    let result = std::panic::catch_unwind(|| {
+        McpConfig::set_enabled_override("global-only", false).expect("save override");
+        let config = McpConfig::load_for_dir(Some(project.path()));
+        assert_eq!(config.sources["global-only"], "~/.jcode/mcp.json");
+        assert_eq!(config.sources["shadowed"], ".mcp.json");
+        assert_eq!(config.sources["remote-twin"], ".mcp.json");
+        assert!(!config.servers["global-only"].is_enabled());
+        // A project file's server waits for approval, even when it shadows a
+        // global definition of the same name.
+        assert!(!config.servers["shadowed"].is_enabled());
+        assert!(config.pending_approval.contains("shadowed"));
+        // Nothing may start it before the user answers (connect-on-call etc.).
+        assert_eq!(
+            McpConfig::project_server_state(project.path(), "shadowed"),
+            ProjectServerState::Pending
+        );
+        McpConfig::set_project_approval(project.path(), "shadowed", McpApproval::Approve)
+            .expect("approve");
+        assert_eq!(
+            McpConfig::project_server_state(project.path(), "shadowed"),
+            ProjectServerState::Approved
+        );
+        McpConfig::set_project_approval(project.path(), "remote-twin", McpApproval::Reject)
+            .expect("reject");
+        let config = McpConfig::load_for_dir(Some(project.path()));
+        assert!(config.servers["shadowed"].is_enabled());
+        assert!(!config.servers["remote-twin"].is_enabled());
+        assert_eq!(
+            McpConfig::project_server_state(project.path(), "remote-twin"),
+            ProjectServerState::Rejected
+        );
+        assert!(config.pending_approval.is_empty());
+
+        McpConfig::set_enabled_override("global-only", true).expect("save override");
+        let config = McpConfig::load_for_dir(Some(project.path()));
+        assert!(config.servers["global-only"].is_enabled());
+    });
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    result.expect("source tracking and override assertions");
+}
+
+#[tokio::test]
+async fn unapproved_project_server_is_never_started_by_a_tool_call() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(
+        project.path().join(".mcp.json"),
+        r#"{"mcpServers":{"repo":{"command":"definitely-not-run","disabled":false}}}"#,
+    )
+    .unwrap();
+
+    let manager =
+        crate::mcp::McpManager::with_config(McpConfig::load_for_dir(Some(project.path())));
+    let call = manager
+        .call_tool("repo", "anything", serde_json::json!({}))
+        .await;
+    let connect = manager
+        .ensure_server_connected("repo", std::time::Duration::from_secs(1))
+        .await;
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    for result in [call.map(|_| ()), connect] {
+        let error = result.expect_err("pending project server must not start");
+        assert!(error.to_string().contains("approval"), "{error}");
+    }
 }

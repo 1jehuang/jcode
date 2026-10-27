@@ -16,6 +16,8 @@ pub mod reasoning;
 pub mod retry_after;
 pub mod selection;
 pub mod service_tier;
+mod simple_completion;
+pub use simple_completion::collect_simple_completion;
 pub mod transport;
 pub mod usage_limit;
 
@@ -80,7 +82,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
 use jcode_message_types::{
-    ContentBlock, Message, Role, StreamEvent, ToolDefinition, messages_with_dynamic_system_context,
+    Message, StreamEvent, ToolDefinition, messages_with_dynamic_system_context,
 };
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
@@ -99,7 +101,7 @@ pub trait Provider: Send + Sync {
     /// input through this hook or wait for a network warmup to finish.
     async fn prewarm(&self, _tools: &[ToolDefinition], _system_static: &str) {}
 
-    /// Discard upstream conversation handles before a new foreground turn.
+    /// Discard continuation state after the caller replaces conversation history.
     ///
     /// The caller must first finish or cancel the foreground stream, then await
     /// this hook before requesting another completion. Stateful providers must
@@ -575,10 +577,19 @@ pub trait Provider: Send + Sync {
         self.fork()
     }
 
+    /// Tell the provider which jcode session it serves, before each turn.
+    /// Providers that report activity outside a turn (Claude Code background
+    /// tasks) need it to address the session; the default ignores it.
+    fn bind_session(&self, _session_id: &str) {}
+
     /// Get a sender for native tool results (if the provider supports it).
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
         None
     }
+
+    /// Whether the caller will execute NativeToolCall events and deliver results.
+    /// Defaults to false in runtimes. Set before completing, never during a turn.
+    fn set_host_tool_executor_available(&self, _available: bool) {}
 
     /// Drain any startup notices.
     fn drain_startup_notices(&self) -> Vec<String> {
@@ -613,55 +624,6 @@ pub trait Provider: Send + Sync {
     ) -> Result<(String, SimpleCompletionUsage)> {
         collect_simple_completion(self, prompt, system).await
     }
-}
-
-/// Drive `Provider::complete` for a single user prompt and collect the text and
-/// provider-reported usage.
-pub async fn collect_simple_completion<P: Provider + ?Sized>(
-    provider: &P,
-    prompt: &str,
-    system: &str,
-) -> Result<(String, SimpleCompletionUsage)> {
-    use futures::StreamExt;
-
-    let messages = vec![Message {
-        role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: prompt.to_string(),
-            cache_control: None,
-        }],
-        timestamp: None,
-        tool_duration_ms: None,
-    }];
-
-    let response = provider.complete(&messages, &[], system, None).await?;
-    let mut result = String::new();
-    let mut usage = SimpleCompletionUsage::default();
-    tokio::pin!(response);
-
-    while let Some(event) = response.next().await {
-        match event {
-            Ok(StreamEvent::TextDelta(text)) => result.push_str(&text),
-            Ok(StreamEvent::TextSuffixReplace { old_text, new_text }) => {
-                jcode_message_types::replace_text_suffix(&mut result, &old_text, &new_text);
-            }
-            Ok(StreamEvent::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_input_tokens,
-                cache_creation_input_tokens,
-            }) => usage.observe(
-                input_tokens,
-                output_tokens,
-                cache_read_input_tokens,
-                cache_creation_input_tokens,
-            ),
-            Ok(_) => {}
-            Err(err) => return Err(err),
-        }
-    }
-
-    Ok((result, usage))
 }
 
 /// Provider-reported usage for a non-agent completion.

@@ -405,7 +405,7 @@ async fn agent_profile_socket_yaml_frontmatter_body_snapshot_reload_and_errors()
     assert!(!baseline.contains(BODY_V1));
 
     client
-        .send(json!({"type":"runtime_command", "id":604, "command":"agent", "args":["socket-profile"]}))
+        .send(json!({"type":"runtime_command", "id":604, "command":"agent", "args":["--select", "socket-profile", "[]"]}))
         .await;
     let ServerEvent::RuntimeCommandResult {
         data: selected,
@@ -417,9 +417,14 @@ async fn agent_profile_socket_yaml_frontmatter_body_snapshot_reload_and_errors()
     else {
         unreachable!()
     };
+    assert!(message.starts_with("Agent profile socket-profile applied."));
+    assert!(message.contains("Markdown instructions take effect next turn."));
     assert!(
-        message.starts_with("Instructions only; model, tools and permissions remain unchanged.")
+        message
+            .contains("Ignored YAML frontmatter fields: mode, model, permission, x_socket_header_")
     );
+    assert!(message.contains("The Markdown instruction body still applies."));
+    assert!(!message.contains("settings are not applied"));
     assert_eq!(selected["current"], "socket-profile");
     assert_eq!(selected["changed"], true);
     assert_eq!(selected["effective"], "next_turn");
@@ -458,9 +463,14 @@ async fn agent_profile_socket_yaml_frontmatter_body_snapshot_reload_and_errors()
     else {
         unreachable!()
     };
+    assert!(message.starts_with("Agent profile socket-profile applied."));
+    assert!(message.contains("Markdown instructions take effect next turn."));
     assert!(
-        message.starts_with("Instructions only; model, tools and permissions remain unchanged.")
+        message
+            .contains("Ignored YAML frontmatter fields: mode, model, permission, x_socket_header_")
     );
+    assert!(message.contains("The Markdown instruction body still applies."));
+    assert!(!message.contains("settings are not applied"));
     assert_eq!(reloaded["current"], "socket-profile");
     assert_eq!(reloaded["changed"], true);
     assert_saved_profile(&session_id, BODY_V2);

@@ -252,17 +252,18 @@ fn claim_update_fetch_slot() -> bool {
     std::fs::write(&marker, b"").is_ok()
 }
 
-/// `None` means this local checkout has no tracking branch, not a failed check.
+/// `None` means the source checkout is unavailable or has no tracking branch.
 pub fn check_for_updates() -> Result<Option<bool>> {
-    let repo_dir =
-        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode source repository"))?;
-    check_for_updates_in(&repo_dir, claim_update_fetch_slot)
+    check_for_updates_in(get_repo_dir().as_deref(), claim_update_fetch_slot)
 }
 
 pub(super) fn check_for_updates_in(
-    repo_dir: &std::path::Path,
+    repo_dir: Option<&std::path::Path>,
     claim_fetch: impl FnOnce() -> bool,
 ) -> Result<Option<bool>> {
+    let Some(repo_dir) = repo_dir else {
+        return Ok(None);
+    };
     // Unlike @{u}, these commands distinguish a valid local branch without
     // tracking from an inaccessible repository or a broken upstream ref.
     let branch = source_update_git(repo_dir, &["rev-parse", "--symbolic-full-name", "HEAD"])?;

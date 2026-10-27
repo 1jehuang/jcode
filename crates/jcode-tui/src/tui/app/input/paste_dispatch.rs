@@ -1,6 +1,7 @@
 use super::*;
 
 pub(in crate::tui::app) fn handle_paste(app: &mut App, text: String) {
+    app.rewind_ui.last_empty_escape = None;
     if app.paste_account_manager_prompt(&text) {
         return;
     }

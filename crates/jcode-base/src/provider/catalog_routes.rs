@@ -697,16 +697,41 @@ fn append_openai_compatible_profile_routes(
             continue;
         }
         let named_routes = named_provider_profile_routes(profile_name, profile_config);
+        let named_routes = without_existing_model_routes(routes, named_routes);
         added_any |= !named_routes.is_empty();
         routes.extend(named_routes);
     }
     added_any
 }
 
+fn same_model_route_identity(left: &ModelRoute, right: &ModelRoute) -> bool {
+    left.api_method.eq_ignore_ascii_case(&right.api_method)
+        && left.model.eq_ignore_ascii_case(&right.model)
+}
+
+fn without_existing_model_routes(
+    existing_routes: &[ModelRoute],
+    candidate_routes: Vec<ModelRoute>,
+) -> Vec<ModelRoute> {
+    candidate_routes
+        .into_iter()
+        .filter(|candidate| {
+            !existing_routes
+                .iter()
+                .any(|existing| same_model_route_identity(existing, candidate))
+        })
+        .collect()
+}
+
+pub fn named_provider_model_supports_chat(model: &crate::config::NamedProviderModelConfig) -> bool {
+    model.supports_chat != Some(false)
+        && (model.input.is_empty() || model.input.iter().any(|input| input == "text"))
+}
+
 /// Picker routes for one user-defined named provider profile from config.
 ///
-/// Text-capable static models plus the profile's `default_model` are offered;
-/// models declared image-only via `input = ["image"]` are excluded.
+/// Chat-capable static models plus the profile's `default_model` are offered;
+/// generation-only and image-only models are excluded.
 fn named_provider_profile_routes(
     profile_name: &str,
     profile_config: &crate::config::NamedProviderConfig,
@@ -714,10 +739,7 @@ fn named_provider_profile_routes(
     let mut models: Vec<String> = profile_config
         .models
         .iter()
-        .filter(|model| {
-            // `input` empty means unspecified (assume text-capable).
-            model.input.is_empty() || model.input.iter().any(|input| input == "text")
-        })
+        .filter(|model| named_provider_model_supports_chat(model))
         .map(|model| model.id.trim().to_string())
         .filter(|id| !id.is_empty())
         .collect();
@@ -727,6 +749,13 @@ fn named_provider_profile_routes(
             .as_deref()
             .map(str::trim)
             .filter(|model| !model.is_empty())
+            .filter(|model| {
+                profile_config
+                    .models
+                    .iter()
+                    .find(|entry| entry.id.trim().eq_ignore_ascii_case(model))
+                    .is_none_or(named_provider_model_supports_chat)
+            })
     {
         models.push(default_model.to_string());
     }
@@ -743,8 +772,33 @@ fn named_provider_profile_routes(
         if !is_listable_model_name(&model) || routes.iter().any(|route| route.model == model) {
             continue;
         }
+        let model_config = profile_config
+            .models
+            .iter()
+            .find(|entry| entry.id.trim().eq_ignore_ascii_case(&model));
         routes.push(ModelRoute {
-            catalog_metadata: None,
+            catalog_metadata: model_config.map(|model_config| jcode_provider_core::ModelMetadata {
+                context_window: model_config.context_window.or_else(|| {
+                    jcode_provider_core::context_limit_for_model_with_provider(
+                        &model,
+                        Some(profile_name),
+                    )
+                }),
+                max_input_tokens: model_config.max_input_tokens,
+                max_output_tokens: model_config.max_output_tokens,
+                supports_chat: model_config.supports_chat,
+                supports_thinking: model_config.supports_thinking,
+                input_modalities: model_config.input.clone(),
+                output_modalities: model_config.output.clone(),
+                supported_endpoints: model_config.supported_endpoints.clone(),
+                reasoning_efforts: model_config.reasoning_efforts.clone(),
+                supports_tool_calls: model_config.supports_tool_calls,
+                supports_streaming: model_config.supports_streaming,
+                supports_structured_outputs: model_config.supports_structured_outputs,
+                supports_image_input: (!model_config.input.is_empty())
+                    .then(|| model_config.input.iter().any(|input| input == "image")),
+                ..Default::default()
+            }),
             model,
             provider: profile_name.to_string(),
             api_method: api_method.clone(),
@@ -1613,6 +1667,109 @@ mod tests {
                 "no source may attach a Copilot route: {routes:?}"
             );
         }
+    }
+
+    #[test]
+    fn named_profile_merge_skips_builtin_duplicate_and_keeps_config_only_models() {
+        let built_in = ModelRoute {
+            catalog_metadata: None,
+            model: "A6-Coder-Large".into(),
+            provider: "A6 API".into(),
+            api_method: "openai-compatible:a6api".into(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        };
+        let configured_duplicate = ModelRoute {
+            provider: "a6api".into(),
+            model: "a6-coder-large".into(),
+            ..built_in.clone()
+        };
+        let config_only = ModelRoute {
+            provider: "a6api".into(),
+            model: "A6-Coder-Small".into(),
+            ..built_in.clone()
+        };
+
+        let merged = without_existing_model_routes(
+            std::slice::from_ref(&built_in),
+            vec![configured_duplicate, config_only.clone()],
+        );
+
+        assert_eq!(merged, vec![config_only]);
+    }
+
+    #[test]
+    fn named_profile_routes_exclude_generation_only_and_preserve_model_metadata() {
+        let profile = crate::config::NamedProviderConfig {
+            base_url: "https://api.example.test/v1".into(),
+            default_model: Some("chat-vision".into()),
+            models: vec![
+                crate::config::NamedProviderModelConfig {
+                    id: "chat-vision".into(),
+                    context_window: Some(1_000_000),
+                    max_input_tokens: Some(900_000),
+                    max_output_tokens: Some(32_000),
+                    reasoning: Some(true),
+                    supports_thinking: Some(true),
+                    reasoning_efforts: vec!["max".into(), "low".into(), "high".into()],
+                    input: vec!["text".into(), "image".into()],
+                    output: vec!["text".into()],
+                    supported_endpoints: vec!["chat/completions".into(), "responses".into()],
+                    supports_tool_calls: Some(true),
+                    supports_streaming: Some(true),
+                    supports_structured_outputs: Some(true),
+                    supports_chat: Some(true),
+                    ..Default::default()
+                },
+                crate::config::NamedProviderModelConfig {
+                    id: "video-only".into(),
+                    input: vec!["text".into()],
+                    output: vec!["video".into()],
+                    supported_endpoints: vec!["videos".into()],
+                    supports_chat: Some(false),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let routes = named_provider_profile_routes("example", &profile);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].model, "chat-vision");
+        let metadata = routes[0].catalog_metadata.as_ref().unwrap();
+        assert_eq!(metadata.context_window, Some(1_000_000));
+        assert_eq!(metadata.max_input_tokens, Some(900_000));
+        assert_eq!(metadata.max_output_tokens, Some(32_000));
+        assert_eq!(metadata.input_modalities, ["text", "image"]);
+        assert_eq!(metadata.output_modalities, ["text"]);
+        assert_eq!(
+            metadata.supported_endpoints,
+            ["chat/completions", "responses"]
+        );
+        assert_eq!(metadata.supports_image_input, Some(true));
+        assert_eq!(metadata.supports_tool_calls, Some(true));
+        assert_eq!(metadata.supports_streaming, Some(true));
+        assert_eq!(metadata.supports_structured_outputs, Some(true));
+        assert_eq!(metadata.supports_thinking, Some(true));
+        assert_eq!(metadata.reasoning_efforts, ["max", "low", "high"]);
+    }
+
+    #[test]
+    fn named_profile_blocks_generation_only_default_from_picker_fallback() {
+        let profile = crate::config::NamedProviderConfig {
+            base_url: "https://api.example.test/v1".into(),
+            default_model: Some("video-only".into()),
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "video-only".into(),
+                output: vec!["video".into()],
+                supports_chat: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(named_provider_profile_routes("example", &profile).is_empty());
     }
 
     #[test]

@@ -696,6 +696,14 @@ impl App {
                 break;
             }
 
+            // Dialog keys are synchronous; filesystem rewind acquires async
+            // path locks here, before any queued model turn can start.
+            if self.rewind_ui.local_restore.is_some() {
+                self.process_local_rewind().await;
+                needs_redraw = true;
+                continue;
+            }
+
             // Process pending turn OR wait for input/redraw
             if self.pending_turn {
                 self.pending_turn = false;

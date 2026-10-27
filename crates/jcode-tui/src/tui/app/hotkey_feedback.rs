@@ -417,7 +417,7 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
     out.push(KnownHotkey::new(
         ctrl('r'),
         "history_search",
-        "search prompt history across sessions",
+        "search this session's prompt history",
     ));
     let alternate_enter_desc = alternate_enter_description(inputs.queue_mode);
     out.push(KnownHotkey::new(

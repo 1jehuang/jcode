@@ -457,6 +457,21 @@ mod tests {
     }
 
     #[test]
+    fn a6api_profile_and_login_align_with_named_config_profile() {
+        // Host and key env must match the pre-existing `[providers.a6api]`
+        // named profile in config.toml so one key serves both lines.
+        assert_eq!(A6API_PROFILE.api_base, "https://api.a6api.com/v1");
+        assert_eq!(A6API_PROFILE.api_key_env, "A6API_KEY");
+        assert_eq!(A6API_PROFILE.env_file, "a6api.env");
+        assert_eq!(A6API_PROFILE.default_model, Some("gpt-6-astra"));
+        const { assert!(A6API_PROFILE.requires_api_key) };
+        assert!(openai_compatible_profiles().contains(&A6API_PROFILE));
+        for input in ["a6api", "a6 api", "A6 API", "a6", "astra-jb", " A6API "] {
+            assert_eq!(resolve_login_provider(input), Some(A6API_LOGIN_PROVIDER));
+        }
+    }
+
+    #[test]
     fn novita_profile_and_login_are_available_on_all_surfaces() {
         assert_eq!(NOVITA_PROFILE.api_base, "https://api.novita.ai/openai");
         assert_eq!(NOVITA_PROFILE.api_key_env, "NOVITA_API_KEY");

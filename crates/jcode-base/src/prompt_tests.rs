@@ -43,9 +43,19 @@ fn mermaid_prompt_module_follows_capability() {
 /// Verify skill prompts don't accidentally introduce "Claude Code" identity
 #[test]
 fn test_skill_prompt_integration() {
+    // A real `~/.jcode/system-prompt.md` (or another test's) replaces the
+    // default base prompt, so build against an empty jcode home.
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
     // Test that a skill prompt is properly appended and doesn't break anything
     let skill_prompt = "You are helping with a debugging task.";
     let prompt = build_system_prompt(Some(skill_prompt), &[]);
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
 
     // The prompt should contain our default system prompt
     // Identity line reworded in 24838926e ("docs: refine base agent guidance").
@@ -199,6 +209,21 @@ fn agents_md_distinct_project_and_global_files_are_both_loaded() {
 
 #[test]
 fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
+    // Both builds must read the same global files: hold the env lock and use
+    // an empty jcode home (a real ~/.jcode/system-prompt.md would leak in).
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
     let project_dir = tempfile::TempDir::new().unwrap();
     let agents_md = project_dir.path().join("AGENTS.md");
     std::fs::write(&agents_md, "original session instructions").unwrap();

@@ -1654,22 +1654,13 @@ impl App {
         }
 
         if !self.is_remote && !crate::perf::tui_policy().simplified_model_picker {
-            let routes_started = std::time::Instant::now();
-            let routes = self.simplified_model_routes_for_picker(&current_model);
-            let routes_ms = routes_started.elapsed().as_millis();
-            self.open_model_picker_with_routes(
-                cache_signature.clone(),
-                picker_started,
-                routes,
-                routes_ms,
-                preserve_input,
-                false,
-            );
-            if self.inline_interactive_state.is_some() {
-                self.set_status_notice("Updating model routes…");
-            } else {
-                self.open_loading_model_picker(&current_model);
-            }
+            // Building the simplified catalog also expands saved OAuth accounts and
+            // reads their cached model lists. That work is allowed to be slow, so it
+            // must not happen on the TUI thread just because the user typed `/model`.
+            // Paint a usable current-model row first, then replace it when the full
+            // catalog arrives through the existing async loader.
+            self.open_loading_model_picker(&current_model);
+            self.set_status_notice("Updating model routes…");
             self.start_model_picker_route_load(cache_signature, picker_started);
             return;
         }
@@ -3288,6 +3279,7 @@ impl App {
                 name
             )));
         }
+        self.suspend_prompt_history_for_switch();
         self.workspace_client.queue_resume_session(session_id);
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;
@@ -3327,6 +3319,7 @@ impl App {
         self.push_display_message(DisplayMessage::system(format!(
             "Claude Code exited and its transcript was prepared as {session_id}."
         )));
+        self.suspend_prompt_history_for_switch();
         self.workspace_client.queue_resume_session(session_id);
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;

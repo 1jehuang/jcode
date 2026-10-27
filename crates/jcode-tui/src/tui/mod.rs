@@ -30,6 +30,8 @@ pub struct BackgroundTaskRow {
 pub mod backend;
 pub(crate) mod color_support;
 mod core;
+pub(crate) mod dialog;
+pub(crate) mod plugin_command;
 pub(crate) mod fuzzy;
 pub mod herdr;
 // Terminal image display + metadata helpers now live in the dependency-free
@@ -1126,6 +1128,10 @@ pub trait TuiState {
     fn login_picker_overlay(&self) -> Option<&std::cell::RefCell<login_picker::LoginPicker>>;
     /// Account picker overlay for /accounts command
     fn account_picker_overlay(&self) -> Option<&std::cell::RefCell<account_picker::AccountPicker>>;
+    /// `/mcp` or `/skills` dialog
+    fn dialog(&self) -> Option<&dialog::Dialog> {
+        None
+    }
     /// Usage overlay for /usage command
     fn usage_overlay(&self) -> Option<&std::cell::RefCell<usage_overlay::UsageOverlay>>;
     /// Working directory for this session

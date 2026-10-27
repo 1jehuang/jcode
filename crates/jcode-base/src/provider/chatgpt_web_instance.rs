@@ -182,9 +182,26 @@ fn display_available_with(
     macos || set(display) || set(wayland)
 }
 
+/// Headless Chrome calls itself "HeadlessChrome", which ChatGPT's Cloudflare
+/// check blocks (the page never leaves "Just a moment"). The normal desktop
+/// identity of the same major version passes it.
+fn desktop_user_agent(version_output: &str) -> Option<String> {
+    let major: u32 = version_output
+        .split_whitespace()
+        .find_map(|word| word.split('.').next()?.parse().ok())?;
+    let platform = if cfg!(target_os = "macos") {
+        "Macintosh; Intel Mac OS X 10_15_7"
+    } else {
+        "X11; Linux x86_64"
+    };
+    Some(format!(
+        "Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    ))
+}
+
 /// Command-line arguments for the private instance. Headless runs never show
 /// a window. The visible variant is used only for signing in.
-pub fn chrome_args(profile: &Path, headless: bool) -> Vec<String> {
+pub fn chrome_args(profile: &Path, headless: bool, user_agent: Option<&str>) -> Vec<String> {
     let mut args = vec![
         format!("--user-data-dir={}", profile.display()),
         "--remote-debugging-pipe".to_string(),
@@ -196,18 +213,14 @@ pub fn chrome_args(profile: &Path, headless: bool) -> Vec<String> {
         "--disable-backgrounding-occluded-windows".to_string(),
         "--password-store=basic".to_string(),
     ];
+    // Truly headless: macOS pulls an off-screen window back onto the screen
+    // and focuses it, so a "parked" real window is not invisible.
     if headless {
-        // ChatGPT's Cloudflare check blocks the --headless=new fingerprint even
-        // with a valid session, so turns never load. Run a real window parked
-        // far off-screen instead: it passes the check and stays off the desktop.
-        // Override with JCODE_CHATGPT_WEB_HEADLESS=1 to force true headless.
-        if std::env::var("JCODE_CHATGPT_WEB_HEADLESS").as_deref() == Ok("1") {
-            args.push("--headless=new".to_string());
-            args.push("--window-size=1280,900".to_string());
-        } else {
-            args.push("--window-position=-32000,-32000".to_string());
-            args.push("--window-size=1280,900".to_string());
-        }
+        args.push("--headless=new".to_string());
+        args.push("--window-size=1280,900".to_string());
+    }
+    if let Some(user_agent) = user_agent {
+        args.push(format!("--user-agent={user_agent}"));
     }
     args.push("about:blank".to_string());
     args
@@ -441,9 +454,30 @@ impl Instance {
         let (from_chrome_read, from_chrome_write) = pipe()?;
         let child_in = to_chrome_read.as_raw_fd();
         let child_out = from_chrome_write.as_raw_fd();
+        let user_agent = if headless {
+            // Prints and exits without opening a browser.
+            let version = tokio::process::Command::new(chrome)
+                .arg("--version")
+                .kill_on_drop(true)
+                .output();
+            let user_agent = tokio::time::timeout(Duration::from_secs(10), version)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|output| desktop_user_agent(&String::from_utf8_lossy(&output.stdout)));
+            if user_agent.is_none() {
+                crate::logging::warn(&format!(
+                    "Could not read the version of {}; ChatGPT may block the headless browser",
+                    chrome.display()
+                ));
+            }
+            user_agent
+        } else {
+            None
+        };
         let mut command = tokio::process::Command::new(chrome);
         command
-            .args(chrome_args(profile, headless))
+            .args(chrome_args(profile, headless, user_agent.as_deref()))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -756,7 +790,7 @@ pub async fn sign_in_interactively() -> Result<()> {
 pub enum SignIn {
     /// A user-initiated chat turn or explicit refresh.
     Interactive,
-    /// Background catalog refresh. Never shows a window.
+    /// Background catalog refresh. Never shows a window or opens a tab.
     Never,
 }
 
@@ -1020,9 +1054,9 @@ async fn sign_in_from_main_browser() -> Result<bool> {
 }
 
 /// Opens an owned, signed-in Temporary Chat page in the invisible instance.
-/// When signed out, first copies the session from the user's main browser
-/// through the bridge (no window). Only if that is impossible, and the caller
-/// allows it, shows the private sign-in window once.
+/// When signed out and the caller is interactive, first copies the session
+/// from the user's main browser through the bridge (a short-lived tab there),
+/// and only if that is impossible shows the private sign-in window once.
 pub async fn open_signed_in_page(
     sign_in: SignIn,
 ) -> Result<(tokio::sync::MappedMutexGuard<'static, Instance>, Page)> {
@@ -1043,7 +1077,8 @@ pub async fn open_signed_in_page(
         }
         let _ = instance.close_page(&page).await;
         drop(instance);
-        if !imported {
+        // The copy opens a tab in the user's browser; background work never does.
+        if !imported && sign_in == SignIn::Interactive {
             imported = true;
             match sign_in_from_main_browser().await {
                 Ok(true) => continue,
@@ -1109,11 +1144,9 @@ mod tests {
 
     #[test]
     fn headless_args_never_open_a_window_or_a_port() {
-        let args = chrome_args(Path::new("/p"), true);
-        // The background instance runs a real window parked off-screen (the
-        // --headless=new fingerprint fails ChatGPT's Cloudflare check), so it
-        // never shows on the desktop and never opens a debugging port.
-        assert!(args.contains(&"--window-position=-32000,-32000".to_string()));
+        let args = chrome_args(Path::new("/p"), true, Some("UA"));
+        assert!(args.contains(&"--headless=new".to_string()));
+        assert!(args.contains(&"--user-agent=UA".to_string()));
         assert!(args.contains(&"--user-data-dir=/p".to_string()));
         assert!(args.contains(&"--remote-debugging-pipe".to_string()));
         assert!(
@@ -1121,13 +1154,18 @@ mod tests {
                 .iter()
                 .any(|arg| arg.starts_with("--remote-debugging-port"))
         );
-        let visible = chrome_args(Path::new("/p"), false);
+        let visible = chrome_args(Path::new("/p"), false, None);
         assert!(!visible.iter().any(|arg| arg.starts_with("--headless")));
-        assert!(
-            !visible
-                .iter()
-                .any(|arg| arg.starts_with("--window-position"))
-        );
+    }
+
+    #[test]
+    fn headless_identity_is_desktop_chrome_of_the_same_major_version() {
+        for output in ["Brave Browser 154.1.96.61", "Google Chrome 154.0.7000.12\n"] {
+            let user_agent = desktop_user_agent(output).unwrap();
+            assert!(user_agent.contains(" Chrome/154.0.0.0 "), "{user_agent}");
+            assert!(!user_agent.contains("Headless"));
+        }
+        assert_eq!(desktop_user_agent("no version here"), None);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use jcode_message_types::{ContentBlock, Role};
 
 #[test]
 fn simple_completion_usage_keeps_latest_reported_values() {

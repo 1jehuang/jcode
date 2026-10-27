@@ -46,6 +46,10 @@ impl Provider for OpenRouterProvider {
             return self.complete_azure_responses(messages, tools, system).await;
         }
         let model = self.model.read().await.clone();
+        // astra-jb (a6api profile only): the `-jb` suffix is a picker label
+        // only; the relay receives the id without it. Runs before capability
+        // checks so catalog lookups match the real slug.
+        let model = astra_jb::strip_jb_alias(self.profile_id.as_deref(), &model).to_string();
         let responses_api =
             model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
         let reasoning_effort = self.reasoning_effort();
@@ -93,6 +97,44 @@ impl Provider for OpenRouterProvider {
         let allow_image_input = self.supports_image_input();
 
         let mut effective_messages: Vec<Message> = messages.to_vec();
+        // astra-jb (a6api profile only): launder the final user turn through
+        // the vision-OCR path before anything else touches the messages, so
+        // the cache breakpoint annotation lands on the framing text block.
+        // No-op for every other profile and model.
+        if astra_jb::launder_final_user_turn(
+            &mut effective_messages,
+            self.profile_id.as_deref(),
+            &model,
+        ) {
+            jcode_base::logging::info(
+                "astra-jb: final user turn laundered through the vision-OCR path",
+            );
+        }
+        // astra-jb (a6api profile only): append the assistant prefill
+        // continuation so the model extends in-flight work instead of
+        // deciding from scratch whether to help (removes the output-side
+        // refusal decision point). Request-scoped; never recorded in history.
+        if astra_jb::laundering_enabled(self.profile_id.as_deref(), &model)
+            && let Some(prefill) = astra_jb::prefill_continuation(&effective_messages)
+        {
+            effective_messages.push(prefill);
+            jcode_base::logging::info("astra-jb: assistant prefill continuation appended");
+        }
+        // astra-jb refusal-retry: arm the buffered retry ladder with the
+        // pre-laundering snapshot and the message-rebuild inputs, so a
+        // refusal-shaped response escalates the framing ladder and re-sends.
+        let astra_retry = if astra_jb::laundering_enabled(self.profile_id.as_deref(), &model) {
+            Some((
+                messages.to_vec(),
+                system.to_string(),
+                allow_reasoning,
+                include_reasoning_content,
+                allow_image_input,
+                self.profile_id.clone(),
+            ))
+        } else {
+            None
+        };
         let cache_supported = self.model_supports_cache(&model).await;
         let cache_control_added = if cache_supported {
             add_cache_breakpoint(&mut effective_messages)
@@ -327,7 +369,7 @@ impl Provider for OpenRouterProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
         let api_base = self.api_base.clone();
-        let auth = (self.auth)()?;
+        let auth_factory = self.auth.clone();
         let send_openrouter_headers = self.send_openrouter_headers;
         let conversation_id = self.conversation_id.clone();
         let request_for_retries = request;
@@ -344,20 +386,116 @@ impl Provider for OpenRouterProvider {
             {
                 return;
             }
-            run_stream_with_retries(
-                client,
-                api_base,
-                auth,
-                send_openrouter_headers,
-                conversation_id,
-                request_for_retries,
-                false,
-                tx,
-                provider_pin,
-                model_for_stream,
-                responses_api,
-            )
-            .await;
+            let Some((snapshot, system_text, allow_reasoning, include_reasoning_content, allow_image_input, profile_for_retry)) = astra_retry else {
+                let auth = match (auth_factory)() {
+                    Ok(auth) => auth,
+                    Err(_) => return,
+                };
+                run_stream_with_retries(
+                    client,
+                    api_base,
+                    auth,
+                    send_openrouter_headers,
+                    conversation_id,
+                    request_for_retries,
+                    false,
+                    tx,
+                    provider_pin,
+                    model_for_stream,
+                    responses_api,
+                )
+                .await;
+                return;
+            };
+            // astra-jb buffered refusal-retry ladder: each attempt's events are
+            // held until its stream completes. A refusal-shaped text response
+            // escalates the framing ladder and re-sends from the pre-laundering
+            // snapshot; the consumer only ever sees the final attempt's events.
+            let mut level = 0usize;
+            let mut attempt_request = request_for_retries.clone();
+            let mut events: Vec<Result<StreamEvent>> = Vec::new();
+            let mut text = String::new();
+            loop {
+                let (tx2, mut rx2) = mpsc::channel::<Result<StreamEvent>>(100);
+                let auth = match (auth_factory)() {
+                    Ok(auth) => auth,
+                    Err(_) => return,
+                };
+                let handle = tokio::spawn(run_stream_with_retries(
+                    client.clone(),
+                    api_base.clone(),
+                    auth,
+                    send_openrouter_headers,
+                    conversation_id.clone(),
+                    attempt_request.clone(),
+                    false,
+                    tx2,
+                    Arc::clone(&provider_pin),
+                    model_for_stream.clone(),
+                    responses_api,
+                ));
+                while let Some(event) = rx2.recv().await {
+                    match &event {
+                        Ok(StreamEvent::TextDelta(delta)) => text.push_str(delta),
+                        Ok(StreamEvent::TextSuffixReplace { old_text, new_text }) => {
+                            if text.ends_with(old_text.as_str()) {
+                                let keep = text.len() - old_text.len();
+                                text.truncate(keep);
+                                text.push_str(new_text);
+                            }
+                        }
+                        _ => {}
+                    }
+                    events.push(event);
+                }
+                let _ = handle.await;
+                // Transcription-only applies at every level: a retry that
+                // re-transcribes the (unrendered) pages is still a silent
+                // refusal. Stall pivots are terminator-anchored at level 0
+                // (transcription shape) and marker-scanned at higher levels
+                // (recap-chaining continuations carry no terminator).
+                let refused = astra_jb::is_refusal_shaped(&text)
+                    || astra_jb::is_transcription_only(&text)
+                    || astra_jb::is_stall_pivot(&text)
+                    || astra_jb::is_continuation_stall(&text);
+                if !refused || level >= astra_jb::MAX_ESCALATION_LEVEL {
+                    break;
+                }
+                level += 1;
+                jcode_base::logging::info(&format!(
+                    "astra-jb: refusal-shaped response; escalating framing ladder to level {level}"
+                ));
+                // Retry swaps the prefill tail in-place — the pages are NOT
+                // re-rendered. The transcription already carries the page
+                // content in assistant context (recap-chaining); fresh images
+                // would re-trigger the transcription loop. The framing ladder
+                // escalates inside the assistant prefill instead.
+                if let Some(messages_arr) =
+                    attempt_request.get_mut("messages").and_then(|v| v.as_array_mut())
+                {
+                    let tail_is_prefill = messages_arr
+                        .last()
+                        .and_then(|m| m.get("role").and_then(|r| r.as_str()))
+                        == Some("assistant");
+                    if tail_is_prefill {
+                        let prefill = astra_jb::escalation_prefill(&text, level)
+                            .or_else(|| astra_jb::prefill_continuation(&snapshot));
+                        if let Some(prefill) = prefill {
+                            if let Some(last) = messages_arr.last_mut() {
+                                last["content"] = serde_json::to_value(prefill.content)
+                                    .unwrap_or(serde_json::Value::Null);
+                            }
+                        }
+                    }
+                }
+                events.clear();
+                text.clear();
+            }
+            for event in events {
+                if tx.send(event).await.is_err() {
+                    return;
+                }
+            }
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -400,6 +538,18 @@ impl Provider for OpenRouterProvider {
                 "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp"
             );
         }
+        // astra-jb: the a6api profile launders user prompts through the
+        // vision-OCR path (see `astra_jb`), so astra models on this line must
+        // accept image_url parts regardless of what the marketplace catalog
+        // advertises about input modalities.
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case(astra_jb::A6API_PROFILE_ID))
+            && model_id.contains("astra")
+        {
+            return true;
+        }
         if Self::profile_rejects_image_input(self.profile_id.as_deref()) {
             return false;
         }
@@ -419,6 +569,37 @@ impl Provider for OpenRouterProvider {
         // Keep the legacy OpenRouter aggregator behavior unchanged here because
         // image availability is model/provider-route dependent there.
         !self.supports_provider_features
+    }
+
+    fn model_metadata(&self, model: &str) -> Option<jcode_provider_core::ModelMetadata> {
+        self.profile_id.as_deref()?;
+        let configured = self.model_config(model)?;
+        let input = configured.input.clone();
+        Some(jcode_provider_core::ModelMetadata {
+            context_window: configured.context_window.or_else(|| {
+                jcode_provider_core::context_limit_for_model_with_provider(
+                    model,
+                    Some("openai-compatible"),
+                )
+            }),
+            max_input_tokens: configured.max_input_tokens,
+            max_output_tokens: configured.max_output_tokens,
+            supports_chat: configured.supports_chat,
+            supports_thinking: configured.supports_thinking,
+            input_modalities: input.clone(),
+            output_modalities: configured.output.clone(),
+            supported_endpoints: configured.supported_endpoints.clone(),
+            reasoning_efforts: configured.reasoning_efforts.clone(),
+            supports_image_input: (!input.is_empty()).then(|| {
+                input
+                    .iter()
+                    .any(|modality| modality.eq_ignore_ascii_case("image"))
+            }),
+            supports_tool_calls: configured.supports_tool_calls,
+            supports_streaming: configured.supports_streaming,
+            supports_structured_outputs: configured.supports_structured_outputs,
+            ..Default::default()
+        })
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
@@ -454,14 +635,11 @@ impl Provider for OpenRouterProvider {
             // preserve the caller's model string exactly for custom endpoints.
             (trimmed.to_string(), None)
         };
-        if let Some(profile_id) = self.profile_id.as_deref()
-            && !jcode_base::provider_catalog::openai_compatible_profile_model_supports_chat(
-                profile_id, &model_id,
-            )
-        {
+        if self.profile_id.is_some() && !self.model_supports_chat(&model_id) {
             anyhow::bail!(
-                "Model '{}' is listed by the provider catalog but is not currently usable for chat completions through this direct provider. Choose another model from `/model`.",
-                model_id
+                "Model '{}' is not configured as chat-capable for provider profile '{}'.",
+                model_id,
+                self.profile_id.as_deref().unwrap_or_default()
             );
         }
         if let Ok(mut current) = self.model.try_write() {
@@ -551,6 +729,16 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
+        if let Some(configured) = self.configured_reasoning_efforts() {
+            let mut efforts: Vec<&'static str> = configured
+                .iter()
+                .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
+                .collect();
+            jcode_provider_core::sort_reasoning_efforts(&mut efforts);
+            efforts.dedup();
+            efforts.extend(["swarm", "swarm-deep"]);
+            return efforts;
+        }
         if self.supports_deepseek_reasoning_effort() {
             jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
         } else if self.supports_openai_reasoning_effort() {
@@ -821,6 +1009,12 @@ impl Provider for OpenRouterProvider {
             return ctx as usize;
         }
         let normalized_model_id = model_id.trim().to_ascii_lowercase();
+        if let Some(limit) = self
+            .model_config(&normalized_model_id)
+            .and_then(|configured| configured.context_window)
+        {
+            return limit;
+        }
         if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
             return *limit;
         }
@@ -881,6 +1075,7 @@ impl Provider for OpenRouterProvider {
             thinking_prefill_name: self.thinking_prefill_name.clone(),
             thinking_prefill_non_kimi: self.thinking_prefill_non_kimi,
             static_models: self.static_models.clone(),
+            static_model_config: self.static_model_config.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
             send_openrouter_headers: self.send_openrouter_headers,

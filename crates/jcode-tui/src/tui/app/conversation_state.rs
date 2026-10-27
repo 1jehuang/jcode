@@ -805,6 +805,7 @@ impl App {
         self.pending_images.clear();
         self.active_skill = None;
         self.provider_session_id = None;
+        self.invalidate_rewind_ui();
         self.session = new_session;
         self.set_side_panel_snapshot(
             crate::side_panel::snapshot_for_session(&self.session.id).unwrap_or_default(),

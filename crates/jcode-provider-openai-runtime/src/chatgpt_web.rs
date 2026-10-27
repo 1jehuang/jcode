@@ -356,14 +356,14 @@ impl ChatGptWebState {
         };
         match (result, cleanup) {
             (Ok(response), Ok(())) => Ok(response),
-            (Err(error), Ok(())) => Err(explain_turn_error(error)),
+            (Err(error), Ok(())) => Err(explain_turn_error(error, prompt.len())),
             (Ok(_), Err(error)) => Err(error.context(
                 "ChatGPT answered, but its owned browser state could not be cleaned up safely",
             )),
             // Lead with the cause; cleanup trouble is secondary detail.
             (Err(error), Err(cleanup_error)) => Err(anyhow::anyhow!(
                 "{:#} (browser cleanup also failed: {cleanup_error:#})",
-                explain_turn_error(error)
+                explain_turn_error(error, prompt.len())
             )),
         }
     }
@@ -441,9 +441,35 @@ fn page_unresponsive(error: &anyhow::Error) -> bool {
     format!("{error:#}").contains("DevTools Runtime.evaluate timed out")
 }
 
+/// Above this many prompt bytes, an empty answer is taken as ChatGPT's silent
+/// input limit: it finished turns with no reply once a session's prompt passed
+/// ~900K characters, instead of returning HTTP 413.
+/// shortcut: a size guess, not ChatGPT's real limit; replace it if ChatGPT starts reporting the limit.
+const SILENT_LIMIT_PROMPT_BYTES: usize = 500_000;
+
+/// Why a finished turn has no answer: ChatGPT's own tools, or the reply's shape.
+fn empty_answer_detail(builtin: &[String], state: &Value) -> String {
+    if !builtin.is_empty() {
+        return format!(" (it used its own tools instead: {})", builtin.join(", "));
+    }
+    match state.get("shape").and_then(Value::as_str) {
+        Some(shape) if !shape.is_empty() => format!(" (reply: {shape})"),
+        _ => " (reply: no assistant message)".to_string(),
+    }
+}
+
 /// Rewrites ChatGPT web failures into errors jcode can act on.
-fn explain_turn_error(error: anyhow::Error) -> anyhow::Error {
+fn explain_turn_error(error: anyhow::Error, prompt_bytes: usize) -> anyhow::Error {
     let text = format!("{error:#}");
+    if prompt_bytes > SILENT_LIMIT_PROMPT_BYTES
+        && text.contains("completed the turn without an assistant response")
+        && !text.contains("its own tools")
+    {
+        // Worded as a context-limit error so jcode compacts and retries.
+        return error.context(format!(
+            "ChatGPT web returned no answer for a {prompt_bytes}-byte prompt: the conversation likely exceeds the context length limit of a single ChatGPT message. Compact the conversation to continue"
+        ));
+    }
     if text.contains("message_length_exceeds_limit") || text.contains("HTTP 413") {
         // Worded as a context-limit error so jcode compacts and retries.
         return error.context(
@@ -451,6 +477,8 @@ fn explain_turn_error(error: anyhow::Error) -> anyhow::Error {
         );
     }
     if page_unresponsive(&error) {
+        // The user-facing message hides which in-page step hung.
+        jcode_base::logging::warn(&format!("ChatGPT web page stopped responding: {error:#}"));
         return error.context(
             "The ChatGPT web page stopped responding during the turn, so its tab was closed. Retry the message",
         );
@@ -778,11 +806,7 @@ async fn poll_network_stream(
                 if text.is_empty() {
                     anyhow::bail!(
                         "ChatGPT completed the turn without an assistant response{}",
-                        if builtin.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" (it used its own tools instead: {})", builtin.join(", "))
-                        }
+                        empty_answer_detail(&builtin, &state)
                     );
                 }
                 // Picker turns re-check the picker; route turns are checked
@@ -978,11 +1002,7 @@ async fn read_transcript(browser: &Tab<'_>) -> Result<Transcript> {
     if text.is_empty() {
         anyhow::bail!(
             "ChatGPT completed the turn without an assistant response{}",
-            if builtin.is_empty() {
-                String::new()
-            } else {
-                format!(" (it used its own tools instead: {})", builtin.join(", "))
-            }
+            empty_answer_detail(&builtin, &state)
         );
     }
     Ok(Transcript::Final { text, builtin })
@@ -1669,7 +1689,7 @@ mod tests {
         let raw = anyhow::anyhow!(
             "ChatGPT web rejected the request: HTTP 413: {{\"detail\":{{\"code\":\"message_length_exceeds_limit\"}}}}"
         );
-        let text = format!("{:#}", explain_turn_error(raw)).to_lowercase();
+        let text = format!("{:#}", explain_turn_error(raw, 1_000)).to_lowercase();
         // Same predicate as jcode's context-limit auto-compaction.
         assert!(text.contains("context length"), "{text}");
         assert!(
@@ -1679,12 +1699,38 @@ mod tests {
     }
 
     #[test]
+    fn empty_answer_to_a_huge_prompt_is_reported_as_a_context_limit() {
+        let state = json!({"shape": "text finished_successfully stop 0 chars"});
+        let empty = || {
+            anyhow::anyhow!(
+                "ChatGPT completed the turn without an assistant response{}",
+                empty_answer_detail(&[], &state)
+            )
+        };
+        let huge = format!("{:#}", explain_turn_error(empty(), 900_000));
+        assert!(huge.to_lowercase().contains("context length"), "{huge}");
+        assert!(
+            huge.contains("(reply: text finished_successfully stop 0 chars)"),
+            "{huge}"
+        );
+        // A small prompt, or ChatGPT answering with its own tools, is not a size problem.
+        let small = format!("{:#}", explain_turn_error(empty(), 1_000));
+        assert!(!small.to_lowercase().contains("context length"), "{small}");
+        let tools = anyhow::anyhow!(
+            "ChatGPT completed the turn without an assistant response{}",
+            empty_answer_detail(&["python".to_string()], &state)
+        );
+        let tools = format!("{:#}", explain_turn_error(tools, 900_000));
+        assert!(!tools.to_lowercase().contains("context length"), "{tools}");
+    }
+
+    #[test]
     fn frozen_page_errors_lead_with_the_cause() {
         let raw = anyhow::anyhow!("DevTools Runtime.evaluate timed out")
             .context("ChatGPT UI step 'stream'")
             .context("Failed to read the owned ChatGPT web stream");
         assert!(page_unresponsive(&raw));
-        let text = format!("{:#}", explain_turn_error(raw));
+        let text = format!("{:#}", explain_turn_error(raw, 1_000));
         assert!(
             text.starts_with("The ChatGPT web page stopped responding"),
             "{text}"
@@ -1692,7 +1738,7 @@ mod tests {
         let other = anyhow::anyhow!("ChatGPT web did not start a response stream");
         assert!(!page_unresponsive(&other));
         assert_eq!(
-            format!("{:#}", explain_turn_error(other)),
+            format!("{:#}", explain_turn_error(other, 1_000)),
             "ChatGPT web did not start a response stream"
         );
     }

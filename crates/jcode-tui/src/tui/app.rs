@@ -74,6 +74,7 @@ mod commands_review;
 mod conversation_state;
 mod copy_selection;
 mod debug;
+mod dialog_actions;
 mod dictation;
 mod event_wrappers;
 mod handterm_native_scroll;
@@ -82,6 +83,7 @@ mod hotkey_feedback;
 pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
 mod inline_interactive;
+mod rewind;
 pub(crate) use inline_interactive::{model_picker_active_provider, split_model_picker_filter};
 mod input;
 mod input_help;
@@ -195,8 +197,6 @@ struct TurnReasoningTrace {
 #[derive(Debug, Clone)]
 struct LocalRewindUndoSnapshot {
     messages: Vec<StoredMessage>,
-    provider_session_id: Option<String>,
-    session_provider_session_id: Option<String>,
     visible_message_count: usize,
 }
 
@@ -1106,11 +1106,10 @@ pub struct App {
     // showed output is not held for a full overload resend, because the new
     // answer would be appended to the partial one.
     remote_turn_streamed_output: bool,
-    // Provider-specific session ID for conversation resume
+    // Provider continuation and local rewind state.
     provider_session_id: Option<String>,
-    // One-step undo snapshot captured before the most recent local rewind.
     rewind_undo_snapshot: Option<LocalRewindUndoSnapshot>,
-    // Cancel flag for interrupting generation
+    rewind_ui: rewind::RewindUiState,
     cancel_requested: bool,
     // Quit confirmation: tracks when first Ctrl+C was pressed
     quit_pending: Option<Instant>,
@@ -1408,6 +1407,8 @@ pub struct App {
     swarm_panel_focused: bool,
     // Whether the focused swarm panel owns the main transcript viewport.
     swarm_panel_full_page: bool,
+    // Parent session to return to after entering a swarm/background agent.
+    swarm_parent_session_id: Option<String>,
     // Diff display mode (cycle with /diff)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
@@ -1802,10 +1803,16 @@ pub struct App {
     login_picker_overlay: Option<RefCell<super::login_picker::LoginPicker>>,
     /// Account picker overlay (None = not visible)
     account_picker_overlay: Option<RefCell<super::account_picker::AccountPicker>>,
+    /// `/mcp` or `/skills` dialog (None = not visible)
+    dialog: Option<super::dialog::Dialog>,
+    /// Request id of the in-flight `mcp` runtime command.
+    mcp_request_id: Option<u64>,
     /// Profile command replies are control traffic, never turn completion.
     agent_profile_request_ids: std::collections::HashSet<u64>,
     agent_profile_picker_request_id: Option<u64>,
     agent_profile_ui: agent_profiles::AgentProfileUi,
+    /// Whether this client already asked about new project MCP servers.
+    mcp_approval_checked: bool,
     /// Usage overlay (None = not visible)
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.
@@ -1820,9 +1827,9 @@ pub struct App {
     workspace_client: super::workspace_client::WorkspaceClientState,
     /// Reverse prompt-history search overlay state (Ctrl+R). None = closed.
     prompt_history_search: Option<prompt_history::PromptHistorySearchState>,
-    /// Lazily-loaded persisted cross-session prompt history (oldest first,
-    /// deduped). None until first use; see `prompt_history.rs`.
+    /// Active session's independent prompt journal (oldest first, deduped).
     persisted_prompt_history: Option<Vec<String>>,
+    prompt_history_scope: prompt_history::PromptHistoryScope,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.

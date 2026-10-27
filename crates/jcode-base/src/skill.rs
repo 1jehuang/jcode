@@ -9,6 +9,9 @@ use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 mod invocation;
+mod plugin_commands;
+#[cfg(test)]
+mod plugin_tests;
 pub use invocation::SkillInvocation;
 
 /// A skill definition from SKILL.md
@@ -17,6 +20,9 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// `disable-model-invocation: true`: only the user can run it via `/name`;
+    /// it is left out of the model's skill list (Claude Code semantics).
+    pub disable_model_invocation: bool,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -27,10 +33,15 @@ pub struct Skill {
 
 #[derive(Debug, Deserialize)]
 struct SkillFrontmatter {
-    name: String,
-    description: String,
+    /// Optional like in Claude Code: defaults to the skill's directory name.
+    name: Option<String>,
+    /// Optional like in Claude Code: defaults to the body's first line.
+    #[serde(default)]
+    description: Option<String>,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
+    #[serde(rename = "disable-model-invocation", default)]
+    disable_model_invocation: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +55,9 @@ enum AllowedTools {
 #[derive(Debug, Default, Clone)]
 pub struct SkillRegistry {
     skills: HashMap<String, Skill>,
+    /// Keys inserted by plugin discovery, refreshed per workspace access.
+    plugin_keys: std::collections::HashSet<String>,
+    command_origins: HashMap<String, (String, PathBuf)>,
 }
 
 /// Maximum directory depth scanned under a Claude Code plugin root when
@@ -108,8 +122,9 @@ impl SkillRegistry {
         }
     }
 
-    /// Import skills from Claude Code and Codex CLI on first run.
-    /// Only runs if ~/.jcode/skills/ doesn't exist yet.
+    /// Import skills from Codex CLI on first run.
+    /// Only runs if ~/.jcode/skills/ doesn't exist yet. Claude Code skills are
+    /// not copied: `~/.claude/skills` is read live by [`Self::global_skill_dirs`].
     fn import_from_external() {
         let jcode_skills = match crate::storage::jcode_dir() {
             Ok(dir) => dir.join("skills"),
@@ -122,17 +137,6 @@ impl SkillRegistry {
 
         let mut sources = Vec::new();
         let mut copied = Vec::new();
-
-        // Import from Claude Code (~/.claude/skills/)
-        if let Ok(claude_skills) = crate::storage::user_home_path(".claude/skills")
-            && claude_skills.is_dir()
-        {
-            let count = Self::copy_skills_dir(&claude_skills, &jcode_skills).copied;
-            if count > 0 {
-                sources.push(format!("{} from Claude Code", count));
-                copied.extend(Self::list_skill_names(&jcode_skills));
-            }
-        }
 
         // Import from Codex CLI (~/.codex/skills/)
         if let Ok(codex_skills) = crate::storage::user_home_path(".codex/skills")
@@ -269,22 +273,32 @@ impl SkillRegistry {
             registry.load_plugin_skills_from_root(&plugins_root);
         }
 
-        // Load from ~/.jcode/skills/ (jcode's own global skills)
-        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-            let jcode_skills = jcode_dir.join("skills");
-            if jcode_skills.exists() {
-                registry.load_from_dir(&jcode_skills)?;
-            }
+        for plugin in crate::plugin::enabled_user_plugins() {
+            registry.load_enabled_plugin(&plugin.name, &plugin.root);
         }
 
-        // Load from ~/.agents/skills/ (shared cross-tool `.agents` convention)
-        if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
-            && agents_skills.exists()
-        {
-            registry.load_from_dir(&agents_skills)?;
+        for dir in Self::global_skill_dirs() {
+            registry.load_from_dir(&dir)?;
         }
 
         Ok(registry)
+    }
+
+    /// Global skill directories, lowest precedence first: `~/.jcode/skills/`,
+    /// `~/.claude/skills/` (read live, so skills added in Claude Code show up
+    /// without a re-import; it shadows stale copies from the old first-run
+    /// import), then `~/.agents/skills/`.
+    fn global_skill_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+            dirs.push(jcode_dir.join("skills"));
+        }
+        for rel in [".claude/skills", ".agents/skills"] {
+            if let Ok(dir) = crate::storage::user_home_path(rel) {
+                dirs.push(dir);
+            }
+        }
+        dirs
     }
 
     /// Load only the project-local skill overlay for a workspace root:
@@ -311,6 +325,7 @@ impl SkillRegistry {
     /// project-local overlay for the session's workspace root.
     pub fn effective_for_working_dir(base: &Self, working_dir: Option<&Path>) -> Self {
         let mut effective = base.clone();
+        effective.refresh_plugins(working_dir);
         if let Ok(overlay) = Self::load_project_overlay(working_dir) {
             effective.merge_overlay(overlay);
         }
@@ -321,6 +336,7 @@ impl SkillRegistry {
     /// resolved against an optional active session working directory.
     pub fn load_for_working_dir(working_dir: Option<&Path>) -> Result<Self> {
         let mut registry = Self::load_global()?;
+        registry.refresh_plugins(working_dir);
         registry.load_project_local_dirs(working_dir)?;
         Ok(registry)
     }
@@ -352,6 +368,100 @@ impl SkillRegistry {
         Ok(())
     }
 
+    /// Refresh only plugin-owned entries. Never trust a startup snapshot for
+    /// enable/disable/uninstall: plugin state and scope are resolved on access.
+    fn refresh_plugins(&mut self, working_dir: Option<&Path>) {
+        for key in self.plugin_keys.drain() {
+            self.skills.remove(&key);
+            self.command_origins.remove(&key);
+        }
+        let explicit = std::mem::take(&mut self.skills);
+        if let Some(root) = Self::claude_plugins_root() {
+            self.load_plugin_skills_from_root(&root);
+        }
+        let cwd = working_dir
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok());
+        if let Some(cwd) = cwd {
+            for plugin in crate::plugin::enabled_plugins_for_dir(&cwd) {
+                self.load_enabled_plugin(&plugin.name, &plugin.root);
+            }
+        }
+        for (name, skill) in explicit {
+            self.plugin_keys.remove(&name);
+            self.command_origins.remove(&name);
+            self.skills.insert(name, skill);
+        }
+    }
+
+    fn load_enabled_plugin(&mut self, name: &str, root: &Path) {
+        use crate::plugin_components::{component_paths, markdown_files};
+        // Claude also accepts a plugin-root skill when the conventional
+        // skills directory is absent. Explicit extra skill directories remain
+        // additive to this default source.
+        if !root.join("skills").is_dir() && root.join("SKILL.md").is_file() {
+            self.load_plugin_skill_file(name, root, &root.join("SKILL.md"));
+        }
+        // Legacy commands share slash invocation with skills. Prefer a skill
+        // when both components deliberately define the same qualified name.
+        for component in component_paths(root, "commands") {
+            for (command, path) in markdown_files(&component) {
+                if let Ok(mut skill) = Self::parse_plugin_command(&path) {
+                    skill.name = format!("{name}:{command}");
+                    self.plugin_keys.insert(skill.name.clone());
+                    self.skills.insert(skill.name.clone(), skill);
+                }
+            }
+        }
+        self.load_declared_commands(name, root);
+        for component in component_paths(root, "skills") {
+            if component.join("SKILL.md").is_file() {
+                self.load_plugin_skill_file(name, root, &component.join("SKILL.md"));
+            } else if let Ok(entries) = std::fs::read_dir(component) {
+                let mut entries: Vec<_> = entries.flatten().collect();
+                entries.sort_by_key(|entry| entry.file_name());
+                for entry in entries {
+                    self.load_plugin_skill_file(name, root, &entry.path().join("SKILL.md"));
+                }
+            }
+        }
+    }
+
+    fn load_plugin_skill_file(&mut self, name: &str, root: &Path, file: &Path) {
+        let (Ok(root), Ok(file)) = (root.canonicalize(), file.canonicalize()) else {
+            return;
+        };
+        if !file.starts_with(root) || !file.is_file() {
+            return;
+        }
+        if let Ok(mut skill) = Self::parse_skill(&file) {
+            skill.name = format!("{name}:{}", skill.name);
+            self.command_origins.remove(&skill.name);
+            self.plugin_keys.insert(skill.name.clone());
+            self.skills.insert(skill.name.clone(), skill);
+        }
+    }
+
+    fn parse_plugin_command(path: &Path) -> Result<Skill> {
+        let source = std::fs::read_to_string(path)?;
+        if source.trim_start().starts_with("---") {
+            return Self::parse_skill(path);
+        }
+        Ok(Skill {
+            name: path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_owned(),
+            description: description_from_body(&source),
+            allowed_tools: None,
+            disable_model_invocation: false,
+            content: source,
+            path: path.to_owned(),
+            search_text: std::sync::OnceLock::new(),
+        })
+    }
+
     /// Root of the Claude Code plugin store (`~/.claude/plugins`), if present.
     fn claude_plugins_root() -> Option<PathBuf> {
         crate::storage::user_home_path(".claude/plugins")
@@ -364,14 +474,21 @@ impl SkillRegistry {
     /// plugin never prevents jcode's own skills from loading.
     fn load_plugin_skills_from_root(&mut self, plugins_root: &Path) -> usize {
         let mut count = 0;
-        for dir in Self::plugin_skill_dirs_under(plugins_root) {
-            count += self.load_from_dir_count(&dir).unwrap_or(0);
+        for (dir, plugin) in Self::plugin_skill_dirs_under(plugins_root) {
+            count += self
+                .load_from_dir_prefixed(&dir, Some(&plugin))
+                .unwrap_or(0);
         }
         count
     }
 
-    /// Discover `skills/` directories provided by Claude Code plugins under
-    /// the given plugins root (normally `~/.claude/plugins`).
+    /// Discover the `skills/` directory of each Claude Code plugin under the
+    /// given plugins root (normally `~/.claude/plugins`), with the plugin name
+    /// its skills are namespaced under (`plugin:skill`, as in Claude Code).
+    ///
+    /// Like Claude Code, only `<plugin root>/skills` is loaded: nested trees
+    /// such as a plugin's `template/skills` are files it installs elsewhere,
+    /// not skills of its own.
     ///
     /// Sources, in order of trust:
     /// - `installed_plugins.json` install paths (current Claude Code layout,
@@ -382,47 +499,78 @@ impl SkillRegistry {
     ///
     /// `marketplaces/` is intentionally not scanned: it mirrors the full
     /// marketplace catalog, including plugins the user never installed.
-    fn plugin_skill_dirs_under(plugins_root: &Path) -> Vec<PathBuf> {
+    fn plugin_skill_dirs_under(plugins_root: &Path) -> Vec<(PathBuf, String)> {
         if !plugins_root.is_dir() {
             return Vec::new();
         }
 
-        let mut roots: Vec<PathBuf> =
-            Self::installed_plugin_paths(&plugins_root.join("installed_plugins.json"));
-        if roots.is_empty() {
-            let cache = plugins_root.join("cache");
-            if cache.is_dir() {
-                roots.push(cache);
-            }
+        let manifest = Self::installed_plugin_paths(&plugins_root.join("installed_plugins.json"));
+        let mut scan_roots = Vec::new();
+        // Scan the cache only without a readable manifest: a manifest whose
+        // plugins are all disabled must not bring every cached plugin back.
+        if manifest.is_none() {
+            scan_roots.push(plugins_root.join("cache"));
         }
-        let repos = plugins_root.join("repos");
-        if repos.is_dir() {
-            roots.push(repos);
+        let mut plugin_roots: std::collections::BTreeSet<PathBuf> =
+            manifest.unwrap_or_default().into_iter().collect();
+        scan_roots.push(plugins_root.join("repos"));
+        for root in scan_roots.iter().filter(|root| root.is_dir()) {
+            Self::collect_plugin_roots(root, PLUGIN_SCAN_MAX_DEPTH, &mut plugin_roots);
         }
+        plugin_roots
+            .into_iter()
+            .filter(|root| Self::dir_contains_skill(&root.join("skills")))
+            .map(|root| (root.join("skills"), Self::plugin_name(&root)))
+            .collect()
+    }
 
-        let mut dirs = std::collections::BTreeSet::new();
-        for root in roots {
-            Self::collect_plugin_skills_dirs(&root, PLUGIN_SCAN_MAX_DEPTH, &mut dirs);
+    /// A plugin's name: `.claude-plugin/plugin.json` `name`, else its
+    /// directory, skipping a version directory (`cache/<market>/<plugin>/1.2.0`).
+    fn plugin_name(root: &Path) -> String {
+        let manifest_name = std::fs::read_to_string(root.join(".claude-plugin/plugin.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|manifest| manifest.get("name")?.as_str().map(str::to_string))
+            .filter(|name| !name.trim().is_empty());
+        if let Some(name) = manifest_name {
+            return name;
         }
-        dirs.into_iter().collect()
+        let dir_name = |path: &Path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let name = dir_name(root);
+        let looks_like_version = name.starts_with(|ch: char| ch.is_ascii_digit())
+            || (name.len() >= 7 && name.chars().all(|ch| ch.is_ascii_hexdigit()));
+        match root.parent() {
+            Some(parent) if looks_like_version => dir_name(parent),
+            _ => name,
+        }
     }
 
     /// Parse install paths from a Claude Code `installed_plugins.json`
     /// manifest. Tolerates both a list of installs per plugin (version 2) and
     /// a single install object, and skips paths that no longer exist.
-    fn installed_plugin_paths(manifest: &Path) -> Vec<PathBuf> {
-        let Ok(raw) = std::fs::read_to_string(manifest) else {
-            return Vec::new();
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            return Vec::new();
-        };
-        let Some(plugins) = value.get("plugins").and_then(|p| p.as_object()) else {
-            return Vec::new();
-        };
+    fn installed_plugin_paths(manifest: &Path) -> Option<Vec<PathBuf>> {
+        let raw = std::fs::read_to_string(manifest).ok()?;
+        let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+        let plugins = value.get("plugins")?.as_object()?;
 
+        // Claude Code's `enabledPlugins` switch: an explicit `false` turns the
+        // plugin (and so its skills) off.
+        let enabled: serde_json::Map<String, serde_json::Value> =
+            crate::storage::user_home_path(".claude/settings.json")
+                .ok()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|settings| settings.get("enabledPlugins")?.as_object().cloned())
+                .unwrap_or_default();
         let mut paths = Vec::new();
-        for installs in plugins.values() {
+        for (key, installs) in plugins {
+            if enabled.get(key).and_then(|value| value.as_bool()) == Some(false) {
+                continue;
+            }
             let installs: Vec<&serde_json::Value> = match installs {
                 serde_json::Value::Array(list) => list.iter().collect(),
                 other => vec![other],
@@ -436,12 +584,13 @@ impl SkillRegistry {
                 }
             }
         }
-        paths
+        Some(paths)
     }
 
-    /// Recursively collect directories named `skills` that contain at least
-    /// one `<name>/SKILL.md`, up to `depth` levels below `root`.
-    fn collect_plugin_skills_dirs(
+    /// Recursively collect plugin roots (a directory with a
+    /// `.claude-plugin/plugin.json` manifest or its own `skills/<name>/SKILL.md`),
+    /// up to `depth` levels below `root`. A plugin's subtree is never searched.
+    fn collect_plugin_roots(
         root: &Path,
         depth: usize,
         out: &mut std::collections::BTreeSet<PathBuf>,
@@ -462,11 +611,13 @@ impl SkillRegistry {
             if name == ".git" || name == "node_modules" {
                 continue;
             }
-            if name == "skills" && Self::dir_contains_skill(&path) {
+            if path.join(".claude-plugin/plugin.json").is_file()
+                || Self::dir_contains_skill(&path.join("skills"))
+            {
                 out.insert(path);
                 continue;
             }
-            Self::collect_plugin_skills_dirs(&path, depth - 1, out);
+            Self::collect_plugin_roots(&path, depth - 1, out);
         }
     }
 
@@ -494,6 +645,8 @@ impl SkillRegistry {
                 if skill_file.exists()
                     && let Ok(skill) = Self::parse_skill(&skill_file)
                 {
+                    self.plugin_keys.remove(&skill.name);
+                    self.command_origins.remove(&skill.name);
                     self.skills.insert(skill.name.clone(), skill);
                 }
             }
@@ -524,7 +677,20 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            disable_model_invocation,
         } = frontmatter;
+        let description = description
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| description_from_body(&body));
+        let name = match name {
+            Some(name) => name,
+            None => path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow::anyhow!("Skill has no name and no directory name"))?
+                .to_string(),
+        };
 
         let allowed_tools = allowed_tools.map(|tools| match tools {
             AllowedTools::CommaDelimited(tools) => tools
@@ -537,6 +703,7 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            disable_model_invocation,
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
@@ -552,21 +719,42 @@ impl SkillRegistry {
         }
 
         let rest = &content[3..];
+        // The closing fence is a line of its own; a bare `find("---")` would
+        // stop at `---` inside a description.
         let end = rest
-            .find("---")
+            .find("\n---")
             .ok_or_else(|| anyhow::anyhow!("Unclosed frontmatter"))?;
 
         let yaml = &rest[..end];
-        let body = rest[end + 3..].trim().to_string();
+        let body = rest[end + 4..].trim().to_string();
 
-        let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml)?;
+        let frontmatter: SkillFrontmatter = match serde_yaml::from_str(yaml) {
+            Ok(frontmatter) => frontmatter,
+            // Claude Code retries with loose values quoted, so a description
+            // like `Triggers on: explore ...` still loads instead of vanishing.
+            Err(error) => serde_yaml::from_str(&quote_lossy_values(yaml)).map_err(|_| error)?,
+        };
 
         Ok((frontmatter, body))
     }
 
-    /// Get a skill by name
+    /// Get a skill by name. A bare name also finds a plugin's `plugin:name`
+    /// skill when exactly one plugin provides it, so `/ponytail` keeps working
+    /// next to Claude Code's `/ponytail:ponytail`.
     pub fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.get(name)
+        if let Some(skill) = self.skills.get(name) {
+            return Some(skill);
+        }
+        if name.contains(':') {
+            return None;
+        }
+        let mut matches = self.skills.iter().filter_map(|(key, skill)| {
+            key.split_once(':')
+                .is_some_and(|(_, short)| short == name)
+                .then_some(skill)
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 
     /// List all available skills.
@@ -586,22 +774,38 @@ impl SkillRegistry {
 
     /// Reload a specific skill by name
     pub fn reload(&mut self, name: &str) -> Result<bool> {
-        // Find the skill's path first
-        let path = self.skills.get(name).map(|s| s.path.clone());
-
-        if let Some(path) = path {
-            if path.exists() {
-                let skill = Self::parse_skill(&path)?;
-                self.skills.insert(skill.name.clone(), skill);
-                Ok(true)
-            } else {
-                // Skill file was deleted
-                self.skills.remove(name);
-                Ok(false)
+        // Resolve like `get` (a bare name finds `plugin:name`), keeping the key.
+        let Some((key, path)) = self.get(name).map(|s| (s.name.clone(), s.path.clone())) else {
+            return Ok(false);
+        };
+        if let Some((plugin, root)) = self.command_origins.get(&key).cloned() {
+            let keys: Vec<_> = self
+                .command_origins
+                .iter()
+                .filter(|(_, origin)| origin.0 == plugin && origin.1 == root)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in keys {
+                self.skills.remove(&key);
+                self.plugin_keys.remove(&key);
+                self.command_origins.remove(&key);
             }
-        } else {
-            Ok(false)
+            self.load_enabled_plugin(&plugin, &root);
+            return Ok(self.skills.contains_key(&key));
         }
+        if !path.exists() {
+            // Skill file was deleted
+            self.skills.remove(&key);
+            return Ok(false);
+        }
+        let mut skill = Self::parse_plugin_command(&path)?;
+        // Keep the registry identity, including nested command namespaces.
+        if key.contains(':') {
+            skill.name = key.clone();
+        }
+        self.skills.remove(&key);
+        self.skills.insert(skill.name.clone(), skill);
+        Ok(true)
     }
 
     /// Reload all skills from all locations
@@ -626,6 +830,8 @@ impl SkillRegistry {
             "reloaded all skills; the skills list in the system prompt may have changed",
         );
         self.skills.clear();
+        self.plugin_keys.clear();
+        self.command_origins.clear();
 
         let mut count = 0;
 
@@ -635,19 +841,14 @@ impl SkillRegistry {
             count += self.load_plugin_skills_from_root(&plugins_root);
         }
 
-        // Load from ~/.jcode/skills/ (jcode's own global skills)
-        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-            let jcode_skills = jcode_dir.join("skills");
-            if jcode_skills.exists() {
-                count += self.load_from_dir_count(&jcode_skills)?;
-            }
+        for plugin in crate::plugin::enabled_user_plugins() {
+            let before = self.skills.len();
+            self.load_enabled_plugin(&plugin.name, &plugin.root);
+            count += self.skills.len().saturating_sub(before);
         }
 
-        // Load from ~/.agents/skills/ (shared cross-tool `.agents` convention)
-        if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
-            && agents_skills.exists()
-        {
-            count += self.load_from_dir_count(&agents_skills)?;
+        for dir in Self::global_skill_dirs() {
+            count += self.load_from_dir_count(&dir)?;
         }
 
         Ok(count)
@@ -655,6 +856,12 @@ impl SkillRegistry {
 
     /// Load skills from a directory and return count
     fn load_from_dir_count(&mut self, dir: &Path) -> Result<usize> {
+        self.load_from_dir_prefixed(dir, None)
+    }
+
+    /// Load skills from a directory, naming each `<prefix>:<name>` when a
+    /// plugin prefix is given, and return the count.
+    fn load_from_dir_prefixed(&mut self, dir: &Path, prefix: Option<&str>) -> Result<usize> {
         if !dir.is_dir() {
             return Ok(0);
         }
@@ -667,8 +874,15 @@ impl SkillRegistry {
             if path.is_dir() {
                 let skill_file = path.join("SKILL.md");
                 if skill_file.exists()
-                    && let Ok(skill) = Self::parse_skill(&skill_file)
+                    && let Ok(mut skill) = Self::parse_skill(&skill_file)
                 {
+                    if let Some(prefix) = prefix {
+                        skill.name = format!("{prefix}:{}", skill.name);
+                        self.plugin_keys.insert(skill.name.clone());
+                    } else {
+                        self.plugin_keys.remove(&skill.name);
+                    }
+                    self.command_origins.remove(&skill.name);
                     self.skills.insert(skill.name.clone(), skill);
                     count += 1;
                 }
@@ -696,7 +910,7 @@ impl SkillRegistry {
         if name.is_empty()
             || !name
                 .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':'))
         {
             return None;
         }
@@ -716,7 +930,7 @@ impl SkillRegistry {
 
     /// Return true if a skill with the given name is currently loaded.
     pub fn contains(&self, name: &str) -> bool {
-        self.skills.contains_key(name)
+        self.get(name).is_some()
     }
 }
 
@@ -913,6 +1127,63 @@ pub const ENDORSED_SKILLS: &[EndorsedSkill] = &[
     },
 ];
 
+/// Claude Code's description for a skill without one: the body's first
+/// non-empty line, minus a Markdown heading marker, cut to 100 characters.
+fn description_from_body(body: &str) -> String {
+    let Some(line) = body.lines().map(str::trim).find(|line| !line.is_empty()) else {
+        return "Custom item".to_string();
+    };
+    let heading = line.trim_start_matches('#');
+    let text = if heading.len() < line.len() && heading.starts_with(char::is_whitespace) {
+        heading.trim_start()
+    } else {
+        line
+    };
+    if text.chars().count() > 100 {
+        format!("{}...", text.chars().take(97).collect::<String>())
+    } else {
+        text.to_string()
+    }
+}
+
+/// Claude Code's frontmatter fallback: double-quote each top-level
+/// `key: value` whose unquoted value holds YAML syntax (`: `, `#`, `[`, ...)
+/// and turn leading tabs into spaces, so loosely written SKILL.md files parse.
+fn quote_lossy_values(yaml: &str) -> String {
+    const SPECIAL: &[char] = &[
+        '{', '}', '[', ']', '*', '&', '#', '!', '|', '>', '%', '@', '`',
+    ];
+    let quote = |line: &str| -> Option<String> {
+        let (key, rest) = line.split_once(':')?;
+        let key_ok = !key.is_empty()
+            && key
+                .chars()
+                .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '_' | '-'));
+        if !key_ok || !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let value = rest.trim_start();
+        let quoted = (value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\''));
+        let flow_list = value.starts_with('[')
+            && value.ends_with(']')
+            && serde_yaml::from_str::<Vec<serde_yaml::Value>>(value).is_ok();
+        let needs_quotes = value.contains(": ") || value.contains(SPECIAL);
+        (!value.is_empty() && !quoted && !flow_list && needs_quotes).then(|| {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("{key}: \"{escaped}\"")
+        })
+    };
+    yaml.lines()
+        .map(|line| {
+            let line = quote(line).unwrap_or_else(|| line.to_string());
+            let tabs = line.len() - line.trim_start_matches('\t').len();
+            format!("{}{}", "  ".repeat(tabs), &line[tabs..])
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Return the curated list of skills endorsed by jcode.
 pub fn endorsed_skills() -> &'static [EndorsedSkill] {
     ENDORSED_SKILLS
@@ -925,6 +1196,32 @@ impl Skill {
             "# Skill: {}\n\n{}\n\n{}",
             self.name, self.description, self.content
         )
+    }
+
+    /// The skill as delivered when invoked, Claude Code style: the base
+    /// directory first so relative files (`scripts/`, `reference.md`) resolve,
+    /// then the body with `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}` filled in.
+    pub fn invocation_text(&self, args: &str) -> String {
+        let dir = self
+            .path
+            .parent()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let plugin_root = self
+            .path
+            .ancestors()
+            .skip(1)
+            .find(|path| path.join(".claude-plugin/plugin.json").is_file())
+            .map(|path| path.display().to_string());
+        let body = self
+            .content
+            .replace("${CLAUDE_SKILL_DIR}", &dir)
+            .replace("$ARGUMENTS", args);
+        let body = match plugin_root {
+            Some(root) => body.replace("${CLAUDE_PLUGIN_ROOT}", &root),
+            None => body,
+        };
+        format!("Base directory for this skill: {dir}\n\n{body}")
     }
 
     /// Load additional files from the skill directory
@@ -993,6 +1290,7 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
             allowed_tools: None,
+            disable_model_invocation: false,
             content: content.to_string(),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             search_text: std::sync::OnceLock::from(build_skill_search_text(
@@ -1238,6 +1536,82 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_frontmatter_and_invocation_text() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = temp.path().join("skills");
+        // No `name:` (defaults to the folder), a `---` inside the description,
+        // and the user-only flag.
+        write_skill_file(
+            &skills_dir,
+            "deploy",
+            "---\ndescription: Ship it --- carefully\ndisable-model-invocation: true\n---\n\nDeploy $ARGUMENTS using ${CLAUDE_SKILL_DIR}/run.sh\n",
+        );
+
+        let mut registry = SkillRegistry::default();
+        registry.load_from_dir(&skills_dir).expect("load skills");
+        let skill = registry.get("deploy").expect("named after its folder");
+        assert_eq!(skill.description, "Ship it --- carefully");
+        assert!(skill.disable_model_invocation);
+
+        let dir = skills_dir.join("deploy").display().to_string();
+        assert_eq!(
+            skill.invocation_text("staging"),
+            format!("Base directory for this skill: {dir}\n\nDeploy staging using {dir}/run.sh")
+        );
+    }
+
+    #[test]
+    fn missing_description_comes_from_the_body_like_claude_code() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = temp.path().join("skills");
+        write_skill_file(
+            &skills_dir,
+            "notes",
+            "---\nname: notes\n---\n\n# Take meeting notes\n\nBody.\n",
+        );
+        write_skill_file(
+            &skills_dir,
+            "blank",
+            "---\ndescription: \"\"\n---\n\nPlain first line\n",
+        );
+        let mut registry = SkillRegistry::default();
+        registry.load_from_dir(&skills_dir).expect("load skills");
+        assert_eq!(
+            registry.get("notes").unwrap().description,
+            "Take meeting notes"
+        );
+        assert_eq!(
+            registry.get("blank").unwrap().description,
+            "Plain first line"
+        );
+        assert_eq!(description_from_body(&"x".repeat(150)).chars().count(), 100);
+    }
+
+    #[test]
+    fn loose_frontmatter_values_load_like_claude_code() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = temp.path().join("skills");
+        write_skill_file(
+            &skills_dir,
+            "graph",
+            "---\nname: graph\ndescription: Use the graph. Triggers on: explore, \"who calls\" #tag\nallowed-tools: [Read, Grep]\n---\n\nBody.\n",
+        );
+        let mut registry = SkillRegistry::default();
+        registry.load_from_dir(&skills_dir).expect("load skills");
+        let skill = registry
+            .get("graph")
+            .expect("loose description still parses");
+        assert_eq!(
+            skill.description,
+            "Use the graph. Triggers on: explore, \"who calls\" #tag"
+        );
+        assert_eq!(
+            skill.allowed_tools.as_deref(),
+            Some(&["Read".to_string(), "Grep".to_string()][..])
+        );
+    }
+
+    #[test]
     fn malformed_skill_does_not_block_directory_loaders() {
         let temp = tempfile::tempdir().expect("tempdir");
         let skills_dir = temp.path().join("skills");
@@ -1249,7 +1623,7 @@ mod tests {
         write_skill_file(
             &skills_dir,
             "malformed",
-            "---\nname: malformed\ndescription: Triggers: invalid yaml\n---\n\nBroken.\n",
+            "---\nname: malformed\ndescription: Never closed\n\nBroken.\n",
         );
 
         let mut registry = SkillRegistry::default();
@@ -1465,16 +1839,84 @@ mod tests {
         // cache/<marketplace>/<plugin>/<version>/skills/<skill>/SKILL.md
         let install = plugins_root.join("cache/test-marketplace/vercel/0.40.1");
         write_plugin_skill(&install, "ai-gateway");
-        // Nested `.claude/skills` variant inside the same install.
+        // Nested skill trees (templates a plugin installs into projects) are
+        // not the plugin's own skills; Claude Code loads only `<root>/skills`.
         write_plugin_skill(&install.join(".claude"), "benchmark-agents");
+        write_plugin_skill(&install.join("template"), "template-skill");
         write_installed_plugins_manifest(plugins_root, &[&install]);
 
         let mut registry = SkillRegistry::default();
         let count = registry.load_plugin_skills_from_root(plugins_root);
 
-        assert_eq!(count, 2);
-        assert!(registry.contains("ai-gateway"));
-        assert!(registry.contains("benchmark-agents"));
+        assert_eq!(count, 1);
+        assert!(
+            registry.get("vercel:ai-gateway").is_some(),
+            "namespaced like Claude Code"
+        );
+        assert!(registry.contains("ai-gateway"), "bare name still resolves");
+        assert!(!registry.contains("benchmark-agents"));
+        // Reloading (by either name) keeps the plugin namespace.
+        assert!(registry.reload("ai-gateway").expect("reload"));
+        assert!(registry.get("vercel:ai-gateway").is_some());
+        assert_eq!(registry.list().len(), 1, "no un-namespaced duplicate");
+        assert!(!registry.contains("template-skill"));
+    }
+
+    #[test]
+    fn plugin_disabled_in_claude_settings_loads_no_skills() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let settings = temp.path().join("external/.claude/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            r#"{"enabledPlugins":{"off@enabled-test":false,"on@enabled-test":true}}"#,
+        )
+        .unwrap();
+        let plugins_root = temp.path().join("plugins");
+        let off = plugins_root.join("cache/test-marketplace/off/1.0.0");
+        let on = plugins_root.join("cache/test-marketplace/on/1.0.0");
+        write_plugin_skill(&off, "off-skill");
+        write_plugin_skill(&on, "on-skill");
+        // Own manifest keys: other plugin tests share `plugin-N@test-marketplace`
+        // and run without the env lock, so these settings must not touch them.
+        std::fs::create_dir_all(&plugins_root).unwrap();
+        std::fs::write(
+            plugins_root.join("installed_plugins.json"),
+            serde_json::json!({"version": 2, "plugins": {
+                "off@enabled-test": [{"installPath": off}],
+                "on@enabled-test": [{"installPath": on}],
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::default();
+        registry.load_plugin_skills_from_root(&plugins_root);
+        // Every plugin off: the cache must not be scanned as a fallback.
+        std::fs::write(
+            &settings,
+            r#"{"enabledPlugins":{"off@enabled-test":false,"on@enabled-test":false}}"#,
+        )
+        .unwrap();
+        let mut all_off = SkillRegistry::default();
+        all_off.load_plugin_skills_from_root(&plugins_root);
+        match previous {
+            Some(home) => crate::env::set_var("JCODE_HOME", home),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+
+        assert!(
+            !registry.contains("off-skill"),
+            "enabledPlugins false turns it off"
+        );
+        assert!(registry.get("on:on-skill").is_some());
+        assert!(
+            all_off.list().is_empty(),
+            "all plugins off loads no plugin skills"
+        );
     }
 
     #[test]

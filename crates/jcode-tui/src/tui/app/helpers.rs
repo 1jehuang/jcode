@@ -605,11 +605,31 @@ pub(super) fn named_profile_reasoning_efforts(
     }
 
     let model = model_name.unwrap_or_default().trim().to_ascii_lowercase();
-    let model_reasoning = profile
+    let model_config = profile
         .models
         .iter()
-        .find(|entry| entry.id.trim().eq_ignore_ascii_case(&model))
-        .and_then(|entry| entry.reasoning);
+        .find(|entry| entry.id.trim().eq_ignore_ascii_case(&model));
+    if model_config.is_some_and(|entry| entry.supports_chat == Some(false)) {
+        return Some(Vec::new());
+    }
+    if let Some(configured) = model_config.filter(|entry| !entry.reasoning_efforts.is_empty()) {
+        let mut efforts: Vec<&'static str> = configured
+            .reasoning_efforts
+            .iter()
+            .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
+            .collect();
+        jcode_provider_core::sort_reasoning_efforts(&mut efforts);
+        efforts.dedup();
+        efforts.extend(["swarm", "swarm-deep"]);
+        return Some(efforts);
+    }
+    let model_reasoning = model_config.and_then(|entry| entry.reasoning);
+    // A model can support reasoning without exposing a selectable effort
+    // parameter. Treat an explicit per-model declaration as authoritative
+    // instead of borrowing a generic ladder from the profile's provider.
+    if profile_id.eq_ignore_ascii_case("a6api") && model_reasoning == Some(true) {
+        return Some(Vec::new());
+    }
     // Keep Conifer's current local override policy outside this port.
     if profile_id.eq_ignore_ascii_case("conifer") {
         return if model_reasoning == Some(false)

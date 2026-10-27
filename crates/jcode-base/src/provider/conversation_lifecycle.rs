@@ -2,6 +2,14 @@
 use super::*;
 
 impl MultiProvider {
+    pub(super) fn bind_existing_claude_session(&self, session_id: &str) {
+        // Claude Code keeps reporting background tasks after a model switch
+        // away from it, so bind it whenever it exists.
+        if let Some(provider) = self.claude_code_provider() {
+            provider.bind_session(session_id);
+        }
+    }
+
     pub(super) async fn reset_existing_conversation_state(&self) -> Result<()> {
         // Do not create lazy providers or hold synchronous locks across awaits.
         let mut providers = Vec::new();

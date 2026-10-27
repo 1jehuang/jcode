@@ -1,4 +1,4 @@
-// Cross-session prompt history + Ctrl+R reverse search tests
+// Session-local prompt journal + Ctrl+R reverse search tests
 // ====================================================================
 
 #[test]
@@ -46,9 +46,9 @@ fn test_prompt_history_skips_pending_login_input() {
 }
 
 #[test]
-fn test_up_arrow_recalls_prompts_from_previous_sessions() {
+fn test_up_arrow_recalls_session_journal_after_transcript_truncation() {
     let mut app = create_test_app();
-    // Persisted history from earlier sessions, oldest first.
+    // Journal entries removed from this session's visible conversation.
     app.persisted_prompt_history = Some(vec![
         "old session prompt".to_string(),
         "newer old prompt".to_string(),
@@ -72,7 +72,7 @@ fn test_up_arrow_recalls_prompts_from_previous_sessions() {
 }
 
 #[test]
-fn test_merged_prompt_history_dedupes_across_sessions() {
+fn test_prompt_history_does_not_reorder_journal_from_visible_transcript() {
     let mut app = create_test_app();
     app.persisted_prompt_history =
         Some(vec!["shared prompt".to_string(), "unique old".to_string()]);
@@ -82,7 +82,7 @@ fn test_merged_prompt_history_dedupes_across_sessions() {
     let merged = app.merged_prompt_history();
     assert_eq!(
         merged,
-        vec!["unique old".to_string(), "shared prompt".to_string()]
+        vec!["shared prompt".to_string(), "unique old".to_string()]
     );
 }
 

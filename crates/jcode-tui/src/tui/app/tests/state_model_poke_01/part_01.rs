@@ -156,11 +156,10 @@ fn test_rewind_undo_restores_truncated_messages() {
 
     assert_eq!(app.session.visible_conversation_message_count(), 3);
     assert_eq!(app.messages.len(), 3);
-    assert_eq!(app.provider_session_id.as_deref(), Some("provider-session"));
-    assert_eq!(
-        app.session.provider_session_id.as_deref(),
-        Some("provider-session")
-    );
+    // Restoring messages must reseed the provider, not resume its discarded state.
+    assert!(app.provider_session_id.is_none());
+    assert!(app.session.provider_session_id.is_none());
+    assert!(app.rewind_ui.local_provider_reset_pending);
     assert!(
         app.display_messages()
             .last()
@@ -168,55 +167,6 @@ fn test_rewind_undo_restores_truncated_messages() {
             .content
             .contains("✓ Undid rewind. Restored 2 messages.")
     );
-}
-
-#[test]
-fn test_rewind_lists_visible_messages_when_initial_session_context_is_hidden() {
-    let mut app = create_test_app();
-
-    for idx in 1..=2 {
-        app.session.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: format!("msg-{}", idx),
-                cache_control: None,
-            }],
-        );
-    }
-
-    app.input = "/rewind".to_string();
-    app.submit_input();
-
-    let last = app.display_messages().last().expect("history message");
-    assert!(last.content.contains("Conversation history:"));
-    assert!(last.content.contains("1 👤 User - msg-1"));
-    assert!(last.content.contains("2 👤 User - msg-2"));
-    assert!(!last.content.contains("Session Context"));
-    assert!(!last.content.contains("No messages in conversation"));
-}
-
-#[test]
-fn test_rewind_autocomplete_does_not_fuzzy_rewrite_numeric_targets() {
-    let mut app = create_test_app();
-    app.session.replace_messages(Vec::new());
-
-    for idx in 1..=3 {
-        app.session.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: format!("msg-{}", idx),
-                cache_control: None,
-            }],
-        );
-    }
-
-    app.input = "/rewind 10".to_string();
-    assert!(!app.autocomplete());
-    assert_eq!(app.input, "/rewind 10");
-
-    app.input = "/rewind 2".to_string();
-    assert!(!app.autocomplete());
-    assert_eq!(app.input, "/rewind 2");
 }
 
 #[test]

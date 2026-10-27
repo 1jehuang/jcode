@@ -75,41 +75,7 @@ impl Tool for McpTool {
             .call_tool(&self.server_name, &self.tool_def.name, input)
             .await?;
 
-        // Convert MCP content blocks to output string
-        let mut output_parts = Vec::new();
-        for block in result.content {
-            match block {
-                ContentBlock::Text { text } => {
-                    output_parts.push(text);
-                }
-                ContentBlock::Image { data, mime_type } => {
-                    output_parts.push(format!("[Image: {} ({} bytes)]", mime_type, data.len()));
-                }
-                ContentBlock::Resource { resource } => {
-                    if let Some(rendered) = crate::applets::mount_mcp_resource(
-                        &ctx.session_id,
-                        &ctx.tool_call_id,
-                        &resource.uri,
-                        resource.mime_type.as_deref(),
-                        resource.text.as_deref(),
-                    ) {
-                        output_parts.push(rendered);
-                    } else if let Some(text) = resource.text {
-                        output_parts.push(text);
-                    } else if let Some(blob) = resource.blob {
-                        output_parts.push(format!(
-                            "[Resource: {} ({} bytes)]",
-                            resource.uri,
-                            blob.len()
-                        ));
-                    } else {
-                        output_parts.push(format!("[Resource: {}]", resource.uri));
-                    }
-                }
-            }
-        }
-
-        let output = output_parts.join("\n");
+        let output = render_content(result.content, &ctx.session_id, &ctx.tool_call_id);
         let output = if accept_large_output {
             output
         } else {
@@ -289,6 +255,53 @@ pub fn create_mcp_tools_from_cached_many(
         .collect()
 }
 
+/// Render a `tools/call` result's content blocks as tool output text.
+pub fn render_content(content: Vec<ContentBlock>, session_id: &str, tool_call_id: &str) -> String {
+    let mut output_parts = Vec::new();
+    for block in content {
+        match block {
+            ContentBlock::Text { text } => {
+                output_parts.push(text);
+            }
+            ContentBlock::Image { data, mime_type } => {
+                output_parts.push(format!("[Image: {} ({} bytes)]", mime_type, data.len()));
+            }
+            ContentBlock::Resource { resource } => {
+                if let Some(rendered) = crate::applets::mount_mcp_resource(
+                    session_id,
+                    tool_call_id,
+                    &resource.uri,
+                    resource.mime_type.as_deref(),
+                    resource.text.as_deref(),
+                ) {
+                    output_parts.push(rendered);
+                } else if let Some(text) = resource.text {
+                    output_parts.push(text);
+                } else if let Some(blob) = resource.blob {
+                    output_parts.push(format!(
+                        "[Resource: {} ({} bytes)]",
+                        resource.uri,
+                        blob.len()
+                    ));
+                } else {
+                    output_parts.push(format!("[Resource: {}]", resource.uri));
+                }
+            }
+            ContentBlock::ResourceLink { uri, name } => {
+                output_parts.push(match name {
+                    Some(name) => format!("[Resource link: {name} {uri}]"),
+                    None => format!("[Resource link: {uri}]"),
+                });
+            }
+            ContentBlock::Unsupported => {
+                output_parts.push("[Unsupported MCP content block omitted]".to_string());
+            }
+        }
+    }
+
+    output_parts.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{dispatch_name, dispatch_names};
@@ -319,6 +332,7 @@ mod tests {
 
     fn def(name: &str) -> McpToolDef {
         McpToolDef {
+            annotations: None,
             name: name.to_string(),
             description: None,
             input_schema: json!({"type": "object"}),
@@ -392,6 +406,7 @@ mod tests {
             (
                 "server-a".to_string(),
                 McpToolDef {
+                    annotations: None,
                     name: "query-docs".to_string(),
                     description: None,
                     input_schema: json!({"type": "object"}),
@@ -400,6 +415,7 @@ mod tests {
             (
                 "server_a".to_string(),
                 McpToolDef {
+                    annotations: None,
                     name: "query_docs".to_string(),
                     description: None,
                     input_schema: json!({"type": "object"}),

@@ -38,8 +38,7 @@ struct SkillInput {
     #[serde(alias = "skill")]
     #[serde(default)]
     name: Option<String>,
-    /// Optional Claude-compatible Skill wrapper argument. The skill loader only
-    /// needs to load the prompt, so args are currently accepted and ignored.
+    /// Claude-compatible Skill argument: fills `$ARGUMENTS` in the body.
     #[serde(default)]
     args: Option<String>,
 }
@@ -55,7 +54,7 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Manage skills."
+        "Load a listed skill's instructions when it covers the task; also list/read/reload."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -71,6 +70,10 @@ impl Tool for SkillTool {
                 "name": {
                     "type": "string",
                     "description": "Skill name."
+                },
+                "args": {
+                    "type": "string",
+                    "description": "Arguments for the skill; fill its $ARGUMENTS."
                 }
             }
         })
@@ -80,11 +83,9 @@ impl Tool for SkillTool {
         let params: SkillInput = serde_json::from_value(input)?;
         let action_label = params.action.clone();
         let name_label = params.name.clone().unwrap_or_else(|| "<none>".to_string());
-        let _args = params.args.as_deref();
-
         match params.action.as_str() {
             "load" => {
-                self.load_skill(params.name, ctx.working_dir.as_deref())
+                self.load_skill(params.name, params.args, ctx.working_dir.as_deref())
                     .await
             }
             "list" => self.list_skills(ctx.working_dir.as_deref()).await,
@@ -113,6 +114,7 @@ impl SkillTool {
     async fn load_skill(
         &self,
         name: Option<String>,
+        args: Option<String>,
         working_dir: Option<&std::path::Path>,
     ) -> Result<ToolOutput> {
         let name = normalize_skill_name(name, "load")?;
@@ -144,19 +146,36 @@ impl SkillTool {
             }
         })?;
 
-        let base_dir = skill
-            .path
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| ".".to_string());
+        match crate::skill_overrides::mode(&crate::skill_overrides::load(), &skill.name) {
+            crate::skill_overrides::SkillMode::Off => {
+                anyhow::bail!("Skill '{}' is turned off in /skills", name)
+            }
+            crate::skill_overrides::SkillMode::UserInvocableOnly => anyhow::bail!(
+                "Skill '{}' is set to user-only in /skills; only the user can run it with /{}",
+                name,
+                name
+            ),
+            _ => {}
+        }
+        if skill.disable_model_invocation {
+            anyhow::bail!(
+                "Skill '{}' sets disable-model-invocation; only the user can run it with /{}",
+                name,
+                name
+            );
+        }
 
-        Ok(ToolOutput::new(format!(
-            "## Skill: {}\n\n**Base directory**: {}\n\n{}",
+        let args = args.unwrap_or_default();
+        let mut text = format!(
+            "## Skill: {}\n\n{}",
             skill.name,
-            base_dir,
-            skill.get_prompt()
-        ))
-        .with_title(format!("skill: {}", skill.name)))
+            skill.invocation_text(args.trim())
+        );
+        // Same fallback as Claude Code when the body has no `$ARGUMENTS` slot.
+        if !args.trim().is_empty() && !skill.content.contains("$ARGUMENTS") {
+            text.push_str(&format!("\n\nARGUMENTS: {}", args.trim()));
+        }
+        Ok(ToolOutput::new(text).with_title(format!("skill: {}", skill.name)))
     }
 
     async fn list_skills(&self, working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {

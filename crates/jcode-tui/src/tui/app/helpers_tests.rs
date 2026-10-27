@@ -178,6 +178,152 @@ fn named_compatible_profile_exposes_explicit_effort_levels_to_remote_client() {
 }
 
 #[test]
+fn named_compatible_profile_uses_per_model_effort_vocabulary() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "kimi-k3".into(),
+                reasoning: Some(true),
+                reasoning_efforts: vec!["low".into(), "high".into(), "max".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("openai-compatible:a6api"), Some("kimi-k3")),
+        Some(vec!["low", "high", "max", "swarm", "swarm-deep"]),
+    );
+}
+
+#[test]
+fn a6api_model_catalog_exposes_model_specific_effort_ladders() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: [
+                ("grok-4.7", &["low", "medium", "high", "xhigh"][..]),
+                ("grok-4.5", &["low", "medium", "high"][..]),
+                ("claude-fable-5.1", &["low", "medium", "high", "xhigh", "max"][..]),
+                ("claude-haiku-5-5", &["low", "medium", "high", "xhigh", "max"][..]),
+                ("gemini-3.5-flash", &["low", "medium", "high"][..]),
+            ]
+            .into_iter()
+            .map(|(id, efforts)| crate::config::NamedProviderModelConfig {
+                id: id.into(),
+                reasoning_efforts: efforts.iter().map(|effort| (*effort).into()).collect(),
+                ..Default::default()
+            })
+            .collect(),
+            ..Default::default()
+        },
+    );
+    for (model, mut expected) in [
+        ("grok-4.7", vec!["low", "medium", "high", "xhigh"]),
+        ("grok-4.5", vec!["low", "medium", "high"]),
+        ("claude-fable-5.1", vec!["low", "medium", "high", "xhigh", "max"]),
+        ("claude-haiku-5-5", vec!["low", "medium", "high", "xhigh", "max"]),
+        ("gemini-3.5-flash", vec!["low", "medium", "high"]),
+    ] {
+        expected.extend(["swarm", "swarm-deep"]);
+        assert_eq!(
+            named_profile_reasoning_efforts(&config, Some("openai-compatible:a6api"), Some(model)),
+            Some(expected),
+            "unexpected effort ladder for {model}",
+        );
+    }
+}
+
+#[test]
+fn a6api_models_without_effort_metadata_do_not_infer_a_ladder_from_thinking_support() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "claude-haiku-4-5".into(),
+                reasoning: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(
+            &config,
+            Some("openai-compatible:a6api"),
+            Some("claude-haiku-4-5"),
+        ),
+        Some(Vec::new()),
+    );
+}
+
+#[test]
+fn a6api_glm_models_use_zai_effort_vocabulary() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "glm-5.3".into(),
+                reasoning: Some(true),
+                reasoning_efforts: vec!["low".into(), "high".into(), "max".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("openai-compatible:a6api"), Some("glm-5.3")),
+        Some(vec!["low", "high", "max", "swarm", "swarm-deep"]),
+    );
+}
+
+#[test]
+fn a6api_gpt_terra_uses_openai_effort_vocabulary() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "gpt-5.6-terra".into(),
+                reasoning: Some(true),
+                reasoning_efforts: vec![
+                    "none".into(),
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                    "max".into(),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(
+            &config,
+            Some("openai-compatible:a6api"),
+            Some("gpt-5.6-terra"),
+        ),
+        Some(vec![
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "swarm",
+            "swarm-deep",
+        ]),
+    );
+}
+
+#[test]
 fn named_compatible_profile_disables_effort_for_model_with_reasoning_off() {
     let mut config = crate::config::Config::default();
     config.providers.insert(

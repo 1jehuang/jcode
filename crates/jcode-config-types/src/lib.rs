@@ -454,6 +454,33 @@ pub enum NamedProviderAuth {
 #[serde(default)]
 pub struct NamedProviderModelConfig {
     pub id: String,
+    /// Whether this route accepts chat-completion requests. `false` keeps
+    /// generation-only models out of the chat picker while preserving their
+    /// model IDs for other provider APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_chat: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_thinking: Option<bool>,
+    /// Output modalities returned by the model (for example `text`, `image`,
+    /// or `video`). This is descriptive and does not imply matching input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tool_calls: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_structured_outputs: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
+    /// Model-specific OpenAI-compatible reasoning effort values, in any order.
+    /// The runtime normalizes these to Jcode's canonical effort names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
     /// Explicitly enable or disable `/effort` for this model. When omitted,
     /// the provider-level setting and built-in model-family detection apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -85,6 +85,7 @@ impl App {
         event_stream: &mut EventStream,
         bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
     ) -> Result<()> {
+        self.ensure_local_rewind_provider_reset().await?;
         // Same account bookkeeping as the server agent's turn: return home at
         // turn start, save a failover move on every exit path.
         let observed = self.local_account_turn_start();

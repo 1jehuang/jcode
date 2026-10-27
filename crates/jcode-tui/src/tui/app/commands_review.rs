@@ -336,7 +336,10 @@ pub(super) fn reset_current_session(app: &mut App) {
     session.autoreview_enabled = Some(app.autoreview_enabled);
     session.autojudge_enabled = Some(app.autojudge_enabled);
     session.ensure_initial_session_context_message();
+    app.invalidate_rewind_ui();
+    app.activate_prompt_history(&session.id);
     app.session = session;
+    app.adopt_prompt_history_display();
     clear_side_panel_for_new_session(app);
     app.provider_session_id = None;
 }

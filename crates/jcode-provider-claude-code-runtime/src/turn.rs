@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::control::{self, McpAction};
-use crate::process::{ChildEvent, ChildHandle, INTERRUPT_GRACE};
+use crate::process::{self, ChildEvent, ChildHandle, INTERRUPT_GRACE};
 use crate::translate::{ClaudeCodeRateLimits, Translator};
 
 /// Emit a status heartbeat after this much silence so long tool runs do not
@@ -76,7 +76,8 @@ pub async fn drive_turn(req: TurnRequest<'_>) -> TurnOutcome {
     // Drop results left over from an earlier, cancelled turn.
     while results.try_recv().is_ok() {}
 
-    let mut translator = Translator::new(login_hint, Some(turn_uuid));
+    let mut translator = Translator::new(login_hint, Some(turn_uuid.clone()));
+    let mut queued = false;
     let mut pending_tools: HashMap<String, Value> = HashMap::new();
     let mut reported_session: Option<String> = None;
 
@@ -110,6 +111,16 @@ pub async fn drive_turn(req: TurnRequest<'_>) -> TurnOutcome {
                     None => break TurnEnd::Exited(child.stderr_tail()),
                 };
                 last_activity = Instant::now();
+                // After a background task finishes, Claude Code runs its own
+                // follow-up turn; our message stays "queued" until that ends.
+                if line["type"] == "command_lifecycle" && line["command_uuid"] == turn_uuid.as_str() {
+                    queued = line["state"] == "queued";
+                    continue;
+                }
+                if queued {
+                    process::answer_idle(child, &line).await;
+                    continue;
+                }
                 if line.get("type").and_then(Value::as_str) == Some("control_request") {
                     let events = handle_control(child, &line, tools, permission_mode, &mut pending_tools).await;
                     if !emit_all(out, events).await {
@@ -215,7 +226,11 @@ async fn handle_control(
         }
         "mcp_message" => {
             let message = request.get("message").cloned().unwrap_or(Value::Null);
-            match control::handle_mcp_message(&message, tools) {
+            match control::handle_mcp_message_with_file_tools(
+                &message,
+                tools,
+                &child.launch.spec.host_file_tools,
+            ) {
                 McpAction::Reply(reply) => {
                     control::control_success(&request_id, control::mcp_response_body(reply))
                 }
