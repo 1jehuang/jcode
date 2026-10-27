@@ -194,7 +194,7 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
             .join(", ");
 
         notes.push_str(&format!(
-            "\nPersisted background task(s) for this session are still running: {}. Do not rerun those commands.\n{}",
+            "\nPersisted background task(s) for this session are still running: {}. Do not rerun those commands. Read a task's result with `bg action=\"output\" task_id=\"<id>\"` or check it with `bg action=\"status\" task_id=\"<id>\"`.\n{}",
             task_list,
             crate::tool::BACKGROUND_WAIT_GUIDANCE
         ));
