@@ -60,11 +60,13 @@ const FORMAT_VERSION: u32 = 1;
 /// Hidden remote subcommands a cloud host must support before anything is
 /// uploaded. Probing all of them up front means an older host fails clearly at
 /// preflight instead of after a partial credential transfer.
-const REQUIRED_REMOTE_COMMANDS: [&str; 4] = [
+const REQUIRED_REMOTE_COMMANDS: [&str; 6] = [
     "receive",
     "credentials",
     "router-credentials",
     "cancel-return",
+    "replace-receive",
+    "group-protocol",
 ];
 const SNAPSHOT_REF_PREFIX: &str = "refs/jcode-cloud";
 /// Environment variables worth carrying. Everything else (DISPLAY, WAYLAND_*,
@@ -445,7 +447,12 @@ impl Target {
     }
 
     fn preflight_key(&self, host: &str) -> String {
-        format!("{host}\n{}", self.remote_binary())
+        // Capability changes invalidate markers written by older clients.
+        format!(
+            "{host}\n{}\n{}",
+            self.remote_binary(),
+            REQUIRED_REMOTE_COMMANDS.join(",")
+        )
     }
 
     fn preflight_uncached(&self, host: &str) -> Result<()> {
@@ -464,8 +471,29 @@ impl Target {
                     .map(|h| h.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 timed_move_stage("host prepare script", || {
-                    self.run_shell(host, &super::cloud_managed::prepare_script(&home)?)
-                        .context("prepare the Jcode Cloud machine")
+                    let prepared =
+                        self.run_shell(host, &super::cloud_managed::prepare_script(&home)?);
+                    if let Err(error) = prepared {
+                        // A development protocol may not exist in any published
+                        // release yet. Use the running native executable, never
+                        // a stale PATH launcher, and verify it before switching.
+                        if cfg!(all(target_os = "linux", target_arch = "x86_64"))
+                            && !jcode_build_meta::is_release_build()
+                            && std::env::var_os("JCODE_CLOUD_RELEASE").is_none()
+                            && self.remote_binary.is_none()
+                            && std::env::var_os("JCODE_CLOUD_REMOTE_BINARY").is_none()
+                        {
+                            step(
+                                "prepare",
+                                "published cloud CLI is unavailable or incompatible; syncing this development binary",
+                            );
+                            self.prepare_development_binary(host, &home)
+                                .with_context(|| format!("prepare development cloud CLI (published preparation failed: {error:#})"))?;
+                        } else {
+                            return Err(error).context("prepare the Jcode Cloud machine");
+                        }
+                    }
+                    Ok(())
                 })?;
             }
             // Preserve custom transports that only support one remote invocation.
@@ -526,6 +554,48 @@ impl Target {
             }
             Ok(())
         })
+    }
+
+    /// Transfer only our executable over the existing authenticated SSH channel.
+    /// The installer probes it before an atomic switch and rolls back on failure.
+    /// No checkout, credentials, lease, or running daemon is touched.
+    fn prepare_development_binary(&self, host: &str, home: &str) -> Result<()> {
+        let executable =
+            std::env::current_exe().context("locate running development executable")?;
+        let mut file = std::fs::File::open(&executable)?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        let checksum = hex::encode(digest.finalize());
+        // The candidate is inside a private temporary directory. The outer
+        // shell owns its cleanup independently of the installer's own traps.
+        let prepare = super::cloud_managed::prepare_script_with_candidate(home, Some("jcode"))?;
+        let script = format!(
+            "set -eu\numask 077\nupload=$(mktemp -d)\ntrap 'rm -rf \"$upload\"' EXIT\ncat > \"$upload/jcode\"\nprintf '%s  %s\\n' '{checksum}' \"$upload/jcode\" | sha256sum --check --status\nchmod 755 \"$upload/jcode\"\n(\ncd \"$upload\"\n{prepare}\n)\n"
+        );
+        let mut command = Self::ssh_command(host)?;
+        command.arg(format!("bash -c {}", shell_quote(&script)));
+        command
+            .stdin(Stdio::from(std::fs::File::open(&executable)?))
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let output = command
+            .output()
+            .context("send development executable to cloud")?;
+        if !output.status.success() {
+            bail!(
+                "cloud development CLI install failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
     }
 
     /// `ssh` with the options every cloud call uses, including the private
