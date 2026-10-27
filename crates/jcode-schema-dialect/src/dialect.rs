@@ -62,6 +62,9 @@ pub struct DialectTransforms {
     /// depth. Needed by validators that accept `allOf` syntactically without
     /// intersecting it.
     pub merge_all_of_branches: bool,
+    /// Gemini's protobuf Schema.type is scalar, not a JSON Schema type array.
+    /// Use nullable for T|null and typed anyOf branches for other unions.
+    pub lower_type_arrays: bool,
 }
 
 /// A provider's accepted JSON Schema subset plus the rewrites needed to reach
@@ -252,11 +255,57 @@ fn walk(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
                 out.entry("properties".to_string())
                     .or_insert_with(|| Value::Object(Map::new()));
             }
+            if spec.transforms.lower_type_arrays {
+                lower_type_array(&mut out);
+            }
             Value::Object(out)
         }
         Value::Array(items) => Value::Array(items.iter().map(|i| walk(i, spec, quirks)).collect()),
         _ => schema.clone(),
     }
+}
+
+fn lower_type_array(out: &mut Map<String, Value>) {
+    let Some(Value::Array(types)) = out.get("type") else {
+        return;
+    };
+    let Some(types) = types.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+        return;
+    };
+    if types.is_empty() {
+        return;
+    }
+    let nullable = types.contains(&"null");
+    let mut non_null = Vec::new();
+    for kind in types.iter().copied().filter(|kind| *kind != "null") {
+        if !non_null.contains(&kind) {
+            non_null.push(kind);
+        }
+    }
+    if non_null.len() <= 1 {
+        let kind = non_null.first().copied().unwrap_or("null").to_string();
+        let has_non_null = !non_null.is_empty();
+        out.insert("type".into(), Value::String(kind));
+        if nullable && has_non_null {
+            out.insert("nullable".into(), Value::Bool(true));
+        }
+        return;
+    }
+    let kinds: Vec<String> = non_null.into_iter().map(str::to_string).collect();
+    out.remove("type");
+    let branches = kinds
+        .into_iter()
+        .map(|kind| {
+            let mut branch = out.clone();
+            branch.insert("type".into(), Value::String(kind));
+            if nullable {
+                branch.insert("nullable".into(), Value::Bool(true));
+            }
+            Value::Object(branch)
+        })
+        .collect();
+    out.clear();
+    out.insert("anyOf".into(), Value::Array(branches));
 }
 
 fn is_object_typed(map: &Map<String, Value>) -> bool {

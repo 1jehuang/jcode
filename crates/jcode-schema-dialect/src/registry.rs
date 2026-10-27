@@ -101,6 +101,7 @@ pub const GEMINI: DialectSpec = DialectSpec {
         // `anyOf` inside a property is fine, so only the root is widened.
         flatten_top_level_combiners: true,
         prune_dangling_required: true,
+        lower_type_arrays: true,
         const_as_enum: true,
         one_of_as_any_of: true,
         ..DEFAULT_TRANSFORMS
@@ -238,6 +239,7 @@ const DEFAULT_TRANSFORMS: DialectTransforms = DialectTransforms {
     const_as_enum: false,
     one_of_as_any_of: false,
     merge_all_of_branches: false,
+    lower_type_arrays: false,
 };
 
 /// Every registered dialect, for conformance sweeps.

@@ -145,6 +145,12 @@ fn walk(schema: &Value, spec: &DialectSpec, path: &str, errors: &mut Vec<Conform
     match schema {
         Value::Object(map) => {
             for (key, value) in map {
+                if spec.transforms.lower_type_arrays && key == "type" && value.is_array() {
+                    errors.push(ConformanceError {
+                        path: path.to_string(),
+                        message: "type array survived a scalar-type schema dialect".to_string(),
+                    });
+                }
                 if !spec.supports(key) {
                     errors.push(ConformanceError {
                         path: path.to_string(),
@@ -250,6 +256,18 @@ fn compare(original: &Value, normalized: &Value, path: &str, errors: &mut Vec<Co
     else {
         return;
     };
+
+    // A scalar-type dialect represents a type union as full typed branches.
+    // Check each branch still carries the original structural keywords.
+    if original_map.get("type").is_some_and(Value::is_array)
+        && !normalized_map.contains_key("type")
+        && let Some(Value::Array(branches)) = normalized_map.get("anyOf")
+    {
+        for branch in branches {
+            compare(original, branch, path, errors);
+        }
+        return;
+    }
 
     for key in LOAD_BEARING_KEYWORDS {
         // A combiner flatten legitimately moves properties around, so only
