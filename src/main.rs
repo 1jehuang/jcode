@@ -103,6 +103,10 @@ fn main() -> Result<()> {
 }
 
 fn run_main() -> Result<()> {
+    // An exec-based server reload keeps the old image's children (MCP servers,
+    // tool subprocesses) but forgets their pids. Snapshot and reap them before
+    // this image spawns anything of its own, or each reload leaks zombies.
+    jcode::inherited_children::reap_inherited_children();
     configure_system_allocator();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -141,7 +145,21 @@ fn run_main() -> Result<()> {
         .enable_all()
         .build()?;
 
+    // The machine-wide MCP broker is an internal helper process. Dispatch it
+    // before normal CLI startup so it never initializes providers, checks for
+    // updates, or touches session state.
+    #[cfg(unix)]
+    if let Some(args) = mcp_broker_invocation(std::env::args().skip(1)) {
+        return runtime.block_on(jcode::mcp::broker::run_cli(&args));
+    }
+
     runtime.block_on(async { jcode::run().await })
+}
+
+/// Arguments after `mcp-broker` when invoked as `jcode mcp-broker [...]`.
+fn mcp_broker_invocation(args: impl IntoIterator<Item = String>) -> Option<Vec<String>> {
+    let mut args = args.into_iter();
+    (args.next().as_deref() == Some("mcp-broker")).then(|| args.collect())
 }
 
 /// True when invoked as `jcode setup-hotkey --listen-macos-hotkey`.
@@ -208,6 +226,17 @@ mod tests {
     #[test]
     fn ignores_plain_setup_hotkey() {
         assert!(!args_are_macos_hotkey_listener(argv(&["setup-hotkey"])));
+    }
+
+    #[test]
+    fn detects_mcp_broker_invocation() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            super::mcp_broker_invocation(argv(&["mcp-broker", "--status"])),
+            Some(vec!["--status".to_string()])
+        );
+        assert_eq!(super::mcp_broker_invocation(argv(&["serve"])), None);
+        assert_eq!(super::mcp_broker_invocation(argv(&[])), None);
     }
 
     #[test]
