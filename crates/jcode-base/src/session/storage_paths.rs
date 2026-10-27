@@ -43,7 +43,7 @@ pub fn session_journal_path(session_id: &str) -> Result<PathBuf> {
 }
 
 pub fn session_exists(session_id: &str) -> bool {
-    session_path(session_id)
-        .map(|path| path.exists())
+    super::SessionStore::configured()
+        .and_then(|store| store.exists(session_id))
         .unwrap_or(false)
 }

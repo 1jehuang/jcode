@@ -670,3 +670,62 @@ fn limit_validation_reports_friendly_errors() {
         .expect_err("negative limit should be rejected");
     assert!(err.contains("received -1"));
 }
+
+fn with_sqlite_backend<T>(f: impl FnOnce() -> T) -> T {
+    let previous = std::env::var("JCODE_SESSION_BACKEND").ok();
+    crate::env::set_var("JCODE_SESSION_BACKEND", "sqlite");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    match previous {
+        Some(previous) => crate::env::set_var("JCODE_SESSION_BACKEND", previous),
+        None => crate::env::remove_var("JCODE_SESSION_BACKEND"),
+    }
+    result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
+
+#[test]
+fn sqlite_only_sessions_are_searchable_by_index_and_exhaustive_scan() {
+    with_temp_home(|home| {
+        with_sqlite_backend(|| {
+            let mut session = save_test_session(
+                "sqlite-session",
+                vec![
+                    (Role::User, vec![text("sqlite baseline message")]),
+                    (
+                        Role::Assistant,
+                        vec![ContentBlock::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "websearch".to_string(),
+                            input: json!({"query": "tool-only-sqlite-needle"}),
+                            thought_signature: None,
+                        }],
+                    ),
+                ],
+            );
+            assert!(
+                !home.join("sessions/sqlite-session.json").exists(),
+                "the SQLite backend must not write a snapshot"
+            );
+
+            let options = SearchOptions::for_test("current-session");
+            assert!(run_search(home, "tool-only-sqlite-needle", &options).is_empty());
+
+            let mut tools = SearchOptions::for_test("current-session");
+            tools.include_tools = true;
+            let results = run_search(home, "tool-only-sqlite-needle", &tools);
+            assert_eq!(results.len(), 1, "tool bodies come from the store");
+            assert_eq!(results[0].session_id, "sqlite-session");
+
+            // Searched once, so the index holds this session. A later commit
+            // must invalidate that entry.
+            session.add_message(Role::User, vec![text("appended-after-index-needle")]);
+            session.save().expect("append commit");
+            for exhaustive in [false, true] {
+                let mut options = SearchOptions::for_test("current-session");
+                options.exhaustive = exhaustive;
+                let results = run_search(home, "appended-after-index-needle", &options);
+                assert_eq!(results.len(), 1, "exhaustive={exhaustive}");
+                assert_eq!(results[0].message_index, Some(2));
+            }
+        })
+    });
+}

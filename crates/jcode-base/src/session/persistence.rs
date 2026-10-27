@@ -26,7 +26,7 @@ impl JournalReplayStats {
 /// Held (shared) for the duration of every session save. Shutdown takes it
 /// exclusively so `process::exit` cannot land between a checkpoint's snapshot
 /// write and its journal delete (#1632).
-static SAVES_IN_FLIGHT: std::sync::RwLock<()> = std::sync::RwLock::new(());
+pub(super) static SAVES_IN_FLIGHT: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// Block until no session save is in progress (or `timeout` elapses), then
 /// keep new saves from starting. Call right before exiting the process.
@@ -388,10 +388,18 @@ impl Session {
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
+        Self::load_file_at(path, true, true)
+    }
+
+    pub(super) fn load_file_at(path: &Path, refresh_overrides: bool, repair: bool) -> Result<Self> {
         let load_start = Instant::now();
         let snapshot_bytes = file_len_or_zero(path);
         let snapshot_start = Instant::now();
-        let mut session: Session = storage::read_json(path)?;
+        let mut session: Session = if repair {
+            storage::read_json(path)?
+        } else {
+            serde_json::from_slice(&std::fs::read(path)?)?
+        };
         let snapshot_ms = snapshot_start.elapsed().as_millis();
         let snapshot_duplicates = dedupe_messages_by_id(&mut session.messages);
         let journal_path = session_journal_path_from_snapshot(path);
@@ -406,9 +414,12 @@ impl Session {
         let journal_entries = replay_stats.entries;
         let journal_ms = journal_start.elapsed().as_millis();
         let finalize_start = Instant::now();
-        session.refresh_agent_model_overrides()?;
+        if refresh_overrides {
+            session.refresh_agent_model_overrides()?;
+        }
         session.backfill_prompt_title();
         session.reset_persist_state(path.exists());
+        session.persist_state.store_key = Some(path.to_path_buf());
         session.reset_provider_messages_cache();
         session.mark_memory_profile_dirty();
         // Sessions written before tool screenshots were bounded (#1680) can
@@ -425,7 +436,7 @@ impl Session {
                 ],
             );
         }
-        if replay_stats.is_corrupt() {
+        if repair && replay_stats.is_corrupt() {
             session.schedule_checkpoint_after_corrupt_journal(&journal_path);
         }
         if snapshot_duplicates > 0 || dedupe.found_duplicates() {
@@ -491,8 +502,7 @@ impl Session {
     }
 
     pub fn load(session_id: &str) -> Result<Self> {
-        let path = session_path(session_id)?;
-        let mut session = Self::load_from_path(&path)?;
+        let mut session = super::SessionStore::configured()?.load(session_id)?;
         session.refresh_agent_model_overrides()?;
         Ok(session)
     }
@@ -501,6 +511,9 @@ impl Session {
     /// server startup when it still matches disk (see `session::prewarm`).
     /// Only for resume, which consumes the copy exactly once.
     pub fn load_for_resume(session_id: &str) -> Result<Self> {
+        if super::SessionBackend::configured()? != super::SessionBackend::Files {
+            return Self::load(session_id);
+        }
         if let Some(mut session) = super::prewarm::take(session_id) {
             session.refresh_agent_model_overrides()?;
             crate::logging::info(&format!(
@@ -518,6 +531,11 @@ impl Session {
     /// client can paint quickly while the server performs the authoritative
     /// session restore + history bootstrap.
     pub fn load_startup_stub(session_id: &str) -> Result<Self> {
+        if super::SessionBackend::configured()? != super::SessionBackend::Files {
+            let mut session = super::SessionStore::configured()?.load_startup_stub(session_id)?;
+            session.refresh_agent_model_overrides()?;
+            return Ok(session);
+        }
         let path = session_path(session_id)?;
         // `from_slice` over the whole file is several times faster than
         // `from_reader` (which pulls bytes one at a time through io::Read) on
@@ -534,6 +552,9 @@ impl Session {
     }
 
     pub fn load_for_remote_startup(session_id: &str) -> Result<Self> {
+        if super::SessionBackend::configured()? != super::SessionBackend::Files {
+            return Self::load(session_id);
+        }
         let path = session_path(session_id)?;
         let load_start = Instant::now();
         let snapshot_bytes = file_len_or_zero(&path);
@@ -612,11 +633,7 @@ impl Session {
     }
 
     fn save_inner(&mut self, force: bool) -> Result<()> {
-        // Shutdown waits for this guard so it cannot exit mid-checkpoint.
         let pre_start = Instant::now();
-        let _save_guard = SAVES_IN_FLIGHT
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let guard_ms = pre_start.elapsed().as_millis();
         self.refresh_agent_model_overrides()?;
         let overrides_ms = pre_start.elapsed().as_millis() - guard_ms;
@@ -638,10 +655,24 @@ impl Session {
             crate::logging::warn(&format!("Session {} not persisted: {}", self.id, block));
             return Ok(());
         }
-        self.updated_at = Utc::now();
-        let path = session_path(&self.id)?;
-        let journal_path = session_journal_path_from_snapshot(&path);
+        let store = super::SessionStore::configured()?;
+        let result = if force {
+            store.save_prepared(self)
+        } else {
+            store.save(self)
+        };
+        if result.is_ok() && self.persist_state.snapshot_exists {
+            if let Err(error) = crate::recent_session_index::upsert_session(self) {
+                crate::logging::warn(&format!(
+                    "Failed to update recent-session metadata for {}: {error}",
+                    self.id
+                ));
+            }
+        }
+        result
+    }
 
+    pub(super) fn should_persist(&self, force: bool) -> bool {
         // A newly opened panel contains only its hidden session-context message.
         // Do not turn that implementation detail into a transcript on disk. Once
         // the user (or a programmatic caller) adds a real conversation message,
@@ -671,9 +702,13 @@ impl Session {
             && !self.is_canary
             && !self.is_debug
         {
-            return Ok(());
+            return false;
         }
+        true
+    }
 
+    pub(super) fn save_file_at(&mut self, path: &Path) -> Result<()> {
+        let journal_path = session_journal_path_from_snapshot(path);
         let start = std::time::Instant::now();
         let snapshot_bytes_before = file_len_or_zero(&path);
         let journal_bytes_before = file_len_or_zero(&journal_path);
@@ -872,12 +907,6 @@ impl Session {
             fields.push(("error", crate::util::format_error_chain(error)));
             crate::logging::event_warn("SESSION_PERSISTENCE", fields);
         } else {
-            if let Err(error) = crate::recent_session_index::upsert_session(self) {
-                crate::logging::warn(&format!(
-                    "Failed to update recent-session metadata for {}: {error}",
-                    self.id
-                ));
-            }
             crate::logging::event_info("SESSION_PERSISTENCE", fields);
         }
         result

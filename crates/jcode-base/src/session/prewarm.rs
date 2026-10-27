@@ -118,6 +118,9 @@ pub fn sessions_owned_by(pid: u32) -> Vec<String> {
 
 /// Parse the given sessions in the background, largest first.
 pub fn spawn_prewarm(session_ids: Vec<String>) {
+    if super::SessionBackend::configured().ok() != Some(super::SessionBackend::Files) {
+        return;
+    }
     spawn_prewarm_with_min_bytes(session_ids, MIN_PREWARM_BYTES);
 }
 

@@ -1,4 +1,8 @@
-use super::{Session, SessionStatus, active_pids_dir, session_exists, session_path};
+#[cfg(test)]
+use super::session_path;
+use super::{
+    Session, SessionBackend, SessionStatus, SessionStore, active_pids_dir, session_exists,
+};
 use crate::id::extract_session_name;
 use crate::message::{ContentBlock, Role};
 use crate::storage;
@@ -8,6 +12,32 @@ use serde::Deserialize;
 use std::collections::HashSet;
 
 const RELEVANT_CRASH_GROUP_WINDOW_SECS: i64 = 60;
+
+fn stored_session_ids() -> Result<Vec<String>> {
+    if SessionBackend::configured()? != SessionBackend::Files {
+        return Ok(SessionStore::configured()?
+            .list()?
+            .into_iter()
+            .map(|row| row.id)
+            .collect());
+    }
+    let directory = storage::jcode_dir()?.join("sessions");
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+            && let Some(id) = path.file_stem().and_then(|id| id.to_str())
+        {
+            ids.push(id.to_owned());
+        }
+    }
+    Ok(ids)
+}
 
 /// Recover crashed sessions from the most relevant crash group (text-only).
 /// Returns new recovery session IDs (most recent first).
@@ -29,19 +59,10 @@ pub fn recover_crashed_sessions_by_ids(session_ids: &[String]) -> Result<Vec<Str
 }
 
 fn recover_crashed_sessions_for_allowed_ids(allowed_ids: &HashSet<String>) -> Result<Vec<String>> {
-    let sessions_dir = storage::jcode_dir()?.join("sessions");
-    if !sessions_dir.exists() {
-        return Ok(Vec::new());
-    }
-
     let mut recovered_parents: HashSet<String> = HashSet::new();
-    for entry in std::fs::read_dir(&sessions_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "json").unwrap_or(false)
-            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            && stem.starts_with("session_recovery_")
-            && let Ok(session) = Session::load_startup_stub(stem)
+    for id in stored_session_ids()? {
+        if id.starts_with("session_recovery_")
+            && let Ok(session) = Session::load_startup_stub(&id)
             && let Some(parent) = session.parent_id
         {
             recovered_parents.insert(parent);
@@ -66,19 +87,9 @@ fn recover_crashed_sessions_for_allowed_ids(allowed_ids: &HashSet<String>) -> Re
 }
 
 fn recover_crashed_sessions_matching(allowed_ids: Option<&HashSet<String>>) -> Result<Vec<String>> {
-    let sessions_dir = storage::jcode_dir()?.join("sessions");
-    if !sessions_dir.exists() {
-        return Ok(Vec::new());
-    }
-
     let mut sessions: Vec<Session> = Vec::new();
-    for entry in std::fs::read_dir(&sessions_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "json").unwrap_or(false)
-            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            && let Ok(mut session) = Session::load(stem)
-        {
+    for id in stored_session_ids()? {
+        if let Ok(mut session) = Session::load(&id) {
             if session.detect_crash() {
                 let _ = session.save();
             }
@@ -202,19 +213,9 @@ pub struct CrashedSessionsInfo {
 /// Returns info about crashed sessions within the crash window (60 seconds),
 /// excluding any that have already been recovered.
 pub fn detect_crashed_sessions() -> Result<Option<CrashedSessionsInfo>> {
-    let sessions_dir = storage::jcode_dir()?.join("sessions");
-    if !sessions_dir.exists() {
-        return Ok(None);
-    }
-
     let mut sessions: Vec<Session> = Vec::new();
-    for entry in std::fs::read_dir(&sessions_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "json").unwrap_or(false)
-            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            && let Ok(mut session) = Session::load(stem)
-        {
+    for id in stored_session_ids()? {
+        if let Ok(mut session) = Session::load(&id) {
             if session.detect_crash() {
                 let _ = session.save();
             }
@@ -412,6 +413,39 @@ fn had_streaming_marker(session_id: &str) -> bool {
 /// Legacy fallback: scan the full sessions directory.
 /// Used only on the first launch after upgrading to the active_pids system.
 fn find_crashed_legacy_scan() -> Vec<(String, String)> {
+    if SessionBackend::configured().ok() == Some(SessionBackend::Sqlite) {
+        let Ok(store) = SessionStore::configured() else {
+            return Vec::new();
+        };
+        let Ok(summaries) = store.list() else {
+            return Vec::new();
+        };
+        let recovered: HashSet<_> = summaries
+            .iter()
+            .filter(|row| row.id.starts_with("session_recovery_"))
+            .filter_map(|row| row.parent_id.as_deref())
+            .collect();
+        let cutoff = Utc::now() - Duration::hours(24);
+        let mut crashed: Vec<_> = summaries
+            .iter()
+            .filter(|row| matches!(row.status, SessionStatus::Crashed { .. }))
+            .filter(|row| !recovered.contains(row.id.as_str()))
+            .filter(|row| row.last_active_at.unwrap_or(row.updated_at) > cutoff)
+            .collect();
+        crashed.sort_by_key(|row| std::cmp::Reverse(row.updated_at));
+        return crashed
+            .into_iter()
+            .map(|row| {
+                let name = row
+                    .short_name
+                    .as_deref()
+                    .or_else(|| extract_session_name(&row.id))
+                    .unwrap_or(&row.id)
+                    .to_owned();
+                (row.id.clone(), name)
+            })
+            .collect();
+    }
     let sessions_dir = match storage::jcode_dir() {
         Ok(d) => d.join("sessions"),
         Err(_) => return Vec::new(),
@@ -600,7 +634,7 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
     // Resolution is not validation. Reading a multi-MB snapshot here repeats
     // startup metadata reads and server restore, and can trigger client-side
     // backup recovery. Leave corruption detection to the authoritative load.
-    if is_stem && session_path(name_or_id)?.is_file() {
+    if is_stem && session_exists(name_or_id) {
         return Ok(name_or_id.to_string());
     }
 
@@ -625,26 +659,17 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
     }
 
     // Otherwise, search for a session with matching short name or title.
-    let sessions_dir = storage::jcode_dir()?.join("sessions");
-    if !sessions_dir.exists() {
+    if SessionBackend::configured()? == SessionBackend::Files
+        && !storage::jcode_dir()?.join("sessions").exists()
+    {
         anyhow::bail!("No sessions found");
     }
-
     let normalized_query = normalize_resume_lookup_text(name_or_id);
     let mut exact_matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
     let mut title_matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
 
-    for entry in std::fs::read_dir(&sessions_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.extension().map(|e| e == "json").unwrap_or(false) {
-            continue;
-        }
-
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-
+    for id in stored_session_ids()? {
+        let stem = id.as_str();
         let short_name_matches =
             extract_session_name(stem).is_some_and(|short| short == name_or_id);
         if short_name_matches {
@@ -701,6 +726,64 @@ mod batch_crash_tests {
                 crate::env::remove_var("JCODE_HOME");
             }
         }
+    }
+
+    struct BackendGuard(Option<std::ffi::OsString>);
+
+    impl Drop for BackendGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.0 {
+                crate::env::set_var("JCODE_SESSION_BACKEND", value);
+            } else {
+                crate::env::remove_var("JCODE_SESSION_BACKEND");
+            }
+        }
+    }
+
+    #[test]
+    fn sqlite_only_session_name_lookup_and_crash_recovery() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir()?;
+        let _home = HomeGuard::set(home.path());
+        let _backend = BackendGuard(std::env::var_os("JCODE_SESSION_BACKEND"));
+        crate::env::set_var("JCODE_SESSION_BACKEND", "sqlite");
+        let mut session = Session::create_with_id(
+            "session_sqlite_recovery_1234567890123".into(),
+            None,
+            Some("Database-only recovery".into()),
+        );
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "Keep this message through recovery".into(),
+                cache_control: None,
+            }],
+        );
+        session.status = SessionStatus::Crashed {
+            message: Some("interrupted".into()),
+        };
+        session.save()?;
+        assert!(
+            !home
+                .path()
+                .join("sessions")
+                .join(format!("{}.json", session.id))
+                .exists()
+        );
+        assert_eq!(find_session_by_name_or_id(&session.id)?, session.id);
+        assert_eq!(
+            find_session_by_name_or_id("Database-only recovery")?,
+            session.id
+        );
+        let recovered = recover_crashed_sessions_by_ids(&[session.id.clone()])?;
+        assert_eq!(recovered.len(), 1);
+        let restored = Session::load(&recovered[0])?;
+        assert_eq!(restored.parent_id.as_deref(), Some(session.id.as_str()));
+        assert!(restored.messages.iter().flat_map(|message| &message.content).any(|block| {
+            matches!(block, ContentBlock::Text { text, .. } if text == "Keep this message through recovery")
+        }));
+        assert!(recover_crashed_sessions_by_ids(&[session.id])?.is_empty());
+        Ok(())
     }
 
     #[test]
