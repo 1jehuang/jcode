@@ -3727,10 +3727,7 @@ fn emit_ndjson_event(
     use crate::protocol::ServerEvent;
 
     match event {
-        ServerEvent::ReasoningDelta { text } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "reasoning_delta", "text": text }),
-        ),
+        ServerEvent::ReasoningDelta { .. } => write_json_line(stdout, &event),
         ServerEvent::TextDelta { text } => {
             state.text.push_str(&text);
             write_json_line(
@@ -3931,7 +3928,6 @@ fn emit_ndjson_event(
                 "retry_after_secs": retry_after_secs,
             }),
         ),
-        ServerEvent::Ack { .. } | ServerEvent::Done { .. } | ServerEvent::Pong { .. } => Ok(()),
         _ => Ok(()),
     }
 }
