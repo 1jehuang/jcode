@@ -174,16 +174,13 @@ fn print_machine(machine: &Machine, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(machine)?);
     } else {
+        let name_suffix = match &machine.name {
+            Some(name) => format!("  {name}"),
+            None => String::new(),
+        };
         println!(
             "{}  {}  expires {}{}",
-            machine.id,
-            machine.connection.state,
-            machine.expires_at,
-            machine
-                .name
-                .as_ref()
-                .map(|n| format!("  {n}"))
-                .unwrap_or_default()
+            machine.id, machine.connection.state, machine.expires_at, name_suffix
         );
     }
     Ok(())
@@ -244,7 +241,9 @@ pub(crate) fn run_cli(action: CloudEphemeralCommand) -> Result<()> {
             // Printed before I/O so an uncertain network outcome can be retried safely.
             eprintln!(
                 "[jcode cloud] request-id: {} (reuse with --request-id if interrupted)",
-                body["request_id"].as_str().unwrap()
+                body["request_id"]
+                    .as_str()
+                    .context("missing provisioning request ID")?
             );
             let machine: Machine =
                 cloud_managed::request_json("POST", "cloud/machines", Some(body))?;

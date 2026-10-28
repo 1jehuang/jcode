@@ -43,14 +43,18 @@ pub(super) fn run(target: &Target, yes: bool, dry_run: bool, json: bool) -> Resu
     }
     report["host"] = serde_json::Value::String(host.clone());
     if !dry_run {
-        let synced = environment::sync_saved(Path::new(&repo.root), target).is_ok();
+        let synced = match environment::sync_saved(Path::new(&repo.root), target) {
+            Ok(()) => true,
+            Err(_) => {
+                // Do not format private environment failures or retry the replacement.
+                step(
+                    "environment",
+                    "repository replaced, but saved environment requirements need attention; use cloud env push to retry",
+                );
+                false
+            }
+        };
         report["environment_synced"] = serde_json::Value::Bool(synced);
-        if !synced {
-            step(
-                "environment",
-                "repository replaced, but saved environment requirements need attention; use cloud env push to retry",
-            );
-        }
     }
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -71,18 +75,18 @@ pub(super) fn run(target: &Target, yes: bool, dry_run: bool, json: bool) -> Resu
     Ok(())
 }
 
-fn same_repository(path: &Path, root: &Path) -> bool {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    path.starts_with(&root) || root.starts_with(&path)
+fn same_repository(path: &Path, root: &Path) -> Result<bool> {
+    let path = resolved_path(path)?;
+    let root = resolved_path(root)?;
+    Ok(path.starts_with(&root) || root.starts_with(&path))
 }
 
 fn reject_lease(root: &Path, lease: &storage::SessionLease) -> Result<()> {
     if lease.is_here()
-        && lease
-            .repo_root
-            .as_deref()
-            .is_none_or(|p| same_repository(Path::new(p), root))
+        && match lease.repo_root.as_deref() {
+            Some(path) => same_repository(Path::new(path), root)?,
+            None => true,
+        }
     {
         bail!(
             "repository is owned by cloud session {}; return that session before replacing",
@@ -93,7 +97,10 @@ fn reject_lease(root: &Path, lease: &storage::SessionLease) -> Result<()> {
 }
 
 fn reject_active_session(root: &Path, id: &str, working_dir: Option<&str>) -> Result<()> {
-    if working_dir.is_none_or(|p| same_repository(Path::new(p), root)) {
+    if match working_dir {
+        Some(path) => same_repository(Path::new(path), root)?,
+        None => true,
+    } {
         bail!("repository may be in use by active cloud session {id}; stop it before replacing");
     }
     Ok(())
@@ -144,6 +151,27 @@ fn resolved_path(path: &Path) -> Result<PathBuf> {
     }
 }
 
+#[cfg(test)]
+mod path_error_tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn repository_comparison_propagates_symlink_loops() {
+        let temp = tempfile::tempdir().unwrap();
+        let loop_path = temp.path().join("loop");
+        std::os::unix::fs::symlink("loop", &loop_path).unwrap();
+        assert!(same_repository(&loop_path, temp.path()).is_err());
+        assert!(reject_active_session(temp.path(), "active", loop_path.to_str()).is_err());
+    }
+
+    #[test]
+    fn repository_comparison_resolves_expected_missing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(same_repository(&temp.path().join("absent/child"), temp.path()).unwrap());
+    }
+}
+
 fn validate_destination(root: &Path) -> Result<()> {
     if !root.is_absolute()
         || root.parent().is_none()
@@ -159,17 +187,22 @@ fn validate_destination(root: &Path) -> Result<()> {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 bail!("replacement destination must be a directory, not a symlink or file");
             }
-            if let Ok(metadata) = root.join(".git").symlink_metadata()
-                && (!metadata.is_dir() || metadata.file_type().is_symlink())
-            {
-                bail!("cannot replace a linked worktree or repository with external Git metadata");
+            match root.join(".git").symlink_metadata() {
+                Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+                    bail!(
+                        "cannot replace a linked worktree or repository with external Git metadata"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("cannot inspect repository metadata"),
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).context("cannot inspect replacement destination"),
     }
     let resolved = resolved_path(root)?;
-    for protected in [dirs::home_dir(), storage::jcode_dir().ok()]
+    for protected in [dirs::home_dir(), Some(storage::jcode_dir()?)]
         .into_iter()
         .flatten()
     {
@@ -184,7 +217,10 @@ fn install(repo: &RepoManifest, bundle: &Path, id: &str) -> Result<Option<PathBu
     let root = Path::new(&repo.root);
     validate_destination(root)?;
     reject_owners(root)?;
-    let parent = root.parent().unwrap();
+    let parent = root.parent().context("repository path has no parent")?;
+    let filename = root
+        .file_name()
+        .context("repository path has no filename")?;
     std::fs::create_dir_all(parent)?;
     // Keep the lock inode, even after unlocking, so concurrent callers cannot
     // lock different inodes. This lock also survives a receiver crash safely.
@@ -194,7 +230,7 @@ fn install(repo: &RepoManifest, bundle: &Path, id: &str) -> Result<Option<PathBu
         .write(true)
         .open(parent.join(format!(
             ".{}.jcode-replace.lock",
-            root.file_name().unwrap().to_string_lossy()
+            filename.to_string_lossy()
         )))?;
     lock.try_lock()
         .context("another replacement is already running for this checkout")?;
@@ -215,10 +251,15 @@ fn install(repo: &RepoManifest, bundle: &Path, id: &str) -> Result<Option<PathBu
     )?;
     validate_destination(root)?;
     reject_owners(root)?;
-    let backup = if root.symlink_metadata().is_ok() {
+    let exists = match root.symlink_metadata() {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("cannot inspect checkout before backup"),
+    };
+    let backup = if exists {
         let backup = parent.join(format!(
             "{}.jcode-backup-{}",
-            root.file_name().unwrap().to_string_lossy(),
+            filename.to_string_lossy(),
             uuid::Uuid::new_v4()
         ));
         std::fs::rename(root, &backup).context("preserve existing cloud checkout")?;

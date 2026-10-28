@@ -43,7 +43,7 @@ fn repository_root(path: &Path) -> Result<PathBuf> {
         "private state is not a project"
     );
     // No shell, hooks, or user-controlled commands are executed to resolve paths.
-    anyhow::ensure!(root.join(".git").exists(), "repository root required");
+    anyhow::ensure!(root.join(".git").try_exists()?, "repository root required");
     env::checked_path(&root, Path::new(".jcode/cloud-environment.json"))?;
     Ok(root)
 }
@@ -51,7 +51,7 @@ fn repository_root(path: &Path) -> Result<PathBuf> {
 fn current_root() -> Result<PathBuf> {
     let mut current = std::env::current_dir()?.canonicalize()?;
     loop {
-        if current.join(".git").exists() {
+        if current.join(".git").try_exists()? {
             return repository_root(&current);
         }
         anyhow::ensure!(current.pop(), "repository root required");
@@ -94,10 +94,14 @@ fn collect(root: &Path, request: &Request, source: Source) -> Result<Payload> {
                 vec![bytes]
             }
             Resource::EnvVar { name } => {
-                let value = std::env::var(name)
-                    .ok()
-                    .or_else(|| env::load_environment(root).ok()?.get(name).cloned())
-                    .context("variable unavailable")?;
+                let value = match std::env::var(name) {
+                    Ok(value) => value,
+                    Err(std::env::VarError::NotPresent) => env::load_environment(root)?
+                        .get(name)
+                        .cloned()
+                        .context("variable unavailable")?,
+                    Err(std::env::VarError::NotUnicode(_)) => bail!("variable encoding invalid"),
+                };
                 env::validate_environment_value(&value)?;
                 vec![value.into_bytes()]
             }
@@ -106,7 +110,10 @@ fn collect(root: &Path, request: &Request, source: Source) -> Result<Payload> {
                 let mut found = Vec::new();
                 for (slot, path) in env::credential_paths(name)?.iter().enumerate() {
                     let full = env::checked_path(&home, Path::new(path))?;
-                    if full.exists() {
+                    if full
+                        .try_exists()
+                        .context("cannot inspect credential availability")?
+                    {
                         let data = env::read_private(&home, Path::new(path))?;
                         append_entry(&mut entries, resource, slot, &data)?;
                         found.push(());
@@ -141,7 +148,8 @@ fn exchange_bounded(
 ) -> Result<Vec<u8>> {
     #[cfg(not(unix))]
     {
-        let _ = (command, bytes, timeout);
+        // Release the unused command and private input on unsupported platforms.
+        drop((command, bytes, timeout));
         bail!("private transport unsupported");
     }
     #[cfg(unix)]
@@ -233,12 +241,22 @@ fn exchange_bounded(
         if result.is_err() {
             if own_process_group {
                 unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                    if libc::kill(-(child.id() as i32), libc::SIGKILL) != 0
+                        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+                    {
+                        crate::logging::warn("private transport process group cleanup failed");
+                    }
                 }
             }
-            let _ = child.kill();
+            match child.kill() {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {}
+                Err(_) => crate::logging::warn("private transport process cleanup failed"),
+            }
         }
-        let _ = child.wait();
+        child
+            .wait()
+            .map_err(|_| anyhow::anyhow!("private transport reaping failed"))?;
         result
     }
 }
@@ -278,19 +296,23 @@ fn send(root: &Path, target: &Target, request: &Request, source: Source) -> Resu
     transmit(target, &host, &payload)
 }
 
-fn callback_target(host: String) -> Target {
-    Target {
+fn callback_target(host: String) -> Result<Target> {
+    let remote_binary = match std::env::var("JCODE_SSH_BINARY") {
+        Ok(binary) => Some(binary).filter(|binary| !binary.trim().is_empty()),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => bail!("remote binary encoding invalid"),
+    };
+    Ok(Target {
         host: Some(host),
-        remote_binary: std::env::var("JCODE_SSH_BINARY")
-            .ok()
-            .filter(|binary| !binary.trim().is_empty()),
+        remote_binary,
         transport: None,
-    }
+    })
 }
 
 fn fulfill(session: &str, request: Request) -> Result<Status> {
     anyhow::ensure!(
-        std::env::var("JCODE_CLOUD_ENV_SESSION").ok().as_deref() == Some(session),
+        std::env::var_os("JCODE_CLOUD_ENV_SESSION").as_deref()
+            == Some(std::ffi::OsStr::new(session)),
         "no handoff grant"
     );
     let host = std::env::var("JCODE_SSH_REMOTE").context("no target grant")?;
@@ -305,7 +327,7 @@ fn fulfill(session: &str, request: Request) -> Result<Status> {
     // superseded sessions cannot reuse an old authorization snapshot.
     let current = storage::read_session_lease(session).context("no lease")?;
     anyhow::ensure!(current == lease, "lease changed");
-    let target = callback_target(host);
+    let target = callback_target(host)?;
     send(
         &root,
         &target,
@@ -476,11 +498,18 @@ pub(crate) fn run_cli(action: super::super::args::CloudEnvCommand) -> Result<()>
             )?)?),
         }
     })();
-    // Errors are intentionally flattened, never printed, formatted or logged.
-    // Successful process exit lets callers parse the bounded status consistently.
-    let status = result.unwrap_or_else(|_| Status::rejected());
-    println!("{}", serde_json::to_string(&status)?);
-    Ok(())
+    // Never format the underlying error: parsing and validation may contain secrets.
+    // Preserve a bounded status on stdout while signaling failure to the caller.
+    match result {
+        Ok(status) => {
+            println!("{}", serde_json::to_string(&status)?);
+            Ok(())
+        }
+        Err(_) => {
+            println!("{}", serde_json::to_string(&Status::rejected())?);
+            bail!("private environment request rejected")
+        }
+    }
 }
 
 pub(super) fn sync_saved(root: &Path, target: &super::Target) -> Result<()> {
@@ -497,6 +526,35 @@ pub(super) fn sync_saved(root: &Path, target: &super::Target) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejected_cli_request_returns_redacted_failure() {
+        let error = run_cli(super::super::super::args::CloudEnvCommand::Push {
+            host: None,
+            request: "secret-invalid-request".into(),
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "private environment request rejected");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn callback_rejects_non_unicode_binary_without_leaking_it() {
+        use std::os::unix::ffi::OsStringExt;
+        let _lock = storage::lock_test_env();
+        let previous = std::env::var_os("JCODE_SSH_BINARY");
+        crate::env::set_var(
+            "JCODE_SSH_BINARY",
+            std::ffi::OsString::from_vec(b"secret\xff".to_vec()),
+        );
+        let result = callback_target("test-host".into());
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_SSH_BINARY", value),
+            None => crate::env::remove_var("JCODE_SSH_BINARY"),
+        }
+        let error = result.err().expect("invalid encoding must fail");
+        assert_eq!(error.to_string(), "remote binary encoding invalid");
+    }
+
     #[test]
     #[cfg(unix)]
     fn concurrent_workspace_receives_publish_once() {
@@ -687,7 +745,7 @@ mod tests {
         }
         let _restore = Restore(std::env::var_os("JCODE_SSH_BINARY"));
         crate::env::set_var("JCODE_SSH_BINARY", "/custom/remote-jcode");
-        let target = callback_target("test-host".into());
+        let target = callback_target("test-host".into()).unwrap();
         assert_eq!(
             target.remote_binary.as_deref(),
             Some("/custom/remote-jcode")
