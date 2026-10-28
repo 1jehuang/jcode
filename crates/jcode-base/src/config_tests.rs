@@ -420,6 +420,66 @@ fn test_env_override_swarm_model() {
 }
 
 #[test]
+fn swarm_model_selection_defaults_off_even_with_an_allowlist() {
+    let agents = Config::default().agents;
+    assert!(!agents.swarm_model_selection);
+    assert!(agents.swarm_model_allowlist.is_empty());
+    assert!(agents.validate_swarm_model_request(None).is_ok());
+    for model in [
+        "inherit",
+        "coordinator",
+        "",
+        "  ",
+        "claude-api:claude-opus-4-8",
+    ] {
+        assert!(agents.validate_swarm_model_request(Some(model)).is_err());
+    }
+    let cfg: Config =
+        toml::from_str("[agents]\nswarm_model_allowlist = [\"claude-api:claude-opus-4-8\"]\n")
+            .unwrap();
+    assert!(
+        cfg.agents
+            .validate_swarm_model_request(Some("claude-api:claude-opus-4-8"))
+            .is_err()
+    );
+}
+
+#[test]
+fn swarm_model_selection_requires_opt_in_and_exact_route_match() {
+    let cfg: Config = toml::from_str(
+        "[agents]\nswarm_model_selection = true\nswarm_model_allowlist = [\"claude:claude-opus-4-8\"]\n"
+    ).unwrap();
+    assert!(cfg.agents.validate_swarm_model_request(None).is_ok());
+    assert!(
+        cfg.agents
+            .validate_swarm_model_request(Some("claude:claude-opus-4-8"))
+            .is_ok()
+    );
+    for model in [
+        "claude-api:claude-opus-4-8",
+        "claude-opus-4-8",
+        "Claude:claude-opus-4-8",
+        "claude:claude-opus-4-8 ",
+        "inherit",
+        "",
+        "  ",
+    ] {
+        assert!(
+            cfg.agents
+                .validate_swarm_model_request(Some(model))
+                .is_err(),
+            "{model:?}"
+        );
+    }
+    let cfg: Config = toml::from_str("[agents]\nswarm_model_selection = true\n").unwrap();
+    assert!(
+        cfg.agents
+            .validate_swarm_model_request(Some("claude:claude-opus-4-8"))
+            .is_err()
+    );
+}
+
+#[test]
 fn swarm_effort_parses_from_toml_and_env_override() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_SWARM_EFFORT");

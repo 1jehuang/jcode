@@ -638,6 +638,10 @@ pub(super) async fn spawn_swarm_agent(
     soft_interrupt_queues: &SessionInterruptQueues,
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
+    let agents_config = &crate::config::config().agents;
+    agents_config
+        .validate_swarm_model_request(requested_model.as_deref())
+        .map_err(anyhow::Error::msg)?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
@@ -647,7 +651,6 @@ pub(super) async fn spawn_swarm_agent(
     // startup env (#405).
     let client_terminal_env =
         client_terminal_env_for_session(req_session_id, client_connections).await;
-    let agents_config = &crate::config::config().agents;
     let configured_swarm_model =
         session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);

@@ -1620,14 +1620,14 @@ fn format_swarm_model_list(
             out.push_str(&format!("Configured agents.swarm_model default: {pin}\n"));
         }
         _ => out.push_str(
-            "No agents.swarm_model default configured (workers inherit the coordinator's model unless model is passed).\n",
+            "No agents.swarm_model default configured (workers inherit the coordinator's model).\n",
         ),
     }
     if model_routes.is_empty() {
-        out.push_str("\nNo model routes reported. Omit model to use the configured default, or pass inherit to use the coordinator.");
+        out.push_str("\nNo model routes reported. Omit model to use the configured default.");
         return out;
     }
-    out.push_str("\nAvailable model routes (pass model with a bare model or route-pinned value to override the configured default):\n");
+    out.push_str("\nModel routes (informational only, overrides require agents.swarm_model_selection and an exact agents.swarm_model_allowlist entry):\n");
     for route in model_routes {
         let availability = if route.available {
             ""
@@ -1773,8 +1773,7 @@ struct CommunicateInput {
     /// threshold.
     #[serde(default)]
     tldr: Option<String>,
-    /// Per-worker model override for spawn and assignment-created workers.
-    /// Takes precedence over agents.swarm_model; see list_models for routes.
+    /// Optional model override, authorized by the user's opt-in and exact allowlist.
     #[serde(default)]
     model: Option<String>,
     /// Short human-readable label for a spawned agent shown in swarm UI.
@@ -1836,6 +1835,21 @@ fn canonical_swarm_action(action: &str) -> &str {
         "assign" => "assign_task",
         "kill" | "terminate" => "stop",
         _ => action,
+    }
+}
+
+fn apply_swarm_model_policy(schema: &mut Value, agents: &crate::config::AgentsConfig) {
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("swarm properties");
+    if !agents.swarm_model_selection || agents.swarm_model_allowlist.is_empty() {
+        properties.remove("model");
+    } else {
+        properties.insert("model".to_string(), json!({
+            "type": "string",
+            "enum": agents.swarm_model_allowlist,
+            "description": "Optional worker model. Only exact user-allowlisted routes are permitted. Omit to use the configured default."
+        }));
     }
 }
 
@@ -1919,10 +1933,6 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["visible", "headless", "inline", "auto"],
                     "description": "Omit to use the user's configured mode. Set only when the user asks for one."
-                },
-                "model": {
-                    "type": "string",
-                    "description": "Model for new workers, e.g. 'openai-api:gpt-5.6-luna'. 'inherit' uses yours. See list_models."
                 },
                 "session_ids": {
                     "type": "array",
@@ -2011,11 +2021,16 @@ impl Tool for CommunicateTool {
             }
         ]);
 
+        apply_swarm_model_policy(&mut schema, &crate::config::config().agents);
         schema
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: CommunicateInput = serde_json::from_value(input)?;
+        crate::config::config()
+            .agents
+            .validate_swarm_model_request(params.model.as_deref())
+            .map_err(anyhow::Error::msg)?;
 
         // `to_session` and `target_session` both name a single session id. Historically
         // different actions required different field names (e.g. `dm` wanted `to_session`

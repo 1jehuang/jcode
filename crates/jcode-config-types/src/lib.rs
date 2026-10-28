@@ -585,9 +585,12 @@ pub struct AgentsConfig {
     ///
     /// Leave unset (or use `"inherit"` / `"coordinator"`) to have spawned swarm
     /// agents inherit the spawning coordinator's model. Set to a concrete model
-    /// string to change the worker default. An explicit `model` in the swarm
-    /// tool overrides this default for newly spawned workers.
+    /// string to change the worker default.
     pub swarm_model: Option<String>,
+    /// Opt in to agent-selected worker models, restricted to the exact allowlist.
+    pub swarm_model_selection: bool,
+    /// Exact model/route strings the agent may request. Empty denies all overrides.
+    pub swarm_model_allowlist: Vec<String>,
     /// Reasoning effort for spawned swarm workers (`"low"`, `"medium"`,
     /// `"high"`, ...). The swarm tool does not let agents choose worker
     /// effort. Unset means `"low"`.
@@ -713,6 +716,8 @@ impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             swarm_model: None,
+            swarm_model_selection: false,
+            swarm_model_allowlist: Vec::new(),
             swarm_effort: None,
             swarm_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
@@ -740,6 +745,30 @@ impl Default for AgentsConfig {
 }
 
 impl AgentsConfig {
+    /// Validate an agent-supplied override before resolving any provider route.
+    /// Matching is exact: a bare model never authorizes another provider's route.
+    pub fn validate_swarm_model_request(&self, model: Option<&str>) -> Result<(), &'static str> {
+        let Some(model) = model else {
+            return Ok(());
+        };
+        if !self.swarm_model_selection {
+            return Err(
+                "Agent-selected swarm models are disabled. Omit model to use the user-configured default.",
+            );
+        }
+        if model.trim().is_empty()
+            || !self
+                .swarm_model_allowlist
+                .iter()
+                .any(|allowed| allowed == model)
+        {
+            return Err(
+                "Requested swarm model is not in agents.swarm_model_allowlist. Omit model to use the user-configured default.",
+            );
+        }
+        Ok(())
+    }
+
     /// Resolve swarm mode's root effort without allowing the orchestration
     /// sentinel to recurse into itself. Unknown values use the low-effort
     /// default without invalidating other settings.
