@@ -4,6 +4,64 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+/// Cooperative cancellation must not emit a normal completion notification.
+#[tokio::test]
+async fn cooperative_cancellation_does_not_publish_completion() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let info = manager
+        .spawn_with_notify_and_cancellation(
+            "test",
+            None,
+            "cancel-no-notify",
+            true,
+            true,
+            Some(cancel_tx),
+            move |_| async move {
+                cancel_rx.await?;
+                Ok(TaskResult::cancelled())
+            },
+        )
+        .await;
+    assert!(manager.cancel(&info.task_id).await?);
+    while let Ok(event) = events.try_recv() {
+        if let BusEvent::BackgroundTaskCompleted(completed) = event {
+            assert_ne!(completed.task_id, info.task_id);
+        }
+    }
+    Ok(())
+}
+
+/// Cancellation must propagate a task's cleanup failure to its caller.
+#[tokio::test]
+async fn cooperative_cancellation_reports_cleanup_failure() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let info = manager
+        .spawn_with_notify_and_cancellation(
+            "test",
+            None,
+            "cancel-error",
+            false,
+            false,
+            Some(cancel_tx),
+            move |_| async move {
+                cancel_rx.await?;
+                Err(anyhow!("process cleanup failed"))
+            },
+        )
+        .await;
+    let error = manager
+        .cancel(&info.task_id)
+        .await
+        .expect_err("cleanup must fail");
+    assert!(error.to_string().contains("process cleanup failed"));
+    Ok(())
+}
+
 struct SignalDrop(Option<tokio::sync::oneshot::Sender<()>>);
 
 impl Drop for SignalDrop {
