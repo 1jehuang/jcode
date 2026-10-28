@@ -42,10 +42,14 @@ anyhow = "1"
 libc = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+ignore = "0.4"
 dirs = "5"
 similar = "2"
 tempfile = "3"
 open = "5"
+
+# File watching support for @file index
+notify = "6"
 
 # OAuth / hashing helpers used by the login + account UI
 base64 = "0.22"
