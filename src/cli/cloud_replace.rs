@@ -566,17 +566,8 @@ mod tests {
 
     #[test]
     fn repository_ownership_includes_subdirectories_and_ancestors() {
-        assert!(same_repository(
-            Path::new("/repo/subdir"),
-            Path::new("/repo")
-        ));
-        assert!(same_repository(
-            Path::new("/repo"),
-            Path::new("/repo/subdir")
-        ));
-        assert!(!same_repository(
-            Path::new("/repo-other"),
-            Path::new("/repo")
-        ));
+        assert!(same_repository(Path::new("/repo/subdir"), Path::new("/repo")).unwrap());
+        assert!(same_repository(Path::new("/repo"), Path::new("/repo/subdir")).unwrap());
+        assert!(!same_repository(Path::new("/repo-other"), Path::new("/repo")).unwrap());
     }
 }
