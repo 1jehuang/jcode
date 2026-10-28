@@ -7,9 +7,7 @@ mod catalog;
 mod catalog_refresh;
 #[path = "model_catalog_service.rs"]
 mod catalog_service;
-use catalog_refresh::{
-    anthropic_model_cache_is_fresh, note_openai_model_catalog_refresh_attempt_for_scope,
-};
+use catalog_refresh::note_openai_model_catalog_refresh_attempt_for_scope;
 pub use catalog_refresh::{
     begin_anthropic_model_catalog_refresh, begin_anthropic_model_catalog_refresh_for_scope,
     begin_forced_anthropic_model_catalog_refresh_for_scope, begin_openai_model_catalog_refresh,
