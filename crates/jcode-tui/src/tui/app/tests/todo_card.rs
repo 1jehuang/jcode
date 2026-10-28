@@ -851,6 +851,19 @@ fn clipped_pinned_todo_card_does_not_toggle_below_chat_viewport() {
                 card,
                 "card outside chat: {card:?} {chat:?}"
             );
+            if expanded {
+                let remaining_chat_height = chat.bottom().saturating_sub(card.y);
+                let (band_lines, _) = crate::tui::ui::viewport::pinned_todo_band_lines(
+                    &app,
+                    chat.width,
+                    chat.height,
+                );
+                assert!(
+                    band_lines.len() > remaining_chat_height as usize,
+                    "expanded band should exceed the space below the sticky preview: {} lines vs {remaining_chat_height} rows ({chat:?}, {card:?})",
+                    band_lines.len()
+                );
+            }
             if let Some(control) = crate::tui::ui::viewport::pinned_todo_more_area() {
                 assert_eq!(control.intersection(card), control, "control outside card");
             } else {
