@@ -4207,6 +4207,7 @@ dependencies = [
  "tempfile",
  "terminal-colorsaurus",
  "tokio",
+ "unicode-segmentation",
  "unicode-width",
  "url",
  "urlencoding",
