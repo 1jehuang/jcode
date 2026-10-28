@@ -216,6 +216,16 @@ should_reject_concurrent_installer() {
   assert_equal 0.91.0 "$(cat "$BUILDS/current-version")"
 }
 
+should_reject_symlinked_store_lock() {
+  create_fixture symlinked-store-lock
+  ln -s "$BUILDS/.ghe-install.lock" "$BUILDS/.store.lock"
+  if run_install; then
+    echo "Expected rejection of a symlinked build store lock" >&2
+    exit 1
+  fi
+  assert_equal 0.91.0 "$(cat "$BUILDS/current-version")"
+}
+
 should_reject_launcher_inside_build_store() {
   create_fixture launcher-in-stable
   if HOME="$HOME_DIR" JCODE_INSTALL_DIR="$BUILDS/stable" \
@@ -265,7 +275,8 @@ should_reject_regular_launcher
 should_require_persistent_update_disable
 should_reject_modified_immutable_payload
 should_reject_concurrent_installer
+should_reject_symlinked_store_lock
 should_reject_launcher_inside_build_store
 should_reject_symlinked_current_directory
 should_not_pass_installer_lock_to_server
-printf 'install_ghe: 23 regression tests passed\n'
+printf 'install_ghe: 24 regression tests passed\n'
