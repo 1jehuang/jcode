@@ -13,7 +13,6 @@ mod client;
 mod manager;
 mod pending;
 pub mod oauth;
-mod pending;
 pub mod pool;
 mod protocol;
 mod remote;
