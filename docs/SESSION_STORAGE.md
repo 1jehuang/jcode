@@ -14,7 +14,7 @@ Any caller that still enumerates the `sessions` directory directly must be ident
 
 The file backend's checkpoint-specific environment-history trimming is unchanged. SQLite retains imported environment rows until the caller replaces that history. To compare steady-state writes with identical inputs, the benchmark checkpoints the 16 file samples once and mirrors their retained environment history into the SQLite samples before timing. The full corpus import equality check and untouched picker copies precede this preparation.
 
-This first backend does not add compression or an FTS index. SQLite text-search candidate loading is not a claim of indexed full-text search. The benchmark reports database, WAL, and shared-memory size rather than assuming SQLite is smaller. File-only SDK and auxiliary analytics consumers remain compatibility work until exercised against database-only sessions.
+The original backend benchmark below did not include compression or an FTS index. The optional [SQLite search follow-up](SESSION_SQLITE_SEARCH.md) adds explicit offline FTS preparation and bounded picker metadata queries. The original timings remain the pre-FTS baseline. File-only SDK and auxiliary analytics consumers remain compatibility work until exercised against database-only sessions.
 
 ## Usage and integration boundary
 
