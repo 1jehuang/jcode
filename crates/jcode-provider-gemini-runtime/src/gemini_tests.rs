@@ -781,9 +781,11 @@ fn build_tools_drops_a_required_array_left_empty_after_pruning() {
 }
 
 #[test]
-fn build_tools_keeps_required_when_the_object_declares_no_properties() {
-    // Without a local `properties` map there is nothing to validate against, and
-    // Gemini does not reject it, so leave such schemas untouched.
+fn build_tools_prunes_required_when_the_object_declares_no_properties() {
+    // The shared Gemini dialect prunes dangling requirements even without a
+    // local `properties` map, including nested array items. Keep this runtime
+    // integration assertion aligned with that policy. Valid requirements are
+    // preserved by build_tools_prunes_required_names_not_defined_in_the_same_object.
     let defs = vec![ToolDefinition {
         name: "passthrough".to_string(),
         description: "passthrough".to_string(),
@@ -796,7 +798,11 @@ fn build_tools_keeps_required_when_the_object_declares_no_properties() {
 
     let built = build_tools(&defs).expect("gemini tools");
     let parameters = &built[0].function_declarations[0].parameters;
-    assert_eq!(parameters["required"], json!(["anything"]));
+    assert!(
+        parameters.get("required").is_none(),
+        "requirements without declared properties must be pruned: {parameters}"
+    );
+    assert_eq!(parameters["type"], json!("object"));
 }
 
 #[test]
