@@ -143,6 +143,23 @@ fn hierarchy_rejects_malformed_structures() {
 }
 
 #[test]
+fn null_phases_is_treated_as_omitted() {
+    assert!(parse_todo_input(json!({"phases":null})).unwrap().todos.is_none());
+}
+
+#[test]
+fn null_phases_does_not_conflict_with_incremental_patch() {
+    let stored = json!([{"id":"a","content":"A","status":"pending","priority":"high"}]);
+    let patched = apply_todo_patch(
+        json!({"phases":null,"update":[{"id":"a","content":"changed"}]}),
+        || stored.clone(),
+    )
+    .unwrap();
+    let todos = parse_todo_input(patched).unwrap().todos.unwrap();
+    assert_eq!(todos[0].content, "changed");
+}
+
+#[test]
 fn hierarchy_patch_inherits_and_preserves_membership() {
     let stored = json!([{"id":"a","content":"A","status":"pending","priority":"high","stage":2,"group":"x"}]);
     let result = apply_todo_patch(
