@@ -436,7 +436,10 @@ async fn run_dependency_mixed_work_stays_actionable_and_scoped() {
     assert_eq!(count, 1);
     let message = run_actionable_poke_message(message, &todos, &actionable);
     assert!(message.contains("Actionable todos:\n- independent:"));
-    assert!(message.contains("Leave todos waiting"));
+    assert!(
+        !message.contains("- waiting:"),
+        "blocked work is not actionable"
+    );
     assert!(crate::todo::is_auto_poke_message(&message));
     let mut completed = dependency_todo("completed", &[&task.task_id]);
     completed.status = "completed".to_string();
@@ -1401,20 +1404,24 @@ async fn run_dependency_resumes_same_session_in_all_output_modes() {
             let mut run = std::pin::pin!(run_single_message_with_agent(
                 &mut agent, provider, "go", json, ndjson
             ));
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(200), &mut run)
-                    .await
-                    .is_err(),
-                "{mode} must remain alive while the dependency runs"
-            );
-            assert!(
-                !crate::background::global()
-                    .status(&task.task_id)
-                    .await
-                    .unwrap()
-                    .wake,
-                "{mode} should own continuation rather than scheduling a daemon wake"
-            );
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    tokio::select! {
+                        result = &mut run => panic!("{mode} finished before dependency completion: {result:?}"),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    }
+                    if !crate::background::global()
+                        .status(&task.task_id)
+                        .await
+                        .unwrap()
+                        .wake
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("CLI must take continuation ownership while dependency is running");
             finish.send(()).unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(5), &mut run)
                 .await
