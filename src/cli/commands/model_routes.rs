@@ -2,8 +2,6 @@
 
 use std::collections::BTreeSet;
 
-use super::*;
-
 pub(super) fn cli_api_method_display(raw: &str) -> String {
     crate::provider::ModelRouteApiMethod::parse(raw).display_label()
 }
