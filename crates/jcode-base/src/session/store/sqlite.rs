@@ -776,8 +776,11 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
     fn prepare_search_index(&self) -> Result<bool> {
+        self.prepare_search_index_mode(super::SessionSearchIndexMode::Positional)
+    }
+    fn prepare_search_index_mode(&self, mode: super::SessionSearchIndexMode) -> Result<bool> {
         let mut connection = self.connection()?;
-        super::sqlite_fts::migrate(&mut connection)?;
+        super::sqlite_fts::prepare(&mut connection, mode)?;
         Ok(true)
     }
     fn indexed_search_candidates(&self, query: &str) -> Result<Option<Vec<String>>> {

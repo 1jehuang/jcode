@@ -9,17 +9,18 @@ This is a separate change on top of the opt-in session-storage backend. It does 
 - No-query picker listing applies the visible/debug budgets and saved-session rules in SQL before fetching summary JSON. It reads metadata for rows that can appear, not transcript bodies or every summary in the discovery window.
 - SQLite commits already store changed rows without producing full JSON snapshots. JSON import/export remains the compatibility interface.
 
-FTS5 is an index, not an index-free search method. Building it takes time and storage, and maintaining it adds write work. Query latency must be measured separately from schema migration and initial indexing. The index retains trigram positions so quoted phrases can verify contiguous substrings without reading external transcript content. Existing bounded result scoring still loads matching sessions. Short and Unicode queries retain the existing Bloom/raw fallback rather than silently changing search semantics.
+FTS5 is an index, not an index-free search method. Building it takes time and storage, and maintaining it adds write work. Query latency must be measured separately from schema migration and initial indexing. Positional mode retains trigram positions so quoted phrases can verify contiguous substrings without reading external transcript content. Compact and column modes use indexed `LIKE` and verify candidates against external content. Existing bounded result scoring still loads matching sessions. Short and Unicode queries retain the existing Bloom/raw fallback rather than silently changing search semantics.
 
 ## Preparing the optional index
 
 Preparation is explicit, not part of opening the store, listing sessions, saving a turn, or searching. Stop writers against the target store first. The initial build holds a write transaction and can take many minutes on a multi-gigabyte corpus. Until preparation completes, searches use the existing fallback. A completed index is maintained transactionally by subsequent writes.
 
 ```sh
-JCODE_HOME=/path/to/offline/store cargo run -p jcode-base --example session_search_index
+JCODE_HOME=/path/to/offline/store cargo run -p jcode-base --example session_search_index -- compact
+# Alternative modes: column or positional (the default).
 ```
 
-The same operation is available as `SessionStore::prepare_search_index()`. Calling it again on a prepared store does not rebuild the index. Do not use a live store for benchmarking.
+The same operation is available as `SessionStore::prepare_search_index_mode(mode)`. `prepare_search_index()` selects positional mode for compatibility. Repeating the same mode does not rebuild the index. Changing modes explicitly rebuilds it in a transaction. Ordinary opens recognize all three modes without rebuilding. New indexes omit per-row token counts (`columnsize=0`). Do not use a live store for benchmarking.
 
 ## Validation contract
 
@@ -58,6 +59,48 @@ Initial positional index preparation took **1,237.8 seconds (20 minutes 38 secon
 On a separate copy, 21 metadata-only commits had a median of 13.3 ms before and 22.7 ms after indexing. The 21 append commits had medians of 16.6 ms and 15.0 ms. After-index maxima were 600.1 ms and 213.3 ms respectively. These small, non-paired mutation samples do not establish a write-throughput improvement. Reopened session values matched after every commit.
 
 Focused validation: 11 store tests, 28 search tests, and four SQLite picker tests passed. One pre-existing search benchmark test remained ignored. This is not a full-workspace test claim.
+
+## Index alternatives on the same sample
+
+`session_index_variants` compares real persisted rows from 64 size-quantile sessions: 12,651 rows, 75,824,139 payload bytes, and an 81,063,936-byte base database. Five sessions larger than 32 MiB were excluded from sampling. All variants use the same rows, SQLite 3.46.0, external content, WAL with FULL synchronization, and three query repeats. Modes run in fixed order, so this is screening evidence, not a randomized full-workload speed claim.
+
+| Variant | Additional index bytes | Build seconds | Absent ms | Substring ms | Same candidates for all six queries |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Scan | 0 | 0 | 105.2 | 162.5 | Yes |
+| B-tree on text | 90,255,360 | 1.0 | 103.9 | 157.6 | Yes |
+| Word FTS | 40,095,744 | 2.4 | 0.08 | 0.06 | **No** |
+| Compact trigram | 17,956,864 | 12.7 | 16.3 | 20.9 | Yes |
+| Column trigram | 44,380,160 | 24.4 | 13.4 | 24.0 | Yes |
+| Positional trigram | 167,825,408 | 19.0 | 0.81 | 0.44 | Yes |
+
+Word FTS omitted all eight substring-matching sessions and nine of the 62 short-query matches. Its lower times do not represent equivalent work. The B-tree did not help the leading-wildcard workload. Compact trigram used 55% less index space than word FTS and 89% less than positional trigram on this sample, while retaining the tested substring semantics. Positional remained faster for indexed candidate selection. Column mode was not a clear win over compact in these measurements.
+
+The example also records three small-row update commits per variant and validates read-back. Those samples are too small and order-dependent for a write-throughput conclusion. Aggregate measurements are in `docs/benchmarks/session-index-variants-2026-10-28.json`.
+
+```sh
+cargo run -p jcode-base --example session_index_variants -- SOURCE_DB NEW_OUTPUT_DIR PRIVATE_QUERIES_JSON
+```
+
+The source database is opened read-only. The output directory must not exist and contains private copied content. Only aggregate counts, sizes, timings, and comparison results are printed. No live configuration or session data is changed.
+
+## Compact versus positional on the full corpus
+
+The existing prepared copies of all 3,018 sessions occupy **4,710,825,984 bytes (compact)** and **11,010,162,688 bytes (positional)** after checkpointing. Compact saves 57% of total database space in these copies. These earlier-built indexes retain token-count tables, unlike the new sample's `columnsize=0` builds, so their sizes must not be extrapolated from the sample.
+
+Three alternating fresh-process runs through `SessionSearchTool::execute` produced identical result digests in all six categories:
+
+| Query category | Positional median ms | Compact median ms | Results |
+| --- | ---: | ---: | ---: |
+| Absent | 3,920.9 | 1,823.6 | 0 |
+| Selective | 3,455.6 | 6,551.5 | 8 |
+| Substring | 3,907.2 | 6,353.2 | 50 |
+| Multi-term | 4,016.7 | 8,836.2 | 50 |
+| Broad | 2,231.8 | 9,556.1 | 50 |
+| Short fallback | 2,679.1 | 3,135.7 | 50 |
+
+Timing variation was large: positional absent-query samples ranged from 164.7 to 15,540.5 ms. Do not infer that compact is faster for absent queries, or compare this run directly with earlier measurements under different contention. The useful result is output parity and a measured space/latency tradeoff: compact saves disk but generally does more work verifying candidates. The positional default is unchanged; compact and column remain explicit offline choices.
+
+The current changes passed 11 store tests and 28 search tests (one existing benchmark ignored), including compact/column mode switching, append visibility, truncation, and rejection of noncontiguous trigram false positives. The full-corpus public comparison is saved in `docs/benchmarks/session-compact-vs-positional-2026-10-28.json`. No live sessions, configuration, or installed binaries were changed.
 
 ## Reproducing search measurements
 

@@ -1,0 +1,319 @@
+{
+  "base_database_bytes": 81063936,
+  "excluded_session_size_over_bytes": 33554432,
+  "query_repeats": 3,
+  "sample_payload_bytes": 75824139,
+  "sample_rows": 12651,
+  "sample_sessions": 64,
+  "scope": "raw persisted-row candidate search, not full SessionSearchTool or picker",
+  "source_eligible_sessions": 3013,
+  "sqlite_version": "3.46.0",
+  "variants": [
+    {
+      "build_ms": 0.011642,
+      "database_bytes": 81063936,
+      "index_bytes": 0,
+      "mode": "scan",
+      "query": {
+        "absent": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 0,
+          "median_ms": 105.15816
+        },
+        "broad": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 64,
+          "median_ms": 115.097484
+        },
+        "multi_term": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 2,
+          "median_ms": 236.880818
+        },
+        "selective": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 1,
+          "median_ms": 90.145558
+        },
+        "short": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 62,
+          "median_ms": 51.872901999999996
+        },
+        "substring": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 8,
+          "median_ms": 162.485524
+        }
+      },
+      "small_row_update_median_ms": 5.898542
+    },
+    {
+      "build_ms": 961.4023550000001,
+      "database_bytes": 171319296,
+      "index_bytes": 90255360,
+      "mode": "btree",
+      "query": {
+        "absent": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 0,
+          "median_ms": 103.947681
+        },
+        "broad": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 64,
+          "median_ms": 113.093393
+        },
+        "multi_term": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 2,
+          "median_ms": 213.85808
+        },
+        "selective": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 1,
+          "median_ms": 83.078784
+        },
+        "short": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 62,
+          "median_ms": 48.868705999999996
+        },
+        "substring": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 8,
+          "median_ms": 157.626246
+        }
+      },
+      "small_row_update_median_ms": 17.937739
+    },
+    {
+      "build_ms": 2383.212642,
+      "database_bytes": 121159680,
+      "index_bytes": 40095744,
+      "mode": "word",
+      "query": {
+        "absent": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 0,
+          "median_ms": 0.07705899999999999
+        },
+        "broad": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 64,
+          "median_ms": 3.376423
+        },
+        "multi_term": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 2,
+          "median_ms": 0.251495
+        },
+        "selective": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 1,
+          "median_ms": 0.067893
+        },
+        "short": {
+          "equal_to_raw": false,
+          "false_negatives": 9,
+          "false_positives": 0,
+          "matched_sessions": 53,
+          "median_ms": 1.6202860000000001
+        },
+        "substring": {
+          "equal_to_raw": false,
+          "false_negatives": 8,
+          "false_positives": 0,
+          "matched_sessions": 0,
+          "median_ms": 0.058352
+        }
+      },
+      "small_row_update_median_ms": 19.944706
+    },
+    {
+      "build_ms": 12670.759327000002,
+      "database_bytes": 99020800,
+      "index_bytes": 17956864,
+      "mode": "trigram_none",
+      "query": {
+        "absent": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 0,
+          "median_ms": 16.298115
+        },
+        "broad": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 64,
+          "median_ms": 43.299877
+        },
+        "multi_term": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 2,
+          "median_ms": 44.230767
+        },
+        "selective": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 1,
+          "median_ms": 15.335077
+        },
+        "short": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 62,
+          "median_ms": 43.937279000000004
+        },
+        "substring": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 8,
+          "median_ms": 20.93537
+        }
+      },
+      "small_row_update_median_ms": 11.952288
+    },
+    {
+      "build_ms": 24355.550241,
+      "database_bytes": 125444096,
+      "index_bytes": 44380160,
+      "mode": "trigram_column",
+      "query": {
+        "absent": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 0,
+          "median_ms": 13.353438
+        },
+        "broad": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 64,
+          "median_ms": 35.251494
+        },
+        "multi_term": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 2,
+          "median_ms": 32.675381
+        },
+        "selective": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 1,
+          "median_ms": 10.913025
+        },
+        "short": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 62,
+          "median_ms": 34.471982999999994
+        },
+        "substring": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 8,
+          "median_ms": 23.965929
+        }
+      },
+      "small_row_update_median_ms": 2.758759
+    },
+    {
+      "build_ms": 19041.862027,
+      "database_bytes": 248889344,
+      "index_bytes": 167825408,
+      "mode": "trigram_full",
+      "query": {
+        "absent": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 0,
+          "median_ms": 0.812982
+        },
+        "broad": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 64,
+          "median_ms": 5.816147
+        },
+        "multi_term": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 2,
+          "median_ms": 1.5760830000000001
+        },
+        "selective": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 1,
+          "median_ms": 0.307431
+        },
+        "short": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 62,
+          "median_ms": 29.845691000000002
+        },
+        "substring": {
+          "equal_to_raw": true,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "matched_sessions": 8,
+          "median_ms": 0.435383
+        }
+      },
+      "small_row_update_median_ms": 2.3072340000000002
+    }
+  ]
+}

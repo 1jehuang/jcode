@@ -23,25 +23,51 @@ fn normalized(column: &str) -> String {
 }
 
 pub(super) fn ready(connection: &Connection) -> Result<bool> {
-    let count: i64 = connection.query_row(
+    Ok(index_mode(connection)?.is_some())
+}
+
+fn index_mode(connection: &Connection) -> Result<Option<super::SessionSearchIndexMode>> {
+    for (detail, mode) in [
+        ("none", super::SessionSearchIndexMode::Compact),
+        ("column", super::SessionSearchIndexMode::Column),
+        ("full", super::SessionSearchIndexMode::Positional),
+    ] {
+        let count: i64 = connection.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='table'
              AND name IN ('sessions_search_fts','session_messages_search_fts','session_replay_search_fts',
                           'session_environment_search_fts','session_memory_search_fts','session_compaction_search_fts')
-             AND sql LIKE '%detail=full%'",
-            [], |row| row.get(0),
+             AND sql LIKE ?1",
+            [format!("%detail={detail}%")], |row| row.get(0),
         )?;
-    Ok(count == SOURCES.len() as i64)
+        if count == SOURCES.len() as i64 {
+            return Ok(Some(mode));
+        }
+    }
+    Ok(None)
 }
 
+#[cfg(test)]
 pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
-    if ready(connection)? {
+    prepare(connection, super::SessionSearchIndexMode::Positional)
+}
+
+pub(super) fn prepare(
+    connection: &mut Connection,
+    mode: super::SessionSearchIndexMode,
+) -> Result<()> {
+    if index_mode(connection)? == Some(mode) {
         return Ok(());
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if ready(&transaction)? {
+    if index_mode(&transaction)? == Some(mode) {
         transaction.commit()?;
         return Ok(());
     }
+    let detail = match mode {
+        super::SessionSearchIndexMode::Compact => "none",
+        super::SessionSearchIndexMode::Column => "column",
+        super::SessionSearchIndexMode::Positional => "full",
+    };
     for (table, column, _) in SOURCES {
         transaction.execute_batch(&format!(
             "DROP TRIGGER IF EXISTS {table}_search_fts_insert;
@@ -57,7 +83,7 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
         let old_text = normalized(&format!("old.{column}"));
         transaction.execute_batch(&format!(
             "CREATE VIEW {view} AS SELECT rowid AS rowid,{text} AS text FROM {table};
-             CREATE VIRTUAL TABLE {index} USING fts5(text,content='{view}',content_rowid='rowid',tokenize='trigram',detail=full);
+             CREATE VIRTUAL TABLE {index} USING fts5(text,content='{view}',content_rowid='rowid',tokenize='trigram',detail={detail},columnsize=0);
              CREATE TRIGGER {index}_insert AFTER INSERT ON {table} BEGIN
                INSERT INTO {index}(rowid,text) VALUES(new.rowid,{new_text});
              END;
@@ -96,18 +122,31 @@ pub(super) fn candidates(connection: &Connection, query: &str) -> Result<Vec<Str
     {
         return all_ids();
     }
-    // Positional trigram phrases verify contiguous substrings using postings,
-    // without reading external transcript content before bounded scoring.
+    // Positional phrases verify substrings from postings. Compact indexes use
+    // indexed LIKE, which verifies candidates against external content.
     let mut selects = Vec::new();
     let mut parameters: Vec<rusqlite::types::Value> = Vec::new();
+    let positional = index_mode(connection)? == Some(super::SessionSearchIndexMode::Positional);
     for (term_number, term) in profile.terms.iter().enumerate() {
-        parameters.push(format!("\"{term}\"").into());
+        parameters.push(
+            if positional {
+                format!("\"{term}\"")
+            } else {
+                format!("%{term}%")
+            }
+            .into(),
+        );
         let match_parameter = parameters.len();
         for (table, _, id_column) in SOURCES {
+            let predicate = if positional {
+                format!("{table}_search_fts MATCH ?{match_parameter}")
+            } else {
+                format!("{table}_search_fts.text LIKE ?{match_parameter}")
+            };
             selects.push(format!(
                 "SELECT source.{id_column} AS id,{term_number} AS term
                  FROM {table}_search_fts JOIN {table} AS source ON source.rowid={table}_search_fts.rowid
-                 WHERE {table}_search_fts MATCH ?{match_parameter}"
+                 WHERE {predicate}"
             ));
         }
     }

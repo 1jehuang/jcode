@@ -76,8 +76,8 @@ pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
 pub use storage_paths::{session_exists, session_journal_path, session_path};
 pub use store::{
-    SessionBackend, SessionListOptions, SessionSearchCandidate, SessionStorage, SessionStore,
-    SessionSummary,
+    SessionBackend, SessionListOptions, SessionSearchCandidate, SessionSearchIndexMode,
+    SessionStorage, SessionStore, SessionSummary,
 };
 pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 

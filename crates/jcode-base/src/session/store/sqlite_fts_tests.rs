@@ -11,7 +11,6 @@ fn text(value: &str) -> Vec<ContentBlock> {
 }
 
 fn hits(store: &SessionStore, query: &str) -> Result<Vec<String>> {
-    assert!(store.prepare_search_index()?);
     Ok(store
         .indexed_search_candidates(query)?
         .expect("SQLite index"))
@@ -37,6 +36,7 @@ fn sqlite_fts_tracks_public_commits_and_transaction_rollback() -> Result<()> {
         0,
         "ordinary commits must not build the search index"
     );
+    assert!(store.prepare_search_index()?);
     for query in [
         "firstneedle",
         "servabil",
@@ -122,6 +122,23 @@ fn sqlite_fts_tracks_public_commits_and_transaction_rollback() -> Result<()> {
         )?;
     }
     assert!(!root.path().join("sessions/indexed-session.json").exists());
+    for mode in [
+        super::super::SessionSearchIndexMode::Compact,
+        super::super::SessionSearchIndexMode::Column,
+    ] {
+        assert!(store.prepare_search_index_mode(mode)?);
+        assert_eq!(hits(&store, "servabil")?, vec![session.id.clone()]);
+        assert!(hits(&store, "abcde")?.is_empty());
+        session.add_message(Role::User, text("compactmutationneedle"));
+        store.save(&mut session)?;
+        assert_eq!(
+            hits(&store, "compactmutationneedle")?,
+            vec![session.id.clone()]
+        );
+        session.replace_messages(vec![session.messages[0].clone()]);
+        store.save(&mut session)?;
+        assert!(hits(&store, "compactmutationneedle")?.is_empty());
+    }
     Ok(())
 }
 
@@ -132,6 +149,7 @@ fn sqlite_fts_migration_rebuilds_existing_content() -> Result<()> {
     let mut session = Session::create_with_id("migration-session".into(), None, None);
     session.add_message(Role::User, text("migrationneedle"));
     store.save(&mut session)?;
+    assert!(store.prepare_search_index()?);
     assert_eq!(hits(&store, "migrationneedle")?, vec![session.id.clone()]);
     drop(store);
     {
@@ -166,6 +184,7 @@ fn sqlite_fts_migration_rebuilds_existing_content() -> Result<()> {
         connection.execute_batch("ALTER TABLE memory_hold RENAME TO session_memory;")?;
     }
     let reopened = SessionStore::open(root.path(), SessionBackend::Sqlite)?;
+    assert!(reopened.prepare_search_index()?);
     assert_eq!(hits(&reopened, "migrationneedle")?, vec![session.id]);
     Ok(())
 }

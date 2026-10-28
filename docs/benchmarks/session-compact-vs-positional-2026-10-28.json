@@ -1,0 +1,207 @@
+{
+  "repetitions": 3,
+  "order": "alternating fresh processes",
+  "filesystem_cache": "warm; no global eviction",
+  "exhaustive": false,
+  "queries": {
+    "absent": {
+      "results_equal": true,
+      "before": {
+        "search": {
+          "median_ms": 3920.881019,
+          "min_ms": 164.727716,
+          "max_ms": 15540.478272
+        },
+        "wall": {
+          "median_ms": 3935.507690999657,
+          "min_ms": 169.78801399818622,
+          "max_ms": 15577.628609000385
+        },
+        "result_counts": [
+          0
+        ]
+      },
+      "after": {
+        "search": {
+          "median_ms": 1823.647463,
+          "min_ms": 1092.550221,
+          "max_ms": 11422.920532999999
+        },
+        "wall": {
+          "median_ms": 1845.9254250010417,
+          "min_ms": 1098.1589059992984,
+          "max_ms": 11440.920463999646
+        },
+        "result_counts": [
+          0
+        ]
+      }
+    },
+    "selective": {
+      "results_equal": true,
+      "before": {
+        "search": {
+          "median_ms": 3455.635894,
+          "min_ms": 2808.635699,
+          "max_ms": 5314.829235
+        },
+        "wall": {
+          "median_ms": 3476.7936739990546,
+          "min_ms": 2830.9587179974187,
+          "max_ms": 5329.984842999693
+        },
+        "result_counts": [
+          8
+        ]
+      },
+      "after": {
+        "search": {
+          "median_ms": 6551.452241,
+          "min_ms": 3425.314255,
+          "max_ms": 7271.07553
+        },
+        "wall": {
+          "median_ms": 6586.606207001751,
+          "min_ms": 3439.9029260021052,
+          "max_ms": 7284.702630000538
+        },
+        "result_counts": [
+          8
+        ]
+      }
+    },
+    "substring": {
+      "results_equal": true,
+      "before": {
+        "search": {
+          "median_ms": 3907.162832,
+          "min_ms": 3348.503812,
+          "max_ms": 12369.523976
+        },
+        "wall": {
+          "median_ms": 3926.2336720021267,
+          "min_ms": 3361.923931999627,
+          "max_ms": 12401.104273001692
+        },
+        "result_counts": [
+          50
+        ]
+      },
+      "after": {
+        "search": {
+          "median_ms": 6353.159374999999,
+          "min_ms": 6034.052105,
+          "max_ms": 9594.319155000001
+        },
+        "wall": {
+          "median_ms": 6375.309266000841,
+          "min_ms": 6049.816353999631,
+          "max_ms": 9618.688983999164
+        },
+        "result_counts": [
+          50
+        ]
+      }
+    },
+    "multi_term": {
+      "results_equal": true,
+      "before": {
+        "search": {
+          "median_ms": 4016.695095,
+          "min_ms": 3903.8567300000004,
+          "max_ms": 7018.30494
+        },
+        "wall": {
+          "median_ms": 4027.77077599967,
+          "min_ms": 3914.400003999617,
+          "max_ms": 7028.881074998935
+        },
+        "result_counts": [
+          50
+        ]
+      },
+      "after": {
+        "search": {
+          "median_ms": 8836.187560999999,
+          "min_ms": 8742.966966999998,
+          "max_ms": 11449.00899
+        },
+        "wall": {
+          "median_ms": 8846.62993099846,
+          "min_ms": 8754.64870200085,
+          "max_ms": 11465.856274000544
+        },
+        "result_counts": [
+          50
+        ]
+      }
+    },
+    "broad": {
+      "results_equal": true,
+      "before": {
+        "search": {
+          "median_ms": 2231.792968,
+          "min_ms": 2064.1262039999997,
+          "max_ms": 16527.092557
+        },
+        "wall": {
+          "median_ms": 2241.91547800001,
+          "min_ms": 2076.735327998904,
+          "max_ms": 16534.725012003037
+        },
+        "result_counts": [
+          50
+        ]
+      },
+      "after": {
+        "search": {
+          "median_ms": 9556.09398,
+          "min_ms": 7566.907058,
+          "max_ms": 12362.690456999999
+        },
+        "wall": {
+          "median_ms": 9569.946053001331,
+          "min_ms": 7576.9771890009,
+          "max_ms": 12378.741201002413
+        },
+        "result_counts": [
+          50
+        ]
+      }
+    },
+    "short": {
+      "results_equal": true,
+      "before": {
+        "search": {
+          "median_ms": 2679.058826,
+          "min_ms": 2164.1406,
+          "max_ms": 2898.815442
+        },
+        "wall": {
+          "median_ms": 2706.975846002024,
+          "min_ms": 2178.007422000519,
+          "max_ms": 2919.3489459976263
+        },
+        "result_counts": [
+          50
+        ]
+      },
+      "after": {
+        "search": {
+          "median_ms": 3135.651924,
+          "min_ms": 2746.636116,
+          "max_ms": 3159.0871589999997
+        },
+        "wall": {
+          "median_ms": 3155.0071210003807,
+          "min_ms": 2770.652618000895,
+          "max_ms": 3184.1123729973333
+        },
+        "result_counts": [
+          50
+        ]
+      }
+    }
+  },
+  "all_results_equal": true
+}

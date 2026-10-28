@@ -19,6 +19,14 @@ pub enum SessionBackend {
     Sqlite,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionSearchIndexMode {
+    Compact,
+    Column,
+    #[default]
+    Positional,
+}
+
 impl SessionBackend {
     pub fn configured() -> Result<Self> {
         match std::env::var("JCODE_SESSION_BACKEND") {
@@ -294,6 +302,9 @@ pub trait SessionStorage: Send + Sync {
     fn prepare_search_index(&self) -> Result<bool> {
         Ok(false)
     }
+    fn prepare_search_index_mode(&self, _mode: SessionSearchIndexMode) -> Result<bool> {
+        self.prepare_search_index()
+    }
     /// Native indexed candidates, or None when no suitable index is ready.
     fn indexed_search_candidates(&self, _query: &str) -> Result<Option<Vec<String>>> {
         Ok(None)
@@ -422,6 +433,9 @@ impl SessionStore {
     }
     pub fn prepare_search_index(&self) -> Result<bool> {
         self.storage.prepare_search_index()
+    }
+    pub fn prepare_search_index_mode(&self, mode: SessionSearchIndexMode) -> Result<bool> {
+        self.storage.prepare_search_index_mode(mode)
     }
     pub fn search_text(&self, id: &str) -> Result<String> {
         validate_id(id)?;
