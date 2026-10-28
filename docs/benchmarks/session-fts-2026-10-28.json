@@ -36,6 +36,11 @@
     "substring": {"before_median_ms": 1357.598946, "after_median_ms": 2347.388668, "results_equal": false, "before_count": 16, "after_count": 50},
     "multi_term": {"before_median_ms": 2842.719784, "after_median_ms": 2305.226513, "results_equal": false, "before_count": 50, "after_count": 50}
   },
+  "candidate_audit": {
+    "method": "Read-only baseline Bloom cache and FTS candidates compared with raw persisted text; supplemental to public-tool checks",
+    "substring": {"raw_matches": 491, "bloom_candidates": 45, "fts_candidates": 491, "bloom_false_negatives": 475, "bloom_false_positives": 29, "fts_false_negatives": 0, "fts_false_positives": 0},
+    "multi_term": {"raw_matches": 224, "bloom_candidates": 209, "fts_candidates": 224, "bloom_false_negatives": 35, "bloom_false_positives": 20, "fts_false_negatives": 0, "fts_false_positives": 0}
+  },
   "all_indexed_results_equal": false,
   "exhaustive": {
     "repetitions": 3,
