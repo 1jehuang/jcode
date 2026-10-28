@@ -259,8 +259,16 @@ class PreviewWorkflowTests(unittest.TestCase):
         self.assertIn('JCODE_BUILD_SEMVER: v1.0.0-preview.${{ github.run_number }}', workflow)
         self.assertEqual(workflow.count('ref: ${{ github.sha }}'), 3)
         self.assertIn('grep -F "$JCODE_BUILD_SEMVER"', workflow)
-        self.assertIn('bash scripts/build_linux_compat.sh dist', workflow)
-        self.assertIn('RUSTUP_TOOLCHAIN=nightly justrust build --local --locked -Z build-std=std,panic_abort', workflow)
+        self.assertIn('bash scripts/build_preview_linux_hosted.sh', workflow)
+        self.assertIn('bash scripts/install_justrust_hosted_ci.sh', workflow)
+        self.assertIn('toolchain: 1.99.0', workflow)
+        self.assertIn('bash scripts/package_preview_linux_hosted.sh', workflow)
+        self.assertLess(workflow.index('bash scripts/build_preview_linux_hosted.sh'),
+                        workflow.index('bash scripts/package_preview_linux_hosted.sh'))
+        self.assertIn('JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}', workflow)
+        self.assertEqual(workflow.count('            hosted: true'), 2)
+        self.assertIn('CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"', workflow)
+        self.assertIn('CARGO_INCREMENTAL: "0"', workflow)
         self.assertNotIn('continue-on-error:', workflow)
         for forbidden in ('quick-release', 'npm ', 'brew ', 'DEPLOY_KEY', 'latest.json', 'push origin', 'secrets.PAT'):
             self.assertNotIn(forbidden, workflow)
@@ -270,6 +278,21 @@ class PreviewWorkflowTests(unittest.TestCase):
         self.assertIn('needs: publish', workflow)
         self.assertIn('gh workflow run discord-release.yml', workflow)
         self.assertNotIn('gh workflow run release.yml', workflow)
+
+    def test_hosted_linux_credentials_are_scoped_to_build_step(self):
+        workflow = (ROOT / ".github/workflows/preview.yml").read_text()
+        hosted = workflow.split("      - name: Build Linux preview on hosted justrust\n", 1)[1]
+        hosted = hosted.split("      - name:", 1)[0]
+        self.assertIn("if: matrix.hosted == true", hosted)
+        self.assertIn("secrets.JUSTRUST_API_KEY", hosted)
+        self.assertEqual(workflow.count("secrets.JUSTRUST_API_KEY"), 1)
+        native = workflow.split("      - name: Build native preview\n", 1)[1]
+        native = native.split("      - name:", 1)[0]
+        self.assertIn("matrix.hosted != true", native)
+        self.assertNotIn("aarch64-unknown-linux-gnu", native)
+        self.assertNotIn("secrets.", native)
+        cache = workflow.split("      - uses: Swatinem/rust-cache@v2\n", 1)[1]
+        self.assertTrue(cache.startswith("        if: matrix.hosted != true\n"))
 
     def test_native_build_preserves_empty_and_nonempty_options(self):
         workflow = (ROOT / ".github/workflows/preview.yml").read_text()
@@ -296,7 +319,7 @@ class PreviewWorkflowTests(unittest.TestCase):
     def test_windows_build_uses_native_shell_and_propagates_failure(self):
         workflow = (ROOT / ".github/workflows/preview.yml").read_text()
         native = workflow.split("      - name: Build native preview\n", 1)[1]
-        self.assertIn("if: matrix.compat != true && runner.os != 'Windows'",
+        self.assertIn("if: matrix.hosted != true && runner.os != 'Windows'",
                       native.split("        run: |", 1)[0])
         windows = workflow.split(
             "      - name: Build Windows preview with MSVC environment\n", 1)[1]
