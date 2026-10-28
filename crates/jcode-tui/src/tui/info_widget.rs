@@ -1815,9 +1815,9 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
 
 #[path = "info_widget_cache.rs"]
 mod cache_render;
-use cache_render::render_kv_cache_widget;
 #[cfg(test)]
 use cache_render::render_kv_cache_summary_line;
+use cache_render::render_kv_cache_widget;
 
 /// Render ambient mode status widget
 fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
