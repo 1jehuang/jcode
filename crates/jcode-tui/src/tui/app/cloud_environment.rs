@@ -363,11 +363,10 @@ impl App {
             if live.load(Ordering::SeqCst)
                 && remaining(&session).is_some()
                 && tokio::time::Instant::now() < deadline
+                && let Some(output) = result
             {
-                if let Some(output) = result {
-                    reply(call_id, output, None);
-                    return;
-                }
+                reply(call_id, output, None);
+                return;
             }
             reply(
                 call_id,

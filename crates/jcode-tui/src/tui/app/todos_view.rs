@@ -579,10 +579,11 @@ fn advance_todo_agent_elapsed(
         &mut agent.age_secs,
         &mut agent.activity_age_secs,
         &mut agent.wait_age_secs,
-    ] {
-        if let Some(age) = age {
-            *age = age.saturating_add(elapsed.as_secs());
-        }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *age = age.saturating_add(elapsed.as_secs());
     }
 }
 
@@ -826,8 +827,10 @@ mod tests {
 
     #[test]
     fn shortcut_changes_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent::default();
-        agent.shortcut = Some(1);
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            shortcut: Some(1),
+            ..Default::default()
+        };
         let before = hash_todo_card_agents(&[agent.clone()]);
         agent.shortcut = Some(0);
         assert_ne!(before, hash_todo_card_agents(&[agent]));
@@ -835,8 +838,10 @@ mod tests {
 
     #[test]
     fn worker_item_status_changes_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent::default();
-        agent.todo_statuses = vec!["pending".into(), "in_progress".into()];
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            todo_statuses: vec!["pending".into(), "in_progress".into()],
+            ..Default::default()
+        };
         let before = hash_todo_card_agents(&[agent.clone()]);
         agent.todo_statuses.swap(0, 1);
         assert_ne!(before, hash_todo_card_agents(&[agent]));

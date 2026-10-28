@@ -1,3 +1,7 @@
+/// A names-only catalog (what the server sends when the fully-routed frame is
+/// oversized) leaves placeholder routes in place. The detailed catalog that
+/// follows carries the same model names, so the no-op fast path must still
+/// recognize it as a change and let the real routes land.
 #[test]
 fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
     with_temp_jcode_home(|| {

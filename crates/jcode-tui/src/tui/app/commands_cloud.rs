@@ -706,7 +706,7 @@ fn show_cloud_failure(
     app.push_display_message(DisplayMessage::error(format_cloud_failure(
         command, details,
     )));
-    app.set_status_notice(&format!(
+    app.set_status_notice(format!(
         "Cloud failed: {}",
         cloud_failure_reason(&cloud_failure_details(details))
     ));
@@ -818,10 +818,9 @@ fn record_cloud_problem(command: &str, session_id: &str, exit: Option<i32>, stde
         .create(true)
         .append(true)
         .open(dir.join("cloud-problems.jsonl"))
+        && let Err(error) = writeln!(file, "{record}")
     {
-        if let Err(error) = writeln!(file, "{record}") {
-            crate::logging::warn(&format!("Cannot write cloud problem log: {error}"));
-        }
+        crate::logging::warn(&format!("Cannot write cloud problem log: {error}"));
     }
     crate::logging::warn(&format!(
         "cloud problem: {command} failed: {}",
@@ -918,7 +917,7 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
             };
             app.push_display_message(DisplayMessage::system(text));
             if !dry_run {
-                let host = report["host"].as_str().or_else(|| match &job.command {
+                let host = report["host"].as_str().or(match &job.command {
                     CloudCommand::Replace { host, .. } => host.as_deref(),
                     _ => None,
                 });

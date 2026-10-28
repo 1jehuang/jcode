@@ -1193,8 +1193,4 @@ fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
     });
 }
 
-/// A names-only catalog (what the server sends when the fully-routed frame is
-/// oversized) leaves placeholder routes in place. The detailed catalog that
-/// follows carries the same model names, so the no-op fast path must still
-/// recognize it as a change and let the real routes land.
 include!("detailed_catalog.rs");

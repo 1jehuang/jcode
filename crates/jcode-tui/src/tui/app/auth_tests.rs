@@ -399,11 +399,11 @@ fn muse_subscription_canonical_success_publishes_untagged_event_and_updates_loca
         // Exactly one canonical untagged event must be published
         let mut canonical_event = None;
         while let Ok(event) = bus_rx.try_recv() {
-            if let crate::bus::BusEvent::LoginCompleted(login) = event {
-                if login.provider == "muse-subscription" {
-                    canonical_event = Some(login);
-                    break;
-                }
+            if let crate::bus::BusEvent::LoginCompleted(login) = event
+                && login.provider == "muse-subscription"
+            {
+                canonical_event = Some(login);
+                break;
             }
         }
         let canonical = canonical_event.expect("canonical untagged event must be published");
@@ -650,11 +650,11 @@ fn muse_subscription_old_success_arriving_after_new_attempt_leaves_new_pending_i
         // Canonical untagged event must be published for the daemon
         let mut canonical_event = None;
         while let Ok(event) = bus_rx.try_recv() {
-            if let crate::bus::BusEvent::LoginCompleted(login) = event {
-                if login.provider == "muse-subscription" {
-                    canonical_event = Some(login);
-                    break;
-                }
+            if let crate::bus::BusEvent::LoginCompleted(login) = event
+                && login.provider == "muse-subscription"
+            {
+                canonical_event = Some(login);
+                break;
             }
         }
         let canonical = canonical_event.expect("canonical untagged event must be published");

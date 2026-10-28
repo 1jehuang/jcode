@@ -8,9 +8,10 @@ use crate::tui::app as app_mod;
 use crate::tui::app::PendingRemoteRewindNotice;
 use crate::tui::core;
 
+#[cfg(test)]
+pub(in crate::tui::app) use update::reload_stale_remote_server_before_update;
 pub(in crate::tui::app) use update::{
-    handle_remote_char_input, handle_remote_update_command,
-    reload_stale_remote_server_before_update, send_interleave_now,
+    handle_remote_char_input, handle_remote_update_command, send_interleave_now,
 };
 
 /// Step the remote session's speed tier (Standard -> Fast -> Ultrafast).
