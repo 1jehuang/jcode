@@ -373,10 +373,18 @@ pub fn load_manifest(root: &Path) -> Result<Manifest> {
 }
 /// An advisory cross-process lock serializes read-modify-write of our private
 /// maps. The lock inode is never replaced, unlike the atomically published data.
+#[cfg(unix)]
+static PRIVATE_LOCK_OPEN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::fd::{AsRawFd, FromRawFd};
+        // Serialize same-process first-use creation. flock below still provides
+        // cross-process exclusion; this guard only protects the open/create path.
+        let open_guard = PRIVATE_LOCK_OPEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (dir, name) = open_parent(base, relative, true)?;
         let fd = unsafe {
             libc::openat(
@@ -390,8 +398,11 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
                 0o600,
             )
         };
-        ensure!(fd >= 0, "cannot lock private state");
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error()).context("cannot open private state lock");
+        }
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        drop(open_guard);
         ensure!(file.metadata()?.is_file(), "invalid private lock");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {

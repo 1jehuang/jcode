@@ -238,7 +238,7 @@ impl Tool for McpSearchTool {
                     if server_filter.is_some_and(|wanted| wanted != server.as_str()) {
                         return None;
                     }
-                    let legacy_name = dispatch_name(&server, &tool.name);
+                    let legacy_name = dispatch_name(server, &tool.name);
                     let allowed = self
                         .registry
                         .as_ref()
@@ -247,7 +247,7 @@ impl Tool for McpSearchTool {
                             || {
                                 super::session_mcp_alias_is_allowed(
                                     &ctx.session_id,
-                                    &name,
+                                    name,
                                     &legacy_name,
                                     "mcp_search",
                                 )
@@ -255,9 +255,9 @@ impl Tool for McpSearchTool {
                             |r| {
                                 r.mcp_dispatch_is_allowed(
                                     &ctx.session_id,
-                                    &server,
+                                    server,
                                     &tool.name,
-                                    &name,
+                                    name,
                                     "mcp_search",
                                 )
                             },
@@ -268,8 +268,8 @@ impl Tool for McpSearchTool {
                     let description = tool.description.as_deref().unwrap_or_default();
                     let rank = match_rank(
                         &query_terms,
-                        &name,
-                        &server,
+                        name,
+                        server,
                         &tool.name,
                         description,
                         any_word,

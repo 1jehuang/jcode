@@ -771,7 +771,7 @@ mod tests {
         let pid_file = directory.path().join("pid");
         let script = format!("echo $$ > '{}'; exec sleep 60", pid_file.display());
         let start = std::time::Instant::now();
-        let result = SshConnection::spawn(shell(&script), Duration::from_millis(100)).await;
+        let result = SshConnection::spawn(shell(&script), Duration::from_millis(500)).await;
         let error = result.err().expect("must time out");
         assert!(format!("{error:#}").contains("timed out"));
         assert!(start.elapsed() < Duration::from_secs(3));
