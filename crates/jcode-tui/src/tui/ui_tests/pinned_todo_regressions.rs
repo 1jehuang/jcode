@@ -95,7 +95,7 @@ fn justrust_status_is_below_todos_and_never_wraps() {
 }
 
 #[test]
-fn pinned_todos_share_top_band_with_swarm_only_on_wide_terminals() {
+fn pinned_todos_do_not_duplicate_passive_swarm_gallery_at_any_width() {
     let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
         let member = crate::protocol::SwarmMemberStatus {
@@ -126,21 +126,9 @@ fn pinned_todos_share_top_band_with_swarm_only_on_wide_terminals() {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert_eq!(
-                text.contains("placement-worker"),
-                width >= 120,
-                "{width}: {text}"
-            );
+            assert!(!text.contains("placement-worker"), "{width}: {text}");
             assert!(lines.iter().all(|line| line.width() <= width as usize));
-            if width >= 120 {
-                let row = lines
-                    .iter()
-                    .find(|line| line.to_string().contains("placement-worker"))
-                    .unwrap();
-                let text = row.to_string();
-                let prefix = text.split("placement-worker").next().unwrap();
-                assert!(unicode_width::UnicodeWidthStr::width(prefix) >= width as usize / 2);
-            }
+            assert!(text.contains("Pinned regression task"), "{width}: {text}");
         }
         clear_flicker_frame_history_for_tests();
         let mut terminal = Terminal::new(TestBackend::new(160, 36)).unwrap();
@@ -148,7 +136,8 @@ fn pinned_todos_share_top_band_with_swarm_only_on_wide_terminals() {
             .draw(|frame| crate::tui::ui::draw(frame, &state))
             .unwrap();
         let text = terminal_text(&terminal);
-        assert_eq!(text.matches("placement-worker").count(), 1, "{text}");
+        assert!(!text.contains("placement-worker"), "{text}");
+        assert_eq!(text.matches("Pinned regression task").count(), 1, "{text}");
     });
 }
 

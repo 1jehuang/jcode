@@ -626,7 +626,10 @@ fn render_system_message_drops_emoji_variation_selectors() {
     let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let text: String = lines.iter().map(extract_line_text).collect();
 
-    assert!(text.contains("⚠ KV cache miss"), "got: {text}");
+    assert!(
+        text.contains("336K KV cache miss · harness: prefix changed"),
+        "got: {text}"
+    );
     assert!(!text.contains('\u{FE0F}'), "VS16 must not reach the buffer");
 }
 

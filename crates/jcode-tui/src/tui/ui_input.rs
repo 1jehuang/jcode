@@ -1031,7 +1031,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                         Style::default().fg(dim_color()),
                     ));
                 }
-                for label in app
+                if let Some(label) = app
                     .upstream_provider()
                     .map(|provider| format!("via {provider}"))
                 {
