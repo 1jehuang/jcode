@@ -67,7 +67,7 @@
     "crates/jcode-provider-openrouter-runtime/src/lib.rs": 2931,
     "crates/jcode-render-core/src/math.rs": 1235,
     "crates/jcode-sdk/src/client.rs": 1938,
-    "crates/jcode-setup-hints/src/lib.rs": 2660,
+    "crates/jcode-setup-hints/src/lib.rs": 2665,
     "crates/jcode-telemetry-core/src/lib.rs": 2775,
     "crates/jcode-terminal-launch/src/lib.rs": 1700,
     "crates/jcode-tui-core/src/keybind.rs": 1235,

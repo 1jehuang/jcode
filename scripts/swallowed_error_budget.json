@@ -1,7 +1,7 @@
 {
-  "total": 3961,
+  "total": 3962,
   "totals_by_pattern": {
-    "dot_ok": 1553,
+    "dot_ok": 1554,
     "let_underscore": 1428,
     "unwrap_or_default": 980
   },
@@ -1842,7 +1842,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-setup-hints/src/macos_terminal.rs": {
-      "dot_ok": 5,
+      "dot_ok": 6,
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
