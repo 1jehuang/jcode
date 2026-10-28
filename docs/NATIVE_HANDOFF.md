@@ -175,3 +175,20 @@ provenance checks and `--version`, `--help`, and `run --help` smoke checks from
 basic launch/help behavior, **not full integration coverage or hosted ARM/Linux
 cross-compilation**. Signing was skipped; nothing was notarized or published.
 Later signing-hardening and ARM-feature changes are not covered by this run.
+
+### Apple signing validation follow-up
+
+Run `40617593094`, attempt 2, completed the native producer and consumer on
+October 28, 2026. The protected signing job successfully imported the dedicated
+PKCS#12 identity, then failed with `The specified item could not be found in the
+keychain` before a signature or notarization result was produced. This is not
+successful signing acceptance.
+
+The signing script now adds its temporary keychain to the user search list while
+preserving existing keychains, and restores the original list before deleting
+the temporary keychain on both success and failure. Exact fingerprint selection,
+Developer ID chain verification, Team ID checks, and signed-runtime smoke remain
+mandatory. Fixture tests cover paths containing spaces, restoration after a bad
+chain, and refusal to sign if search-list setup fails. Actual Apple acceptance
+requires a new exact-source workflow run, not a failed-job-only rerun against an
+older attempt's artifact.
