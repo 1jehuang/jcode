@@ -444,13 +444,12 @@ pub(super) fn draw_messages(
     } else {
         0u16
     };
-    let pinned_todo_area = Rect {
-        x: text_render_area.x,
-        y: render_area.y.saturating_add(prompt_preview_lines),
-        width: text_render_area.width,
-        height: pinned_todo_band.len().min(u16::MAX as usize) as u16,
-    }
-    .intersection(text_render_area);
+    let pinned_todo_area = super::viewport_pinned_todo::clipped_band_area(
+        render_area,
+        text_render_area,
+        prompt_preview_lines,
+        pinned_todo_band.len(),
+    );
     set_pinned_todo_more_area(
         pinned_todo_more_line
             .filter(|&line| line < pinned_todo_area.height as usize)
@@ -1543,7 +1542,9 @@ pub(crate) fn set_pinned_todo_more_area_for_test(area: Option<Rect>) {
 }
 
 pub(crate) fn pinned_todo_more_area() -> Option<Rect> {
-    PINNED_TODO_MORE_AREA.lock().ok().and_then(|area| *area)
+    *PINNED_TODO_MORE_AREA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn set_pinned_todo_card_area(area: Option<Rect>) {
@@ -1563,7 +1564,9 @@ pub(crate) fn clear_pinned_todo_click_areas() {
 }
 
 pub(crate) fn pinned_todo_card_area() -> Option<Rect> {
-    PINNED_TODO_CARD_AREA.lock().ok().and_then(|area| *area)
+    *PINNED_TODO_CARD_AREA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn compute_prompt_preview_line_count(

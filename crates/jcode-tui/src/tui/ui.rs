@@ -94,6 +94,8 @@ pub(crate) mod tools_ui;
 mod transitions;
 #[path = "ui_viewport.rs"]
 pub(crate) mod viewport;
+#[path = "ui_viewport_pinned_todo.rs"]
+mod viewport_pinned_todo;
 use crate::tui::mermaid;
 #[cfg(test)]
 pub(crate) use box_utils::truncate_line_to_width;
