@@ -111,7 +111,7 @@ jobs:
         env:
           JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
       - name: Build native preview
-        if: matrix.compat != true
+        if: matrix.compat != true && runner.os != 'Windows'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -133,6 +133,23 @@ jobs:
             fi
             justrust build --local --locked --release --target "$TARGET" -p jcode --bin jcode "$@"
           fi
+      - name: Build Windows preview with MSVC environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          EXTRA_ARGS: ${{ matrix.cargo_args }}
+          JUSTRUST_DISABLE: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Git Bash prepends its Unix link.exe ahead of the MSVC linker.
+          # PowerShell preserves the developer-command-prompt PATH ordering.
+          $extraArgs = @()
+          if ($env:EXTRA_ARGS) {
+            $extraArgs = $env:EXTRA_ARGS -split '\s+'
+          }
+          & justrust build --local --locked --release --target $env:TARGET -p jcode --bin jcode @extraArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package native binary
         if: matrix.compat != true
         shell: bash
