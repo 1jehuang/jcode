@@ -231,27 +231,62 @@ impl Tool for McpSearchTool {
 
         let names = crate::mcp::dispatch_names(&catalog);
         let rank_pass = |any_word: bool| -> Vec<(MatchRank, McpSearchResult)> {
-        catalog
-            .clone()
-            .into_iter()
-            .zip(names.clone())
-            .filter_map(|((server, tool), name)| {
-                if server_filter.is_some_and(|wanted| wanted != server) {
-                    return None;
-                }
-                let legacy_name = dispatch_name(&server, &tool.name);
-                let allowed = self
-                    .registry
-                    .as_ref()
-                    .and_then(|r| r.upgrade())
-                    .map_or_else(
-                        || {
-                            super::session_mcp_alias_is_allowed(
-                                &ctx.session_id,
-                                &name,
-                                &legacy_name,
-                                "mcp_search",
-                            )
+            catalog
+                .iter()
+                .zip(names.iter())
+                .filter_map(|((server, tool), name)| {
+                    if server_filter.is_some_and(|wanted| wanted != server.as_str()) {
+                        return None;
+                    }
+                    let legacy_name = dispatch_name(&server, &tool.name);
+                    let allowed = self
+                        .registry
+                        .as_ref()
+                        .and_then(|r| r.upgrade())
+                        .map_or_else(
+                            || {
+                                super::session_mcp_alias_is_allowed(
+                                    &ctx.session_id,
+                                    &name,
+                                    &legacy_name,
+                                    "mcp_search",
+                                )
+                            },
+                            |r| {
+                                r.mcp_dispatch_is_allowed(
+                                    &ctx.session_id,
+                                    &server,
+                                    &tool.name,
+                                    &name,
+                                    "mcp_search",
+                                )
+                            },
+                        );
+                    if !allowed {
+                        return None;
+                    }
+                    let description = tool.description.as_deref().unwrap_or_default();
+                    let rank = match_rank(
+                        &query_terms,
+                        &name,
+                        &server,
+                        &tool.name,
+                        description,
+                        any_word,
+                    )?;
+                    Some((
+                        rank,
+                        McpSearchResult {
+                            name: name.clone(),
+                            server: server.clone(),
+                            tool: tool.name.clone(),
+                            description: tool
+                                .description
+                                .as_deref()
+                                .unwrap_or("MCP tool")
+                                .trim()
+                                .to_string(),
+                            input_schema: tool.input_schema.clone(),
                         },
                         |r| {
                             r.mcp_dispatch_is_allowed(
