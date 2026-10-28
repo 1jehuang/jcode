@@ -222,6 +222,48 @@ fn macos_edit_and_rewind_preserve_xattrs_and_detect_external_conflicts() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn new_file_group_uses_effective_group_unless_parent_is_setgid() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let regular_dir = work.path().join("regular");
+    let setgid_dir = work.path().join("setgid");
+    fs::create_dir(&regular_dir).unwrap();
+    fs::create_dir(&setgid_dir).unwrap();
+    fs::set_permissions(&setgid_dir, fs::Permissions::from_mode(0o2770)).unwrap();
+    let regular_metadata = fs::metadata(&regular_dir).unwrap();
+    let setgid_metadata = fs::metadata(&setgid_dir).unwrap();
+    let effective_gid = unsafe { libc::getegid() };
+
+    assert_eq!(new_file_gid(Some(&regular_metadata)), effective_gid);
+    assert_eq!(new_file_gid(Some(&setgid_metadata)), setgid_metadata.gid());
+    assert_eq!(new_file_gid(None), effective_gid);
+
+    let path = regular_dir.join("new-file");
+    checkpoint("new-file-group", 0, "create").unwrap();
+    mutate("new-file-group", &path, Some(b"created")).unwrap();
+    assert_eq!(fs::metadata(path).unwrap().gid(), effective_gid);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unsupported_xattr_errors_are_distinguished_from_other_failures() {
+    assert!(xattrs_unsupported(&std::io::Error::from_raw_os_error(
+        libc::ENOTSUP
+    )));
+    assert!(xattrs_unsupported(&std::io::Error::from_raw_os_error(
+        libc::EOPNOTSUPP
+    )));
+    assert!(!xattrs_unsupported(&std::io::Error::from_raw_os_error(
+        libc::EACCES
+    )));
+    assert!(!xattrs_unsupported(&std::io::Error::from_raw_os_error(
+        libc::EIO
+    )));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn tracked_edit_and_rewind_preserve_unprivileged_xattrs_and_group() {
     use std::os::unix::fs::MetadataExt;
     let _env = crate::storage::lock_test_env();

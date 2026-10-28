@@ -286,10 +286,22 @@ fn read_xattrs(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
     let size = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
-    ensure!(size >= 0, "Could not list file extended attributes");
+    if size < 0 {
+        let error = std::io::Error::last_os_error();
+        if xattrs_unsupported(&error) {
+            return Ok(BTreeMap::new());
+        }
+        return Err(error).context("Could not list file extended attributes");
+    }
     let mut names = vec![0u8; size as usize];
     let got = unsafe { libc::llistxattr(c_path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
-    ensure!(got >= 0, "Could not read file extended attribute names");
+    if got < 0 {
+        let error = std::io::Error::last_os_error();
+        if xattrs_unsupported(&error) {
+            return Ok(BTreeMap::new());
+        }
+        return Err(error).context("Could not read file extended attribute names");
+    }
     names.truncate(got as usize);
     let mut attrs = BTreeMap::new();
     for name in names
@@ -314,6 +326,26 @@ fn read_xattrs(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
         attrs.insert(String::from_utf8(name.to_vec())?, value);
     }
     Ok(attrs)
+}
+
+#[cfg(target_os = "linux")]
+fn xattrs_unsupported(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP))
+}
+
+#[cfg(unix)]
+fn new_file_gid(parent: Option<&fs::Metadata>) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    parent.map_or_else(
+        || unsafe { libc::getegid() },
+        |metadata| {
+            if metadata.mode() & libc::S_ISGID as u32 != 0 {
+                metadata.gid()
+            } else {
+                unsafe { libc::getegid() }
+            }
+        },
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -421,7 +453,13 @@ fn write_xattrs(path: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
                 0,
             )
         };
-        ensure!(result == 0, "Could not restore extended attribute");
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if xattrs_unsupported(&error) {
+                return Ok(());
+            }
+            return Err(error).context("Could not restore extended attribute");
+        }
     }
     Ok(())
 }
@@ -1075,11 +1113,10 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
             #[cfg(unix)]
             {
                 Some(before.metadata.clone().unwrap_or_else(|| {
-                    use std::os::unix::fs::MetadataExt;
                     let parent = path.parent().and_then(|parent| fs::metadata(parent).ok());
                     FileMetadata {
                         uid: unsafe { libc::geteuid() },
-                        gid: parent.map_or_else(|| unsafe { libc::getegid() }, |meta| meta.gid()),
+                        gid: new_file_gid(parent.as_ref()),
                         xattrs: BTreeMap::new(),
                     }
                 }))
