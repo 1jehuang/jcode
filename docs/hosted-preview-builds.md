@@ -23,6 +23,35 @@ Linux ARM64 must retain rebuilt standard libraries and emulated TLS, default
 features, architecture validation and native ARM64 version execution before
 publication. Cross-compilation alone is not native runtime acceptance.
 
+## ARM caller and native runtime gate
+
+The ARM hosted matrix entry runs on x86 `ubuntu-24.04`, matching the x86
+hosted tenant machine. In workflow run `40682883949`, the caller nightly fix
+succeeded, but pinned justrust's `remote_build::ensure_remote_justrust` then
+failed on the ARM-caller to x86-host path by attempting to install an unpublished
+crates version. This workflow routes around that client limitation without
+changing justrust or its reviewed source pin. The managed compiler selection,
+rebuilt ARM standard libraries, emulated TLS and ELF/glibc ABI checks still run
+through `build_preview_linux_hosted.sh` unchanged.
+
+The x86 caller only copies and archives the ARM executable. It must not execute
+it. After all six matrix archives upload, `native-arm-runtime` runs on
+`ubuntu-24.04-arm` and downloads `preview-jcode-linux-aarch64` from the same
+workflow run. `verify_preview_arm_runtime.py` accepts exactly the one executable
+`jcode-linux-aarch64` archive member, rejects links, unsafe paths and non-AArch64
+ELF files, then runs those exact extracted bytes. It requires the explicit
+preview version identity and successful `cloud receive`, `credentials`,
+`router-credentials` and `cancel-return` help checks, all with updates and
+self-development disabled. No hosted key is exposed to the runtime job.
+
+`publish` depends on this native job as well as `build` and `quiet-and-ci`.
+The native gate never rebuilds, repackages or uploads a replacement archive.
+Publication downloads the same immutable ARM upload alongside the other five
+archives. Quiet-period, exact-source CI, current-head recheck, Discord dispatch
+and all six archive names/layouts remain unchanged. Offline contracts exercise
+these dependencies and failure paths. A successful live workflow run remains
+required for end-to-end deployment acceptance of this routing change.
+
 ## Executed acceptance, October 28, 2026
 
 The exact source bootstrap completed in 42.35 seconds (task `9326036828`),
@@ -39,9 +68,9 @@ Both release helpers were then executed using that exact bootstrapped client:
 The preview override was `v1.0.0-preview.42`. Both artifacts retained honest
 source snapshots, which differed because of a concurrent coordinator commit.
 The x86 binary executed with the expected preview version. ARM64 inspection
-verified embedded preview metadata, not native execution. The workflow retains
-native ARM64 execution before packaging. No local application compilation
-fallback was used.
+verified embedded preview metadata, not native execution. The workflow now
+requires native ARM64 execution of the exact uploaded archive before publication.
+No local application compilation fallback was used.
 
 The separate portable packaging script passed actual baseline-container runtime
 acceptance (task `748242iynq`, 12.5 seconds) and wrapper-plus-payload archive

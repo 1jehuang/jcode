@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Preview publication safety and workflow regression tests, no network writes."""
+import io
 import json
+import struct
+import tarfile
 import os
 import subprocess
 import textwrap
@@ -12,6 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import preview_release as preview
+import verify_preview_arm_runtime as arm_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 40
@@ -243,6 +247,96 @@ class PreviewChangeNotesTests(unittest.TestCase):
                        [{"total_commits": 1, "commits": []}])
 
 
+class ArmArchiveRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.archive = Path(directory.name) / "arm.tar.gz"
+        binary = bytearray(64)
+        binary[:7] = b"\x7fELF\x02\x01\x01"
+        struct.pack_into("<HH", binary, 16, 3, 183)
+        self.binary = bytes(binary)
+        self.make_archive()
+        for attribute, value in (("system", "Linux"), ("machine", "aarch64")):
+            mocked = patch.object(arm_runtime.platform, attribute, return_value=value)
+            mocked.start()
+            self.addCleanup(mocked.stop)
+
+    def make_archive(self, name=arm_runtime.MEMBER, mode=0o755, kind=tarfile.REGTYPE, extra=False):
+        with tarfile.open(self.archive, "w:gz") as package:
+            member = tarfile.TarInfo(name)
+            member.size = len(self.binary)
+            member.mode = mode
+            member.type = kind
+            member.linkname = "/tmp/not-the-upload"
+            package.addfile(member, io.BytesIO(self.binary))
+            if extra:
+                package.addfile(tarfile.TarInfo("unexpected"))
+
+    def test_native_gate_executes_exact_archive_bytes_and_all_smokes(self):
+        calls = []
+        def execute(args, **kwargs):
+            self.assertEqual(Path(args[0]).read_bytes(), self.binary)
+            self.assertEqual(args[1:3], ["--no-update", "--no-selfdev"])
+            self.assertTrue(kwargs["check"])
+            self.assertEqual(kwargs["timeout"], 60)
+            calls.append(args[3:])
+            return subprocess.CompletedProcess(args, 0, stdout=f"jcode {TAG} (abc123)\n")
+        with patch.object(arm_runtime.subprocess, "run", side_effect=execute):
+            arm_runtime.verify(self.archive, TAG)
+        self.assertEqual(calls, [["--version"]] + [
+            ["cloud", command, "--help"] for command in
+            ("receive", "credentials", "router-credentials", "cancel-return")])
+
+    def test_non_native_runner_never_opens_or_executes_archive(self):
+        with (patch.object(arm_runtime.platform, "machine", return_value="x86_64"),
+              patch.object(arm_runtime.subprocess, "run") as execute,
+              self.assertRaisesRegex(ValueError, "native ARM64")):
+            arm_runtime.verify("missing.tar.gz", TAG)
+        execute.assert_not_called()
+
+    def test_unsafe_or_wrong_archive_never_executes(self):
+        for change in ({"name": "../jcode-linux-aarch64"}, {"mode": 0o644},
+                       {"kind": tarfile.SYMTYPE}, {"kind": tarfile.LNKTYPE}, {"extra": True}):
+            with self.subTest(change=change):
+                self.make_archive(**change)
+                with (patch.object(arm_runtime.subprocess, "run") as execute,
+                      self.assertRaises(ValueError)):
+                    arm_runtime.verify(self.archive, TAG)
+                execute.assert_not_called()
+        for payload in (b"not an ARM executable", self.binary[:18] + b"\x3e\x00" + self.binary[20:]):
+            self.binary = payload
+            self.make_archive()
+            with (patch.object(arm_runtime.subprocess, "run") as execute,
+                  self.assertRaisesRegex(ValueError, "AArch64")):
+                arm_runtime.verify(self.archive, TAG)
+            execute.assert_not_called()
+
+    def test_version_identity_is_not_a_prefix_match(self):
+        for output in ("jcode v1.0.0-preview.123", "jcode v1.0.0-preview.12-extra", "jcode 0.99.1"):
+            with (self.subTest(output=output),
+                  patch.object(arm_runtime.subprocess, "run", return_value=
+                               subprocess.CompletedProcess([], 0, stdout=output)) as execute,
+                  self.assertRaisesRegex(ValueError, "wrong preview version")):
+                arm_runtime.verify(self.archive, TAG)
+            self.assertEqual(execute.call_count, 1)
+
+    def test_version_and_smoke_failures_block_gate(self):
+        for failure_at in range(5):
+            calls = 0
+            def execute(args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == failure_at + 1:
+                    raise subprocess.CalledProcessError(1, args)
+                return subprocess.CompletedProcess(args, 0, stdout=f"jcode {TAG}\n")
+            with (self.subTest(failure_at=failure_at),
+                  patch.object(arm_runtime.subprocess, "run", side_effect=execute),
+                  self.assertRaises(subprocess.CalledProcessError)):
+                arm_runtime.verify(self.archive, TAG)
+            self.assertEqual(calls, failure_at + 1)
+
+
 class PreviewWorkflowTests(unittest.TestCase):
     def test_workflow_is_opt_in_debounced_exact_sha_and_nonrecursive(self):
         workflow = (ROOT / ".github/workflows/preview.yml").read_text()
@@ -257,7 +351,7 @@ class PreviewWorkflowTests(unittest.TestCase):
         self.assertLess(workflow.index("run: sleep 900"), workflow.index("check_release_ci.py"))
         self.assertIn('check_release_ci.py "$GITHUB_SHA"', workflow)
         self.assertIn('JCODE_BUILD_SEMVER: v1.0.0-preview.${{ github.run_number }}', workflow)
-        self.assertEqual(workflow.count('ref: ${{ github.sha }}'), 3)
+        self.assertEqual(workflow.count('ref: ${{ github.sha }}'), 4)
         self.assertIn('grep -F "$JCODE_BUILD_SEMVER"', workflow)
         self.assertIn('bash scripts/build_preview_linux_hosted.sh', workflow)
         self.assertIn('bash scripts/install_justrust_hosted_ci.sh', workflow)
@@ -335,6 +429,48 @@ class PreviewWorkflowTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("- '!v*-preview.*'", workflow)
         self.assertIn("!contains(inputs.tag || github.ref_name, '-preview.')", workflow)
+
+    def test_arm_compile_and_native_gate_use_same_uploaded_archive(self):
+        workflow = (ROOT / ".github/workflows/preview.yml").read_text()
+        build = workflow.split("  build:\n", 1)[1].split("  native-arm-runtime:\n", 1)[0]
+        self.assertIn("- os: ubuntu-24.04\n            target: aarch64-unknown-linux-gnu\n"
+                      "            artifact: jcode-linux-aarch64\n            hosted: true", build)
+        self.assertNotIn("ubuntu-24.04-arm", build)
+        self.assertEqual(build.count("            artifact: jcode-"), 6)
+        self.assertIn("name: preview-${{ matrix.artifact }}", build)
+        self.assertIn("path: dist/${{ matrix.artifact }}.tar.gz", build)
+        gate = workflow.split("  native-arm-runtime:\n", 1)[1].split("  publish:\n", 1)[0]
+        self.assertIn("needs: build", gate)
+        self.assertIn("runs-on: ubuntu-24.04-arm", gate)
+        self.assertIn("uses: actions/download-artifact@v4", gate)
+        self.assertIn("name: preview-jcode-linux-aarch64", gate)
+        self.assertIn("python3 scripts/verify_preview_arm_runtime.py dist/jcode-linux-aarch64.tar.gz", gate)
+        for forbidden in ("secrets.", "justrust", "upload-artifact", "tar czf", "continue-on-error", "if:"):
+            self.assertNotIn(forbidden, gate)
+        publish = workflow.split("  publish:\n", 1)[1].split("  announce:\n", 1)[0]
+        self.assertIn("needs: [quiet-and-ci, build, native-arm-runtime]", publish)
+        self.assertNotIn("always()", publish)
+        self.assertIn("pattern: preview-jcode-*", publish)
+
+    def test_arm_packaging_never_executes_cross_binary(self):
+        workflow = (ROOT / ".github/workflows/preview.yml").read_text()
+        package = workflow.split("      - name: Package native binary\n", 1)[1]
+        body = textwrap.dedent(package.split("        run: |\n", 1)[1]
+                               .split("      - name:", 1)[0])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target/aarch64-unknown-linux-gnu/release"
+            target.mkdir(parents=True)
+            binary = target / "jcode"
+            binary.write_text("#!/bin/sh\necho executed > should-not-execute\nexit 99\n")
+            binary.chmod(0o755)
+            subprocess.run(["bash", "-c", body], cwd=root, check=True,
+                           env={**os.environ, "TARGET": "aarch64-unknown-linux-gnu",
+                                "ARTIFACT": arm_runtime.MEMBER, "RUNNER_OS": "Linux"})
+            self.assertFalse((root / "should-not-execute").exists())
+            with tarfile.open(root / "dist/jcode-linux-aarch64.tar.gz") as archive:
+                self.assertEqual(archive.getnames(), [arm_runtime.MEMBER])
+                self.assertEqual(archive.extractfile(arm_runtime.MEMBER).read(), binary.read_bytes())
 
     def test_ci_runs_preview_tests(self):
         self.assertIn('python3 scripts/test_preview_release.py',
