@@ -638,11 +638,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
 
 /// Transport for `--provider-profile <name>` (issue #1560: this used to force
 /// OpenAI-compatible unconditionally). Anthropic-compatible profiles go
-/// through `Auto`, the same path as `default_provider = "<name>"`: the env
-/// applied by `apply_named_provider_profile_env` already selects the
-/// Anthropic Messages runtime with the profile's base URL and auth, while
-/// `AnthropicApi` would pin an Anthropic API-key credential the profile may
-/// not have (e.g. `auth = "none"`).
+/// through `AnthropicApi`: the env applied by
+/// `apply_named_provider_profile_env` selects the Anthropic Messages runtime
+/// with the profile's base URL and auth, while `Auto` can be overridden by a
+/// saved provider default.
 fn provider_choice_for_named_profile(profile_name: &str) -> ProviderChoice {
     // Same source as `apply_named_provider_profile_env`, which already
     // validated that the profile exists.
@@ -663,7 +662,10 @@ fn provider_choice_for_named_profile_in(
                 crate::config::NamedProviderType::AnthropicCompatible
             ) =>
         {
-            ProviderChoice::Auto
+            // The explicit profile is installed through the environment, but
+            // `Auto` lets a saved provider default win during startup. Pin the
+            // normal Anthropic transport so an explicit profile stays explicit.
+            ProviderChoice::AnthropicApi
         }
         _ => ProviderChoice::OpenaiCompatible,
     }

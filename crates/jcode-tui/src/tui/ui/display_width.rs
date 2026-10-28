@@ -30,7 +30,17 @@ pub(super) fn display_col_to_byte_offset_inclusive(text: &str, display_col: usiz
         let next_width =
             width.saturating_add(unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0));
         if next_width > display_col {
-            return idx + ch.len_utf8();
+            // Include any following zero-width code points (emoji modifiers,
+            // combining marks, and variation selectors) attached to this
+            // displayed character.
+            let mut end = idx + ch.len_utf8();
+            for next in text[end..].chars() {
+                if unicode_width::UnicodeWidthChar::width(next).unwrap_or(0) != 0 {
+                    break;
+                }
+                end += next.len_utf8();
+            }
+            return end;
         }
         width = next_width;
     }
@@ -82,6 +92,7 @@ mod tests {
         assert_eq!(display_col_slice_copy("你好世界", 0, 8), "你好世界");
         assert_eq!(display_col_slice_copy("你好世界", 2, 5), "好世");
         assert_eq!(display_col_slice_copy("a🙂bc", 0, 2), "a🙂");
+        assert_eq!(display_col_slice_copy("a👍🏽b", 0, 2), "a👍🏽");
         assert_eq!(display_col_slice_copy("abc", 0, 2), "ab");
         assert_eq!(display_col_slice_copy("你好", 1, 1), "");
     }

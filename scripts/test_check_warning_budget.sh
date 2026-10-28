@@ -50,6 +50,25 @@ if (( baseline > 0 )); then
   run_case "warnings below budget" 0 "improved" "$(warnings $((baseline - 1)))" 0
 fi
 
+# grep status 1 means no matches; status 2 means warning counting failed.
+mkdir -p "$tmp/grep-error-bin"
+cat > "$tmp/grep-error-bin/grep" <<'FAKE'
+#!/usr/bin/env bash
+echo "fake grep: deliberate execution error" >&2
+exit 2
+FAKE
+chmod +x "$tmp/grep-error-bin/grep"
+grep_error_status=0
+grep_error_out=$(PATH="$tmp/grep-error-bin:$PATH" CARGO="$tmp/cargo" \
+  FAKE_OUTPUT="$(warnings 1)" FAKE_STATUS=0 bash "$gate" 2>&1) || grep_error_status=$?
+if [[ "$grep_error_status" == 2 ]] && [[ "$grep_error_out" == *"failed to count warnings (grep exit 2)"* ]]; then
+  echo "ok: grep execution error is reported and fails"
+else
+  echo "FAIL: grep execution error (exit $grep_error_status, want 2 and counting diagnostic)"
+  printf '%s\n' "$grep_error_out" | sed 's/^/    /'
+  failures=$((failures + 1))
+fi
+
 missing_status=0
 CARGO="$tmp/does-not-exist" bash "$gate" > /dev/null 2>&1 || missing_status=$?
 if [[ "$missing_status" == 1 ]]; then echo "ok: missing cargo"; else

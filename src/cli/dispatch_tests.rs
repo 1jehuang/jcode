@@ -353,7 +353,7 @@ auth = "none"
 
     assert!(matches!(
         provider_choice_for_named_profile_in("fcc-anthropic", &config),
-        ProviderChoice::Auto
+        ProviderChoice::AnthropicApi
     ));
     assert!(matches!(
         provider_choice_for_named_profile_in("local-openai", &config),
