@@ -100,6 +100,11 @@ jobs:
         shell: bash
         run: python3 scripts/check_swallowed_error_budget.py
 
+      - name: Enforce secret env read ratchet
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python3 scripts/check_secret_env_reads.py
+
       - name: Enforce crate dependency boundaries
         if: ${{ !cancelled() }}
         shell: bash

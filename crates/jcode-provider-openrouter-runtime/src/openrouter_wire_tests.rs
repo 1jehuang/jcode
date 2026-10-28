@@ -225,13 +225,11 @@ fn azure_tool_turn_uses_responses_with_reasoning_and_replays_tool_history() {
         api_base: format!("http://{addr}/openai/v1"),
         profile_id: Some("azure-openai".into()),
         builtin_azure: true,
-        auth: Arc::new(|| {
-            Ok(ProviderAuth::HeaderValue {
-                header_name: reqwest::header::HeaderName::from_static("api-key"),
-                value: "test-key".into(),
-                label: "test".into(),
-            })
-        }),
+        auth: ProviderAuth::InlineHeader {
+            header_name: reqwest::header::HeaderName::from_static("api-key"),
+            token: "test-key".into(),
+            label: "test".into(),
+        },
         ..make_custom_compatible_provider()
     };
     provider.set_model("southindia-production").unwrap();
@@ -654,4 +652,79 @@ fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
     assert_eq!(body["tools"][0]["function"]["name"], "bash");
     assert_eq!(body["messages"][0]["role"], "system");
     assert!(body.get("reasoning_effort").is_none());
+}
+
+/// Issue #1389: `ProviderAuth` carries key *names*, not tokens. Two requests
+/// back-to-back with an env-file edit in between must use the new key — no
+/// captured copy, no restart.
+#[tokio::test]
+async fn auth_names_resolve_live_between_requests() {
+    use tempfile::TempDir;
+    let _env_lock = super::ENV_LOCK.lock();
+    let temp = TempDir::new().expect("tempdir");
+    let _home = super::EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _key = super::EnvVarGuard::remove("PHASE2_LIVE_REKEY_API_KEY");
+
+    let env_file = "phase2-rekey.env";
+    let key_name = "PHASE2_LIVE_REKEY_API_KEY";
+
+    let auth_for = |key_name: &str| ProviderAuth::AuthorizationBearer {
+        key_name: key_name.to_string(),
+        env_file: env_file.to_string(),
+        label: key_name.to_string(),
+    };
+    let auth = auth_for(key_name);
+    auth.require_all().expect_err("no key yet -> fail fast");
+
+    jcode_base::provider_catalog::save_env_value_to_env_file(key_name, env_file, Some("first-key"))
+        .expect("write first key");
+    assert!(
+        std::env::var_os(key_name).is_none(),
+        "never write the process env"
+    );
+
+    let header_value = |auth: ProviderAuth| async move {
+        auth.apply(reqwest::Client::new().post("https://example.test/v1/chat/completions"))
+            .await
+            .map(|req| {
+                req.build()
+                    .expect("build")
+                    .headers()
+                    .get("authorization")
+                    .expect("bearer header")
+                    .to_str()
+                    .expect("ascii")
+                    .to_string()
+            })
+    };
+    assert_eq!(
+        header_value(auth.clone()).await.expect("applies with key"),
+        "Bearer first-key"
+    );
+
+    // Edit the env file between requests: the next lookup re-reads it.
+    jcode_base::provider_catalog::save_env_value_to_env_file(
+        key_name,
+        env_file,
+        Some("second-key"),
+    )
+    .expect("rewrite key");
+    assert!(
+        std::env::var_os(key_name).is_none(),
+        "still no process-env copy after rewrite"
+    );
+    assert_eq!(
+        header_value(auth.clone())
+            .await
+            .expect("applies with rekeyed file"),
+        "Bearer second-key"
+    );
+
+    // Logout (clear) makes the next request fail with the login hint.
+    jcode_base::provider_catalog::save_env_value_to_env_file(key_name, env_file, None)
+        .expect("clear key");
+    let err = header_value(auth.clone())
+        .await
+        .expect_err("no key after logout");
+    assert!(err.to_string().contains("Run `jcode login`"));
 }

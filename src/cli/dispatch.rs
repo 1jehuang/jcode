@@ -1221,7 +1221,7 @@ async fn detect_bootstrap_credentials() -> BootstrapCredentialState {
     let has_openai = has_openai.unwrap_or(false);
     let has_openrouter = provider::openrouter::has_credentials();
     let has_copilot = auth::copilot::has_copilot_credentials();
-    let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+    let has_api_key = crate::provider_catalog::Creds::has("ANTHROPIC_API_KEY", "anthropic.env");
 
     BootstrapCredentialState {
         has_any: has_claude || has_openai || has_openrouter || has_copilot || has_api_key,

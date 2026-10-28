@@ -274,27 +274,8 @@ fn read_vscdb_key(db_path: &PathBuf, key: &str) -> Result<String> {
 /// 1. `CURSOR_API_KEY` env var
 /// 2. Saved key in `~/.config/jcode/cursor.env`
 pub fn load_api_key() -> Result<String> {
-    if let Ok(key) = std::env::var("CURSOR_API_KEY") {
-        let trimmed = jcode_provider_env::sanitize_secret_value(&key);
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-
-    let file_path = config_file_path()?;
-    if file_path.exists() {
-        crate::storage::harden_secret_file_permissions(&file_path);
-        let content = std::fs::read_to_string(&file_path)
-            .with_context(|| format!("Failed to read {}", file_path.display()))?;
-        for line in content.lines() {
-            let line = line.trim();
-            if let Some(key) = line.strip_prefix("CURSOR_API_KEY=") {
-                let key = jcode_provider_env::sanitize_secret_value(key);
-                if !key.is_empty() {
-                    return Ok(key.to_string());
-                }
-            }
-        }
+    if let Some(key) = crate::provider_catalog::Creds::get("CURSOR_API_KEY", "cursor.env") {
+        return Ok(key);
     }
 
     anyhow::bail!(
@@ -312,13 +293,12 @@ pub fn save_api_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remove the saved Cursor API key from `~/.config/jcode/cursor.env` and the
-/// current process environment.
+/// Remove the saved Cursor API key from `~/.config/jcode/cursor.env`
+/// (the process env is never written; see #1389).
 pub fn clear_api_key() -> Result<()> {
     let file_path = config_file_path()?;
     crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", None)?;
 
-    crate::env::remove_var("CURSOR_API_KEY");
     Ok(())
 }
 

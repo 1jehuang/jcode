@@ -11,7 +11,19 @@ impl ProviderAuth {
         // Reuse key-probe rules without changing other providers' auth modes.
         if jcode_base::provider_catalog::api_base_is_anthropic(api_base) {
             match self {
-                Self::AuthorizationBearer { token, .. } => {
+                Self::AuthorizationBearer {
+                    key_name,
+                    env_file,
+                    label,
+                } => {
+                    let token = Self::resolve_key(key_name, env_file, label)?;
+                    return Ok(
+                        jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
+                            req, api_base, &token,
+                        ),
+                    );
+                }
+                Self::InlineBearer { token, .. } => {
                     return Ok(
                         jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
                             req, api_base, token,
@@ -19,11 +31,24 @@ impl ProviderAuth {
                     );
                 }
                 Self::HeaderValue {
-                    header_name, value, ..
+                    header_name,
+                    key_name,
+                    env_file,
+                    label,
+                } if header_name.as_str() == "x-api-key" => {
+                    let token = Self::resolve_key(key_name, env_file, label)?;
+                    return Ok(
+                        jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
+                            req, api_base, &token,
+                        ),
+                    );
+                }
+                Self::InlineHeader {
+                    header_name, token, ..
                 } if header_name.as_str() == "x-api-key" => {
                     return Ok(
                         jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
-                            req, api_base, value,
+                            req, api_base, token,
                         ),
                     );
                 }

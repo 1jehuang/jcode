@@ -118,19 +118,10 @@ pub fn load_api_key_from_env_or_config(env_key: &str, file_name: &str) -> Option
     }
 
     if env_key == "ZHIPU_API_KEY" {
-        if let Ok(key) = std::env::var("ZAI_API_KEY")
-            && let Some(key) = clean_loaded_value(&key, "ZAI_API_KEY")
-        {
+        // Legacy ZAI alias: same env-then-file lookup, through the sanctioned
+        // loader so it stays file-aware and ratchet-clean (issue #1389).
+        if let Some(key) = load_env_value_from_env_or_config("ZAI_API_KEY", file_name) {
             return Some(key);
-        }
-
-        let legacy_prefix = "ZAI_API_KEY=";
-        for line in content.lines() {
-            if let Some(key) = line.strip_prefix(legacy_prefix)
-                && let Some(key) = clean_loaded_value(key, "ZAI_API_KEY")
-            {
-                return Some(key);
-            }
         }
     }
 
@@ -220,15 +211,39 @@ pub fn save_env_value_to_env_file(
 
     let config_dir = jcode_storage::app_config_dir()?;
     let file_path = config_dir.join(file_name);
+    // The env file is the only store: never write the process env (issue #1389).
     jcode_storage::upsert_env_file_value(&file_path, env_key, value)?;
+    Ok(())
+}
 
-    if let Some(value) = value {
-        jcode_core::env::set_var(env_key, value);
-    } else {
-        jcode_core::env::remove_var(env_key);
+/// Credential store facade: process env is a read-only override, the env file
+/// is the truth, and lookups happen at call time. Holds no state.
+pub struct Creds;
+
+impl Creds {
+    /// Live env var, else the file parsed right now.
+    pub fn get(key: &str, file_name: &str) -> Option<String> {
+        load_env_value_from_env_or_config(key, file_name)
     }
 
-    Ok(())
+    /// Upsert a file line. Never touches the process env.
+    pub fn set(key: &str, file_name: &str, val: &str) -> anyhow::Result<()> {
+        save_env_value_to_env_file(key, file_name, Some(val))
+    }
+
+    /// Delete the file line (logout).
+    pub fn clear(key: &str, file_name: &str) -> anyhow::Result<()> {
+        save_env_value_to_env_file(key, file_name, None)
+    }
+
+    pub fn has(key: &str, file_name: &str) -> bool {
+        Self::get(key, file_name).is_some()
+    }
+
+    pub fn require(key: &str, file_name: &str) -> anyhow::Result<String> {
+        Self::get(key, file_name)
+            .ok_or_else(|| anyhow::anyhow!("{key} not configured, run `jcode login`"))
+    }
 }
 
 /// Persist a named API key to its provider env file, file-only.
@@ -470,5 +485,33 @@ mod tests {
                 .as_deref(),
             Some("sk-env-key")
         );
+    }
+
+    #[test]
+    fn creds_set_and_clear_are_file_only_and_read_live() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_CREDS_TEST_API_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        assert!(!Creds::has("JCODE_CREDS_TEST_API_KEY", "creds-test.env"));
+        assert!(Creds::require("JCODE_CREDS_TEST_API_KEY", "creds-test.env").is_err());
+
+        Creds::set("JCODE_CREDS_TEST_API_KEY", "creds-test.env", "first").expect("set");
+        assert!(std::env::var_os("JCODE_CREDS_TEST_API_KEY").is_none());
+        assert_eq!(
+            Creds::get("JCODE_CREDS_TEST_API_KEY", "creds-test.env").as_deref(),
+            Some("first")
+        );
+
+        // A later file edit is visible immediately: no captured/stale copy.
+        Creds::set("JCODE_CREDS_TEST_API_KEY", "creds-test.env", "second").expect("set");
+        assert_eq!(
+            Creds::require("JCODE_CREDS_TEST_API_KEY", "creds-test.env").expect("require"),
+            "second"
+        );
+
+        Creds::clear("JCODE_CREDS_TEST_API_KEY", "creds-test.env").expect("clear");
+        assert!(!Creds::has("JCODE_CREDS_TEST_API_KEY", "creds-test.env"));
+        assert!(std::env::var_os("JCODE_CREDS_TEST_API_KEY").is_none());
     }
 }

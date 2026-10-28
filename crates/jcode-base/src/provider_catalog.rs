@@ -1,5 +1,5 @@
 pub use jcode_provider_env::{
-    load_api_key_from_env_or_config, load_env_value_from_config_file,
+    Creds, load_api_key_from_env_or_config, load_env_value_from_config_file,
     load_env_value_from_env_or_config, register_api_key_fallback_resolver,
     save_env_value_to_env_file, save_named_api_key,
 };
@@ -977,6 +977,8 @@ pub fn apply_named_provider_profile_env_from_config(
                     .filter(|value| !value.is_empty())
                     .map(|key| {
                         let env_name = inline_key_env_name(profile_name);
+                        // ponytail: inline config-toml key has no env-file home;
+                        // the profile env carries it only while active (#1389).
                         crate::env::set_var(&env_name, key);
                         crate::logging::warn(&format!(
                             "Provider profile '{}' stores an inline API key in config.toml. Prefer api_key_env to avoid accidental leaks.",
@@ -1113,6 +1115,8 @@ pub fn apply_named_provider_profile_env_from_config(
                 .or_else(|| {
                     profile.api_key.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(|key| {
                         let env_name = inline_key_env_name(profile_name);
+                        // ponytail: inline config-toml key has no env-file home;
+                        // the profile env carries it only while active (#1389).
                         crate::env::set_var(&env_name, key);
                         crate::logging::warn(&format!(
                             "Provider profile '{}' stores an inline API key in config.toml. Prefer api_key_env to avoid accidental leaks.",
