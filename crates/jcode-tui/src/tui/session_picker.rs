@@ -39,6 +39,7 @@ mod loading;
 mod memory;
 mod navigation;
 mod render;
+mod saved_placement;
 
 #[cfg(test)]
 use loading::collect_recent_session_stems;
@@ -1354,6 +1355,13 @@ impl SessionPicker {
         targets: Vec<ResumeTarget>,
         modifiers: KeyModifiers,
     ) -> PickerResult {
+        saved_placement::SavedPlacement::record_picks(
+            targets
+                .iter()
+                .filter_map(|target| self.session_for_target(target))
+                .filter(|session| session.saved)
+                .map(|session| session.id.clone()),
+        );
         let configured = crate::config::config().keybindings.session_picker_enter;
         let action = if modifiers.contains(KeyModifiers::CONTROL) {
             configured.alternate()

@@ -218,9 +218,11 @@ impl SessionPicker {
         let mut saved_sessions: Vec<SessionRef> = Vec::new();
         let mut saved_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+        let placement = saved_placement::SavedPlacement::load();
+        let now = chrono::Utc::now();
         for session_ref in &filtered_refs {
             if let Some(session) = self.session_by_ref(*session_ref)
-                && session.saved
+                && placement.boosted(session, now)
             {
                 saved_ids.insert(session.id.clone());
                 saved_sessions.push(*session_ref);
