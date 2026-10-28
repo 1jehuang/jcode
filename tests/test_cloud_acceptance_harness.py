@@ -129,6 +129,19 @@ class Provider(unittest.TestCase):
 
 
 class Isolation(unittest.TestCase):
+    def test_cloud_selection_preserves_group_default_and_explicit_round_trip(self):
+        from unittest.mock import Mock
+
+        fixture = Mock()
+        fixture.records.return_value = ["existing request"]
+        acceptance.CloudTUI.go_cloud(fixture)
+        fixture.send.assert_called_once_with("/cloud")
+        fixture.await_cloud.assert_called_once_with(1)
+        fixture.reset_mock()
+        acceptance.CloudTUI.go_cloud(fixture, session_only=True)
+        fixture.send.assert_called_once_with("/cloud --session-only")
+        fixture.await_cloud.assert_called_once_with(1)
+
     def test_long_artifact_paths_do_not_lengthen_runtime_sockets(self):
         with tempfile.TemporaryDirectory() as temp:
             fixture = acceptance.CloudTUI("/bin/true", Path(temp) / ("long-artifacts-" * 12))
