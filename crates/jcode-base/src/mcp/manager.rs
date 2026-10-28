@@ -582,6 +582,13 @@ impl McpManager {
         tool: &str,
         arguments: serde_json::Value,
     ) -> Result<ToolCallResult> {
+        // Re-read policy before either live-connection path: a different session
+        // may have disabled the server or withdrawn project approval since this
+        // manager acquired its handle.
+        if let Some(reason) = self.connect_refusal(server) {
+            anyhow::bail!(reason);
+        }
+
         // Fast path: already connected via pool handle.
         {
             let handles = self.pool_handles.read().await;
@@ -866,6 +873,78 @@ mod tests {
             err.to_string().contains("ghost"),
             "error should name the missing server: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn call_tool_refuses_existing_connection_after_global_disable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let temp = tempfile::tempdir().expect("server directory");
+        let script = temp.path().join("mcp-server.sh");
+        let calls = temp.path().join("calls");
+        std::fs::write(
+            &script,
+            r##"while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}}' ;;
+    *'"tools/list"'*)
+      echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"tools":[{"name":"probe","inputSchema":{"type":"object"}}]}}' ;;
+    *'"tools/call"'*)
+      printf 'called\n' >> "$MCP_CALLS"
+      echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"content":[{"type":"text","text":"ran"}]}}' ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"##,
+        )
+        .expect("write MCP server");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("server metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("make server executable");
+
+        crate::env::set_var("MCP_CALLS", &calls);
+        let mut config = McpConfig::default();
+        config.servers.insert(
+            "fixture".to_string(),
+            McpServerConfig {
+                command: script.display().to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                shared: false,
+                transport: None,
+                url: None,
+                headers: HashMap::new(),
+                enabled: None,
+                disabled: None,
+                timeout_secs: Some(5),
+            },
+        );
+        let manager = McpManager::with_config(config);
+        manager
+            .connect("fixture", &manager.config().servers["fixture"])
+            .await
+            .expect("connect before disabling");
+        McpConfig::set_enabled_override("fixture", false).expect("disable fixture");
+
+        let error = manager
+            .call_tool("fixture", "probe", serde_json::json!({}))
+            .await
+            .expect_err("disabled server must not receive calls through a live handle");
+        assert!(error.to_string().contains("disabled in /mcp"), "{error}");
+        assert!(
+            !calls.exists(),
+            "the connected server must not receive a call"
+        );
+        manager.disconnect_all().await;
     }
 
     #[tokio::test]

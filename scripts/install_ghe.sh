@@ -134,8 +134,8 @@ restore_channels() {
 reload_server() {
   local binary="$1"
   # Force bypasses same-version comparisons, but still uses graceful session handoff.
-  # The daemon must not inherit the installer lock through a reload subprocess.
-  JCODE_NO_AUTO_UPDATE=1 "$binary" --no-update server reload --force </dev/null 9>&-
+  # The daemon must not inherit either installer lock through a reload subprocess.
+  JCODE_NO_AUTO_UPDATE=1 "$binary" --no-update server reload --force </dev/null 8>&- 9>&-
 }
 
 handle_failure() {
@@ -219,6 +219,11 @@ main() {
     fail "Refusing non-regular installer lock."
   exec 9>"$BUILDS_DIR/.ghe-install.lock"
   flock -n 9 || fail "Another GHE installer is active."
+  [[ ! -L "$BUILDS_DIR/.store.lock" &&
+     ( ! -e "$BUILDS_DIR/.store.lock" || -f "$BUILDS_DIR/.store.lock" ) ]] ||
+    fail "Refusing non-regular build store lock."
+  exec 8>"$BUILDS_DIR/.store.lock"
+  flock -w 30 8 || fail "Timed out waiting for the build store lock."
   trap cleanup EXIT
   if [[ "${1:-}" == --rollback ]]; then
     rollback_install "$2"
