@@ -1575,6 +1575,11 @@ pub(crate) fn last_chat_frame() -> Option<Arc<PreparedChatFrame>> {
 /// lock, which serialized nothing between them and produced failures that
 /// appeared only under parallelism (same root cause as issue #593). Both now
 /// delegate here.
+///
+/// Lock hierarchy: tests needing both `storage::lock_test_env` and this lock
+/// must acquire the environment lock first. App construction resets render
+/// state while an environment-scoping helper may already hold that lock.
+/// Taking environment after render would deadlock against that reset.
 #[cfg(test)]
 pub(crate) fn render_state_test_lock() -> RenderStateTestGuard {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
