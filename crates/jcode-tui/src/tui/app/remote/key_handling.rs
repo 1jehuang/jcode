@@ -1044,6 +1044,11 @@ async fn handle_remote_key_internal(
             {
                 app.inline_interactive_state = None;
                 input::clear_input_for_escape(app);
+            } else if !app.input.is_empty() {
+                // A restored prompt is still a visible draft, not a reason to
+                // cancel the resumed run. Clear it before considering Esc a
+                // turn interrupt.
+                input::clear_input_for_escape(app);
             } else if app.is_processing && app.has_pending_user_followup() {
                 // The user typed a new prompt while this turn ran, then hit
                 // Esc: stop this turn and run the new prompt next. The server

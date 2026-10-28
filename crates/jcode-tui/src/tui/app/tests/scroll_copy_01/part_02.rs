@@ -454,6 +454,31 @@ fn test_remote_prompt_jump_ctrl_esc_fallback_on_macos() {
 }
 
 #[test]
+fn test_remote_escape_clears_restored_composer_without_stopping_active_turn() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.auto_poke_incomplete_todos = true;
+    app.input = "restored prompt".to_string();
+    app.cursor_pos = app.input.len();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+
+    assert!(app.is_processing, "the resumed turn must stay active");
+    assert!(app.input.is_empty(), "Esc clears the restored draft");
+    assert!(app.auto_poke_incomplete_todos, "auto-poke remains enabled");
+    assert_eq!(
+        app.status_notice(),
+        Some("Input cleared - Ctrl+Z to restore".to_string())
+    );
+}
+
+#[test]
 fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -900,6 +925,29 @@ fn test_local_escape_with_pending_prompt_redirects_to_it() {
     // The turn loop's cancel path then schedules queued dispatch.
     app.schedule_queued_dispatch_after_interrupt();
     assert!(app.pending_queued_dispatch);
+}
+
+/// A restored prompt in the composer is a draft, not a pending interrupt.
+#[test]
+fn test_local_escape_clears_restored_composer_without_stopping_active_turn() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.auto_poke_incomplete_todos = true;
+    app.input = "restored prompt".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+
+    assert!(app.is_processing, "the resumed turn must stay active");
+    assert!(
+        !app.cancel_requested,
+        "Esc must not cancel the resumed turn"
+    );
+    assert!(app.input.is_empty(), "Esc clears the restored draft");
+    assert!(
+        app.auto_poke_incomplete_todos,
+        "clearing a draft must not disable auto-poke"
+    );
 }
 
 /// Esc with nothing pending still means "stop everything".
