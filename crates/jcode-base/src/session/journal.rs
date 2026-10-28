@@ -28,6 +28,10 @@ pub(super) struct SessionJournalMeta {
     pub(super) model_usage_turn_id: Option<String>,
     pub(super) provider_key: Option<String>,
     pub(super) model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) route_api_method: Option<String>,
+    #[serde(default)]
+    pub(super) migration_epoch: u64,
     #[serde(default)]
     pub(super) reasoning_effort: Option<String>,
     pub(super) subagent_model: Option<String>,
@@ -46,6 +50,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) is_debug: bool,
     pub(super) saved: bool,
     pub(super) save_label: Option<String>,
+    #[serde(default, flatten)]
+    pub(super) extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +91,10 @@ pub(super) struct SessionPersistState {
     /// stripped. The server owns that transcript, so a snapshot written from
     /// the stub would replace it with nothing. Survives `reset_persist_state`.
     pub(super) transcript_stripped: bool,
+    pub(super) store_key: Option<std::path::PathBuf>,
+    pub(super) sqlite_revision: Option<i64>,
+    pub(super) sqlite_transcript_revision: Option<i64>,
+    pub(super) sqlite_metadata: Option<String>,
 }
 
 pub(super) fn metadata_requires_snapshot(
@@ -110,4 +120,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.is_debug != current.is_debug
         || prev.saved != current.saved
         || prev.save_label != current.save_label
+        || prev.route_api_method != current.route_api_method
+        || prev.migration_epoch != current.migration_epoch
+        || prev.extra != current.extra
 }

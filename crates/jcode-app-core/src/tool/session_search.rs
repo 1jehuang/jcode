@@ -9,7 +9,9 @@
 use super::session_search_index::{self, IndexFileSpec};
 use super::{Tool, ToolContext, ToolOutput};
 use crate::message::ContentBlock;
-use crate::session::{Session, StoredMessage, session_journal_path_from_snapshot};
+use crate::session::{
+    Session, SessionBackend, SessionStore, StoredMessage, session_journal_path_from_snapshot,
+};
 use crate::storage;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -267,6 +269,25 @@ struct SessionFileCandidate {
     journal_path: PathBuf,
     session_id_hint: String,
     mtime: SystemTime,
+    /// Set for sessions that live in the SQLite store. They have no snapshot
+    /// or journal files, so the paths above are unused placeholders.
+    store: Option<StoreCandidate>,
+}
+
+#[derive(Clone)]
+struct StoreCandidate {
+    store: SessionStore,
+    version: u64,
+    size_bytes: u64,
+}
+
+impl std::fmt::Debug for StoreCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreCandidate")
+            .field("version", &self.version)
+            .field("size_bytes", &self.size_bytes)
+            .finish()
+    }
 }
 
 #[derive(Default)]
@@ -720,7 +741,7 @@ fn collect_session_files(
     let mut untimestamped = Vec::new();
     let mut truncated = false;
     if !sessions_dir.exists() {
-        return Ok(SessionFileCollection::default());
+        return collect_store_session_files(max_scan_sessions, Vec::new(), false);
     }
     for entry in std::fs::read_dir(sessions_dir)?.flatten() {
         let path = entry.path();
@@ -753,6 +774,7 @@ fn collect_session_files(
             journal_path,
             session_id_hint: stem,
             mtime: system_time_from_unix_millis(timestamp_ms),
+            store: None,
         });
     }
 
@@ -767,6 +789,7 @@ fn collect_session_files(
             journal_path,
             session_id_hint: stem,
             mtime: snapshot_mtime.max(journal_mtime),
+            store: None,
         });
     }
 
@@ -776,6 +799,46 @@ fn collect_session_files(
         truncated = true;
     }
 
+    collect_store_session_files(max_scan_sessions, files, truncated)
+}
+
+/// Add the configured SQLite store's sessions to the file candidates. The
+/// store lists candidates from metadata only. A store row replaces a legacy
+/// file with the same id, and the combined set is bounded by recency.
+fn collect_store_session_files(
+    max_scan_sessions: usize,
+    mut files: Vec<SessionFileCandidate>,
+    mut truncated: bool,
+) -> Result<SessionFileCollection> {
+    if !matches!(SessionBackend::configured(), Ok(SessionBackend::Sqlite)) {
+        return Ok(SessionFileCollection { files, truncated });
+    }
+    let store = SessionStore::configured()?;
+    let rows = store.list_search_candidates(max_scan_sessions.saturating_add(1))?;
+    if rows.len() > max_scan_sessions {
+        truncated = true;
+    }
+    let store_ids: std::collections::HashSet<&str> =
+        rows.iter().map(|row| row.id.as_str()).collect();
+    files.retain(|file| !store_ids.contains(file.session_id_hint.as_str()));
+    for row in rows.iter().take(max_scan_sessions) {
+        files.push(SessionFileCandidate {
+            snapshot_path: PathBuf::new(),
+            journal_path: PathBuf::new(),
+            session_id_hint: row.id.clone(),
+            mtime: system_time_from_unix_millis(row.updated_at_ms.max(0) as u64),
+            store: Some(StoreCandidate {
+                store: store.clone(),
+                version: row.version,
+                size_bytes: row.size_bytes,
+            }),
+        });
+    }
+    if files.len() > max_scan_sessions {
+        files.sort_unstable_by(|a, b| b.mtime.cmp(&a.mtime));
+        files.truncate(max_scan_sessions);
+        truncated = true;
+    }
     Ok(SessionFileCollection { files, truncated })
 }
 
@@ -818,10 +881,49 @@ fn jcode_index_candidates(
     files: &[SessionFileCandidate],
     query: &QueryProfile,
 ) -> Result<Vec<SessionFileCandidate>> {
+    // Native stores maintain their own transactional index. Only legacy files
+    // belong in the separate, lazily rebuilt Bloom index.
+    let indexed_ids = files
+        .iter()
+        .find_map(|file| file.store.as_ref())
+        .map(|native| native.store.indexed_search_candidates(&query.normalized))
+        .transpose()?
+        .flatten();
+    let mut candidates = Vec::new();
+    let files: Vec<_> = if let Some(ids) = indexed_ids {
+        let ids: std::collections::HashSet<_> = ids.into_iter().collect();
+        files
+            .iter()
+            .filter_map(|file| {
+                if file.store.is_some() {
+                    if ids.contains(&file.session_id_hint) {
+                        candidates.push(file.clone());
+                    }
+                    None
+                } else {
+                    Some(file.clone())
+                }
+            })
+            .collect()
+    } else {
+        files.to_vec()
+    };
+    // Like the file Bloom index, native candidates are conservative. Preserve
+    // the existing recency and scoring budget instead of re-reading every hit.
+    if files.is_empty() {
+        return Ok(candidates);
+    }
     let index_path = index_dir()?.join("session_search_jcode_index_v2.bin");
     let specs: Vec<IndexFileSpec> = files
         .iter()
         .map(|file| {
+            if let Some(store) = &file.store {
+                return IndexFileSpec {
+                    key: file.session_id_hint.clone(),
+                    mtime_ms: store.version,
+                    size: store.size_bytes,
+                };
+            }
             // Journals grow after the snapshot is written, so identity covers
             // both files.
             let (snap_mtime, snap_size) = session_search_index::stat_ms_size(&file.snapshot_path);
@@ -847,11 +949,13 @@ fn jcode_index_candidates(
         })
     })?;
 
-    Ok(index
-        .candidate_slots(&query.terms, query.min_term_matches)
-        .into_iter()
-        .filter_map(|slot| files.get(slot).cloned())
-        .collect())
+    candidates.extend(
+        index
+            .candidate_slots(&query.terms, query.min_term_matches)
+            .into_iter()
+            .filter_map(|slot| files.get(slot).cloned()),
+    );
+    Ok(candidates)
 }
 
 fn modified_time_or_epoch(path: &Path) -> SystemTime {
@@ -910,6 +1014,15 @@ fn read_candidate_raw(
     candidate: &SessionFileCandidate,
     read_errors: &mut usize,
 ) -> Option<Vec<u8>> {
+    if let Some(store) = &candidate.store {
+        return match store.store.search_text(&candidate.session_id_hint) {
+            Ok(text) => Some(text.into_bytes()),
+            Err(_) => {
+                *read_errors += 1;
+                None
+            }
+        };
+    }
     let mut raw = match std::fs::read(&candidate.snapshot_path) {
         Ok(data) => data,
         Err(_) => {
@@ -948,7 +1061,11 @@ fn score_candidates_parallel(
             handles.push(scope.spawn(move || {
                 let mut outcome = SearchWorkerOutcome::default();
                 for candidate in chunk {
-                    match Session::load_from_path(&candidate.snapshot_path) {
+                    let loaded = match &candidate.store {
+                        Some(store) => store.store.load(&candidate.session_id_hint),
+                        None => Session::load_from_path(&candidate.snapshot_path),
+                    };
+                    match loaded {
                         Ok(session) => {
                             append_session_results(&mut outcome.results, &session, query, options)
                         }

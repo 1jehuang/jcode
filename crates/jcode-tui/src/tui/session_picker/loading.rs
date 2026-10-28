@@ -148,6 +148,9 @@ struct SessionListCacheEntry {
     /// serve a stale list that still contains (or still omits) other CLIs'
     /// transcripts.
     external_sessions: bool,
+    /// Part of the cache key: the same data dir lists different sessions under
+    /// the SQLite backend.
+    sqlite_backend: bool,
     sessions: Vec<SessionInfo>,
 }
 
@@ -169,6 +172,9 @@ struct GroupedSessionListDiskCache {
     /// file stays readable (it was written with externals on).
     #[serde(default = "crate::tui::session_picker::loading::default_true")]
     external_sessions: bool,
+    /// A list cached without the SQLite store must not serve a SQLite session.
+    #[serde(default)]
+    sqlite_backend: bool,
     server_groups: Vec<ServerGroup>,
     orphan_sessions: Vec<SessionInfo>,
 }
@@ -229,6 +235,7 @@ fn session_list_disk_cache_is_usable(
         && cache.scan_limit == scan_limit
         && cache.include_old_saved_sessions == include_old_saved_sessions_on_initial_load()
         && cache.external_sessions == want_external
+        && cache.sqlite_backend == sqlite_session_backend()
         && chrono::Utc::now()
             .signed_duration_since(cache.generated_at)
             .num_seconds()
@@ -251,6 +258,7 @@ fn write_grouped_session_list_disk_cache(
         scan_limit,
         include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
         external_sessions: include_external_sessions(),
+        sqlite_backend: sqlite_session_backend(),
         server_groups: server_groups.to_vec(),
         orphan_sessions: orphan_sessions.to_vec(),
     };
@@ -1074,6 +1082,7 @@ fn session_has_history(sessions_dir: &Path, stem: &str) -> bool {
 fn collect_recent_session_candidates(
     sessions_dir: &Path,
     candidate_limit: usize,
+    skip: &HashSet<String>,
 ) -> Result<Vec<String>> {
     // Phase 1: a single cheap `readdir` pass to enumerate candidate files. We
     // defer the per-file `stat` (the expensive part on directories with 100k+
@@ -1088,7 +1097,7 @@ fn collect_recent_session_candidates(
         let Some((stem, has_snapshot)) = session_file_stem_for_candidate(file_name) else {
             continue;
         };
-        if stem.starts_with("imported_") {
+        if stem.starts_with("imported_") || skip.contains(stem) {
             continue;
         }
         raw.push((stem.to_string(), has_snapshot, entry.path()));
@@ -1195,7 +1204,10 @@ fn session_snapshot_or_journal_has_saved_metadata(snapshot_path: &Path) -> bool 
     file_tail_contains_saved_true(snapshot_path) || file_tail_contains_saved_true(&journal_path)
 }
 
-fn collect_saved_session_candidates(sessions_dir: &Path) -> Result<Vec<String>> {
+fn collect_saved_session_candidates(
+    sessions_dir: &Path,
+    skip: &HashSet<String>,
+) -> Result<Vec<String>> {
     let mut saved = Vec::new();
     for entry in std::fs::read_dir(sessions_dir)? {
         let entry = entry?;
@@ -1206,7 +1218,7 @@ fn collect_saved_session_candidates(sessions_dir: &Path) -> Result<Vec<String>> 
         let Some((stem, has_snapshot)) = session_file_stem_for_candidate(file_name) else {
             continue;
         };
-        if !has_snapshot || stem.starts_with("imported_") {
+        if !has_snapshot || stem.starts_with("imported_") || skip.contains(stem) {
             continue;
         }
         let path = sessions_dir.join(format!("{stem}.json"));
@@ -1227,7 +1239,8 @@ pub(super) fn collect_recent_session_stems(
     let mut candidate_limit = session_candidate_window(scan_limit);
 
     loop {
-        let candidates = collect_recent_session_candidates(sessions_dir, candidate_limit)?;
+        let candidates =
+            collect_recent_session_candidates(sessions_dir, candidate_limit, &HashSet::new())?;
         let mut recent = Vec::with_capacity(scan_limit);
         for stem in candidates {
             if !session_has_history(sessions_dir, &stem) {
@@ -1742,7 +1755,16 @@ fn parse_jcode_session_info(
 
     let path = sessions_dir.join(format!("{stem}.json"));
     let session = load_session_summary(&path).ok()?;
+    session_info_from_summary(stem, session, catchup_seen)
+}
 
+/// Build a picker row from already-parsed summary data. Shared by the file
+/// scanner and the SQLite store so both render identical rows.
+fn session_info_from_summary(
+    stem: &str,
+    session: SessionSummary,
+    catchup_seen: &crate::catchup::CatchupSeenSnapshot,
+) -> Option<SessionInfo> {
     let visible_message_count = session.messages.visible_message_count;
     if visible_message_count == 0 {
         return None;
@@ -1818,14 +1840,136 @@ fn parse_jcode_session_info(
     })
 }
 
+/// Picker rows for sessions that live only in the configured SQLite store.
+///
+/// Uses the store's metadata summaries, so no transcript body is read. The
+/// recency window, debug budget and saved-session tail mirror the file scanner.
+fn load_store_sessions(
+    store: &session::SessionStore,
+    scan_limit: usize,
+    catchup_seen: &crate::catchup::CatchupSeenSnapshot,
+) -> Result<(Vec<SessionInfo>, HashMap<String, u128>)> {
+    let mut summaries = store.list_picker_summaries(
+        scan_limit,
+        session_candidate_window(scan_limit),
+        include_old_saved_sessions_on_initial_load(),
+    )?;
+    let modified: HashMap<String, u128> = summaries
+        .iter()
+        .map(|summary| {
+            let timestamp = summary.discovery_modified_at.unwrap_or(summary.updated_at);
+            let nanos = u128::try_from(timestamp.timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0);
+            (summary.id.clone(), nanos)
+        })
+        .collect();
+    summaries.sort_by(|a, b| {
+        modified[&b.id]
+            .cmp(&modified[&a.id])
+            .then_with(|| session_sort_key(&b.id).cmp(&session_sort_key(&a.id)))
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    let window = session_candidate_window(scan_limit);
+    let include_saved = include_old_saved_sessions_on_initial_load();
+    let rows = summaries
+        .into_iter()
+        .enumerate()
+        .filter(|(index, summary)| *index < window || (include_saved && summary.saved))
+        .map(|(_, summary)| summary)
+        .filter_map(|summary| {
+            let id = summary.id.clone();
+            session_info_from_summary(&id, summary_from_store(summary), catchup_seen)
+        })
+        .collect();
+    Ok((rows, modified))
+}
+
+fn summary_from_store(summary: session::SessionSummary) -> SessionSummary {
+    SessionSummary {
+        parent_id: summary.parent_id,
+        title: summary.title,
+        custom_title: summary.custom_title,
+        created_at: summary.created_at,
+        updated_at: summary.updated_at,
+        last_active_at: summary.last_active_at,
+        messages: SessionMessageSummaryData {
+            visible_message_count: summary.visible_message_count,
+            user_message_count: summary.user_message_count,
+            assistant_message_count: summary.assistant_message_count,
+            estimated_tokens: summary.estimated_tokens,
+            first_user_prompt: summary.first_user_prompt,
+            search_text: summary.search_text,
+        },
+        working_dir: summary.working_dir,
+        short_name: summary.short_name,
+        provider_key: summary.provider_key,
+        model: summary.model,
+        is_canary: summary.is_canary,
+        is_debug: summary.is_debug,
+        saved: summary.saved,
+        save_label: summary.save_label,
+        status: summary.status,
+    }
+}
+
+/// Merge store rows into the file-scanned jcode sessions (store wins on an id
+/// clash) and re-apply the picker's recency budget to the combined set.
+fn merge_store_sessions(
+    sessions: &mut Vec<SessionInfo>,
+    store_sessions: Vec<SessionInfo>,
+    scan_limit: usize,
+    modified: &HashMap<String, u128>,
+    sessions_dir: &Path,
+) {
+    let store_ids: HashSet<&str> = store_sessions.iter().map(|s| s.id.as_str()).collect();
+    sessions.retain(|s| !store_ids.contains(s.id.as_str()));
+    sessions.extend(store_sessions);
+    let sort_keys: HashMap<_, _> = sessions
+        .iter()
+        .map(|info| {
+            let timestamp = modified.get(&info.id).copied().unwrap_or_else(|| {
+                let snapshot = sessions_dir.join(format!("{}.json", info.id));
+                let journal = sessions_dir.join(format!("{}.journal.jsonl", info.id));
+                path_modified_sort_key(&snapshot).max(path_modified_sort_key(&journal))
+            });
+            (info.id.clone(), timestamp)
+        })
+        .collect();
+    sessions.sort_by(|a, b| {
+        sort_keys[&b.id]
+            .cmp(&sort_keys[&a.id])
+            .then_with(|| session_sort_key(&b.id).cmp(&session_sort_key(&a.id)))
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    let (mut visible, mut debug) = (0usize, 0usize);
+    sessions.retain(|info| {
+        if visible >= scan_limit {
+            return info.saved;
+        }
+        if info.is_debug {
+            debug += 1;
+            return debug <= scan_limit;
+        }
+        visible += 1;
+        true
+    });
+}
+
 pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     load_sessions_inner(false)
+}
+
+fn sqlite_session_backend() -> bool {
+    matches!(
+        session::SessionBackend::configured(),
+        Ok(session::SessionBackend::Sqlite)
+    )
 }
 
 fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
     let want_external = include_external_sessions();
+    let want_sqlite = sqlite_session_backend();
 
     let cache_generation = if let Ok(state) = session_list_cache().lock() {
         if !bypass_cache
@@ -1833,6 +1977,7 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
             && entry.sessions_dir == sessions_dir
             && entry.scan_limit == scan_limit
             && entry.external_sessions == want_external
+            && entry.sqlite_backend == want_sqlite
             && entry.loaded_at.elapsed() <= SESSION_LIST_CACHE_TTL
         {
             return Ok(entry.sessions.clone());
@@ -1842,16 +1987,43 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
         0
     };
 
+    // Sessions committed to the SQLite store are listed from metadata first. Their ids
+    // exclude same-id legacy snapshots (left behind by a non-destructive import) from the
+    // file scan, so those multi-MB bodies are never parsed.
+    let catchup_seen = crate::catchup::CatchupSeenSnapshot::load();
+    let mut native_ids: HashSet<String> = HashSet::new();
+    let mut store_sessions: Vec<SessionInfo> = Vec::new();
+    let mut store_modified = HashMap::new();
+    if want_sqlite {
+        match session::SessionStore::configured().and_then(|store| {
+            let ids = store.list_search_candidates(usize::MAX)?;
+            let (rows, modified) = load_store_sessions(&store, scan_limit, &catchup_seen)?;
+            Ok((ids, rows, modified))
+        }) {
+            Ok((ids, rows, modified)) => {
+                native_ids = ids.into_iter().map(|candidate| candidate.id).collect();
+                store_sessions = rows;
+                store_modified = modified;
+            }
+            Err(err) => crate::logging::warn(&format!(
+                "Session picker could not list the SQLite session store: {err}"
+            )),
+        }
+    }
+
     let candidates = if sessions_dir.exists() {
         // Keep startup responsive by avoiding `session_has_history` here. That helper parses
         // snapshots/journals, and `load_session_summary` below parses the same files again.
         // Instead, gather a recency-ordered candidate window cheaply from metadata and let the
         // single summary pass filter empty sessions while filling up to `scan_limit` entries.
-        let mut candidates =
-            collect_recent_session_candidates(&sessions_dir, session_candidate_window(scan_limit))?;
+        let mut candidates = collect_recent_session_candidates(
+            &sessions_dir,
+            session_candidate_window(scan_limit),
+            &native_ids,
+        )?;
         if include_old_saved_sessions_on_initial_load() {
             let mut seen: HashSet<String> = candidates.iter().cloned().collect();
-            for stem in collect_saved_session_candidates(&sessions_dir)? {
+            for stem in collect_saved_session_candidates(&sessions_dir, &native_ids)? {
                 if seen.insert(stem.clone()) {
                     candidates.push(stem);
                 }
@@ -1862,9 +2034,8 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
         Vec::new()
     };
 
-    // Loading the catch-up "seen" state once (instead of per session) avoids
+    // `catchup_seen` is loaded once above (instead of per session) to avoid
     // re-reading and re-parsing `catchup_seen.json` for every candidate.
-    let catchup_seen = crate::catchup::CatchupSeenSnapshot::load();
     let sessions_dir_ref = &sessions_dir;
     let catchup_ref = &catchup_seen;
 
@@ -1942,6 +2113,15 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
 
         (sessions, external_handle.join().unwrap_or_default())
     });
+    if !store_sessions.is_empty() {
+        merge_store_sessions(
+            &mut sessions,
+            store_sessions,
+            scan_limit,
+            &store_modified,
+            &sessions_dir,
+        );
+    }
     sessions.extend(external_sessions);
 
     // A moved session's local snapshot stops changing. Keep it discoverable
@@ -1962,6 +2142,7 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
             sessions_dir,
             scan_limit,
             external_sessions: want_external,
+            sqlite_backend: want_sqlite,
             sessions: sessions.clone(),
         });
     }

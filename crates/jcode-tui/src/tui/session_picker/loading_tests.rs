@@ -260,6 +260,7 @@ fn cached_grouped_sessions_round_trip_from_disk() {
         scan_limit: session_scan_limit(),
         include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
         external_sessions: include_external_sessions(),
+        sqlite_backend: sqlite_session_backend(),
         server_groups: Vec::new(),
         orphan_sessions: vec![session],
     };
@@ -1092,7 +1093,7 @@ fn benchmark_real_resume_loading_phases() {
 
     let phase_start = std::time::Instant::now();
     let candidates = if sessions_dir.exists() {
-        collect_recent_session_candidates(&sessions_dir, candidate_limit)
+        collect_recent_session_candidates(&sessions_dir, candidate_limit, &HashSet::new())
             .expect("collect recent session candidates")
     } else {
         Vec::new()
@@ -1632,6 +1633,7 @@ mod external_session_opt_out {
             scan_limit: 50,
             include_old_saved_sessions: super::super::include_old_saved_sessions_on_initial_load(),
             external_sessions,
+            sqlite_backend: false,
             server_groups: Vec::new(),
             orphan_sessions: Vec::new(),
         }
@@ -1687,4 +1689,192 @@ mod external_session_opt_out {
     fn external_sessions_default_is_on() {
         assert!(jcode_config_types::DisplayConfig::default().external_sessions);
     }
+}
+
+fn picker_test_session(id: &str) -> Session {
+    let mut session = Session::create_with_id(id.to_string(), None, Some("Picker parity".into()));
+    session.short_name = Some("parity".into());
+    session.working_dir = Some("/tmp/parity-project".into());
+    session.save_label = Some("parity-label".into());
+    session.saved = true;
+    for (role, text) in [
+        (crate::message::Role::User, "first parity prompt"),
+        (crate::message::Role::Assistant, "parity-body-needle reply"),
+        (crate::message::Role::User, "second prompt"),
+    ] {
+        session.add_message(
+            role,
+            vec![crate::message::ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        );
+    }
+    session.save().expect("save session");
+    session
+}
+
+#[test]
+fn sqlite_only_session_row_matches_the_file_backed_row() {
+    let _env_lock = crate::storage::lock_test_env();
+    let id = "session_parity_1770000000000";
+
+    let files_home = tempfile::tempdir().expect("files home");
+    let files_row = {
+        let _home = EnvVarGuard::set_path("JCODE_HOME", files_home.path());
+        picker_test_session(id);
+        invalidate_session_list_cache();
+        load_sessions()
+            .expect("load file sessions")
+            .into_iter()
+            .find(|session| session.id == id)
+            .expect("file row")
+    };
+
+    let sqlite_home = tempfile::tempdir().expect("sqlite home");
+    let sqlite_row = {
+        let _home = EnvVarGuard::set_path("JCODE_HOME", sqlite_home.path());
+        let _backend = EnvVarGuard::set_str("JCODE_SESSION_BACKEND", "sqlite");
+        picker_test_session(id);
+        assert!(
+            !sqlite_home
+                .path()
+                .join("sessions")
+                .join(format!("{id}.json"))
+                .exists(),
+            "the SQLite backend must not write a snapshot"
+        );
+        invalidate_session_list_cache();
+        load_sessions()
+            .expect("load sqlite sessions")
+            .into_iter()
+            .find(|session| session.id == id)
+            .expect("sqlite-only row")
+    };
+
+    assert_eq!(sqlite_row.title, files_row.title);
+    assert_eq!(sqlite_row.short_name, files_row.short_name);
+    assert_eq!(sqlite_row.message_count, files_row.message_count);
+    assert_eq!(sqlite_row.user_message_count, files_row.user_message_count);
+    assert_eq!(
+        sqlite_row.assistant_message_count,
+        files_row.assistant_message_count
+    );
+    assert_eq!(sqlite_row.first_user_prompt, files_row.first_user_prompt);
+    assert_eq!(sqlite_row.working_dir, files_row.working_dir);
+    assert_eq!(sqlite_row.saved, files_row.saved);
+    assert_eq!(sqlite_row.save_label, files_row.save_label);
+    assert!(sqlite_row.search_index.contains("parity-body-needle"));
+    assert!(sqlite_row.search_index.contains("/tmp/parity-project"));
+}
+
+#[test]
+fn sqlite_picker_lists_unimported_legacy_sessions_and_prefers_native_rows() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let overlap = "session_overlap_1770000000001";
+    let legacy_only = "session_legacyonly_1770000000000";
+
+    // Two legacy file sessions written by the default backend.
+    picker_test_session(overlap);
+    picker_test_session(legacy_only);
+
+    // Opening the overlapping one under SQLite imports it (the JSON stays) and
+    // the next commit lands only in the store.
+    let _backend = EnvVarGuard::set_str("JCODE_SESSION_BACKEND", "sqlite");
+    let mut session = Session::load(overlap).expect("import and load");
+    session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "sqlite-only follow-up".into(),
+            cache_control: None,
+        }],
+    );
+    session.save().expect("commit to sqlite");
+
+    invalidate_session_list_cache();
+    let sessions = load_sessions().expect("load sessions");
+    let overlap_row = sessions
+        .iter()
+        .find(|row| row.id == overlap)
+        .expect("overlap row");
+    assert_eq!(
+        overlap_row.message_count, 4,
+        "native row supersedes the stale snapshot"
+    );
+    assert!(overlap_row.search_index.contains("sqlite-only follow-up"));
+    assert_eq!(sessions.iter().filter(|row| row.id == overlap).count(), 1);
+    assert!(
+        sessions.iter().any(|row| row.id == legacy_only),
+        "unimported legacy sessions stay visible"
+    );
+}
+
+#[test]
+fn sqlite_picker_preserves_imported_recency_and_saved_tail() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _backend = EnvVarGuard::set_str("JCODE_SESSION_BACKEND", "files");
+    let _limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "50");
+    let _external = EnvVarGuard::set_str("JCODE_EXTERNAL_SESSIONS", "0");
+    let files = session::SessionStore::open(home.path(), session::SessionBackend::Files).unwrap();
+    let sqlite = session::SessionStore::open(home.path(), session::SessionBackend::Sqlite).unwrap();
+    for index in 0..54 {
+        let id = format!("session_order_{index:04}");
+        let mut item = Session::create_with_id(id.clone(), None, None);
+        item.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "recency parity".into(),
+                cache_control: None,
+            }],
+        );
+        item.is_debug = index == 1 || index == 53;
+        item.saved = index == 0;
+        item.title = None;
+        item.updated_at = chrono::DateTime::from_timestamp(1_700_000_100 - index, 0).unwrap();
+        files.save_prepared(&mut item).unwrap();
+        let path = home.path().join("sessions").join(format!("{id}.json"));
+        let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + index as u64);
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        sqlite.import_from_path(&path).unwrap();
+    }
+    invalidate_session_list_cache();
+    let file_rows = load_sessions().unwrap();
+    let _sqlite_backend = EnvVarGuard::set_str("JCODE_SESSION_BACKEND", "sqlite");
+    invalidate_session_list_cache();
+    let sqlite_rows = load_sessions().unwrap();
+    assert_eq!(
+        sqlite_rows
+            .iter()
+            .map(|row| (&row.id, &row.title))
+            .collect::<Vec<_>>(),
+        file_rows
+            .iter()
+            .map(|row| (&row.id, &row.title))
+            .collect::<Vec<_>>(),
+        "import must not backfill titles only in the SQLite picker"
+    );
+    let ids = |rows: Vec<SessionInfo>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+    let file_ids = ids(file_rows);
+    assert!(
+        file_ids.contains(&"session_order_0000".into()),
+        "saved tail retained"
+    );
+    assert!(
+        !file_ids.contains(&"session_order_0001".into()),
+        "late debug row excluded"
+    );
+    assert!(
+        !file_ids.contains(&"session_order_0002".into()),
+        "old unsaved row excluded"
+    );
+    assert_eq!(ids(sqlite_rows), file_ids);
 }

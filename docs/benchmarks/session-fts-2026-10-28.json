@@ -1,0 +1,64 @@
+{
+  "date": "2026-10-28",
+  "baseline_commit": "071454bff",
+  "implementation_commit": "d7f3e7da5",
+  "sessions": 3018,
+  "conditions": {
+    "profile": "unoptimized development, debug info disabled",
+    "cache": "warm filesystem, no global eviction",
+    "order": "alternating fresh processes",
+    "external_sessions": false,
+    "query_repetitions": 5,
+    "picker_repetitions": 7,
+    "query_content": "private, not published"
+  },
+  "preparation": {
+    "elapsed_ms": 1237785.794663,
+    "baseline_database_bytes": 3476684800,
+    "indexed_database_bytes": 11010162688,
+    "wal_bytes_after_checkpoint": 0,
+    "max_rss_kib": 123848,
+    "ready_check_ms_excluding_store_open": 0.130636
+  },
+  "picker": {
+    "before_median_ms": 727.824076,
+    "after_median_ms": 287.732128,
+    "before_range_ms": [652.890599, 779.838685],
+    "after_range_ms": [260.976595, 316.466305],
+    "rows": 800,
+    "metadata_equal": true
+  },
+  "search": {
+    "absent": {"before_median_ms": 1272.918214, "after_median_ms": 70.792662, "results_equal": true, "before_count": 0, "after_count": 0},
+    "selective": {"before_median_ms": 1661.158754, "after_median_ms": 1551.032628, "results_equal": true, "before_count": 8, "after_count": 8},
+    "broad": {"before_median_ms": 996.410740, "after_median_ms": 1449.549510, "results_equal": true, "before_count": 50, "after_count": 50},
+    "short": {"before_median_ms": 1705.109283, "after_median_ms": 1746.483864, "results_equal": true, "before_count": 50, "after_count": 50},
+    "substring": {"before_median_ms": 1357.598946, "after_median_ms": 2347.388668, "results_equal": false, "before_count": 16, "after_count": 50},
+    "multi_term": {"before_median_ms": 2842.719784, "after_median_ms": 2305.226513, "results_equal": false, "before_count": 50, "after_count": 50}
+  },
+  "candidate_audit": {
+    "method": "Read-only baseline Bloom cache and FTS candidates compared with raw persisted text; supplemental to public-tool checks",
+    "substring": {"raw_matches": 491, "bloom_candidates": 45, "fts_candidates": 491, "bloom_false_negatives": 475, "bloom_false_positives": 29, "fts_false_negatives": 0, "fts_false_positives": 0},
+    "multi_term": {"raw_matches": 224, "bloom_candidates": 209, "fts_candidates": 224, "bloom_false_negatives": 35, "bloom_false_positives": 20, "fts_false_negatives": 0, "fts_false_positives": 0}
+  },
+  "all_indexed_results_equal": false,
+  "exhaustive": {
+    "repetitions": 3,
+    "all_results_equal": true,
+    "substring": {"before_median_ms": 8788.282142, "after_median_ms": 8898.576980, "results": 50},
+    "multi_term": {"before_median_ms": 7244.425225, "after_median_ms": 7462.513553, "results": 50}
+  },
+  "writes": {
+    "samples_each": 21,
+    "sessions": 7,
+    "paired": false,
+    "metadata_before_median_ms": 13.317928,
+    "metadata_after_median_ms": 22.732097,
+    "append_before_median_ms": 16.593386,
+    "append_after_median_ms": 15.034884,
+    "metadata_after_max_ms": 600.139551,
+    "append_after_max_ms": 213.276123,
+    "read_back_equal": true
+  },
+  "interpretation": "Picker and absent-query gains are observed with equal results. No universal speedup or full indexed-result-equivalence claim. Index preparation is explicit and offline."
+}
