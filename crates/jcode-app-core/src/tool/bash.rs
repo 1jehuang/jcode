@@ -812,6 +812,13 @@ impl Tool for BashTool {
         let mut params: BashInput = serde_json::from_value(input)?;
         let run_in_background = params.run_in_background.unwrap_or(false);
 
+        #[cfg(unix)]
+        if rig_send_cargo_substitution(&params.command) {
+            return Err(anyhow::anyhow!(
+                "Refusing to execute a Cargo command substitution in a rig send shell command. Shell substitution runs before rig receives the message. Quote the message literally, for example with single quotes."
+            ));
+        }
+
         // Destructive-command gate (#604), before background dispatch.
         if let Some(refusal) = destructive_command_refusal(
             &params.command,
@@ -856,6 +863,131 @@ impl Tool for BashTool {
             output.output.push_str(hint);
         }
         Ok(output)
+    }
+}
+
+/// Catch the common accidental expansion of Markdown Cargo examples in messages.
+/// This is intentionally narrow: it is not a general shell parser or Cargo gate.
+#[cfg(unix)]
+fn rig_send_cargo_substitution(command: &str) -> bool {
+    if !command.contains("rig send") {
+        return false;
+    }
+    let bytes = command.as_bytes();
+    let mut i = 0;
+    let mut single = false;
+    let mut double = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !double => {
+                single = !single;
+                i += 1;
+                continue;
+            }
+            b'"' if !single => {
+                double = !double;
+                i += 1;
+                continue;
+            }
+            b'`' if !single => {
+                let rest = &command[i + 1..];
+                if let Some(end) = rest.find('`') {
+                    if contains_cargo_command(&rest[..end]) {
+                        return true;
+                    }
+                    i += end + 2;
+                    continue;
+                }
+            }
+            b'$' if !single && bytes.get(i + 1) == Some(&b'(') => {
+                let rest = &command[i + 2..];
+                if let Some(end) = rest.find(')') {
+                    if contains_cargo_command(&rest[..end]) {
+                        return true;
+                    }
+                    i += end + 3;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+#[cfg(unix)]
+fn contains_cargo_command(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .any(|word| word == "cargo")
+}
+
+#[cfg(all(test, unix))]
+mod rig_send_cargo_substitution_tests {
+    use super::rig_send_cargo_substitution;
+
+    #[test]
+    fn blocks_expanding_cargo_examples_but_not_literal_text() {
+        for command in [
+            "rig send seat \"Run `cargo test`\"",
+            "rig send seat \"Run $(cargo check)\"",
+            "rig send seat \"That's `cargo test`\"",
+        ] {
+            assert!(rig_send_cargo_substitution(command), "{command}");
+        }
+        for command in [
+            "rig send seat 'Run `cargo test`'",
+            "rig send seat 'Run $(cargo test)'",
+            "rig send seat \"Hello\"",
+            "cargo test",
+        ] {
+            assert!(!rig_send_cargo_substitution(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn covers_reported_hull_incident_shapes() {
+        // Redacted message bodies preserve the three reported Cargo shapes.
+        for command in [
+            "rig send peer@hull \"Result: `cargo build --release -p hull-app`\"",
+            "rig send peer@hull \"Result: `cargo test -p hull-app focused_filter`\"",
+            "rig send peer@hull \"Result: `cargo test -p hull-runtime`\"",
+        ] {
+            assert!(rig_send_cargo_substitution(command), "{command}");
+        }
+        for command in [
+            "rig send peer@hull 'Result: `cargo build --release -p hull-app`'",
+            "rig send peer@hull 'Result: `cargo test -p hull-app focused_filter`'",
+            "rig send peer@hull 'Result: `cargo test -p hull-runtime`'",
+            "rig send peer@hull \"Revision $(git rev-parse --short HEAD)\"",
+            "scripts/cargo-gate cargo test -p hull-app",
+        ] {
+            assert!(!rig_send_cargo_substitution(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn shell_runs_unquoted_substitution_before_rig_but_guard_stops_it() {
+        let command = "rig send peer@hull \"Result: `cargo test -p hull-app focused_filter`\"";
+        let run = |text: &str| {
+            std::process::Command::new("bash")
+                .args([
+                    "-c",
+                    &format!("cargo() {{ printf CARGO_CALLED >&2; }}; rig() {{ :; }}; {text}"),
+                ])
+                .output()
+                .expect("run inert shell fixture")
+        };
+        let before = run(command);
+        assert_eq!(before.stderr, b"CARGO_CALLED");
+        assert!(rig_send_cargo_substitution(command));
+        let safe = "rig send peer@hull 'Result: `cargo test -p hull-app focused_filter`'";
+        assert!(!rig_send_cargo_substitution(safe));
+        assert!(run(safe).stderr.is_empty());
     }
 }
 
