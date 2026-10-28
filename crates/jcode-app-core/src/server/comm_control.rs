@@ -1875,6 +1875,7 @@ pub(super) async fn handle_comm_task_control(
             client_event_tx,
             sessions,
             soft_interrupt_queues,
+            client_connections,
             swarm_members,
             swarms_by_id,
             event_history,
@@ -1918,6 +1919,7 @@ pub(super) async fn handle_comm_task_control(
             client_event_tx,
             sessions,
             soft_interrupt_queues,
+            client_connections,
             swarm_members,
             swarms_by_id,
             event_history,
@@ -2514,6 +2516,7 @@ async fn wake_session_without_plan(
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
     soft_interrupt_queues: &super::SessionInterruptQueues,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
@@ -2570,6 +2573,7 @@ async fn wake_session_without_plan(
             event_history,
             event_counter,
             swarm_event_tx,
+            client_connections,
         ),
     )
     .await;

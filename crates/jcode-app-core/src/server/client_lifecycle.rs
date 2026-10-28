@@ -1929,6 +1929,7 @@ pub(super) async fn handle_client(
                     &event_history,
                     &event_counter,
                     &swarm_event_tx,
+                    &client_connections,
                     &client_event_tx,
                 )
                 .await;
@@ -2317,7 +2318,7 @@ pub(super) async fn handle_client(
                         if !args.is_empty() { anyhow::bail!("This command accepts no arguments"); }
                         let (tx, mut rx) = mpsc::unbounded_channel();
                         super::client_actions::handle_resume_all_sessions(id, &sessions, &swarm_members, &swarms_by_id,
-                            &event_history, &event_counter, &swarm_event_tx, &tx).await;
+                            &event_history, &event_counter, &swarm_event_tx, &client_connections, &tx).await;
                         while let Ok(event) = rx.try_recv() {
                             if let ServerEvent::ResumeAllResult { resumed, skipped, message, resumed_sessions, .. } = event {
                                 return Ok((serde_json::json!({"resumed": resumed, "skipped": skipped, "resumed_sessions": resumed_sessions}), message));

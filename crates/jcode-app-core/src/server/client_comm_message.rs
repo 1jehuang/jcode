@@ -119,7 +119,7 @@ pub(super) async fn handle_comm_message(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
-    _client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
 ) {
     let started = std::time::Instant::now();
     crate::logging::event_info(
@@ -475,6 +475,7 @@ pub(super) async fn handle_comm_message(
                                 event_history,
                                 event_counter,
                                 swarm_event_tx,
+                                client_connections,
                             ),
                         )
                         .await;

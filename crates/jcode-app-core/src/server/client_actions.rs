@@ -72,6 +72,7 @@ pub(super) async fn handle_notify_session(
                 ctx.event_history,
                 ctx.event_counter,
                 ctx.swarm_event_tx,
+                ctx.client_connections,
             ),
         )
         .await
@@ -1086,6 +1087,7 @@ pub(super) async fn handle_resume_all_sessions(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     // Snapshot live sessions (those with at least one live client attachment).
@@ -1132,7 +1134,29 @@ pub(super) async fn handle_resume_all_sessions(
             .map(str::to_string)
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
 
-        // Best-effort: record that the durable recovery intent was delivered.
+        let started = super::live_turn::spawn_tracked_live_turn(
+            &session_id,
+            agent_guard,
+            String::new(),
+            Some(reminder.clone()),
+            None,
+            Some("resuming interrupted session".to_string()),
+            super::live_turn::LiveTurnSwarmContext::new(
+                swarm_members,
+                swarms_by_id,
+                event_history,
+                event_counter,
+                swarm_event_tx,
+                client_connections,
+            ),
+        )
+        .await;
+        if !started {
+            skipped += 1;
+            continue;
+        }
+
+        // Best-effort: record delivery only after the target-safe turn starts.
         if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
             &session_id,
             &reminder,
@@ -1143,23 +1167,6 @@ pub(super) async fn handle_resume_all_sessions(
                 session_id, error
             ));
         }
-
-        super::live_turn::spawn_tracked_live_turn(
-            &session_id,
-            agent_guard,
-            String::new(),
-            Some(reminder),
-            None,
-            Some("resuming interrupted session".to_string()),
-            super::live_turn::LiveTurnSwarmContext::new(
-                swarm_members,
-                swarms_by_id,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            ),
-        )
-        .await;
 
         resumed_sessions.push(display_name);
     }

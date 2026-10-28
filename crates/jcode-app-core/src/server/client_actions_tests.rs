@@ -894,6 +894,28 @@ fn live_member(session_id: &str) -> (SwarmMember, mpsc::UnboundedReceiver<Server
     (member, attach_rx)
 }
 
+fn active_client_connections(
+    session_id: &str,
+) -> Arc<RwLock<HashMap<String, ClientConnectionInfo>>> {
+    let (disconnect_tx, _) = mpsc::unbounded_channel();
+    let now = Instant::now();
+    Arc::new(RwLock::new(HashMap::from([(
+        "client-1".to_string(),
+        ClientConnectionInfo {
+            client_id: "client-1".to_string(),
+            session_id: session_id.to_string(),
+            client_instance_id: None,
+            debug_client_id: None,
+            connected_at: now,
+            last_seen: now,
+            is_processing: false,
+            current_tool_name: None,
+            terminal_env: Vec::new(),
+            disconnect_tx,
+        },
+    )])))
+}
+
 #[tokio::test]
 async fn resume_all_continues_interrupted_idle_live_session() {
     let _guard = crate::storage::lock_test_env();
@@ -929,6 +951,7 @@ async fn resume_all_continues_interrupted_idle_live_session() {
     let (member, mut attach_rx) = live_member(&session_id);
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+    let client_connections = active_client_connections(&session_id);
 
     let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
     handle_resume_all_sessions(
@@ -939,6 +962,7 @@ async fn resume_all_continues_interrupted_idle_live_session() {
         &event_history,
         &event_counter,
         &swarm_event_tx,
+        &client_connections,
         &client_event_tx,
     )
     .await;
@@ -1030,6 +1054,7 @@ async fn resume_all_skips_session_with_completed_turn() {
     let (member, _attach_rx) = live_member(&session_id);
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+    let client_connections = active_client_connections(&session_id);
 
     let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
     handle_resume_all_sessions(
@@ -1040,6 +1065,7 @@ async fn resume_all_skips_session_with_completed_turn() {
         &event_history,
         &event_counter,
         &swarm_event_tx,
+        &client_connections,
         &client_event_tx,
     )
     .await;

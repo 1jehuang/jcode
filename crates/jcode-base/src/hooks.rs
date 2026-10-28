@@ -247,13 +247,7 @@ where
 }
 
 /// Replace server-inherited client identity on a subprocess with `env`.
-pub fn apply_client_env_pairs(
-    mut set: impl FnMut(&str, Option<&str>),
-    env: &[(String, String)],
-) {
-    if env.is_empty() {
-        return;
-    }
+pub fn apply_client_env_pairs(mut set: impl FnMut(&str, Option<&str>), env: &[(String, String)]) {
     for key in jcode_terminal_launch::CLIENT_TERMINAL_ENV_VARS {
         set(key, None);
     }

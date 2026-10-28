@@ -1,7 +1,7 @@
 use super::live_turn::{LiveTurnSwarmContext, run_live_turn_if_idle};
 use super::state::SwarmEvent;
 use super::{
-    SessionAgents, SessionInterruptQueues, SwarmMember, fanout_session_event,
+    ClientConnectionInfo, SessionAgents, SessionInterruptQueues, SwarmMember, fanout_session_event,
     queue_soft_interrupt_for_session,
 };
 use crate::message::{
@@ -74,6 +74,7 @@ pub(super) async fn dispatch_background_task_completion(
     task: &crate::bus::BackgroundTaskCompleted,
     sessions: &SessionAgents,
     soft_interrupt_queues: &SessionInterruptQueues,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     event_history: &Arc<RwLock<VecDeque<SwarmEvent>>>,
@@ -128,6 +129,7 @@ pub(super) async fn dispatch_background_task_completion(
                 event_history,
                 event_counter,
                 swarm_event_tx,
+                client_connections,
             ),
         )
         .await
@@ -161,6 +163,7 @@ pub(super) async fn dispatch_background_task_stalled(
     task: &crate::bus::BackgroundTaskStalled,
     sessions: &SessionAgents,
     soft_interrupt_queues: &SessionInterruptQueues,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     event_history: &Arc<RwLock<VecDeque<SwarmEvent>>>,
@@ -215,6 +218,7 @@ pub(super) async fn dispatch_background_task_stalled(
                 event_history,
                 event_counter,
                 swarm_event_tx,
+                client_connections,
             ),
         )
         .await
@@ -247,6 +251,7 @@ pub(super) async fn dispatch_swarm_await_completion(
     event: &crate::bus::SwarmAwaitCompleted,
     sessions: &SessionAgents,
     soft_interrupt_queues: &SessionInterruptQueues,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     event_history: &Arc<RwLock<VecDeque<SwarmEvent>>>,
@@ -306,6 +311,7 @@ pub(super) async fn dispatch_swarm_await_completion(
             event_history,
             event_counter,
             swarm_event_tx,
+            client_connections,
         ),
     )
     .await

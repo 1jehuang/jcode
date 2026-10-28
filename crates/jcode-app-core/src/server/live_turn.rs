@@ -39,6 +39,7 @@ pub(super) struct LiveTurnSwarmContext {
     pub event_history: Arc<RwLock<VecDeque<SwarmEvent>>>,
     pub event_counter: Arc<AtomicU64>,
     pub event_tx: broadcast::Sender<SwarmEvent>,
+    pub client_connections: ClientConnections,
 }
 
 impl LiveTurnSwarmContext {
@@ -48,6 +49,7 @@ impl LiveTurnSwarmContext {
         event_history: &Arc<RwLock<VecDeque<SwarmEvent>>>,
         event_counter: &Arc<AtomicU64>,
         event_tx: &broadcast::Sender<SwarmEvent>,
+        client_connections: &ClientConnections,
     ) -> Self {
         Self {
             members: Arc::clone(members),
@@ -55,8 +57,33 @@ impl LiveTurnSwarmContext {
             event_history: Arc::clone(event_history),
             event_counter: Arc::clone(event_counter),
             event_tx: event_tx.clone(),
+            client_connections: Arc::clone(client_connections),
         }
     }
+}
+
+/// Resolve an environment only when it is unambiguous for the target session.
+/// Disconnected interactive seats are not driven immediately; headless workers
+/// intentionally have no client env and run with an explicitly empty scope.
+async fn target_client_terminal_env(
+    session_id: &str,
+    members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_connections: &ClientConnections,
+) -> Option<Vec<(String, String)>> {
+    let is_headless = members
+        .read()
+        .await
+        .get(session_id)
+        .is_some_and(|member| member.is_headless);
+    let connections = client_connections.read().await;
+    let mut snapshots = connections
+        .values()
+        .filter(|connection| connection.session_id == session_id)
+        .map(|connection| connection.terminal_env.clone());
+    let Some(first) = snapshots.next() else {
+        return is_headless.then(Vec::new);
+    };
+    snapshots.all(|snapshot| snapshot == first).then_some(first)
 }
 
 /// Reserve the live agent for `session_id` when the session has at least one
@@ -125,6 +152,15 @@ pub(super) async fn spawn_tracked_live_turn(
     {
         agent.set_inline_output_tap(true);
     }
+    let Some(client_terminal_env) =
+        target_client_terminal_env(session_id, &swarm.members, &swarm.client_connections).await
+    else {
+        crate::logging::warn(&format!(
+            "Skipping server-initiated turn for session {} because its client identity is disconnected or ambiguous",
+            session_id
+        ));
+        return false;
+    };
     update_member_status(
         session_id,
         "running",
@@ -158,7 +194,6 @@ pub(super) async fn spawn_tracked_live_turn(
                         vec![],
                         system_reminder,
                         event_tx.clone(),
-                        Some(display_role),
                     )
                     .await
             } else {
@@ -427,12 +462,14 @@ mod durable_error_tests {
         let event_history = Arc::new(RwLock::new(VecDeque::new()));
         let event_counter = Arc::new(AtomicU64::new(0));
         let (swarm_event_tx, _) = broadcast::channel(16);
+        let client_connections = Arc::new(RwLock::new(HashMap::new()));
         let swarm = LiveTurnSwarmContext::new(
             &members,
             &swarms_by_id,
             &event_history,
             &event_counter,
             &swarm_event_tx,
+            &client_connections,
         );
         let accepted = agent.lock().await.claim_server_turn().unwrap();
         assert!(
@@ -520,5 +557,246 @@ mod durable_error_tests {
         );
         // Join the agent reservation before dropping the isolated test home.
         drop(agent.lock().await);
+    }
+}
+
+#[cfg(test)]
+mod identity_scope_tests {
+    use super::*;
+    use crate::message::{Message, StreamEvent, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
+    use crate::tool::Registry;
+    use std::sync::Mutex as StdMutex;
+    use std::time::Instant;
+    use tokio::sync::mpsc;
+
+    #[derive(Clone, Default)]
+    struct IdentityProvider(Arc<StdMutex<Vec<Option<String>>>>);
+
+    #[async_trait::async_trait]
+    impl Provider for IdentityProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            let mut inherited = HashMap::from([(
+                "OPENRIG_SESSION_NAME".to_string(),
+                "queue-worker@kernel".to_string(),
+            )]);
+            crate::hooks::apply_client_env_pairs(
+                |key, value| match value {
+                    Some(value) => {
+                        inherited.insert(key.to_string(), value.to_string());
+                    }
+                    None => {
+                        inherited.remove(key);
+                    }
+                },
+                &crate::hooks::client_env_for_tools(),
+            );
+            self.0
+                .lock()
+                .expect("identity provider lock")
+                .push(inherited.get("OPENRIG_SESSION_NAME").cloned());
+            Ok(Box::pin(tokio_stream::iter(vec![
+                Ok(StreamEvent::TextDelta("turn complete".to_string())),
+                Ok(StreamEvent::MessageEnd { stop_reason: None }),
+            ])))
+        }
+
+        fn name(&self) -> &str {
+            "identity-test"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    fn member(
+        session_id: &str,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        attach_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> SwarmMember {
+        SwarmMember {
+            session_id: session_id.to_string(),
+            event_tx,
+            event_txs: HashMap::from([("client".to_string(), attach_tx)]),
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: false,
+            status: "ready".to_string(),
+            detail: None,
+            friendly_name: None,
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".to_string(),
+            joined_at: Instant::now(),
+            last_status_change: Instant::now(),
+            is_headless: false,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+            task_label: None,
+        }
+    }
+
+    fn connection(session_id: &str, identity: &str) -> crate::server::ClientConnectionInfo {
+        let (disconnect_tx, _) = mpsc::unbounded_channel();
+        let now = Instant::now();
+        crate::server::ClientConnectionInfo {
+            client_id: format!("connection-{identity}"),
+            session_id: session_id.to_string(),
+            client_instance_id: None,
+            debug_client_id: None,
+            connected_at: now,
+            last_seen: now,
+            is_processing: false,
+            current_tool_name: None,
+            terminal_env: vec![("OPENRIG_SESSION_NAME".to_string(), identity.to_string())],
+            disconnect_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_live_turns_keep_target_identity_and_reject_missing_or_ambiguous_env() {
+        let _env_lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("isolated Jcode home");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore_home = RestoreHome(previous_home);
+
+        let provider = Arc::new(IdentityProvider::default());
+        let mut agents = Vec::new();
+        let mut members = HashMap::new();
+        let mut connections = HashMap::new();
+        let mut receivers = Vec::new();
+        let mut ids = Vec::new();
+        for identity in ["design-designer@hull", "product-partner@hull"] {
+            let mut agent = Agent::new(provider.clone(), Registry::empty());
+            agent.set_memory_enabled(false);
+            let session_id = agent.session_id().to_string();
+            let agent = Arc::new(Mutex::new(agent));
+            let (event_tx, event_rx) = mpsc::unbounded_channel();
+            let (attach_tx, attach_rx) = mpsc::unbounded_channel();
+            members.insert(session_id.clone(), member(&session_id, event_tx, attach_tx));
+            connections.insert(
+                format!("connection-{identity}"),
+                connection(&session_id, identity),
+            );
+            agents.push(agent);
+            receivers.push((event_rx, attach_rx));
+            ids.push(session_id);
+        }
+        let members = Arc::new(RwLock::new(members));
+        let connections = Arc::new(RwLock::new(connections));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(VecDeque::new()));
+        let event_counter = Arc::new(AtomicU64::new(0));
+        let (event_tx, _) = broadcast::channel(16);
+        let make_context = |connections: &ClientConnections| {
+            LiveTurnSwarmContext::new(
+                &members,
+                &swarms_by_id,
+                &event_history,
+                &event_counter,
+                &event_tx,
+                connections,
+            )
+        };
+
+        let (first_started, second_started) = tokio::join!(
+            spawn_tracked_live_turn(
+                &ids[0],
+                Arc::clone(&agents[0]).lock_owned().await,
+                "wake designer".to_string(),
+                None,
+                None,
+                None,
+                make_context(&connections),
+            ),
+            spawn_tracked_live_turn(
+                &ids[1],
+                Arc::clone(&agents[1]).lock_owned().await,
+                "wake product partner".to_string(),
+                None,
+                None,
+                None,
+                make_context(&connections),
+            ),
+        );
+        assert!(first_started && second_started);
+
+        for (_, attach_rx) in &mut receivers {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if matches!(attach_rx.recv().await, Some(ServerEvent::Done { id: 0 })) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("each target live turn should complete");
+        }
+        let mut seen = provider.0.lock().expect("identity provider lock").clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                Some("design-designer@hull".to_string()),
+                Some("product-partner@hull".to_string()),
+            ]
+        );
+
+        let empty_connections = Arc::new(RwLock::new(HashMap::new()));
+        assert!(
+            !spawn_tracked_live_turn(
+                &ids[1],
+                Arc::clone(&agents[1]).lock_owned().await,
+                "must not run without a connected client".to_string(),
+                None,
+                None,
+                None,
+                make_context(&empty_connections),
+            )
+            .await
+        );
+
+        let ambiguous_connections = Arc::new(RwLock::new(HashMap::from([
+            (
+                "first-client".to_string(),
+                connection(&ids[0], "design-designer@hull"),
+            ),
+            (
+                "second-client".to_string(),
+                connection(&ids[0], "queue-worker@kernel"),
+            ),
+        ])));
+        assert!(
+            !spawn_tracked_live_turn(
+                &ids[0],
+                Arc::clone(&agents[0]).lock_owned().await,
+                "must not run with ambiguous client identity".to_string(),
+                None,
+                None,
+                None,
+                make_context(&ambiguous_connections),
+            )
+            .await
+        );
+        assert_eq!(provider.0.lock().expect("identity provider lock").len(), 2);
     }
 }
