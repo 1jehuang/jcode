@@ -110,6 +110,11 @@ fn pinned_config_and_app_reset_lock_order_does_not_deadlock() {
 #[test]
 fn justrust_status_is_below_todos_and_never_wraps() {
     with_pinned_todos_config(|| {
+        // Release commit titles may contain the product name too. The status
+        // assertion must distinguish UI chrome from unrelated changelog prose.
+        let _changelog = header::scoped_unseen_changelog_entries_override_for_tests(vec![
+            "justrust release update".to_string(),
+        ]);
         let mut state = TestState {
             pinned_todos_payload: Some(todo_payload()),
             justrust_status: Some(crate::tui::justrust_status::StatusRow {
@@ -136,8 +141,18 @@ fn justrust_status_is_below_todos_and_never_wraps() {
             .draw(|frame| crate::tui::ui::draw(frame, &state))
             .unwrap();
         let text = terminal_text(&terminal);
-        assert_eq!(text.matches("justrust").count(), 1, "{text}");
-        assert!(text.find("Pinned regression task").unwrap() < text.find("justrust").unwrap());
+        assert!(text.contains("justrust release update"), "{text}");
+        let status_rows: Vec<_> = text
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.trim_start().starts_with("justrust [remote/hosted]"))
+            .collect();
+        assert_eq!(status_rows.len(), 1, "{text}");
+        let todo_row = text
+            .lines()
+            .position(|line| line.contains("Pinned regression task"))
+            .unwrap();
+        assert!(todo_row < status_rows[0].0, "{text}");
 
         state.pinned_todos_payload = None;
         let (lines, _) = viewport::pinned_todo_band_lines(&state, 100, 24);
