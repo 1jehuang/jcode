@@ -45,8 +45,11 @@ elif name == 'security' and args[0] == 'find-identity':
     print('  1) ' + 'A' * 40 + ' "' + identity + '"')
     if os.environ.get('TEST_DUPLICATE_IDENTITY'):
         print('  2) ' + 'B' * 40 + ' "' + identity + '"')
-elif name == 'codesign' and '--verify' in args and os.environ.get('TEST_BAD_CHAIN'):
-    sys.exit(1)
+elif name == 'codesign' and '--verify' in args:
+    if not args[args.index('-R') + 1].startswith('='):
+        sys.exit('Inline requirement must start with =, not a filename')
+    if os.environ.get('TEST_BAD_CHAIN'):
+        sys.exit(1)
 elif name == 'ditto':
     Path(args[-1]).write_bytes(b'fixture zip')
 elif name == 'xcrun':
@@ -84,6 +87,7 @@ elif name == 'xcrun':
         self.assertEqual(signing[signing.index('--sign') + 1], 'A' * 40)
         verification = next(args for name, args in calls if name == 'codesign' and '--verify' in args)
         requirement = verification[verification.index('-R') + 1]
+        self.assertTrue(requirement.startswith('=anchor apple generic'))
         for clause in ('anchor apple generic', 'certificate 1[field.1.2.840.113635.100.6.2.6] exists',
                        'certificate leaf[field.1.2.840.113635.100.6.1.13] exists',
                        'identifier "com.jcode.cli"', 'certificate leaf[subject.OU] = "ABCDEFGHIJ"'):

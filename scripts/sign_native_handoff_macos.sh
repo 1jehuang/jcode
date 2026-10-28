@@ -91,7 +91,8 @@ echo 'Developer ID signature created'
 # additionally binding the leaf Team ID to the exact identity selected above.
 requirement='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and identifier "com.jcode.cli"'
 requirement+=" and certificate leaf[subject.OU] = \"$team_id\""
-codesign --verify --strict --verbose=2 -R "$requirement" signed-handoff/jcode
+# The leading '=' selects inline requirement text, otherwise codesign opens a file.
+codesign --verify --strict --verbose=2 -R "=$requirement" signed-handoff/jcode
 # Exercise the signed image with the same credential-free, bounded native smoke
 # checks before sending anything to Apple's notary service.
 python3 - <<'PY'

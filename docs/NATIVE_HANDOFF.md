@@ -192,3 +192,11 @@ mandatory. Fixture tests cover paths containing spaces, restoration after a bad
 chain, and refusal to sign if search-list setup fails. Actual Apple acceptance
 requires a new exact-source workflow run, not a failed-job-only rerun against an
 older attempt's artifact.
+
+The follow-up run `40626489621` passed native producer/consumer checks and created
+a Developer ID signature. Verification then correctly stopped before notarization
+because the script passed an inline requirement without the `=` prefix, causing
+`codesign` to interpret it as a filename. The verification argument now explicitly
+selects inline text. Tests reject the old filename-mode invocation, and all Apple
+chain, Team ID, and identifier clauses remain unchanged. Live verification and
+notarization acceptance still require the next exact-source run.
