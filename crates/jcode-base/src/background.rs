@@ -1396,8 +1396,12 @@ impl BackgroundTaskManager {
                     let _ = (&mut task.handle).await;
                     return Ok(false);
                 }
-                // Wait for the task to report whether its owned resources stopped.
-                (&mut task.handle).await??;
+                // The task may finish normally before it observes cancellation.
+                // In that case its published result must remain authoritative.
+                let result = (&mut task.handle).await??;
+                if !result.cancelled {
+                    return Ok(false);
+                }
             } else {
                 task.handle.abort();
                 let _ = (&mut task.handle).await;

@@ -4,6 +4,53 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+/// A cancellation arriving after a command finishes must preserve its result.
+#[tokio::test]
+async fn cooperative_cancellation_preserves_finished_command_result() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    for exit_code in [0, 7] {
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let info = manager
+            .spawn_with_notify_and_cancellation(
+                "test",
+                None,
+                "already-finished",
+                false,
+                false,
+                Some(cancel_tx),
+                move |_| async move {
+                    // The process is finished, but its task is still finalizing.
+                    cancel_rx.await?;
+                    Ok(if exit_code == 0 {
+                        TaskResult::completed(Some(exit_code))
+                    } else {
+                        TaskResult::failed(Some(exit_code), "command failed")
+                    })
+                },
+            )
+            .await;
+        assert!(
+            !manager.cancel(&info.task_id).await?,
+            "finished command was cancelled"
+        );
+        let status = manager
+            .status(&info.task_id)
+            .await
+            .expect("finished status");
+        assert_eq!(status.exit_code, Some(exit_code));
+        assert_eq!(
+            status.status,
+            if exit_code == 0 {
+                BackgroundTaskStatus::Completed
+            } else {
+                BackgroundTaskStatus::Failed
+            }
+        );
+    }
+    Ok(())
+}
+
 /// Cooperative cancellation must not emit a normal completion notification.
 #[tokio::test]
 async fn cooperative_cancellation_does_not_publish_completion() -> Result<()> {
