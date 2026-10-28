@@ -44,3 +44,33 @@ Representative hosted run ids: `20261027-231440770-3842852` (OpenRouter), `20261
 - Bedrock without `aws-sdk` remains cache/static-only and reports unsupported live refresh. First-page inference-profile permission failures remain best-effort so foundation-model discovery still works for accounts without ListInferenceProfiles permission.
 - No claim is made that every discovered model is entitled, enabled in the current region, tool-capable, or invokable. The provider remains authoritative at request time.
 - Hosted justrust reports disabled build slots after its reflink probe and downstream rebuild cost from Bedrock through jcode-base. For example run `20261027-232216783-3876421` attributed about 5.6 seconds to downstream rebuilds. No unrequested crate restructuring was performed.
+
+## Integrated follow-through
+
+The coordinator subsequently integrated these changes with the shared pipeline:
+
+- Grok Build now fetches the official CLI proxy's `/v1/models` using its OIDC
+  bearer and CLI identity headers. Native `model`/`modelId`, context metadata,
+  and distinct menu IDs are parsed without a release allowlist. Its endpoint-
+  validated persistent cache uses the dedicated `grok-build` namespace.
+- Attached provider instances refresh every 30 minutes, independent of picker
+  activity. Repeated attaches share a timer, missed ticks are skipped, requests
+  time out after two minutes, and weak references avoid retaining closed
+  providers. Explicit refresh bypasses fresh catalogs. Initial attach/startup
+  and login retain their existing prefetch paths.
+- Shared fanout includes compatible profiles, including Grok Build. Nonempty
+  offline defaults no longer suppress attach discovery. Partial successes are
+  published even if another endpoint fails. Anthropic forced refresh bypasses
+  freshness and retry throttles while retaining scoped single-flight protection.
+- Hosted regression results: Grok wrapper 6 passed, compatible runtime 194
+  passed/1 ignored, Anthropic runtime 106 passed/1 ignored, forced scoped guard
+  1 passed, periodic cadence/lifetime/timeout 2 passed. The Grok HTTP fixture
+  discovers both `grok-4.7` and a future ID absent from all fallback arrays,
+  force-refreshes a fresh cache, and retains the last good list after a 503.
+- CI now executes these discovery contracts instead of only compiling the
+  provider test harnesses. Contributor guidance records the required contract
+  for future provider work.
+
+These checks do not establish which models a production account is entitled to
+use. Grok authenticated production verification was unavailable in this checkout.
+The static-only/custom-endpoint and no-SDK Bedrock limitations above still apply.
