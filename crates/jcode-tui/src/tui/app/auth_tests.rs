@@ -355,6 +355,11 @@ fn muse_subscription_canonical_success_publishes_untagged_event_and_updates_loca
         }
         let _restore = RestoreOptIn(prev_opt_in);
 
+        // This test exercises returning-user login state. A fresh install
+        // intentionally replaces the ready notice with onboarding guidance.
+        let mut hints = crate::setup_hints::SetupHintsState::load();
+        hints.onboarding_start_choice_shown = true;
+        hints.save()?;
         let mut app = App::new_for_remote(None);
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let approved = std::sync::Arc::new(std::sync::Mutex::new(None));
