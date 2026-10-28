@@ -1206,14 +1206,9 @@ pub(crate) fn blocked_phase_spans(
         .item_indices()
         .any(|i| crate::todo::todo_completely_blocked(todos[i]))
     {
-        let phase = stage
-            .number
-            .map(|n| format!("phase {n}: "))
-            .unwrap_or_default();
-        return vec![Span::styled(
-            format!("  ✋ {phase}Completely blocked"),
-            Style::default().fg(rgb(225, 165, 90)),
-        )];
+        // The phase pip already replaces this todo's dot with ✋.
+        // Repeating a blocked phase label adds no information.
+        return Vec::new();
     }
     let failed = stage.item_indices().any(|i| {
         !is_done(todos[i])

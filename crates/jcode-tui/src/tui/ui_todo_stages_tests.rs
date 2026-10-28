@@ -404,7 +404,10 @@ fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips(
     assert_eq!(strip[0].content, "✋");
     assert_eq!(width_of(&strip), 4);
     let label = Line::from(blocked_phase_spans(&[&item], &workers)).to_string();
-    assert!(label.contains("phase 1: Completely blocked"));
+    assert!(
+        label.is_empty(),
+        "blocked state already appears in the phase pips"
+    );
     let note = Line::from(lane_note_spans(&[&item], &workers)).to_string();
     assert_eq!(note, "Completely blocked");
     for width in 0..120 {
