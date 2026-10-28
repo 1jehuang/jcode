@@ -132,6 +132,7 @@ fn observed_state(path: &Path) -> Result<FileState> {
             return Ok(FileState {
                 blob: None,
                 mode: None,
+                metadata: None,
             });
         }
         Err(error) => return Err(error.into()),
@@ -144,9 +145,21 @@ fn observed_state(path: &Path) -> Result<FileState> {
     };
     #[cfg(not(unix))]
     let mode = Some(u32::from(metadata.permissions().readonly()));
+    #[cfg(unix)]
+    let metadata_state = {
+        use std::os::unix::fs::MetadataExt;
+        Some(super::FileMetadata {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            xattrs: super::read_xattrs(path)?,
+        })
+    };
+    #[cfg(not(unix))]
+    let metadata_state = None;
     Ok(FileState {
         blob: Some(hex::encode(Sha256::digest(data))),
         mode,
+        metadata: metadata_state,
     })
 }
 
@@ -156,10 +169,14 @@ pub(super) fn checkpoint_info(history: &History, checkpoint: &Checkpoint) -> Rew
     info.changed_file_count = 0;
     for (path, desired) in &checkpoint.before {
         match observed_state(path) {
-            Ok(actual) if &actual == desired => (),
+            Ok(actual) if desired.matches(&actual) => (),
             Ok(actual) => {
                 info.changed_file_count += 1;
-                if history.expected.get(path) != Some(&actual) {
+                if !history
+                    .expected
+                    .get(path)
+                    .is_some_and(|expected| expected.matches(&actual))
+                {
                     info.can_restore_files = false;
                 }
             }

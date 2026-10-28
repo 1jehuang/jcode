@@ -130,6 +130,72 @@ fn full_and_split_prompt_builders_use_the_same_one_line_skill_descriptions() {
 }
 
 #[test]
+fn agents_md_loads_nested_working_directory_and_ancestor_files_nearest_first() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let nested = workspace.join("packages/app/src");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(root.path().join("AGENTS.md"), "ROOT_RULE").unwrap();
+    std::fs::write(workspace.join("AGENTS.md"), "WORKSPACE_RULE").unwrap();
+    std::fs::write(nested.join("AGENTS.md"), "NESTED_RULE").unwrap();
+
+    let (content, info) = load_agents_md_files_from_dir(Some(&nested));
+    let content = content.expect("nested and ancestor instructions");
+    let nested_pos = content.find("NESTED_RULE").unwrap();
+    let workspace_pos = content.find("WORKSPACE_RULE").unwrap();
+    let root_pos = content.find("ROOT_RULE").unwrap();
+    assert!(nested_pos < workspace_pos && workspace_pos < root_pos);
+    assert!(info.has_project_agents_md);
+    assert_eq!(info.project_agents_md_chars, "NESTED_RULE".len());
+}
+
+#[cfg(unix)]
+#[test]
+fn agents_md_ancestor_walk_deduplicates_canonical_paths() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let root = tempfile::tempdir().unwrap();
+    let actual = root.path().join("actual");
+    let alias = root.path().join("alias");
+    let nested = actual.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(actual.join("AGENTS.md"), "ONE_CANONICAL_SOURCE").unwrap();
+    std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    std::fs::create_dir_all(alias.join("nested")).unwrap();
+
+    let global_alias = actual.join("AGENTS.md");
+    let (content, _) = load_agents_md_files_from_dirs(&alias.join("nested"), Some(&global_alias));
+    let content = content.expect("symlink-aliased ancestor instructions");
+    assert_eq!(content.matches("ONE_CANONICAL_SOURCE").count(), 1);
+}
+
+#[test]
 fn test_load_agents_md_files_uses_sandboxed_global_files() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
