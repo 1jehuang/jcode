@@ -611,12 +611,12 @@ fn lane_note_spans(
     lane_todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
 ) -> Vec<Span<'static>> {
-    if let Some(todo) = lane_todos
+    if lane_todos
         .iter()
-        .find(|todo| crate::todo::todo_completely_blocked(todo))
+        .any(|todo| crate::todo::todo_completely_blocked(todo))
     {
         return vec![Span::styled(
-            todo_complete_blocker_detail(todo),
+            "Completely blocked",
             Style::default().fg(rgb(225, 165, 90)),
         )];
     }

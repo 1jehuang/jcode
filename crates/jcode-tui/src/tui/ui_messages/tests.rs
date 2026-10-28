@@ -1289,8 +1289,7 @@ fn complete_blocker_row_precedes_background_clock_and_preserves_reason() {
     }];
     let wide = render_todo_item_line_with_background(&todo, &[], &tasks, "", 240).to_string();
     assert!(wide.contains("✋"));
-    assert!(wide.contains("Completely blocked: Only you can authorize this account ✋"));
-    assert!(wide.contains("Only you can authorize this account ✋"));
+    assert!(!wide.contains("Only you can authorize"));
     assert!(!wide.contains('◷'));
     assert!(!wide.contains('\n'));
     for width in 0..140 {

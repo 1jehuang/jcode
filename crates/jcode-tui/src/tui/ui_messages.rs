@@ -1451,6 +1451,36 @@ pub(crate) fn render_todos_message(
     render_todos_message_with_cap(msg, width, diff_mode, true)
 }
 
+/// Full blocker prose belongs below the response, outside the pinned chrome.
+pub(super) fn todo_blocker_notes(payload: Option<&str>) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(payload) = payload
+        && let Ok(payload) = serde_json::from_str::<TodoCardPayload>(payload)
+    {
+        let (todos, ..) = payload.into_parts();
+        for todo in todos
+            .iter()
+            .filter(|todo| crate::todo::todo_completely_blocked(todo))
+        {
+            if lines.is_empty() {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::styled(
+                format!(
+                    "  ✋ {}: {}",
+                    todo.content
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    todo_complete_blocker_detail(todo)
+                ),
+                Style::default().fg(todo_warning_color()),
+            ));
+        }
+    }
+    lines
+}
+
 /// Todo card for the pinned band at the top of the viewport. The band owns
 /// its full rows (info widgets never dock beside it), so the card spans the
 /// whole available width instead of the transcript's readability cap.
@@ -1615,7 +1645,7 @@ fn render_todos_message_with_cap(
 
     for todo in todos
         .iter()
-        .filter(|todo| crate::todo::todo_completely_blocked(todo))
+        .filter(|todo| cap_width && crate::todo::todo_completely_blocked(todo))
     {
         for chunk in wrap_todo_detail(
             &format!(
@@ -2595,12 +2625,6 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
         Span::styled(format!("{} ", glyph), Style::default().fg(glyph_color)),
         Span::styled(todo.content.clone(), Style::default().fg(text_color)),
     ];
-    if is_completely_blocked {
-        spans.push(Span::styled(
-            format!(" · {}", todo_complete_blocker_detail(todo)),
-            Style::default().fg(todo_warning_color()),
-        ));
-    }
     if crate::todo::is_incomplete_todo(todo)
         && let Some(blocker) = &todo.external_blocker
     {

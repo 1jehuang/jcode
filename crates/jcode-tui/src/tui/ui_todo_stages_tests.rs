@@ -406,7 +406,7 @@ fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips(
     let label = Line::from(blocked_phase_spans(&[&item], &workers)).to_string();
     assert!(label.contains("phase 1: Completely blocked"));
     let note = Line::from(lane_note_spans(&[&item], &workers)).to_string();
-    assert!(note.contains("Completely blocked: Only the account owner can approve access"));
+    assert_eq!(note, "Completely blocked");
     for width in 0..120 {
         let mut pips = Vec::new();
         push_stage_pips(&mut pips, &[&item], width);

@@ -606,10 +606,15 @@ pub(super) fn prepare_messages(
         height,
         diff_mode: app.diff_mode(),
         // Pinning changes which tool messages participate in the transcript.
+        // The live todo payload also owns the trailing blocker explanations.
         messages_version: app
             .display_messages_version()
             .wrapping_mul(2)
-            .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
+            .wrapping_add(u64::from(crate::config::config().display.pin_todos))
+            .wrapping_mul(31)
+            .wrapping_add(super::hash_text_for_cache(
+                app.pinned_todos_payload().unwrap_or(""),
+            )),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
@@ -912,6 +917,10 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         (PreparedSectionKind::BatchProgress, batch_progress_prepared),
         (PreparedSectionKind::Reasoning, reasoning_prepared),
         (PreparedSectionKind::Streaming, streaming_prepared),
+        (
+            PreparedSectionKind::TodoBlockers,
+            Arc::new(prepare_todo_blockers(app, width)),
+        ),
     ]);
     super::note_full_prep_phase_metrics(super::FullPrepPhaseMetrics {
         header_ms,
@@ -921,6 +930,16 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         compose_ms: compose_start.elapsed().as_secs_f64() * 1000.0,
     });
     frame
+}
+
+fn prepare_todo_blockers(app: &dyn TuiState, width: u16) -> PreparedMessages {
+    wrap_lines(
+        messages::todo_blocker_notes(app.pinned_todos_payload()),
+        &[],
+        &[],
+        &[],
+        width,
+    )
 }
 
 /// TTL + cheap-signature cache for the prepared (built + wrapped) header.
