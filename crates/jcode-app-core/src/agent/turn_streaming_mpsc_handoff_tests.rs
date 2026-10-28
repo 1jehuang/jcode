@@ -49,6 +49,19 @@ async fn nonstreaming_background_wait_returns_original_result_after_budget() {
     assert_eq!(start.elapsed(), Duration::from_secs(8));
 }
 
+#[test]
+fn ask_user_is_never_automatically_backgrounded() {
+    // The chooser blocks on a human answer; it must never detach from the turn.
+    assert!(!auto_background_allowed(
+        "ask_user",
+        &serde_json::json!({
+            "intent": "decide fix handling",
+            "question": "How should this be handled?",
+            "options": [{"label": "Fix it"}, {"label": "Skip it"}]
+        })
+    ));
+}
+
 #[tokio::test(start_paused = true)]
 async fn background_wait_is_not_automatically_backgrounded() {
     let input = serde_json::json!({"action": "wait", "task_id": "task"});

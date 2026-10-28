@@ -3,6 +3,11 @@ use super::*;
 const TOOL_FOREGROUND_BUDGET: Duration = Duration::from_secs(3);
 
 pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
+    if name == "ask_user" {
+        // Chooser can block for hours on a human answer; detaching the
+        // oneshot drops the pending answer when the turn ends.
+        return false;
+    }
     !(name == "bg" && input.get("action").and_then(|value| value.as_str()) == Some("wait"))
 }
 
