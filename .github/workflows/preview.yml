@@ -125,8 +125,13 @@ jobs:
             export RUSTFLAGS='-Z tls-model=emulated'
             RUSTUP_TOOLCHAIN=nightly justrust build --local --locked -Z build-std=std,panic_abort --release --target "$TARGET" -p jcode --bin jcode
           else
-            read -r -a extra_args <<< "$EXTRA_ARGS"
-            justrust build --local --locked --release --target "$TARGET" -p jcode --bin jcode "${extra_args[@]}"
+            # Positional parameters also expand safely when empty on macOS Bash 3.2.
+            set --
+            if [ -n "$EXTRA_ARGS" ]; then
+              read -r -a extra_args <<< "$EXTRA_ARGS"
+              set -- "${extra_args[@]}"
+            fi
+            justrust build --local --locked --release --target "$TARGET" -p jcode --bin jcode "$@"
           fi
       - name: Package native binary
         if: matrix.compat != true
