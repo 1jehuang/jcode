@@ -318,28 +318,51 @@ impl GeminiProvider {
     /// Returned names look like `models/gemini-2.5-pro`, so strip the prefix
     /// before normalizing through the shared catalog merge.
     async fn refresh_available_models_api_key(&self, api_key: &str) -> Result<Vec<String>> {
-        let url = format!("{}/models", Self::developer_api_base_url());
-        let response: Value = match self.get_json_api_key(&url, api_key, "ListModels").await {
-            Ok(response) => response,
-            Err(err) => {
-                jcode_base::logging::info(&format!(
-                    "Gemini Developer API model discovery failed: {err:#}"
-                ));
-                return Ok(Vec::new());
-            }
-        };
-
-        let raw: Vec<String> = response
-            .get("models")
-            .and_then(|models| models.as_array())
-            .map(|models| {
-                models
-                    .iter()
-                    .filter_map(|model| model.get("name").and_then(|name| name.as_str()))
+        let catalog_url = format!("{}/models", Self::developer_api_base_url());
+        let mut url = reqwest::Url::parse(&catalog_url)?;
+        let mut raw = Vec::new();
+        let mut seen_tokens = std::collections::HashSet::new();
+        loop {
+            let response: Value = self
+                .get_json_api_key(url.as_str(), api_key, "ListModels")
+                .await
+                .context("Gemini Developer API model discovery failed")?;
+            let page = response
+                .get("models")
+                .and_then(Value::as_array)
+                .context("Gemini ListModels response missing models array")?;
+            raw.extend(page.iter().filter_map(|model| {
+                // Exclude embedding-only models even if their names look like
+                // chat models. Missing metadata remains compatible with proxies.
+                if model
+                    .get("supportedGenerationMethods")
+                    .and_then(Value::as_array)
+                    .is_some_and(|methods| {
+                        !methods.iter().any(|method| method == "generateContent")
+                    })
+                {
+                    return None;
+                }
+                model
+                    .get("name")
+                    .and_then(Value::as_str)
                     .map(|name| name.trim_start_matches("models/").to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
+            }));
+            let Some(token) = response
+                .get("nextPageToken")
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+            else {
+                break;
+            };
+            anyhow::ensure!(
+                seen_tokens.insert(token.to_string()) && seen_tokens.len() <= 100,
+                "Gemini ListModels pagination repeated a token or exceeded 100 pages"
+            );
+            // Tokens are opaque and must be URL-encoded, not interpolated.
+            url.set_query(None);
+            url.query_pairs_mut().append_pair("pageToken", token);
+        }
 
         let models = merge_gemini_model_lists(raw);
         if !models.is_empty() {

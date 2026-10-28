@@ -6,6 +6,33 @@ use jcode_provider_antigravity::{
 use jcode_provider_core::Provider;
 use tokio_stream::StreamExt;
 
+#[test]
+fn malformed_credentials_report_catalog_failure_without_losing_models() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    jcode_base::env::set_var("JCODE_HOME", home.path());
+    // An existing malformed credential file must fail before any network or
+    // fallback to credentials from a locally installed third-party client.
+    std::fs::write(jcode_base::auth::antigravity::tokens_path().unwrap(), "not-json").unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(async {
+        let provider = context_test_provider("gemini-3-flash", Some(128_000));
+        let before = provider.available_models_display();
+        let result = provider.refresh_model_catalog().await;
+        assert_eq!(provider.available_models_display(), before);
+        result
+    });
+    match previous {
+        Some(value) => jcode_base::env::set_var("JCODE_HOME", value),
+        None => jcode_base::env::remove_var("JCODE_HOME"),
+    }
+    assert!(result.is_err());
+}
+
 fn context_test_provider(model: &str, limit: Option<u64>) -> AntigravityProvider {
     let provider = AntigravityProvider::new();
     provider.set_model(model).unwrap();

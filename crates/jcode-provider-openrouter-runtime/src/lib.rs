@@ -2612,6 +2612,10 @@ impl OpenRouterProvider {
 
     /// Force refresh the models cache from API
     pub async fn refresh_models(&self) -> Result<Vec<ModelInfo>> {
+        if !self.supports_model_catalog {
+            return Ok(Vec::new());
+        }
+
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),

@@ -1124,6 +1124,14 @@ impl BedrockProvider {
     #[cfg(feature = "aws-sdk")]
     async fn refresh_catalog(&self) -> Result<(Vec<String>, Vec<String>)> {
         let client = Self::control_client().await;
+        self.refresh_catalog_with_client(&client).await
+    }
+
+    #[cfg(feature = "aws-sdk")]
+    async fn refresh_catalog_with_client(
+        &self,
+        client: &BedrockControlClient,
+    ) -> Result<(Vec<String>, Vec<String>)> {
         let mut models = Vec::new();
         let mut profile_required_models = HashSet::new();
         let mut legacy_models = HashSet::new();
@@ -1162,46 +1170,55 @@ impl BedrockProvider {
 
         let mut profiles = Vec::new();
         let mut inference_profile_routes = HashMap::new();
-        match client.list_inference_profiles().send().await {
-            Ok(resp) => {
-                for summary in resp.inference_profile_summaries() {
-                    let id = summary.inference_profile_id();
-                    if !id.is_empty() {
-                        profiles.push(id.to_string());
+        let mut profile_pages = client.list_inference_profiles().into_paginator().send();
+        let mut received_profile_page = false;
+        while let Some(page) = profile_pages.next().await {
+            let resp = match page {
+                Ok(resp) => resp,
+                Err(err) => {
+                    // Never replace a complete warm profile catalog with the
+                    // prefix of a paginated response after a later-page error.
+                    if received_profile_page {
+                        return Err(anyhow::anyhow!(Self::classify_error_message(
+                            &Self::sdk_error_message(&err)
+                        )));
                     }
-                    let arn = summary.inference_profile_arn();
-                    if !arn.is_empty() {
-                        profiles.push(arn.to_string());
-                    }
-                    if summary.status().as_str() == "ACTIVE" && !id.is_empty() {
-                        for model in summary.models() {
-                            if let Some(model_arn) = model.model_arn()
-                                && let Some(foundation_model) =
-                                    Self::foundation_model_id_from_arn(model_arn)
-                            {
-                                Self::insert_preferred_profile_route(
-                                    &mut inference_profile_routes,
-                                    &foundation_model,
-                                    id,
-                                );
-                            }
+                    jcode_logging::info(&format!(
+                        "Bedrock inference profile discovery skipped: {}",
+                        Self::classify_error_message(&Self::sdk_error_message(&err))
+                    ));
+                    break;
+                }
+            };
+            received_profile_page = true;
+            for summary in resp.inference_profile_summaries() {
+                let id = summary.inference_profile_id();
+                if !id.is_empty() {
+                    profiles.push(id.to_string());
+                }
+                let arn = summary.inference_profile_arn();
+                if !arn.is_empty() {
+                    profiles.push(arn.to_string());
+                }
+                if summary.status().as_str() == "ACTIVE" && !id.is_empty() {
+                    for model in summary.models() {
+                        if let Some(model_arn) = model.model_arn()
+                            && let Some(foundation_model) =
+                                Self::foundation_model_id_from_arn(model_arn)
+                        {
+                            Self::insert_preferred_profile_route(
+                                &mut inference_profile_routes,
+                                &foundation_model,
+                                id,
+                            );
                         }
                     }
                 }
-                profiles.sort();
-                profiles.dedup();
-                Self::merge_profile_routes_from_profile_ids(
-                    &mut inference_profile_routes,
-                    profiles.iter(),
-                );
-            }
-            Err(err) => {
-                jcode_logging::info(&format!(
-                    "Bedrock inference profile discovery skipped: {}",
-                    Self::classify_error_message(&Self::sdk_error_message(&err))
-                ));
             }
         }
+        profiles.sort();
+        profiles.dedup();
+        Self::merge_profile_routes_from_profile_ids(&mut inference_profile_routes, profiles.iter());
 
         if let Ok(mut guard) = self.fetched_models.write() {
             *guard = models.clone();

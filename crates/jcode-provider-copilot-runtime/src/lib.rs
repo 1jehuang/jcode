@@ -316,16 +316,17 @@ impl CopilotApiProvider {
 
     /// Detect the user's Copilot tier and set the best default model.
     /// Call this after construction. Fetches a bearer token and queries /models.
-    /// If JCODE_COPILOT_MODEL is set, this is a no-op (user override).
+    /// JCODE_COPILOT_MODEL pins selection, but does not disable discovery.
     pub async fn detect_tier_and_set_default(&self) {
-        let detect_start = std::time::Instant::now();
-        if std::env::var("JCODE_COPILOT_MODEL").is_ok() {
-            jcode_base::logging::info(
-                "Copilot model overridden via JCODE_COPILOT_MODEL, skipping tier detection",
-            );
-            self.mark_init_done();
-            return;
+        if let Err(err) = self.refresh_live_catalog().await {
+            jcode_base::logging::warn(&format!("Copilot catalog refresh failed: {err:#}"));
         }
+        self.mark_init_done();
+    }
+
+    async fn refresh_live_catalog(&self) -> Result<()> {
+        let detect_start = std::time::Instant::now();
+        let model_pinned = std::env::var("JCODE_COPILOT_MODEL").is_ok();
 
         let bearer_start = std::time::Instant::now();
         let bearer = match self.get_bearer_token().await {
@@ -336,8 +337,7 @@ impl CopilotApiProvider {
                     bearer_start.elapsed().as_millis(),
                     e
                 ));
-                self.mark_init_done();
-                return;
+                return Err(e);
             }
         };
 
@@ -371,7 +371,8 @@ impl CopilotApiProvider {
                 // Only replace the placeholder default (or a model the live
                 // catalog no longer serves). A model the user or session already
                 // chose must survive the periodic tier re-detection.
-                if let Ok(mut m) = self.model.try_write()
+                if !model_pinned
+                    && let Ok(mut m) = self.model.try_write()
                     && (m.as_str() == DEFAULT_MODEL || !all_ids.iter().any(|id| id == m.as_str()))
                 {
                     *m = default;
@@ -403,9 +404,10 @@ impl CopilotApiProvider {
                     detect_start.elapsed().as_millis(),
                     e
                 ));
+                return Err(e);
             }
         }
-        self.mark_init_done();
+        Ok(())
     }
 
     fn mark_init_done(&self) {
@@ -1111,8 +1113,26 @@ impl Provider for CopilotApiProvider {
             ));
             return Ok(());
         }
-        self.detect_tier_and_set_default().await;
-        Ok(())
+        let result = self.refresh_live_catalog().await;
+        self.mark_init_done();
+        result
+    }
+
+    async fn refresh_model_catalog(
+        &self,
+    ) -> Result<jcode_provider_core::ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        // An explicit refresh must not be skipped by the startup grace window.
+        let result = self.refresh_live_catalog().await;
+        self.mark_init_done();
+        result?;
+        Ok(jcode_provider_core::summarize_model_catalog_refresh(
+            before_models,
+            self.available_models_display(),
+            before_routes,
+            self.model_routes(),
+        ))
     }
 
     fn supports_compaction(&self) -> bool {
