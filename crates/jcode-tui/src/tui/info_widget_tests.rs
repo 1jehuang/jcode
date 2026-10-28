@@ -114,6 +114,11 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     };
 
     assert!(data.has_data_for(WidgetKind::KvCache));
+    assert!(!WidgetKind::all_by_priority().contains(&WidgetKind::KvCache));
+    let overview = super::render_overview_framed(&data, Rect::new(0, 0, 60, 30));
+    if let Some(overview) = overview {
+        assert!(!lines_text(&overview.all_lines()).contains("KV cache"));
+    }
     let framed = render_kv_cache_widget(&data, Rect::new(0, 0, 40, 5));
     let text = lines_text(&framed.all_lines());
 

@@ -132,6 +132,7 @@ pub(super) fn render_kv_cache_rates_line(cache: &CacheHitInfo) -> Line<'static> 
     Line::from(spans)
 }
 
+#[cfg(test)]
 pub(super) fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
     let Some(lifetime_ratio) = cache.hit_ratio() else {
         return Line::default();
