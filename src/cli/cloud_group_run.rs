@@ -347,13 +347,13 @@ fn finish_activation(
         .context("group activation unconfirmed; all source members remain fenced. Retry the same cloud migrate command to recover safely")?;
     journal.phase = Phase::Complete;
     save_journal(directory, &journal)?;
-    if let Some(repo) = &root(&journal.group)?.manifest.repo {
-        if let Err(error) = environment::sync_saved(Path::new(&repo.root), target) {
-            step(
-                "environment",
-                &format!("group migrated; saved environment synchronization needs retry: {error}"),
-            );
-        }
+    if let Some(repo) = &root(&journal.group)?.manifest.repo
+        && let Err(error) = environment::sync_saved(Path::new(&repo.root), target)
+    {
+        step(
+            "environment",
+            &format!("group migrated; saved environment synchronization needs retry: {error}"),
+        );
     }
     step(
         "done",

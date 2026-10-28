@@ -498,18 +498,20 @@ pub(crate) fn run_cli(action: super::super::args::CloudEnvCommand) -> Result<()>
             )?)?),
         }
     })();
+    write_status(result, std::io::stdout().lock())
+}
+
+fn write_status(result: Result<Status>, mut output: impl std::io::Write) -> Result<()> {
     // Never format the underlying error: parsing and validation may contain secrets.
     // Preserve a bounded status on stdout while signaling failure to the caller.
-    match result {
-        Ok(status) => {
-            println!("{}", serde_json::to_string(&status)?);
-            Ok(())
-        }
-        Err(_) => {
-            println!("{}", serde_json::to_string(&Status::rejected())?);
-            bail!("private environment request rejected")
-        }
-    }
+    let (status, completed) = match result {
+        Ok(status) => (status, true),
+        Err(_) => (Status::rejected(), false),
+    };
+    serde_json::to_writer(&mut output, &status)?;
+    writeln!(output)?;
+    anyhow::ensure!(completed, "private environment request rejected");
+    Ok(())
 }
 
 pub(super) fn sync_saved(root: &Path, target: &super::Target) -> Result<()> {
@@ -551,7 +553,7 @@ mod tests {
             Some(value) => crate::env::set_var("JCODE_SSH_BINARY", value),
             None => crate::env::remove_var("JCODE_SSH_BINARY"),
         }
-        let error = result.err().expect("invalid encoding must fail");
+        let error = result.expect_err("invalid encoding must fail");
         assert_eq!(error.to_string(), "remote binary encoding invalid");
     }
 
@@ -771,8 +773,15 @@ mod tests {
     }
     #[test]
     fn status_never_reflects_errors() {
-        let result: Result<Status> = Err(anyhow::anyhow!("secret-value"));
-        let output = serde_json::to_string(&result.unwrap_or_else(|_| Status::rejected())).unwrap();
+        let result = env::parse_request(br#"{"action":"secret-value"}"#)
+            .map(|_| Status::new("available", 0, 0));
+        assert!(result.is_err());
+        let mut output = Vec::new();
+        let error = write_status(result, &mut output).unwrap_err();
+        assert_eq!(error.to_string(), "private environment request rejected");
+        let output = String::from_utf8(output).unwrap();
+        let status: Status = serde_json::from_str(&output).unwrap();
+        assert!(!status.ok);
         assert!(!output.contains("secret-value"));
         assert!(output.len() < 128);
     }
