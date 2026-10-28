@@ -21,6 +21,15 @@ import fake_openai_server as provider
 
 
 class Reports(unittest.TestCase):
+    def test_workflow_installs_nondefault_acceptance_prerequisites(self):
+        workflow = (SCRIPTS.parent / ".github/workflows/cloud-acceptance.yml").read_text()
+        install_lines = [line for line in workflow.splitlines()
+                         if "apt-get install" in line]
+        packages = set(" ".join(install_lines).split())
+        for package in ("ripgrep", "tmux", "openssh-server", "bubblewrap",
+                        "util-linux", "python3"):
+            self.assertIn(package, packages, f"runner must install {package}")
+
     def test_failure_is_present_in_json_and_junit(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
