@@ -14,7 +14,11 @@ fn malformed_credentials_report_catalog_failure_without_losing_models() {
     jcode_base::env::set_var("JCODE_HOME", home.path());
     // An existing malformed credential file must fail before any network or
     // fallback to credentials from a locally installed third-party client.
-    std::fs::write(jcode_base::auth::antigravity::tokens_path().unwrap(), "not-json").unwrap();
+    std::fs::write(
+        jcode_base::auth::antigravity::tokens_path().unwrap(),
+        "not-json",
+    )
+    .unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
