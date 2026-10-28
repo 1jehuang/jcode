@@ -139,10 +139,15 @@ pub(super) fn recover_rejected_queued_continuation(app: &mut App) -> bool {
 }
 
 fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> bool {
-    let is_recoverable = app.rate_limit_pending_message.as_ref().is_some_and(|pending| {
-        (rejected || pending.is_system && !pending.auto_retry)
-            && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
-    });
+    let is_recoverable = app
+        .rate_limit_pending_message
+        .as_ref()
+        .is_some_and(|pending| {
+            (rejected || pending.is_system && !pending.auto_retry)
+                && (!pending.content.trim().is_empty()
+                    || !pending.images.is_empty()
+                    || pending.system_reminder.is_some())
+        });
     if !is_recoverable {
         return false;
     }
@@ -159,7 +164,7 @@ fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> b
     if let Some(reminder) = pending.system_reminder {
         app.hidden_queued_system_messages.insert(0, reminder);
     }
-    if !pending.content.trim().is_empty() {
+    if !pending.content.trim().is_empty() || !pending.images.is_empty() {
         app.queued_messages.insert(0, pending.content);
         app.queued_message_images.splice(0..0, pending.images);
     }

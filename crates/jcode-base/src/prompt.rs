@@ -1045,6 +1045,7 @@ fn load_agents_md_files_from_dirs(
 ) -> (Option<String>, ContextInfo) {
     let mut contents = vec![];
     let mut info = ContextInfo::default();
+    let mut seen = std::collections::HashSet::new();
 
     // Helper to load a file if it exists, returns (formatted_content, raw_size)
     let load_file = |path: &Path, label: &str| -> Option<(String, usize)> {
@@ -1059,22 +1060,38 @@ fn load_agents_md_files_from_dirs(
         }
     };
 
-    let project_agents_md = project_dir.join("AGENTS.md");
-    if let Some((content, size)) = load_file(&project_agents_md, "Project Instructions (AGENTS.md)")
-    {
-        info.has_project_agents_md = true;
-        info.project_agents_md_chars = size;
-        contents.push(content);
+    // Load the nearest instructions first, then walk outward. This makes
+    // working-directory guidance the most local while preserving all parents.
+    for (index, directory) in project_dir.ancestors().enumerate() {
+        let path = directory.join("AGENTS.md");
+        if let Ok(canonical) = std::fs::canonicalize(&path)
+            && !seen.insert(canonical)
+        {
+            continue;
+        }
+        if let Some((content, size)) = load_file(
+            &path,
+            if index == 0 {
+                "Project Instructions (AGENTS.md)"
+            } else {
+                "Ancestor Instructions (AGENTS.md)"
+            },
+        ) {
+            if index == 0 {
+                info.has_project_agents_md = true;
+                info.project_agents_md_chars = size;
+            }
+            contents.push(content);
+        }
     }
 
     // Canonical file identity handles cwd=$HOME as well as symlinked aliases.
     // If either file is absent or cannot be resolved, loading below remains the
     // source of truth and simply skips unreadable files.
-    let global_duplicates_project = global_agents_md
-        .is_some_and(|global_agents_md| same_canonical_path(&project_agents_md, global_agents_md));
-
-    if !global_duplicates_project
-        && let Some(global_agents_md) = global_agents_md
+    if let Some(global_agents_md) = global_agents_md
+        && std::fs::canonicalize(global_agents_md)
+            .map(|canonical| seen.insert(canonical))
+            .unwrap_or(true)
         && let Some((content, size)) =
             load_file(global_agents_md, "Global Instructions (~/AGENTS.md)")
     {
