@@ -706,6 +706,10 @@ fn sqlite_only_sessions_are_searchable_by_index_and_exhaustive_scan() {
                 "the SQLite backend must not write a snapshot"
             );
 
+            crate::session::SessionStore::configured()
+                .unwrap()
+                .prepare_search_index()
+                .unwrap();
             let options = SearchOptions::for_test("current-session");
             assert!(run_search(home, "tool-only-sqlite-needle", &options).is_empty());
 
@@ -757,6 +761,10 @@ fn sqlite_native_search_matches_exhaustive_substring_and_unicode_results() {
                 "sqlite-parity-b",
                 vec![(Role::User, vec![text("Unrelated postgresql state")])],
             );
+            crate::session::SessionStore::configured()
+                .unwrap()
+                .prepare_search_index()
+                .unwrap();
             for query in [
                 "servabil",
                 "sqlite checkpoint",

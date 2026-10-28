@@ -96,7 +96,6 @@ impl SqliteSessionStorage {
         if version > 0 && version < 4 {
             migrate_discovery_ordering(&mut connection)?;
         }
-        super::sqlite_fts::migrate(&mut connection)?;
         migrate_picker_flags(&mut connection)?;
         harden_database_files(&path)?;
         Ok(Self {
@@ -487,7 +486,7 @@ fn migrate_picker_flags(connection: &mut Connection) -> Result<()> {
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 6 {
+    if (4..=6).contains(&version) {
         transaction.execute_batch(
             "ALTER TABLE sessions ADD COLUMN picker_debug INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE sessions ADD COLUMN picker_has_history INTEGER NOT NULL DEFAULT 0;
@@ -776,6 +775,11 @@ impl SessionStorage for SqliteSessionStorage {
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+    fn prepare_search_index(&self) -> Result<bool> {
+        let mut connection = self.connection()?;
+        super::sqlite_fts::migrate(&mut connection)?;
+        Ok(true)
+    }
     fn indexed_search_candidates(&self, query: &str) -> Result<Option<Vec<String>>> {
         let profile = jcode_session_types::SessionSearchQueryProfile::new(query);
         if !profile.is_actionable()
@@ -788,6 +792,9 @@ impl SessionStorage for SqliteSessionStorage {
             return Ok(None);
         }
         let connection = self.connection()?;
+        if !super::sqlite_fts::ready(&connection)? {
+            return Ok(None);
+        }
         Ok(Some(super::sqlite_fts::candidates(&connection, query)?))
     }
     fn search_text(&self, id: &str) -> Result<String> {

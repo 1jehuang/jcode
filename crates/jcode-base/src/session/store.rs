@@ -290,7 +290,11 @@ pub trait SessionStorage: Send + Sync {
         Ok(rows)
     }
     fn list_search_candidates(&self, max: usize) -> Result<Vec<SessionSearchCandidate>>;
-    /// Native indexed candidates, or None when the backend uses the file index.
+    /// Prepare optional search indexes offline, without active session writers.
+    fn prepare_search_index(&self) -> Result<bool> {
+        Ok(false)
+    }
+    /// Native indexed candidates, or None when no suitable index is ready.
     fn indexed_search_candidates(&self, _query: &str) -> Result<Option<Vec<String>>> {
         Ok(None)
     }
@@ -415,6 +419,9 @@ impl SessionStore {
     }
     pub fn indexed_search_candidates(&self, query: &str) -> Result<Option<Vec<String>>> {
         self.storage.indexed_search_candidates(query)
+    }
+    pub fn prepare_search_index(&self) -> Result<bool> {
+        self.storage.prepare_search_index()
     }
     pub fn search_text(&self, id: &str) -> Result<String> {
         validate_id(id)?;

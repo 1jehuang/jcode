@@ -1,5 +1,5 @@
 //! Transactional substring indexes over persisted session rows.
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use rusqlite::{Connection, TransactionBehavior};
 use std::collections::BTreeSet;
 
@@ -22,31 +22,34 @@ fn normalized(column: &str) -> String {
     format!("replace(replace({column},'K','k'),'İ','i̇')")
 }
 
+pub(super) fn ready(connection: &Connection) -> Result<bool> {
+    let count: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table'
+             AND name IN ('sessions_search_fts','session_messages_search_fts','session_replay_search_fts',
+                          'session_environment_search_fts','session_memory_search_fts','session_compaction_search_fts')
+             AND sql LIKE '%detail=full%'",
+            [], |row| row.get(0),
+        )?;
+    Ok(count == SOURCES.len() as i64)
+}
+
 pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
-    let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if current >= 6 {
+    if ready(connection)? {
         return Ok(());
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 6 {
+    if ready(&transaction)? {
         transaction.commit()?;
         return Ok(());
     }
-    ensure!(
-        (4..=5).contains(&version),
-        "FTS migration requires session schema 4 or 5"
-    );
     for (table, column, _) in SOURCES {
-        if version == 5 {
-            transaction.execute_batch(&format!(
-                "DROP TRIGGER {table}_search_fts_insert;
-                 DROP TRIGGER {table}_search_fts_delete;
-                 DROP TRIGGER {table}_search_fts_update;
-                 DROP TABLE {table}_search_fts;
-                 DROP VIEW {table}_search_content;"
-            ))?;
-        }
+        transaction.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS {table}_search_fts_insert;
+             DROP TRIGGER IF EXISTS {table}_search_fts_delete;
+             DROP TRIGGER IF EXISTS {table}_search_fts_update;
+             DROP TABLE IF EXISTS {table}_search_fts;
+             DROP VIEW IF EXISTS {table}_search_content;"
+        ))?;
         let index = format!("{table}_search_fts");
         let view = format!("{table}_search_content");
         let text = normalized(column);
@@ -69,7 +72,6 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
              INSERT INTO {index}({index}) VALUES('rebuild');"
         ))?;
     }
-    transaction.execute_batch("PRAGMA user_version=6;")?;
     transaction.commit()?;
     // Avoid replaying a bulk index-build WAL on every later process startup.
     connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;

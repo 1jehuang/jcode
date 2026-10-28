@@ -330,11 +330,11 @@ fn sqlite_orders_and_filters_nanoseconds_before_and_after_v1_migration() -> Resu
         "session_compaction",
     ] {
         connection.execute_batch(&format!(
-            "DROP TRIGGER {table}_search_fts_insert;
-             DROP TRIGGER {table}_search_fts_delete;
-             DROP TRIGGER {table}_search_fts_update;
-             DROP TABLE {table}_search_fts;
-             DROP VIEW {table}_search_content;"
+            "DROP TRIGGER IF EXISTS {table}_search_fts_insert;
+             DROP TRIGGER IF EXISTS {table}_search_fts_delete;
+             DROP TRIGGER IF EXISTS {table}_search_fts_update;
+             DROP TABLE IF EXISTS {table}_search_fts;
+             DROP VIEW IF EXISTS {table}_search_content;"
         ))?;
     }
     connection.execute_batch(
@@ -713,11 +713,11 @@ fn sqlite_discovered_summaries_match_picker_order_across_v3_migration() -> Resul
         "session_compaction",
     ] {
         connection.execute_batch(&format!(
-            "DROP TRIGGER {table}_search_fts_insert;
-             DROP TRIGGER {table}_search_fts_delete;
-             DROP TRIGGER {table}_search_fts_update;
-             DROP TABLE {table}_search_fts;
-             DROP VIEW {table}_search_content;"
+            "DROP TRIGGER IF EXISTS {table}_search_fts_insert;
+             DROP TRIGGER IF EXISTS {table}_search_fts_delete;
+             DROP TRIGGER IF EXISTS {table}_search_fts_update;
+             DROP TABLE IF EXISTS {table}_search_fts;
+             DROP VIEW IF EXISTS {table}_search_content;"
         ))?;
     }
     connection.execute_batch(

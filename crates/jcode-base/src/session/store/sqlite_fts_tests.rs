@@ -11,6 +11,7 @@ fn text(value: &str) -> Vec<ContentBlock> {
 }
 
 fn hits(store: &SessionStore, query: &str) -> Result<Vec<String>> {
+    assert!(store.prepare_search_index()?);
     Ok(store
         .indexed_search_candidates(query)?
         .expect("SQLite index"))
@@ -26,6 +27,16 @@ fn sqlite_fts_tracks_public_commits_and_transaction_rollback() -> Result<()> {
         text("firstneedle Observability Kelvin İmage 工具 42 abc bcd cde"),
     );
     store.save(&mut session)?;
+    assert!(store.indexed_search_candidates("firstneedle")?.is_none());
+    assert_eq!(
+        Connection::open(root.path().join("sessions.sqlite3"))?.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='session_messages_search_fts'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        0,
+        "ordinary commits must not build the search index"
+    );
     for query in [
         "firstneedle",
         "servabil",
@@ -121,6 +132,7 @@ fn sqlite_fts_migration_rebuilds_existing_content() -> Result<()> {
     let mut session = Session::create_with_id("migration-session".into(), None, None);
     session.add_message(Role::User, text("migrationneedle"));
     store.save(&mut session)?;
+    assert_eq!(hits(&store, "migrationneedle")?, vec![session.id.clone()]);
     drop(store);
     {
         let mut connection = Connection::open(root.path().join("sessions.sqlite3"))?;
