@@ -1849,11 +1849,10 @@ fn load_store_sessions(
     scan_limit: usize,
     catchup_seen: &crate::catchup::CatchupSeenSnapshot,
 ) -> Result<(Vec<SessionInfo>, HashMap<String, u128>)> {
-    let mut summaries = store.list_summaries(&session::SessionListOptions {
-        limit: usize::MAX,
-        exclude_id_prefixes: vec!["imported_".to_string()],
-        ..Default::default()
-    })?;
+    let mut summaries = store.list_discovered_summaries(
+        session_candidate_window(scan_limit),
+        include_old_saved_sessions_on_initial_load(),
+    )?;
     let modified: HashMap<String, u128> = summaries
         .iter()
         .map(|summary| {

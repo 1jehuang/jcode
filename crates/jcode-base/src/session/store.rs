@@ -8,6 +8,7 @@ use std::sync::Arc;
 use super::{Session, SessionStatus, StoredMessage};
 
 mod sqlite;
+mod sqlite_fts;
 #[cfg(test)]
 mod tests;
 
@@ -236,7 +237,38 @@ pub trait SessionStorage: Send + Sync {
         summaries.truncate(options.limit);
         Ok(summaries)
     }
+    /// Picker rows ordered newest discovery first (see `discovery_key` and
+    /// `session_sort_key`), excluding `imported_` ids. Returns the top `limit` rows
+    /// plus, when `include_saved`, saved rows ranked below that window.
+    fn list_discovered_summaries(
+        &self,
+        limit: usize,
+        include_saved: bool,
+    ) -> Result<Vec<SessionSummary>> {
+        let mut summaries = self.list_summaries(&SessionListOptions {
+            exclude_id_prefixes: vec!["imported_".to_string()],
+            ..Default::default()
+        })?;
+        summaries.sort_by_cached_key(|summary| {
+            std::cmp::Reverse((
+                discovery_key(summary),
+                session_sort_key(&summary.id),
+                summary.id.clone(),
+            ))
+        });
+        let mut index = 0usize;
+        summaries.retain(|summary| {
+            let keep = index < limit || (include_saved && summary.saved);
+            index += 1;
+            keep
+        });
+        Ok(summaries)
+    }
     fn list_search_candidates(&self, max: usize) -> Result<Vec<SessionSearchCandidate>>;
+    /// Native indexed candidates, or None when the backend uses the file index.
+    fn indexed_search_candidates(&self, _query: &str) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
     fn search_text(&self, id: &str) -> Result<String> {
         Ok(serde_json::to_string(&self.load(id)?)?)
     }
@@ -335,8 +367,20 @@ impl SessionStore {
     pub fn list_summaries(&self, options: &SessionListOptions) -> Result<Vec<SessionSummary>> {
         self.storage.list_summaries(options)
     }
+    /// Recent-first picker rows without reading every summary. See
+    /// `SessionStorage::list_discovered_summaries`.
+    pub fn list_discovered_summaries(
+        &self,
+        limit: usize,
+        include_saved: bool,
+    ) -> Result<Vec<SessionSummary>> {
+        self.storage.list_discovered_summaries(limit, include_saved)
+    }
     pub fn list_search_candidates(&self, max: usize) -> Result<Vec<SessionSearchCandidate>> {
         self.storage.list_search_candidates(max)
+    }
+    pub fn indexed_search_candidates(&self, query: &str) -> Result<Option<Vec<String>>> {
+        self.storage.indexed_search_candidates(query)
     }
     pub fn search_text(&self, id: &str) -> Result<String> {
         validate_id(id)?;
@@ -369,6 +413,41 @@ pub(super) fn validate_id(id: &str) -> Result<()> {
         bail!("Invalid session id");
     }
     Ok(())
+}
+
+/// Discovery timestamp as (seconds, nanos) with the picker's clamping: values
+/// before 1970 or outside the i64 nanosecond range count as 0.
+pub(super) fn discovery_key_at(timestamp: DateTime<Utc>) -> (i64, i64) {
+    let nanos = u128::try_from(timestamp.timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0);
+    (
+        (nanos / 1_000_000_000) as i64,
+        (nanos % 1_000_000_000) as i64,
+    )
+}
+
+pub(super) fn discovery_key(summary: &SessionSummary) -> (i64, i64) {
+    discovery_key_at(summary.discovery_modified_at.unwrap_or(summary.updated_at))
+}
+
+/// Numeric ordering key embedded in a session id; mirrors the TUI picker.
+pub fn session_sort_key(stem: &str) -> u64 {
+    for part in stem.split('_') {
+        if part.len() == 13
+            && part.as_bytes().iter().all(|b| b.is_ascii_digit())
+            && let Ok(ts) = part.parse::<u64>()
+        {
+            return ts;
+        }
+    }
+    stem.split('_')
+        .rev()
+        .find_map(|part| part.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Order-preserving mapping of `session_sort_key` into SQLite's signed integer.
+pub(super) fn sqlite_sort_key(id: &str) -> i64 {
+    (session_sort_key(id) ^ (1 << 63)) as i64
 }
 
 pub(super) fn file_discovery_modified_at(snapshot: &Path) -> Option<DateTime<Utc>> {

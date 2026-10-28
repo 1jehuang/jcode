@@ -881,6 +881,38 @@ fn jcode_index_candidates(
     files: &[SessionFileCandidate],
     query: &QueryProfile,
 ) -> Result<Vec<SessionFileCandidate>> {
+    // Native stores maintain their own transactional index. Only legacy files
+    // belong in the separate, lazily rebuilt Bloom index.
+    let indexed_ids = files
+        .iter()
+        .find_map(|file| file.store.as_ref())
+        .map(|native| native.store.indexed_search_candidates(&query.normalized))
+        .transpose()?
+        .flatten();
+    let mut candidates = Vec::new();
+    let files: Vec<_> = if let Some(ids) = indexed_ids {
+        let ids: std::collections::HashSet<_> = ids.into_iter().collect();
+        files
+            .iter()
+            .filter_map(|file| {
+                if file.store.is_some() {
+                    if ids.contains(&file.session_id_hint) {
+                        candidates.push(file.clone());
+                    }
+                    None
+                } else {
+                    Some(file.clone())
+                }
+            })
+            .collect()
+    } else {
+        files.to_vec()
+    };
+    // Like the file Bloom index, native candidates are conservative. Preserve
+    // the existing recency and scoring budget instead of re-reading every hit.
+    if files.is_empty() {
+        return Ok(candidates);
+    }
     let index_path = index_dir()?.join("session_search_jcode_index_v2.bin");
     let specs: Vec<IndexFileSpec> = files
         .iter()
@@ -917,11 +949,13 @@ fn jcode_index_candidates(
         })
     })?;
 
-    Ok(index
-        .candidate_slots(&query.terms, query.min_term_matches)
-        .into_iter()
-        .filter_map(|slot| files.get(slot).cloned())
-        .collect())
+    candidates.extend(
+        index
+            .candidate_slots(&query.terms, query.min_term_matches)
+            .into_iter()
+            .filter_map(|slot| files.get(slot).cloned()),
+    );
+    Ok(candidates)
 }
 
 fn modified_time_or_epoch(path: &Path) -> SystemTime {

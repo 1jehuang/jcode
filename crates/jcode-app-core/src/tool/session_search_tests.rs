@@ -714,6 +714,12 @@ fn sqlite_only_sessions_are_searchable_by_index_and_exhaustive_scan() {
             let results = run_search(home, "tool-only-sqlite-needle", &tools);
             assert_eq!(results.len(), 1, "tool bodies come from the store");
             assert_eq!(results[0].session_id, "sqlite-session");
+            assert!(
+                !home
+                    .join("cache/session_search_jcode_index_v2.bin")
+                    .exists(),
+                "native sessions must not be read into the separate Bloom index"
+            );
 
             // Searched once, so the index holds this session. A later commit
             // must invalidate that entry.
@@ -725,6 +731,52 @@ fn sqlite_only_sessions_are_searchable_by_index_and_exhaustive_scan() {
                 let results = run_search(home, "appended-after-index-needle", &options);
                 assert_eq!(results.len(), 1, "exhaustive={exhaustive}");
                 assert_eq!(results[0].message_index, Some(2));
+            }
+        })
+    });
+}
+
+#[test]
+fn sqlite_native_search_matches_exhaustive_substring_and_unicode_results() {
+    with_temp_home(|home| {
+        with_sqlite_backend(|| {
+            save_test_session(
+                "sqlite-parity-a",
+                vec![
+                    (
+                        Role::User,
+                        vec![text("Observability with SQLite and 工具 supports 42 cases")],
+                    ),
+                    (
+                        Role::Assistant,
+                        vec![text("Second message includes checkpoint coordination")],
+                    ),
+                ],
+            );
+            save_test_session(
+                "sqlite-parity-b",
+                vec![(Role::User, vec![text("Unrelated postgresql state")])],
+            );
+            for query in [
+                "servabil",
+                "sqlite checkpoint",
+                "工具",
+                "42",
+                "nonexistentxyz",
+                "postgresql",
+                "sqlite-parity-a",
+            ] {
+                let indexed = SearchOptions::for_test("current-session");
+                let mut exhaustive = indexed.clone();
+                exhaustive.exhaustive = true;
+                let results = run_search(home, query, &indexed);
+                let expected = run_search(home, query, &exhaustive);
+                let identities = |rows: Vec<SearchResult>| {
+                    rows.into_iter()
+                        .map(|row| (row.session_id, row.message_index, row.snippet))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(identities(results), identities(expected), "query={query}");
             }
         })
     });

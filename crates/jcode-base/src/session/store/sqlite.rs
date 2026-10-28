@@ -39,7 +39,7 @@ impl SqliteSessionStorage {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 3 {
+        if version > 5 {
             bail!("Unsupported session database schema {version}");
         }
         if version == 0 {
@@ -50,8 +50,13 @@ impl SqliteSessionStorage {
                    updated_ms INTEGER NOT NULL, saved INTEGER NOT NULL,
                    updated_seconds INTEGER NOT NULL, updated_nanos INTEGER NOT NULL,
                    revision INTEGER NOT NULL, size_bytes INTEGER NOT NULL,
-                   transcript_revision INTEGER NOT NULL
+                   transcript_revision INTEGER NOT NULL,
+                   discovery_seconds INTEGER NOT NULL DEFAULT 0,
+                   discovery_nanos INTEGER NOT NULL DEFAULT 0,
+                   sort_key INTEGER NOT NULL DEFAULT 0
                  );
+                 CREATE INDEX IF NOT EXISTS sessions_discovery ON sessions(discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC);
+                 CREATE INDEX IF NOT EXISTS sessions_saved_discovery ON sessions(discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC) WHERE saved=1;
                  CREATE INDEX IF NOT EXISTS sessions_updated_precise ON sessions(updated_seconds DESC,updated_nanos DESC,id);
                  CREATE INDEX IF NOT EXISTS sessions_saved_precise ON sessions(saved,updated_seconds DESC,updated_nanos DESC,id);
                  CREATE TABLE IF NOT EXISTS session_messages (
@@ -78,7 +83,7 @@ impl SqliteSessionStorage {
                    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
                    data TEXT NOT NULL
                  );
-                 PRAGMA user_version=3;
+                 PRAGMA user_version=4;
                  COMMIT;",
             )?;
         }
@@ -88,6 +93,10 @@ impl SqliteSessionStorage {
         if version == 1 || version == 2 {
             migrate_transcript_revision(&mut connection)?;
         }
+        if version > 0 && version < 4 {
+            migrate_discovery_ordering(&mut connection)?;
+        }
+        super::sqlite_fts::migrate(&mut connection)?;
         harden_database_files(&path)?;
         Ok(Self {
             root,
@@ -250,6 +259,8 @@ impl SqliteSessionStorage {
         } else {
             &session.messages[state.messages_len..]
         });
+        let (discovery_seconds, discovery_nanos) = super::discovery_key(&summary);
+        let sort_key = super::sqlite_sort_key(&session.id);
         let summary = serde_json::to_string(&summary)?;
         let compaction_changed = initial
             || state
@@ -269,12 +280,14 @@ impl SqliteSessionStorage {
             previous.transcript_revision + i64::from(transcript_changed)
         });
         transaction.execute(
-            "INSERT INTO sessions(id,metadata,summary,updated_ms,saved,revision,size_bytes,updated_seconds,updated_nanos,transcript_revision)
-             VALUES(?1,?2,?3,?4,?5,?6,0,?7,?8,?9)
+            "INSERT INTO sessions(id,metadata,summary,updated_ms,saved,revision,size_bytes,updated_seconds,updated_nanos,transcript_revision,discovery_seconds,discovery_nanos,sort_key)
+             VALUES(?1,?2,?3,?4,?5,?6,0,?7,?8,?9,?10,?11,?12)
              ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,summary=excluded.summary,
                updated_ms=excluded.updated_ms,saved=excluded.saved,revision=excluded.revision,
                updated_seconds=excluded.updated_seconds,updated_nanos=excluded.updated_nanos,
-               transcript_revision=excluded.transcript_revision",
+               transcript_revision=excluded.transcript_revision,
+               discovery_seconds=excluded.discovery_seconds,discovery_nanos=excluded.discovery_nanos,
+               sort_key=excluded.sort_key",
             params![
                 session.id,
                 metadata,
@@ -284,7 +297,10 @@ impl SqliteSessionStorage {
                 revision,
                 durable_metadata.updated_at.timestamp(),
                 durable_metadata.updated_at.timestamp_subsec_nanos(),
-                transcript_revision
+                transcript_revision,
+                discovery_seconds,
+                discovery_nanos,
+                sort_key
             ],
         )?;
         let mut size_delta = write_vector(
@@ -398,6 +414,60 @@ fn migrate_transcript_revision(connection: &mut Connection) -> Result<()> {
         transaction.execute_batch(
             "ALTER TABLE sessions ADD COLUMN transcript_revision INTEGER NOT NULL DEFAULT 0;
              PRAGMA user_version=3;",
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Add indexed picker ordering columns (schema v4) in one transaction.
+fn migrate_discovery_ordering(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version == 3 {
+        transaction.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN discovery_seconds INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN discovery_nanos INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN sort_key INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        let rows = {
+            let mut statement = transaction.prepare(
+                "SELECT id,json_extract(summary,'$.discovery_modified_at'),updated_seconds,updated_nanos FROM sessions",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut update = transaction.prepare(
+            "UPDATE sessions SET discovery_seconds=?2,discovery_nanos=?3,sort_key=?4 WHERE id=?1",
+        )?;
+        for (id, discovery, seconds, nanos) in rows {
+            let timestamp = match discovery {
+                Some(text) => {
+                    Some(chrono::DateTime::parse_from_rfc3339(&text)?.with_timezone(&chrono::Utc))
+                }
+                None => chrono::DateTime::from_timestamp(seconds, u32::try_from(nanos)?),
+            }
+            .context("Invalid session timestamp")?;
+            let (discovery_seconds, discovery_nanos) = super::discovery_key_at(timestamp);
+            update.execute(params![
+                id,
+                discovery_seconds,
+                discovery_nanos,
+                super::sqlite_sort_key(&id)
+            ])?;
+        }
+        drop(update);
+        transaction.execute_batch(
+            "CREATE INDEX sessions_discovery ON sessions(discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC);
+             CREATE INDEX sessions_saved_discovery ON sessions(discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC) WHERE saved=1;
+             PRAGMA user_version=4;",
         )?;
     }
     transaction.commit()?;
@@ -582,6 +652,52 @@ impl SessionStorage for SqliteSessionStorage {
         })?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
+    fn list_discovered_summaries(
+        &self,
+        limit: usize,
+        include_saved: bool,
+    ) -> Result<Vec<SessionSummary>> {
+        let connection = self.connection()?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let parse = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, i64, i64, i64, String)> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        };
+        let mut statement = connection.prepare_cached(
+            "SELECT id,discovery_seconds,discovery_nanos,sort_key,summary FROM sessions
+             WHERE instr(id,'imported_')!=1
+             ORDER BY discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC LIMIT ?1",
+        )?;
+        let window = statement
+            .query_map([limit], parse)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = window.iter().map(|row| row.4.clone()).collect::<Vec<_>>();
+        if include_saved && i64::try_from(window.len()).is_ok_and(|len| len >= limit) {
+            let mut saved = connection.prepare_cached(
+                "SELECT summary FROM sessions
+                 WHERE saved=1 AND instr(id,'imported_')!=1
+                   AND (discovery_seconds,discovery_nanos,sort_key,id)<(?1,?2,?3,?4)
+                 ORDER BY discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC",
+            )?;
+            let (seconds, nanos, key, id) = match window.last() {
+                Some((id, seconds, nanos, key, _)) => (*seconds, *nanos, *key, id.as_str()),
+                None => (i64::MAX, i64::MAX, i64::MAX, "\u{10FFFF}"),
+            };
+            for row in saved.query_map(params![seconds, nanos, key, id], |row| {
+                row.get::<_, String>(0)
+            })? {
+                rows.push(row?);
+            }
+        }
+        rows.iter()
+            .map(|row| Ok(serde_json::from_str(row)?))
+            .collect()
+    }
     fn list_search_candidates(&self, max: usize) -> Result<Vec<SessionSearchCandidate>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare_cached("SELECT id,updated_ms,revision,size_bytes FROM sessions ORDER BY updated_seconds DESC,updated_nanos DESC,id LIMIT ?1")?;
@@ -594,6 +710,10 @@ impl SessionStorage for SqliteSessionStorage {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+    fn indexed_search_candidates(&self, query: &str) -> Result<Option<Vec<String>>> {
+        let connection = self.connection()?;
+        Ok(Some(super::sqlite_fts::candidates(&connection, query)?))
     }
     fn search_text(&self, id: &str) -> Result<String> {
         self.import_legacy(id)?;

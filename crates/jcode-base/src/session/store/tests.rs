@@ -321,8 +321,29 @@ fn sqlite_orders_and_filters_nanoseconds_before_and_after_v1_migration() -> Resu
     drop(store);
     // Recreate the previous persisted schema using real rows written above.
     let connection = rusqlite::Connection::open(root.path().join("sessions.sqlite3"))?;
+    for table in [
+        "sessions",
+        "session_messages",
+        "session_replay",
+        "session_environment",
+        "session_memory",
+        "session_compaction",
+    ] {
+        connection.execute_batch(&format!(
+            "DROP TRIGGER {table}_search_fts_insert;
+             DROP TRIGGER {table}_search_fts_delete;
+             DROP TRIGGER {table}_search_fts_update;
+             DROP TABLE {table}_search_fts;
+             DROP VIEW {table}_search_content;"
+        ))?;
+    }
     connection.execute_batch(
-        "DROP INDEX sessions_updated_precise;
+        "DROP INDEX sessions_discovery;
+         DROP INDEX sessions_saved_discovery;
+         ALTER TABLE sessions DROP COLUMN discovery_seconds;
+         ALTER TABLE sessions DROP COLUMN discovery_nanos;
+         ALTER TABLE sessions DROP COLUMN sort_key;
+         DROP INDEX sessions_updated_precise;
          DROP INDEX sessions_saved_precise;
          ALTER TABLE sessions DROP COLUMN updated_seconds;
          ALTER TABLE sessions DROP COLUMN updated_nanos;
@@ -561,5 +582,132 @@ fn sqlite_live_files_are_private_with_shared_umask() -> Result<()> {
             "repair {filename}"
         );
     }
+    Ok(())
+}
+
+fn expected_discovered(
+    store: &SessionStore,
+    limit: usize,
+    include_saved: bool,
+) -> Result<Vec<String>> {
+    let mut rows = store.list()?;
+    rows.retain(|row| !row.id.starts_with("imported_"));
+    rows.sort_by(|a, b| {
+        (discovery_key(b), session_sort_key(&b.id), &b.id).cmp(&(
+            discovery_key(a),
+            session_sort_key(&a.id),
+            &a.id,
+        ))
+    });
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .filter(|(index, row)| *index < limit || (include_saved && row.saved))
+        .map(|(_, row)| row.id)
+        .collect())
+}
+
+#[test]
+fn sqlite_discovered_summaries_match_picker_order_across_v3_migration() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = SessionStore::open(root.path(), SessionBackend::Sqlite)?;
+    let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    // (id, discovery offset ms, saved). Equal offsets exercise the id tie-breakers.
+    let cases = [
+        ("session_1700000000002_a", 5, false),
+        ("session_1700000000009_b", 5, true),
+        ("session_1700000000009_a", 5, false),
+        ("plain", 7, false),
+        ("plain_12", 7, false),
+        ("old_saved", 1, true),
+        ("old_unsaved", 1, false),
+        ("oldest_saved", 0, true),
+        ("imported_session_1700000000099_x", 99, true),
+    ];
+    for (id, offset_ms, saved) in cases {
+        let mut session = Session::create_with_id(id.into(), None, None);
+        session.saved = saved;
+        let snapshot = root.path().join(format!("{id}.json"));
+        crate::storage::write_json_secret(&snapshot, &session)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&snapshot)?
+            .set_modified(base + std::time::Duration::from_millis(offset_ms))?;
+        store.import_from_path(&snapshot)?;
+    }
+    let assert_all = |store: &SessionStore| -> Result<()> {
+        for limit in [0, 1, 2, 3, 5, 8, 100] {
+            for include_saved in [false, true] {
+                let actual: Vec<String> = store
+                    .list_discovered_summaries(limit, include_saved)?
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect();
+                assert_eq!(
+                    actual,
+                    expected_discovered(store, limit, include_saved)?,
+                    "limit {limit} include_saved {include_saved}"
+                );
+            }
+        }
+        assert!(
+            store
+                .list_discovered_summaries(100, true)?
+                .iter()
+                .all(|row| !row.id.starts_with("imported_"))
+        );
+        Ok(())
+    };
+    assert_all(&store)?;
+    assert_eq!(
+        store.list_discovered_summaries(3, false)?[0].id,
+        "plain_12",
+        "plain_12 has a larger numeric key than plain"
+    );
+    drop(store);
+    // Recreate the v3 schema from the rows written above.
+    let connection = rusqlite::Connection::open(root.path().join("sessions.sqlite3"))?;
+    for table in [
+        "sessions",
+        "session_messages",
+        "session_replay",
+        "session_environment",
+        "session_memory",
+        "session_compaction",
+    ] {
+        connection.execute_batch(&format!(
+            "DROP TRIGGER {table}_search_fts_insert;
+             DROP TRIGGER {table}_search_fts_delete;
+             DROP TRIGGER {table}_search_fts_update;
+             DROP TABLE {table}_search_fts;
+             DROP VIEW {table}_search_content;"
+        ))?;
+    }
+    connection.execute_batch(
+        "DROP INDEX sessions_discovery;
+         DROP INDEX sessions_saved_discovery;
+         ALTER TABLE sessions DROP COLUMN discovery_seconds;
+         ALTER TABLE sessions DROP COLUMN discovery_nanos;
+         ALTER TABLE sessions DROP COLUMN sort_key;
+         PRAGMA user_version=3;",
+    )?;
+    drop(connection);
+    let migrated = SessionStore::open(root.path(), SessionBackend::Sqlite)?;
+    assert_all(&migrated)?;
+    let connection = rusqlite::Connection::open(root.path().join("sessions.sqlite3"))?;
+    assert_eq!(
+        connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
+        5
+    );
+    // A later save moves the session to the front through the indexed columns.
+    let mut loaded = migrated.load("old_unsaved")?;
+    loaded.add_message(Role::User, text("updated session"));
+    loaded.custom_title = Some("touched".into());
+    migrated.save(&mut loaded)?;
+    assert_eq!(
+        migrated.list_discovered_summaries(1, false)?[0].id,
+        "old_unsaved"
+    );
+    assert_all(&migrated)?;
     Ok(())
 }
