@@ -718,6 +718,10 @@ async fn tool_descriptions_stay_under_token_cap() {
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
     // codemode documents its sandbox API; compile_remote a credit/consent notice.
+    // macos_computer_use states the live-machine safety policy inline (act only
+    // on the requested task, prefer background AX over moving the cursor or
+    // stealing focus) plus the setup/discover pointers (e20c0fc8b). It only
+    // registers on macOS, so Linux CI never exercises it.
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -727,6 +731,7 @@ async fn tool_descriptions_stay_under_token_cap() {
         "applet",
         "codemode",
         "compile_remote",
+        "macos_computer_use",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -790,6 +795,9 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // applet placement lists every shorthand so the model can pick a surface
     // without a round trip. desktop_selfdev action carries a safety warning:
     // killing the harness bridge by hand strands the calling session.
+    // macos_computer_use action lists the action vocabulary the model picks
+    // from without a round trip, and element documents the handle format that
+    // press/get_value consume (e20c0fc8b).
     const EXEMPT: &[(&str, &str)] = &[
         (
             "todo",
@@ -797,6 +805,8 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         ),
         ("applet", "$.properties.placement"),
         ("desktop_selfdev", "$.properties.action"),
+        ("macos_computer_use", "$.properties.action"),
+        ("macos_computer_use", "$.properties.element"),
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
