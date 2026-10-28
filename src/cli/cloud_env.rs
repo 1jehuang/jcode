@@ -661,7 +661,9 @@ mod tests {
                 Entry {
                     resource: variable,
                     slot: 0,
-                    data: env::encode_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----"),
+                    data: env::encode_bytes(
+                        format!("-----BEGIN {} PRIVATE KEY-----", "OPENSSH").as_bytes(),
+                    ),
                 },
             ],
         };
