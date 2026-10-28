@@ -211,6 +211,25 @@ pub(super) fn render_usage_compact(
         )])];
     }
 
+    // Copilot has no quota bars; the token counts are the whole fact, and
+    // folding UsageLimits into the overview must not hide them.
+    if matches!(info.provider, UsageProvider::Copilot) {
+        let line = Line::from(vec![
+            Span::styled("Copilot: ", Style::default().fg(rgb(180, 180, 190)).bold()),
+            Span::styled(
+                format!(
+                    "{} in + {} out",
+                    format_tokens(info.input_tokens),
+                    format_tokens(info.output_tokens)
+                ),
+                Style::default().fg(rgb(140, 140, 150)),
+            ),
+        ]);
+        let fitted = frame::fit(&line, usize::from(width))
+            .unwrap_or_else(|| Line::from(Span::styled("", Style::default())));
+        return vec![fitted];
+    }
+
     let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
     let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
     let five_hr_left = 100u8.saturating_sub(five_hr_used);
@@ -526,6 +545,34 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Usage unavailable"));
+    }
+
+    #[test]
+    fn copilot_usage_compact_keeps_token_counts_inline() {
+        // Without this arm the overview shows a bare `Copilot limits` header
+        // with no data under it, hiding the only usage fact a Copilot session has.
+        let info = UsageInfo {
+            provider: UsageProvider::Copilot,
+            input_tokens: 12_000,
+            output_tokens: 3_400,
+            available: true,
+            ..Default::default()
+        };
+
+        let lines = render_usage_compact(&info, 40, false);
+        assert_eq!(lines.len(), 1);
+        let text = line_text(&lines[0]);
+        assert!(text.contains("Copilot: 12.0K in + 3.4K out"), "{text}");
+        assert!(UnicodeWidthStr::width(text.as_str()) <= 40);
+
+        // The row truncates instead of wrapping at pocket widths.
+        let narrow = render_usage_compact(&info, 20, false);
+        assert_eq!(narrow.len(), 1);
+        let narrow_text = line_text(&narrow[0]);
+        assert!(
+            UnicodeWidthStr::width(narrow_text.as_str()) <= 20,
+            "{narrow_text}"
+        );
     }
 
     #[test]

@@ -217,7 +217,7 @@ fn degenerate_sizes_with_full_contention_never_panic_or_escape() {
 }
 
 /// (b) When Overview is shown, its mergeable widgets (background,
-/// swarm, ...) must not also place standalone.
+/// swarm, commits, ...) must not also place standalone.
 #[test]
 fn overview_suppresses_mergeable_widgets_under_contention() {
     let data = contended_data();
@@ -532,5 +532,161 @@ fn covered_resident_rehomes_immediately_when_content_is_settled() {
             .iter()
             .any(|a| a.placement.kind == anchored.kind),
         "and keeps its anchor to return to"
+    );
+}
+
+/// `display.single_overview = false` restores the classic layout: the
+/// consolidated Overview never places and each mergeable section
+/// (background, ...) docks as its own widget. The default (true) keeps the
+/// single consolidated panel.
+#[test]
+fn single_overview_false_places_separate_widgets_instead_of_overview() {
+    let area = Rect::new(0, 0, 80, 30);
+    let data = InfoWidgetData {
+        model: Some("gpt-test".to_string()),
+        background_info: Some(BackgroundInfo {
+            running_count: 1,
+            running_tasks: vec!["bash".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let margins = margins_for(40, 30, false);
+
+    // Default: the Overview consolidates the background section.
+    let consolidated = calculate_placements_anchored(area, &margins, &data, true, &[]);
+    assert_placements_sane("consolidated", area, &consolidated.visible);
+    assert!(
+        consolidated
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::Overview),
+        "default layout should place the consolidated Overview"
+    );
+    assert!(
+        !consolidated
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::BackgroundTasks),
+        "with the Overview placed, the standalone Background widget stays suppressed"
+    );
+
+    // Opt out: classic separate widgets, no Overview anywhere.
+    let separate_data = InfoWidgetData {
+        overview_disabled: true,
+        ..data.clone()
+    };
+    let separate = calculate_placements_anchored(area, &margins, &separate_data, true, &[]);
+    assert_placements_sane("separate", area, &separate.visible);
+    assert!(
+        !separate
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::Overview),
+        "single_overview=false must not place the consolidated Overview"
+    );
+    assert!(
+        separate
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::BackgroundTasks),
+        "single_overview=false must let the standalone Background widget place"
+    );
+
+    // An anchor recorded under the consolidated layout must not resurrect the
+    // Overview after the flip: the stale anchor dies because the Overview is
+    // no longer in `available`.
+    let flip =
+        calculate_placements_anchored(area, &margins, &separate_data, true, &consolidated.anchors);
+    assert_placements_sane("flip", area, &flip.visible);
+    assert!(
+        !flip.visible.iter().any(|p| p.kind == WidgetKind::Overview),
+        "a stale Overview anchor must not survive the single_overview flip"
+    );
+}
+
+/// Folded sections must not suppress their standalone widgets.
+///
+/// The Overview folds sections that do not fit its rect, but the placement
+/// pass used to suppress every mergeable widget whenever an Overview was
+/// placed, regardless of whether the rect actually showed that section. The
+/// result: a short Overview slot (borderline height after its content grew,
+/// or a covered resident that came back at a smaller height) folded the
+/// details AND kept their standalone widgets suppressed - the content was
+/// visible nowhere. `overview_shows_section` now consults the same fits
+/// flags the renderer folds by, so a folded section's standalone widget
+/// places again.
+#[test]
+fn overview_folded_sections_do_not_suppress_standalone_widgets() {
+    // Runtime (1 row) + usage (label + primary + secondary = 3 rows) +
+    // changes (5 dirty files, no overflow) = 9 inner rows of content.
+    let data = InfoWidgetData {
+        model: Some("claude-test-model".to_string()),
+        provider_name: Some("anthropic".to_string()),
+        usage_info: Some(UsageInfo {
+            provider: UsageProvider::Anthropic,
+            primary_limit_label: Some("5-hour".to_string()),
+            secondary_limit_label: Some("Weekly".to_string()),
+            available: true,
+            ..Default::default()
+        }),
+        git_info: Some(GitInfo {
+            branch: "master".to_string(),
+            modified: 5,
+            dirty_files: vec![
+                DirtyFile::new('M', "src/a.rs"),
+                DirtyFile::new('M', "src/b.rs"),
+                DirtyFile::new('M', "src/c.rs"),
+                DirtyFile::new('M', "src/d.rs"),
+                DirtyFile::new('M', "src/e.rs"),
+            ],
+            dirty_total: 5,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Both pockets are 10 rows (inner height 8): the Overview places on the
+    // right, capped at the pocket, so its 9-row content folds the tail
+    // (changes) away. Centered mode opens the left pocket for the standalone
+    // widgets (left margins only exist when centered).
+    let area = Rect::new(0, 0, 80, 10);
+    let margins = margins_for(36, 10, true);
+    let outcome = calculate_placements_anchored(area, &margins, &data, true, &[]);
+    assert_placements_sane("folded overview", area, &outcome.visible);
+    let overview = outcome
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("overview places with model + usage + changes");
+    let vis = super::super::info_widget_overview::section_visibility(&data, overview.rect);
+    assert!(
+        vis.model_info && vis.usage,
+        "front sections must still fit: {:?} vis={vis:?}",
+        overview.rect
+    );
+    assert!(
+        !vis.changes,
+        "changes section must fold in a 10-row slot: {:?} vis={vis:?}",
+        overview.rect
+    );
+
+    // Folded-out section: its standalone widget must place (left pocket)
+    // instead of staying suppressed and hiding the dirty-file list.
+    assert!(
+        outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::GitStatus),
+        "folded-out changes section must keep its standalone GitStatus widget: {:?}",
+        outcome.visible.iter().map(|p| p.kind).collect::<Vec<_>>()
+    );
+    // Sections the Overview does show stay suppressed exactly as before.
+    assert!(
+        !outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::UsageLimits),
+        "a section the Overview shows must keep its standalone widget suppressed"
     );
 }

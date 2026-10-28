@@ -32,7 +32,7 @@ mod text;
 mod tips;
 #[path = "info_widget_usage.rs"]
 mod usage_render;
-use super::info_widget_overview::{InfoPageKind, compute_page_layout};
+use super::info_widget_overview::{InfoPageKind, compute_page_layout, section_visibility};
 use super::workspace_map::VisibleWorkspaceRow;
 use crate::ambient::AmbientStatus;
 pub use crate::memory_types::{
@@ -53,7 +53,11 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
-use commits::{commits_has_data, render_commits_widget};
+use commits::render_commits_widget;
+pub(crate) use commits::{
+    OVERVIEW_COMMITS_MAX_ROWS, commits_has_data, commits_has_data_at, now_secs,
+    render_commits_compact_at,
+};
 use frame::Framed;
 use git::{
     changes_has_data, changes_height, changes_legend, render_changes_framed, render_git_widget,
@@ -251,7 +255,29 @@ pub(crate) fn is_overview_mergeable(kind: WidgetKind) -> bool {
             | WidgetKind::UsageLimits
             | WidgetKind::KvCache
             | WidgetKind::GitStatus
+            | WidgetKind::Commits
     )
+}
+
+/// Whether a placed Overview's rect can actually show the section that the
+/// standalone `kind` widget renders. The Overview folds sections in, but a
+/// small pocket truncates the tail (Changes/Commits) away; a caller
+/// must not treat such an Overview as covering `kind`'s content.
+pub(crate) fn overview_shows_section_of(
+    kind: WidgetKind,
+    data: &InfoWidgetData,
+    rect: Rect,
+) -> bool {
+    let vis = section_visibility(data, rect);
+    match kind {
+        WidgetKind::ModelInfo => vis.model_info,
+        WidgetKind::BackgroundTasks => vis.background,
+        WidgetKind::UsageLimits => vis.usage,
+        WidgetKind::Compaction => vis.compaction,
+        WidgetKind::GitStatus => vis.changes,
+        WidgetKind::Commits => vis.commits,
+        _ => true,
+    }
 }
 
 /// A placed widget with its location and type
@@ -666,6 +692,12 @@ const PAGE_SWITCH_SECONDS: u64 = 30;
 /// Data to display in the info widget
 #[derive(Debug, Default, Clone)]
 pub struct InfoWidgetData {
+    /// True when `display.single_overview = false`: the Overview never places
+    /// and each mergeable section docks on its own (classic layout). Inverted
+    /// so the derived default (false) keeps the Overview for test fixtures
+    /// built with `..Default::default()`. Snapshotted per frame, not read
+    /// live in `has_data_for`, so placement stays pure in the data.
+    pub overview_disabled: bool,
     pub context_info: Option<ContextInfo>,
     /// True when context state is being updated and no authoritative snapshot is available.
     pub context_info_stale: bool,
@@ -673,6 +705,13 @@ pub struct InfoWidgetData {
     pub context_limit: Option<usize>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// Agent-specific model overrides from config: `agents.swarm_model` and
+    /// `agents.memory_model` (plus their efforts). `None` means "inherit the
+    /// coordinator/default model", which is not shown.
+    pub swarm_model_override: Option<String>,
+    pub swarm_model_effort: Option<String>,
+    pub memory_model_override: Option<String>,
+    pub memory_model_effort: Option<String>,
     pub service_tier: Option<String>,
     /// Initial remote runtime metadata has not arrived yet. Cleared by the owner
     /// once the initial snapshot is applied, never inferred from missing values.
@@ -774,10 +813,23 @@ impl InfoWidgetData {
             WidgetKind::Diagrams => !self.diagrams.is_empty(),
             WidgetKind::WorkspaceMap => !self.workspace_rows.is_empty(),
             WidgetKind::Overview => {
+                // Opt-out (`display.single_overview = false`): the Overview
+                // never places, so every mergeable widget docks on its own.
+                if self.overview_disabled {
+                    return false;
+                }
                 let mut sections = 0usize;
                 // Status-line facts (model, context %, branch) never count:
                 // the overview only joins detail sections.
                 if runtime_has_data(self) {
+                    sections += 1;
+                }
+                if self
+                    .memory_info
+                    .as_ref()
+                    .map(MemoryInfo::should_render)
+                    .unwrap_or(false)
+                {
                     sections += 1;
                 }
                 if self
@@ -800,9 +852,6 @@ impl InfoWidgetData {
                 {
                     sections += 1;
                 }
-                if self.cache_hit_info.is_some() {
-                    sections += 1;
-                }
                 if self.compaction_info.is_some() {
                     sections += 1;
                 }
@@ -816,6 +865,14 @@ impl InfoWidgetData {
                     sections += 1;
                 }
                 if self.cloud_info.is_some() {
+                    sections += 1;
+                }
+                if self
+                    .git_info
+                    .as_ref()
+                    .map(commits_has_data)
+                    .unwrap_or(false)
+                {
                     sections += 1;
                 }
                 // Only useful as a "join" mode when there are multiple sections.
@@ -1147,10 +1204,23 @@ pub(super) fn calculate_placements_with_cloud_reflow(
             && p.rect.height
                 >= calculate_widget_height(WidgetKind::Overview, data, p.rect.width, area.height)
     });
-    let preserves = resident
+    // "Preserve" must count absorption: the resident layout may carry a
+    // standalone fallback (e.g. GitStatus) for a section the truncated
+    // resident Overview could not show. When the fresh Overview is tall
+    // enough to render that section, the fallback's content is not lost -
+    // it folds back into the Overview - so the repack still preserves it.
+    let fresh_overview_rect = fresh
         .visible
         .iter()
-        .all(|old| fresh.visible.iter().any(|new| new.kind == old.kind));
+        .find(|p| p.kind == WidgetKind::Overview)
+        .map(|p| p.rect);
+    let preserves = resident.visible.iter().all(|old| {
+        fresh.visible.iter().any(|new| new.kind == old.kind)
+            || (is_overview_mergeable(old.kind)
+                && fresh_overview_rect
+                    .map(|rect| overview_shows_section_of(old.kind, data, rect))
+                    .unwrap_or(false))
+    });
     if fits && preserves { fresh } else { resident }
 }
 
@@ -1816,8 +1886,6 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
 
 #[path = "info_widget_cache.rs"]
 mod cache_render;
-#[cfg(test)]
-use cache_render::render_kv_cache_summary_line;
 use cache_render::render_kv_cache_widget;
 
 /// Render ambient mode status widget
@@ -2001,10 +2069,13 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
 }
 
 fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    // One clock per page render: the commits section derives freshness from
+    // `now`, and a single read keeps ages from straddling a boundary mid-render.
+    let now = now_secs();
     match kind {
-        InfoPageKind::CompactOnly => render_sections(data, inner, None),
+        InfoPageKind::CompactOnly => render_sections(data, inner, None, now),
         InfoPageKind::MemoryExpanded => {
-            render_sections(data, inner, Some(InfoPageKind::MemoryExpanded))
+            render_sections(data, inner, Some(InfoPageKind::MemoryExpanded), now)
         }
     }
 }
@@ -2033,8 +2104,13 @@ fn render_sections(
     data: &InfoWidgetData,
     inner: Rect,
     focus: Option<InfoPageKind>,
+    now: i64,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Section order matches master's Overview so both stay visually aligned:
+    // Runtime → Memory → Background → Usage → KV cache → Compaction
+    // → Changes → Commits → Swarm.
 
     // Detail layer only: model identity, context %, and branch/counts live on
     // the overscroll status line and are never repeated here.
@@ -2042,7 +2118,7 @@ fn render_sections(
 
     // Memory info
     if let Some(info) = &data.memory_info
-        && (info.total_count > 0 || info.activity.is_some())
+        && info.should_render()
     {
         if matches!(focus, Some(InfoPageKind::MemoryExpanded)) {
             lines.extend(render_memory_expanded(info, inner));
@@ -2064,15 +2140,53 @@ fn render_sections(
         inner.width,
     ));
 
+    // Compaction: one line, same detail the standalone widget carries on its
+    // body (the mode rides the standalone border, so it goes inline here).
+    if let Some(info) = data.compaction_info.as_ref() {
+        let summary_tokens = (info.summary_chars / crate::compaction::CHARS_PER_TOKEN)
+            .max(usize::from(info.summary_chars > 0));
+        let detail = format!(
+            "Compaction {} · {} old · {} active · ~{} summary tok · {}",
+            if info.is_compacting {
+                "compacting"
+            } else {
+                "compacted"
+            },
+            info.compacted_messages,
+            info.active_messages,
+            summary_tokens,
+            info.mode
+        );
+        let color = if info.is_compacting {
+            rgb(255, 220, 140)
+        } else {
+            rgb(110, 210, 140)
+        };
+        let compaction_line = Line::from(vec![
+            Span::styled("🗜  ", Style::default().fg(color)),
+            Span::styled(
+                truncate_smart(&detail, inner.width.saturating_sub(2) as usize),
+                Style::default().fg(rgb(180, 180, 190)),
+            ),
+        ]);
+        lines.push(frame::fit(&compaction_line, inner.width as usize).unwrap_or_default());
+    }
+
     // Changed files (the detail behind the line's git counts).
     if data.dual_git_info.is_some() || data.git_info.as_ref().is_some_and(changes_has_data) {
         lines.extend(render_git_widget(data, inner));
+    }
+
+    // Recent commits on the current branch.
+    if let Some(git) = data.git_info.as_ref() {
+        lines.extend(render_commits_compact_at(git, inner.width as usize, now));
     }
 
     lines.extend(super::info_widget_cloud::render_cloud_summary(
         data,
         inner.width,
     ));
+
     lines
 }
 

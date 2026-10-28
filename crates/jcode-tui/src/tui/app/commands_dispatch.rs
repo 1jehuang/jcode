@@ -33,6 +33,7 @@ pub(super) fn ssh_presentation_command(input: &str) -> bool {
             | "/compact-notifications"
             | "/show-agentgrep-output"
             | "/tool-call-details"
+            | "/overview"
             | "/colors"
             | "/color"
             | "/cls"
@@ -404,6 +405,8 @@ mod tests {
             "/refactor resume",
             "/review",
             "/subagent investigate",
+            "/overview",
+            "/overview off",
         ] {
             assert!(super::ssh_unsupported_command(command), "{command}");
         }
