@@ -610,6 +610,52 @@ impl AnthropicProvider {
         Ok(catalog.available_models)
     }
 
+    async fn refresh_catalogs(&self, force: bool) -> Result<()> {
+        // Custom messages gateways must never leak their API keys to the
+        // official catalog. Genuine subscription OAuth may still discover
+        // directly even when messages are routed through a local proxy.
+        let custom_gateway = self.direct_transport.api_url != API_URL;
+        let mut errors = Vec::new();
+        // Catalog discovery must not mutate the selected chat credential mode.
+        // A failed API route must not suppress discovery via OAuth.
+        for oauth in [false, true] {
+            if custom_gateway && !oauth {
+                continue;
+            }
+            let configured = if oauth {
+                auth::claude::load_credentials().is_ok()
+            } else {
+                self.direct_api_key().is_ok()
+            };
+            if !configured {
+                continue;
+            }
+            let scope = self.catalog_scope_for_route(oauth);
+            let started = if force {
+                jcode_base::provider::begin_forced_anthropic_model_catalog_refresh_for_scope(&scope)
+            } else {
+                jcode_base::provider::begin_anthropic_model_catalog_refresh_for_scope(&scope)
+            };
+            if !started {
+                continue;
+            }
+            let result = self.refresh_model_catalog_for_route(oauth, &scope).await;
+            jcode_base::provider::finish_anthropic_model_catalog_refresh_for_scope(&scope);
+            if let Err(err) = result {
+                let message = format!(
+                    "Anthropic {} model catalog refresh failed; keeping cached list: {err}",
+                    if oauth { "OAuth" } else { "API key" }
+                );
+                jcode_base::logging::warn(&message);
+                errors.push(message);
+            }
+        }
+        if force && !errors.is_empty() {
+            anyhow::bail!("{}", errors.join("; "));
+        }
+        Ok(())
+    }
+
     async fn refresh_model_catalog_for_route(&self, oauth: bool, scope: &str) -> Result<()> {
         let catalog = if oauth {
             let (token, _) = self.get_oauth_access_token().await?;
@@ -1678,45 +1724,21 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        // A custom messages URL (ANTHROPIC_BASE_URL / named profile) must not
-        // leak gateway API keys to Anthropic's official model-catalog
-        // endpoint. Genuine Anthropic OAuth credentials are a different case:
-        // users often route /v1/messages through a local proxy (e.g. a
-        // caching proxy) while authenticating with their real subscription,
-        // and skipping the refresh for them silently freezes the model list
-        // at the last disk snapshot, hiding newly released models. The
-        // catalog fetch itself always goes directly to api.anthropic.com.
-        let custom_gateway = self.direct_transport.api_url != API_URL;
-        // Discovery is independent of the selected chat credential mode. Do not
-        // mutate that mode on this shared provider just to inspect another route.
-        // API discovery gets first opportunity, OAuth still runs on API failure.
-        for oauth in [false, true] {
-            if custom_gateway && !oauth {
-                // Never send named gateway API keys to Anthropic's catalog.
-                continue;
-            }
-            let configured = if oauth {
-                auth::claude::load_credentials().is_ok()
-            } else {
-                self.direct_api_key().is_ok()
-            };
-            if !configured {
-                continue;
-            }
-            let scope = self.catalog_scope_for_route(oauth);
-            if !jcode_base::provider::begin_anthropic_model_catalog_refresh_for_scope(&scope) {
-                continue;
-            }
-            let result = self.refresh_model_catalog_for_route(oauth, &scope).await;
-            jcode_base::provider::finish_anthropic_model_catalog_refresh_for_scope(&scope);
-            if let Err(err) = result {
-                jcode_base::logging::warn(&format!(
-                    "Anthropic {} model catalog refresh failed; keeping cached list: {err}",
-                    if oauth { "OAuth" } else { "API key" }
-                ));
-            }
-        }
-        Ok(())
+        self.refresh_catalogs(false).await
+    }
+
+    async fn refresh_model_catalog(
+        &self,
+    ) -> Result<jcode_provider_core::ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        self.refresh_catalogs(true).await?;
+        Ok(jcode_provider_core::summarize_model_catalog_refresh(
+            before_models,
+            self.available_models_display(),
+            before_routes,
+            self.model_routes(),
+        ))
     }
 
     fn name(&self) -> &'static str {

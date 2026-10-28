@@ -935,6 +935,10 @@ pub fn begin_anthropic_model_catalog_refresh_for_scope(scope: &str) -> bool {
     ANTHROPIC_MODEL_CATALOG_SERVICE.begin_refresh(scope)
 }
 
+pub fn begin_forced_anthropic_model_catalog_refresh_for_scope(scope: &str) -> bool {
+    ANTHROPIC_MODEL_CATALOG_SERVICE.begin_forced_refresh(scope)
+}
+
 pub fn finish_openai_model_catalog_refresh() {
     OPENAI_MODEL_CATALOG_SERVICE.finish_refresh(&current_openai_account_scope());
 }

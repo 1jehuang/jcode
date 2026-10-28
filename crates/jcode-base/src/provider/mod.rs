@@ -333,6 +333,7 @@ pub(crate) fn jcode_subscription_model_prefix(model: &str) -> Option<&str> {
 use self::dispatch::CompletionMode;
 
 mod session_restore;
+pub use self::models::begin_forced_anthropic_model_catalog_refresh_for_scope;
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,
     ModelCatalogHttpStatus, OpenAIModelCatalog, anthropic_catalog_scope_for_route,
