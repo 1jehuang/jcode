@@ -241,7 +241,8 @@ async fn query(program: &std::ffi::OsStr) -> Option<Snapshot> {
 }
 
 async fn query_with_timeout(program: &std::ffi::OsStr, timeout: Duration) -> Option<Snapshot> {
-    tokio::time::timeout(timeout, async {
+    use anyhow::Context;
+    let result = tokio::time::timeout(timeout, async {
         let mut child = tokio::process::Command::new(program)
             .args(["status", "--json"])
             .stdin(std::process::Stdio::null())
@@ -249,27 +250,42 @@ async fn query_with_timeout(program: &std::ffi::OsStr, timeout: Duration) -> Opt
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .ok()?;
+            .context("start justrust status query")?;
         let mut bytes = Vec::new();
         child
             .stdout
-            .take()?
+            .take()
+            .context("justrust status stdout was not piped")?
             .take((MAX_RESPONSE + 1) as u64)
             .read_to_end(&mut bytes)
             .await
-            .ok()?;
+            .context("read justrust status response")?;
         if bytes.len() > MAX_RESPONSE {
-            let _ = child.kill().await;
-            return None;
+            child
+                .kill()
+                .await
+                .context("terminate oversized justrust status response")?;
+            anyhow::bail!("justrust status response exceeds {MAX_RESPONSE} bytes");
         }
-        if !child.wait().await.ok()?.success() {
-            return None;
-        }
-        serde_json::from_slice(&bytes).ok()
+        let status = child
+            .wait()
+            .await
+            .context("wait for justrust status query")?;
+        anyhow::ensure!(status.success(), "justrust status exited with {status}");
+        serde_json::from_slice(&bytes).context("decode justrust status response")
     })
-    .await
-    .ok()
-    .flatten()
+    .await;
+    match result {
+        Ok(Ok(snapshot)) => Some(snapshot),
+        Ok(Err(error)) => {
+            crate::logging::debug(&format!("Build status unavailable: {error:#}"));
+            None
+        }
+        Err(error) => {
+            crate::logging::debug(&format!("Build status query timed out: {error}"));
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -334,8 +350,7 @@ impl Poller {
         self.row = self.snapshot.as_ref().and_then(|snapshot| {
             let age = self
                 .received
-                .map(|at| now.saturating_duration_since(at))
-                .unwrap_or_default();
+                .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
             (age < Duration::from_secs(5))
                 .then(|| snapshot.row(session, repo, age))
                 .flatten()
@@ -356,7 +371,12 @@ impl Poller {
             let (sender, receiver) = oneshot::channel();
             self.pending = Some(receiver);
             runtime.spawn(async move {
-                let _ = sender.send(query(std::ffi::OsStr::new("justrust")).await);
+                if sender
+                    .send(query(std::ffi::OsStr::new("justrust")).await)
+                    .is_err()
+                {
+                    crate::logging::debug("Discarded build status after poller was closed");
+                }
             });
         }
         self.row != previous

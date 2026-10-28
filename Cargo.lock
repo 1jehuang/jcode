@@ -4376,6 +4376,7 @@ name = "jcode-tui-messages"
 version = "0.1.0"
 dependencies = [
  "jcode-config-types",
+ "jcode-logging",
  "jcode-message-types",
  "jcode-session-types",
  "jcode-tui-markdown",
@@ -4429,6 +4430,7 @@ dependencies = [
 name = "jcode-tui-tool-display"
 version = "0.1.0"
 dependencies = [
+ "jcode-logging",
  "serde_json",
  "unicode-width",
 ]

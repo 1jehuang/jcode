@@ -18,10 +18,22 @@ impl SavedPlacement {
     }
 
     pub(super) fn load() -> Self {
-        Self::path()
-            .ok()
-            .and_then(|path| crate::storage::read_json(&path).ok())
-            .unwrap_or_default()
+        let result = (|| -> anyhow::Result<Self> {
+            let path = Self::path()?;
+            if !path.try_exists()? {
+                return Ok(Self::default());
+            }
+            crate::storage::read_json(&path)
+        })();
+        match result {
+            Ok(state) => state,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Could not load saved session placement: {error:#}"
+                ));
+                Self::default()
+            }
+        }
     }
 
     pub(super) fn boosted(&self, session: &SessionInfo, now: DateTime<Utc>) -> bool {

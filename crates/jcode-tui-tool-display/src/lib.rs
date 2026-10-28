@@ -82,7 +82,13 @@ fn exit_code(line: &str) -> Option<i32> {
         .trim_start()
         .split(|c: char| !c.is_ascii_digit() && c != '-')
         .next()?;
-    number.parse().ok()
+    match number.parse() {
+        Ok(code) => Some(code),
+        Err(error) => {
+            jcode_logging::debug(&format!("Ignoring malformed tool exit status: {error}"));
+            None
+        }
+    }
 }
 
 fn strip_wrappers(mut line: &str) -> (&str, u8) {

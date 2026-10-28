@@ -32,15 +32,6 @@ fn handterm_native_latex_cell_symbol(source: &str, rows: u16, cols: u16) -> Opti
     Some(symbol)
 }
 
-fn copy_badge_alt_label_from_config(configured: &str) -> String {
-    let configured = configured.trim();
-    if configured.is_empty() {
-        COPY_BADGE_ALT_LABEL.to_string()
-    } else {
-        configured.to_string()
-    }
-}
-
 pub(crate) fn shortcut_badge_spans(
     key: char,
     alt_style: Style,
@@ -171,78 +162,10 @@ fn resolve_tail_follow_scroll(max_scroll: usize, viewport_height: usize) -> usiz
 
 use super::selection_highlight::highlight_line_selection;
 
-pub(crate) fn truncate_line_in_place_to_width(line: &mut Line<'static>, max_width: usize) {
-    let mut remaining = max_width;
-    let mut kept: Vec<Span<'static>> = Vec::new();
-
-    for span in line.spans.drain(..) {
-        if remaining == 0 {
-            break;
-        }
-
-        let span_width = span.content.as_ref().width();
-        if span_width <= remaining {
-            remaining = remaining.saturating_sub(span_width);
-            kept.push(span);
-            continue;
-        }
-
-        let mut text = String::new();
-        let mut used = 0usize;
-        for ch in span.content.chars() {
-            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if ch_width > 0 && used.saturating_add(ch_width) > remaining {
-                break;
-            }
-            text.push(ch);
-            used = used.saturating_add(ch_width);
-        }
-        if !text.is_empty() {
-            kept.push(Span::styled(text, span.style));
-        }
-        break;
-    }
-
-    line.spans = kept;
-}
-
-/// Remove trailing plain spaces from a line so an appended badge sits exactly
-/// one separator space after the content, regardless of how the source line
-/// was rendered (code block headers end with a space, blockquote lines don't).
-pub(crate) fn trim_line_trailing_spaces(line: &mut Line<'static>) {
-    while let Some(last) = line.spans.last_mut() {
-        let trimmed = last.content.trim_end_matches(' ');
-        if trimmed.len() == last.content.len() {
-            break;
-        }
-        if trimmed.is_empty() {
-            line.spans.pop();
-        } else {
-            last.content = std::borrow::Cow::Owned(trimmed.to_string());
-            break;
-        }
-    }
-}
-
-/// Prepare a line to host an inline badge within `max_content_width` cells.
-/// When the content already fits, only trailing spaces are trimmed (the badge
-/// separator space is accounted for in the reserved width). When the content
-/// must be cut, end it with a dim ellipsis so the truncation is visible
-/// instead of silently swallowing words.
-pub(crate) fn truncate_line_for_copy_badge(line: &mut Line<'static>, max_content_width: usize) {
-    if max_content_width == 0 {
-        line.spans.clear();
-        return;
-    }
-    if line.width() <= max_content_width {
-        trim_line_trailing_spaces(line);
-        return;
-    }
-    truncate_line_in_place_to_width(line, max_content_width.saturating_sub(1));
-    trim_line_trailing_spaces(line);
-    line.spans
-        .push(Span::styled("…", Style::default().fg(dim_color())));
-}
+#[path = "ui_viewport_text.rs"]
+mod viewport_text;
+use viewport_text::copy_badge_alt_label_from_config;
+pub(crate) use viewport_text::{truncate_line_for_copy_badge, truncate_line_in_place_to_width};
 
 /// Choose the wrapped line that hosts an inline copy badge for a copy target
 /// spanning `block_start..block_end`.
@@ -1473,27 +1396,9 @@ pub(super) fn draw_messages(
     (margins, chat_scrollbar)
 }
 
-/// Look-ahead window (in rows) used to compute the "reliable" margin profile that
-/// gates where new info widgets may dock. Small by design: it only needs to cover
-/// the distance content travels in the few frames between a widget being placed and
-/// a nearby long line scrolling into its rows.
-const INFO_WIDGET_LOOKAHEAD_ROWS: usize = 2;
-
-/// Per-index minimum over `[i-window, i+window]`. Returns an empty vec for empty
-/// input (callers treat empty reliable profiles as "no look-ahead").
-fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
-    if widths.is_empty() {
-        return Vec::new();
-    }
-    let n = widths.len();
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let lo = i.saturating_sub(window);
-        let hi = (i + window).min(n - 1);
-        out.push(widths[lo..=hi].iter().copied().min().unwrap_or(0));
-    }
-    out
-}
+#[path = "ui_viewport_margins.rs"]
+mod viewport_margins;
+pub(super) use viewport_margins::{INFO_WIDGET_LOOKAHEAD_ROWS, windowed_min};
 
 /// Passive worker status lives in the todo lanes. The focused swarm panel
 /// remains available for keyboard navigation and its transcript controls.

@@ -20,7 +20,15 @@ pub(super) fn render(
     }
     // Legacy Markdown reports and unknown versions retain the normal system
     // renderer. Never fetch live state while rendering a historic message.
-    let snapshot: Snapshot = serde_json::from_str(&msg.content).ok()?;
+    let snapshot: Snapshot = match serde_json::from_str(&msg.content) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Todo completion uses legacy text fallback: {error}"
+            ));
+            return None;
+        }
+    };
     if snapshot.todo_completion_version != 1 {
         return None;
     }

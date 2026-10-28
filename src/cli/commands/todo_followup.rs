@@ -24,7 +24,7 @@ pub(super) fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
     match crate::todo::load_todos(session_id) {
         Ok(todos) => todos,
         Err(error) => {
-            crate::logging::warn(format!(
+            crate::logging::warn(&format!(
                 "Cannot load headless todos for {session_id}: {error}"
             ));
             Vec::new()
@@ -177,7 +177,7 @@ pub(super) async fn prepare_run_todo_follow_up(
                 if let Err(error) =
                     crate::server::set_await_dependency_delivery(id, session_id, true, false)
                 {
-                    crate::logging::warn(format!(
+                    crate::logging::warn(&format!(
                         "Cannot transfer await dependency {id} delivery to headless runner: {error}"
                     ));
                 }
@@ -199,16 +199,15 @@ pub(super) async fn prepare_run_todo_follow_up(
         for task in &waiting {
             // Prevent a second, daemon-owned turn for the same completion. Do this
             // even for mixed work, whose independent todos remain actionable.
-            if task.wake {
-                if let Err(error) = manager
+            if task.wake
+                && let Err(error) = manager
                     .update_delivery(&task.task_id, task.notify, false)
                     .await
-                {
-                    crate::logging::warn(format!(
-                        "Cannot disable daemon wake for dependency {}: {error}",
-                        task.task_id
-                    ));
-                }
+            {
+                crate::logging::warn(&format!(
+                    "Cannot disable daemon wake for dependency {}: {error}",
+                    task.task_id
+                ));
             }
             if task.stall_wake_seconds.is_some() {
                 manager.disarm_stall_watchdog(&task.task_id).await;
@@ -305,7 +304,7 @@ pub(super) fn take_run_gate_digest(session_id: &str, already_delivered: bool) ->
     let observations = match crate::todo::load_gate_observations(session_id) {
         Ok(observations) => observations,
         Err(error) => {
-            crate::logging::warn(format!(
+            crate::logging::warn(&format!(
                 "Cannot load quality observations for {session_id}: {error}"
             ));
             return None;
@@ -317,7 +316,7 @@ pub(super) fn take_run_gate_digest(session_id: &str, already_delivered: bool) ->
     let plan = match crate::todo::load_plan(session_id) {
         Ok(plan) => plan,
         Err(error) => {
-            crate::logging::warn(format!(
+            crate::logging::warn(&format!(
                 "Cannot load quality review plan for {session_id}: {error}"
             ));
             return None;
@@ -326,7 +325,7 @@ pub(super) fn take_run_gate_digest(session_id: &str, already_delivered: bool) ->
     let goals = match crate::todo::load_goals(session_id) {
         Ok(goals) => goals,
         Err(error) => {
-            crate::logging::warn(format!(
+            crate::logging::warn(&format!(
                 "Cannot load quality review goals for {session_id}: {error}"
             ));
             return None;
@@ -334,7 +333,7 @@ pub(super) fn take_run_gate_digest(session_id: &str, already_delivered: bool) ->
     };
     let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
     if let Err(error) = crate::todo::clear_gate_observations(session_id) {
-        crate::logging::warn(format!(
+        crate::logging::warn(&format!(
             "Cannot clear quality observations for {session_id}: {error}"
         ));
     }
@@ -355,7 +354,7 @@ pub(super) fn take_run_gate_digest_if_turn_ended(
 ) -> Option<String> {
     if !enabled {
         if let Err(error) = crate::todo::clear_gate_observations(session_id) {
-            crate::logging::warn(format!(
+            crate::logging::warn(&format!(
                 "Cannot clear quality observations for {session_id}: {error}"
             ));
         }

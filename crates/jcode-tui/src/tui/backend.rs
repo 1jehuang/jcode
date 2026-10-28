@@ -314,67 +314,12 @@ pub(crate) struct ReplayRemoteState {
     call_output_tokens_seen: u64,
 }
 
+#[path = "backend_auth.rs"]
+mod auth;
+#[path = "backend_cloud.rs"]
+mod cloud;
+
 impl RemoteConnection {
-    pub(crate) fn bind_cloud_authority(&mut self, live: &Arc<std::sync::atomic::AtomicBool>) {
-        self.cloud_authority = Some(Arc::downgrade(live));
-    }
-
-    fn revoke_cloud_authority(&mut self) {
-        if let Some(live) = self.cloud_authority.take().and_then(|live| live.upgrade()) {
-            live.store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-        for task in self.cloud_callbacks.drain(..) {
-            task.abort();
-        }
-    }
-    pub(crate) fn track_cloud_callback(&mut self, task: &tokio::task::JoinHandle<()>) {
-        self.cloud_callbacks.retain(|task| !task.is_finished());
-        self.cloud_callbacks.push(task.abort_handle());
-    }
-    pub(crate) async fn configure_cloud_tools(
-        &mut self,
-        tools: crate::protocol::SessionToolConfig,
-    ) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::ConfigureTools { id, tools })
-            .await
-    }
-
-    pub(crate) fn cloud_callback_sender(
-        &mut self,
-    ) -> impl FnOnce(String, String, Option<String>) + Send + 'static {
-        let writer = Arc::clone(&self.writer);
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        move |call_id, output, error| {
-            tokio::spawn(async move {
-                let request = Request::ToolResult {
-                    id,
-                    call_id,
-                    output,
-                    error,
-                };
-                if let Ok(json) = serde_json::to_string(&request) {
-                    let mut writer = writer.lock().await;
-                    let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
-                }
-            });
-        }
-    }
-
-    pub(crate) fn cloud_expiry_revoke(
-        live: Arc<std::sync::atomic::AtomicBool>,
-        deadline: tokio::time::Instant,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            tokio::time::sleep_until(deadline).await;
-            // ConfigureTools is rejected mid-turn. Revoke local access now,
-            // then let the app issue its one-shot cleanup after becoming idle.
-            live.store(false, std::sync::atomic::Ordering::SeqCst);
-        })
-    }
-
     /// Connect to the server
     pub async fn connect() -> Result<Self> {
         Self::connect_with_session(None, None, false, None, false, None).await
@@ -1193,89 +1138,6 @@ impl RemoteConnection {
     }
 
     /// Notify the server that auth credentials changed (e.g., after login)
-    pub async fn notify_auth_changed(&mut self) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::NotifyAuthChanged {
-            id,
-            provider: None,
-            auth: None,
-            prefer_strongest: false,
-        })
-        .await
-    }
-
-    /// Notify the server about a typed auth lifecycle change and report
-    /// transport failure to the caller.
-    pub async fn notify_auth_changed_event(
-        &mut self,
-        provider: Option<&str>,
-        auth: Option<AuthChanged>,
-        prefer_strongest: bool,
-    ) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::NotifyAuthChanged {
-            id,
-            provider: provider.map(str::to_string),
-            auth,
-            prefer_strongest,
-        })
-        .await
-    }
-
-    /// Notify the server about auth changes without blocking the caller.
-    pub fn notify_auth_changed_detached(&mut self) {
-        self.notify_auth_changed_for_provider_detached(None);
-    }
-
-    /// Notify the server about a provider-specific auth change without blocking the caller.
-    pub fn notify_auth_changed_for_provider_detached(&mut self, provider: Option<&str>) {
-        self.notify_auth_changed_detached_event(provider, None, false);
-    }
-
-    /// Notify the server about a typed auth lifecycle change without blocking the caller.
-    pub fn notify_auth_changed_detached_event(
-        &mut self,
-        provider: Option<&str>,
-        auth: Option<AuthChanged>,
-        prefer_strongest: bool,
-    ) {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request_detached(
-            Request::NotifyAuthChanged {
-                id,
-                provider: provider.map(str::to_string),
-                auth,
-                prefer_strongest,
-            },
-            "notify_auth_changed",
-        );
-    }
-
-    /// Ask server to switch active Anthropic account for this process/session.
-    pub async fn switch_anthropic_account(&mut self, label: &str) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::SwitchAnthropicAccount {
-            id,
-            label: label.to_string(),
-        })
-        .await
-    }
-
-    /// Ask server to switch active OpenAI account for this process/session.
-    pub async fn switch_openai_account(&mut self, label: &str) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::SwitchOpenAiAccount {
-            id,
-            label: label.to_string(),
-        })
-        .await
-    }
-
     /// Send a response for a client debug request
     pub async fn send_client_debug_response(&mut self, id: u64, output: String) -> Result<()> {
         self.send_request(Request::ClientDebugResponse { id, output })

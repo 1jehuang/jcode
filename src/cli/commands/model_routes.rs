@@ -1,5 +1,7 @@
 //! Model route filtering and CLI display names.
 
+use std::collections::BTreeSet;
+
 use super::*;
 
 pub(super) fn cli_api_method_display(raw: &str) -> String {

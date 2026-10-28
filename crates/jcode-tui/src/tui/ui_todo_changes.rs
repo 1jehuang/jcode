@@ -40,7 +40,13 @@ pub(super) fn todos_from_tool_input(tc: &ToolCall) -> Option<Vec<TodoItem>> {
             items: Vec<TodoItem>,
         }
 
-        let phases = serde_json::from_value::<Vec<Phase>>(phases.clone()).ok()?;
+        let phases = match serde_json::from_value::<Vec<Phase>>(phases.clone()) {
+            Ok(phases) => phases,
+            Err(error) => {
+                crate::logging::debug(&format!("Cannot render todo phase changes: {error}"));
+                return None;
+            }
+        };
         let mut todos = Vec::new();
         for phase in phases {
             if phase.phase == 0 || phase.lanes.is_empty() {
