@@ -76,13 +76,8 @@ const DEFAULT_MODEL: &str = "anthropic/claude-opus-5.5";
 
 /// Which model should replace the placeholder default, if any. Pure so it can
 /// be tested without a network catalog.
-fn select_promoted_default(current: &str, catalog: &[&str]) -> Option<String> {
-    if current != DEFAULT_MODEL {
-        return None;
-    }
-    jcode_base::auth::lifecycle::preferred_model_for_provider("openrouter", catalog)
-        .filter(|best| best != DEFAULT_MODEL)
-}
+mod default_selection;
+use default_selection::select_promoted_default;
 
 /// Soft refresh TTL for the model catalog.
 ///

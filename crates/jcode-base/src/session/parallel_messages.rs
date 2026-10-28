@@ -96,7 +96,11 @@ mod tests {
     fn message_json(i: usize) -> String {
         format!(
             r#"{{"id":"m{i}","role":"{}","content":[{{"type":"text","text":"hello \"{i}\" \u00e9"}}]}}"#,
-            if i % 2 == 0 { "user" } else { "assistant" }
+            if i.is_multiple_of(2) {
+                "user"
+            } else {
+                "assistant"
+            }
         )
     }
 

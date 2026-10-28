@@ -309,7 +309,11 @@ impl AntigravityProvider {
             None => {
                 let project_id = antigravity_auth::fetch_project_id(&tokens.access_token).await?;
                 tokens.project_id = Some(project_id.clone());
-                let _ = antigravity_auth::save_tokens(&tokens);
+                if let Err(error) = antigravity_auth::save_tokens(&tokens) {
+                    jcode_base::logging::warn(&format!(
+                        "Cannot persist discovered Antigravity project: {error}"
+                    ));
+                }
                 project_id
             }
         };

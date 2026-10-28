@@ -41,14 +41,20 @@ pub(super) async fn send_final_usage(
                 state.cache_read_input_tokens, state.cache_creation_input_tokens
             ));
         }
-        let _ = tx
+        if tx
             .send(Ok(StreamEvent::TokenUsage {
                 input_tokens: state.input_tokens,
                 output_tokens: state.output_tokens,
                 cache_read_input_tokens: state.cache_read_input_tokens,
                 cache_creation_input_tokens: state.cache_creation_input_tokens,
             }))
-            .await;
+            .await
+            .is_err()
+        {
+            jcode_base::logging::debug(
+                "Anthropic terminal usage consumer disconnected after accounting",
+            );
+        }
     }
 }
 
@@ -68,9 +74,15 @@ pub(super) fn credential_label(is_oauth: bool, token: &str) -> Option<String> {
     if !is_oauth {
         return None;
     }
-    let label = auth::claude::list_accounts()
-        .ok()
-        .and_then(|accounts| matching_label(token, &accounts));
+    let label = match auth::claude::list_accounts() {
+        Ok(accounts) => matching_label(token, &accounts),
+        Err(error) => {
+            jcode_base::logging::warn(&format!(
+                "Cannot load Anthropic accounts for usage attribution: {error}"
+            ));
+            return None;
+        }
+    };
     if label.is_none() {
         jcode_base::logging::warn(
             "Anthropic usage not recorded: request credential could not be attributed to a unique account",

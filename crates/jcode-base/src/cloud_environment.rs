@@ -146,14 +146,9 @@ pub fn decode_bytes(data: &str) -> Result<Vec<u8>> {
 
 pub fn validate_project_bytes(bytes: &[u8]) -> Result<()> {
     // A project-relative name must not provide a back door for SSH key export.
-    for marker in [
-        b"-----BEGIN OPENSSH PRIVATE KEY-----".as_slice(),
-        b"-----BEGIN RSA PRIVATE KEY-----",
-        b"-----BEGIN EC PRIVATE KEY-----",
-        b"-----BEGIN DSA PRIVATE KEY-----",
-        b"-----BEGIN PRIVATE KEY-----",
-        b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
-    ] {
+    for kind in ["OPENSSH ", "RSA ", "EC ", "DSA ", "", "ENCRYPTED "] {
+        let marker = format!("-----BEGIN {kind}PRIVATE KEY-----");
+        let marker = marker.as_bytes();
         ensure!(
             !bytes.windows(marker.len()).any(|w| w == marker),
             "private key denied"
@@ -349,8 +344,11 @@ pub fn publish_private(base: &Path, relative: &Path, bytes: &[u8]) -> Result<boo
     }
     #[cfg(not(unix))]
     {
-        let _ = (base, relative, bytes);
-        bail!("private publication unsupported on this platform")
+        bail!(
+            "private publication of {} bytes to {} unsupported on this platform",
+            bytes.len(),
+            base.join(relative).display()
+        )
     }
 }
 
@@ -416,8 +414,10 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (base, relative);
-        bail!("private state lock unsupported")
+        bail!(
+            "private state lock for {} unsupported on this platform",
+            base.join(relative).display()
+        )
     }
 }
 
@@ -483,8 +483,11 @@ fn replace_private(base: &Path, relative: &Path, bytes: &[u8]) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (base, relative, bytes);
-        bail!("private publication unsupported")
+        bail!(
+            "private publication of {} bytes to {} unsupported on this platform",
+            bytes.len(),
+            base.join(relative).display()
+        )
     }
 }
 
@@ -776,8 +779,11 @@ mod tests {
         }
         assert!(parse_request(br#"{"action":"status"}"#).is_ok());
         assert!(parse_request(br#"{"action":"sync"}"#).is_ok());
-        assert!(validate_project_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----").is_err());
-        assert!(validate_environment_value("-----BEGIN OPENSSH PRIVATE KEY-----").is_err());
+        for kind in ["OPENSSH ", "RSA ", "EC ", "DSA ", "", "ENCRYPTED "] {
+            let header = format!("-----BEGIN {kind}PRIVATE KEY-----");
+            assert!(validate_project_bytes(header.as_bytes()).is_err(), "{kind}");
+            assert!(validate_environment_value(&header).is_err(), "{kind}");
+        }
         assert!(
             validate_resource(&Resource::EnvVar {
                 name: "SSH_PRIVATE_KEY".into()

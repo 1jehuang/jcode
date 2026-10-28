@@ -3141,13 +3141,13 @@ mod bedrock_placeholder_default_tests {
         let routes = vec![
             route(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, true),
             route("anthropic.claude-sonnet-4-20250514-v1:0", true),
-            route("us.anthropic.claude-opus-4-6-v1", true),
+            route("us.anthropic.claude-opus-6-v1", true),
             route("amazon.nova-pro-v1:0", true),
         ];
         assert_eq!(
             bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes)
                 .as_deref(),
-            Some("us.anthropic.claude-opus-4-6-v1")
+            Some("us.anthropic.claude-opus-6-v1")
         );
     }
 
@@ -3203,7 +3203,7 @@ mod bedrock_placeholder_default_tests {
                 "models": [
                     "anthropic.claude-3-5-sonnet-20241022-v2:0",
                     "anthropic.claude-sonnet-4-20250514-v1:0",
-                    "anthropic.claude-opus-4-20250514-v1:0",
+                    "anthropic.claude-opus-6-v1:0",
                 ],
                 "inference_profiles": [],
                 "region": null,
@@ -3226,13 +3226,13 @@ mod bedrock_placeholder_default_tests {
                 None => crate::env::remove_var(key),
             }
         }
-        assert_eq!(promoted, "anthropic.claude-opus-4-20250514-v1:0");
+        assert_eq!(promoted, "anthropic.claude-opus-6-v1:0");
         assert_eq!(pinned, "anthropic.claude-3-5-haiku-20241022-v1:0");
     }
 
     #[test]
     fn bedrock_explicit_model_is_never_replaced() {
-        let routes = vec![route("us.anthropic.claude-opus-4-6-v1", true)];
+        let routes = vec![route("us.anthropic.claude-opus-6-v1", true)];
         assert_eq!(
             bedrock_promoted_default("anthropic.claude-sonnet-4-20250514-v1:0", &routes),
             None
