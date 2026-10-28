@@ -72,3 +72,29 @@ The fixture tests exercise exact identity selection, ambiguity and malformed
 identity refusal, absolute native-tool plan validation, inline requirement
 selection, public receipt fields, dispatch guards, and workflow scope. They do
 not substitute for the coordinator-reviewed protected macOS execution.
+
+## Recorded native acceptance
+
+On October 28, 2026, protected run `40632462506`, attempt 1, passed at Jcode
+source `001a400fa2969711d48932dc3c40707a749bc54b`, with exact helper revision
+`17c344f2e83f836598b82715950497c0879aa713`. Required-reviewer/master-only
+protection remained enabled, and normal reviewer approval used the existing user
+authorization to validate the dedicated signing identity.
+
+The real Python helper invoked native `/usr/bin/codesign` and its verifier on
+the fixed C fixture. The additional Apple chain/identifier/Team ID requirement
+passed and the signed ARM64 fixture executed successfully. Wrong-hash execution
+created no output, the read-only plan created no output, the original fixture's
+hash stayed unchanged, and a repeat execution into the existing destination was
+refused without modifying it. All 17 pinned helper tests and 7 credential-free
+validation fixtures also passed in the real macOS job.
+
+Public receipt artifact `12791579782` (`signing-helper-receipt-1`) has archive
+SHA256 `2d0b731719b256c408aa6d41554dfa1602260e1f4b9f25105aaaa38709507958`.
+Its downloaded JSON is preserved exactly in
+[`evidence/signing-helper-validation-40632462506.json`](evidence/signing-helper-validation-40632462506.json).
+Only the receipt was uploaded, not the fixture executable or credential material.
+This proves native execution of the standalone helper, not an additional Jcode
+release build, notarization, Windows signing, or end-to-end native Rust CLI binary
+execution. The installed Rust CLI's plan/host-guard checks and the separately
+accepted Jcode notarization remain distinct evidence.
