@@ -44,10 +44,15 @@ def release_notes_for_discord(body: str) -> str:
 
 def format_message(*, tag: str, name: str, body: str, url: str) -> str:
     if re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", tag):
-        return (
-            f"## v1 Preview · opt-in: {tag}\n"
+        # An arbitrary URL cannot both fit Discord and remain intact. Fall back
+        # to the project's downloads page instead of emitting a broken link.
+        download_url = url if len(url) <= 256 else "https://github.com/1jehuang/jcode/releases"
+        header = (
+            f"## v1 Preview · opt-in: {tag[:120]}\n"
             "Experimental preview, not a stable release. Stable users are not upgraded automatically.\n"
-            f"Download binaries and notes: <{url}>\n"
+            f"Download binaries and notes: <{download_url}>\n"
+        )
+        setup = (
             "First time: current stable has no `--channel` option. Download your OS/architecture "
             "archive above, verify `SHA256SUMS`, extract the entire archive, and run the extracted "
             "binary by its full path (keep Linux companion files together).\n"
@@ -56,6 +61,26 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
             "Return to stable: `jcode update --channel stable`, or reinstall stable. "
             "Preview publication ends at the stable `v1.0.0` tag."
         )
+        # Keep generated categories and commits, but not repeated setup or
+        # arbitrary legacy prose outside the generated changes section.
+        changes = re.search(
+            r"^## What changed[^\S\n]*\n(.*?)(?=^## First-time preview setup[^\n]*(?:\n|\Z)|\Z)",
+            release_notes_for_discord(body),
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        summary = changes.group(1).strip() if changes else ""
+        if summary:
+            prefix = "## What changed\n"
+            budget = DISCORD_LIMIT - len(header) - len(setup) - len(prefix) - 2
+            if len(summary) > budget:
+                suffix = f"\n… Full notes: <{download_url}>"
+                clipped = summary[: budget - len(suffix)].rstrip()
+                # Preserve whole linked commit bullets whenever a line fits.
+                if "\n" in clipped:
+                    clipped = clipped.rsplit("\n", 1)[0].rstrip()
+                summary = clipped + suffix
+            return f"{header}{prefix}{summary}\n\n{setup}"
+        return header + setup
     title = f"## {tag}" + (f" — {name}" if name and name != tag else "")
     notes = release_notes_for_discord(body)
     message = title if not notes else f"{title}\n{notes}"

@@ -179,14 +179,14 @@ async fn delivery_subscription_serializes_with_spawn_and_adopt_completion() -> R
 
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.recv().await {
-                        if event.task_id == info.task_id {
-                            assert!(
-                                event.notify && event.wake,
-                                "accepted subscription must wake"
-                            );
-                            break;
-                        }
+                    if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.recv().await
+                        && event.task_id == info.task_id
+                    {
+                        assert!(
+                            event.notify && event.wake,
+                            "accepted subscription must wake"
+                        );
+                        break;
                     }
                 }
             })

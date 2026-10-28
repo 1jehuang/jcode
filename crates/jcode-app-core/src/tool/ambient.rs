@@ -759,7 +759,7 @@ impl Tool for ScheduleTool {
     }
 
     fn description(&self) -> &str {
-        "Schedule, list, or cancel future tasks. For an incomplete todo waiting on an external condition, prefer todo external_blocker {reason, review_at}, which maintains and cancels its durable review automatically. Keep this tool for independent scheduled tasks and spawn/ambient targets."
+        "Schedule independent future tasks. For blocked todos, use todo external_blocker."
     }
 
     fn parameters_schema(&self) -> Value {

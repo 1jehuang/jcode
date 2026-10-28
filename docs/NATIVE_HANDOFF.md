@@ -160,8 +160,10 @@ smoke invocations/timeouts, missing signing credentials, exact certificate
 selection, Apple chain/identifier/Team ID requirements, refusal to notarize after
 a bad chain or signed-runtime failure, and read-only environment readiness.
 Signing tests use fake platform commands and never contact Apple. These are fixture
-and static checks. Hosted ARM compilation and native ARM Linux acceptance remain
-pending, as do macOS cross-SDK provisioning and live Apple signing.
+and static checks. Live hosted ARM/native Linux acceptance passed in run
+`40434055378`. Live native macOS ARM64 signing and Apple notarization passed in
+run `40628778548`, as recorded below. Hosted macOS cross-SDK provisioning remains
+a separate, unverified path.
 
 ### Recorded native macOS acceptance
 
@@ -175,3 +177,57 @@ provenance checks and `--version`, `--help`, and `run --help` smoke checks from
 basic launch/help behavior, **not full integration coverage or hosted ARM/Linux
 cross-compilation**. Signing was skipped; nothing was notarized or published.
 Later signing-hardening and ARM-feature changes are not covered by this run.
+
+### Apple signing validation follow-up
+
+Run `40617593094`, attempt 2, completed the native producer and consumer on
+October 28, 2026. The protected signing job successfully imported the dedicated
+PKCS#12 identity, then failed with `The specified item could not be found in the
+keychain` before a signature or notarization result was produced. This is not
+successful signing acceptance.
+
+The signing script now adds its temporary keychain to the user search list while
+preserving existing keychains, and restores the original list before deleting
+the temporary keychain on both success and failure. Exact fingerprint selection,
+Developer ID chain verification, Team ID checks, and signed-runtime smoke remain
+mandatory. Fixture tests cover paths containing spaces, restoration after a bad
+chain, and refusal to sign if search-list setup fails. Actual Apple acceptance
+requires a new exact-source workflow run, not a failed-job-only rerun against an
+older attempt's artifact.
+
+The follow-up run `40626489621` passed native producer/consumer checks and created
+a Developer ID signature. Verification then correctly stopped before notarization
+because the script passed an inline requirement without the `=` prefix, causing
+`codesign` to interpret it as a filename. The verification argument now explicitly
+selects inline text. Tests reject the old filename-mode invocation, and all Apple
+chain, Team ID, and identifier clauses remain unchanged. Live verification and
+notarization acceptance still require the next exact-source run.
+
+### Recorded Apple signing and notarization acceptance
+
+On October 28, 2026, run `40628778548`, attempt 1, passed at exact source
+`a143bccbc9c28d7ce6abbbd47a715dba3a9bff96`. The native macOS ARM64 producer
+built through `justrust --local`, with pinned justrust revision
+`a7e7d02cbd50358d1aea056d3c17e5496586d62a` and `nightly-2026-10-08`.
+The Jcode build step ran from 03:51:33 to 04:13:29 UTC. The separate native
+consumer passed at 04:14:01 UTC, and the protected signing job completed at
+04:15:58 UTC. This is a native GitHub macOS build, not Linux-hosted macOS
+cross-compilation or a performance comparison.
+
+After same-run/source/attempt provenance verification and normal required-reviewer
+approval, the signing job imported the dedicated Developer ID identity and its
+public G2 intermediate, signed with hardened runtime and timestamp, and passed
+the explicit Apple chain, stable identifier, and Team ID requirement. The signed
+image passed `--version`, `--help`, and `run --help` smoke checks. Apple returned
+`Accepted`, submission `049344cd-ace4-4dbc-bf2e-0c45890c5ed4`.
+
+Unsigned artifact `12791990457` and signed artifact `12791493145` remain Actions
+artifacts only. The signed binary and notarized ZIP were downloaded for local
+digest verification against `signing-provenance.json`. Public receipt, exact
+hashes, artifact IDs, and scope are preserved in
+[`evidence/native-handoff-macos-signing-40628778548.json`](evidence/native-handoff-macos-signing-40628778548.json).
+No private credential material is committed. No release was tagged or published,
+no existing Apple certificate/key was revoked, and required-reviewer/master-only
+environment protection remains enabled. Intel macOS, Windows signing, full
+integration behavior, and offline Gatekeeper acceptance are not covered by this
+ARM64 CLI smoke/signing/notarization run.

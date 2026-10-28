@@ -765,7 +765,9 @@ pub fn build_todo_confidence_spike_continuation_message(todos: &[TodoItem]) -> S
 /// reload/resume/remote attach.
 pub fn is_auto_poke_message(message: &str) -> bool {
     let trimmed = message.trim();
-    let first_line = trimmed.lines().next().unwrap_or_default();
+    let Some(first_line) = trimmed.lines().next() else {
+        return false;
+    };
     (trimmed.starts_with("You have ")
         && first_line.contains(" incomplete todo")
         && first_line.ends_with("update the todo tool.")

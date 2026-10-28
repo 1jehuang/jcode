@@ -611,12 +611,12 @@ fn lane_note_spans(
     lane_todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
 ) -> Vec<Span<'static>> {
-    if let Some(todo) = lane_todos
+    if lane_todos
         .iter()
-        .find(|todo| crate::todo::todo_completely_blocked(todo))
+        .any(|todo| crate::todo::todo_completely_blocked(todo))
     {
         return vec![Span::styled(
-            todo_complete_blocker_detail(todo),
+            "Completely blocked",
             Style::default().fg(rgb(225, 165, 90)),
         )];
     }
@@ -943,15 +943,13 @@ pub(crate) fn push_stage_lines(
             }
             if let Some(live) =
                 lane_live_agent(&items, agents).and_then(|agent| agent.live_status.as_ref())
+                && live.phase != "streaming"
+                && let Some(tps) = live.output_tps_milli
             {
-                if live.phase != "streaming" {
-                    if let Some(tps) = live.output_tps_milli {
-                        status.push(Span::styled(
-                            format!(" · {:.1} tps", tps as f64 / 1000.0),
-                            Style::default().fg(todo_meta_color()),
-                        ));
-                    }
-                }
+                status.push(Span::styled(
+                    format!(" · {:.1} tps", tps as f64 / 1000.0),
+                    Style::default().fg(todo_meta_color()),
+                ));
             }
             // Live activity owns the remaining width instead of repeating task titles.
             let status = super::truncate_line_with_ellipsis_to_width(&Line::from(status), room);
@@ -1190,48 +1188,6 @@ mod tests;
 
 /// `⏸ phase 2 blocked` when the active phase has a lane whose worker failed:
 /// later phases cannot start until it is retried or reassigned.
-pub(crate) fn blocked_phase_spans(
-    todos: &[&crate::todo::TodoItem],
-    agents: &[TodoCardAgent],
-) -> Vec<Span<'static>> {
-    if !crate::todo::stages::has_stages(todos.iter().copied()) {
-        return Vec::new();
-    }
-    let stages = ordered_layout(todos);
-    let Some(current) = current_stage(&stages, todos) else {
-        return Vec::new();
-    };
-    let stage = &stages[current];
-    if stage
-        .item_indices()
-        .any(|i| crate::todo::todo_completely_blocked(todos[i]))
-    {
-        let phase = stage
-            .number
-            .map(|n| format!("phase {n}: "))
-            .unwrap_or_default();
-        return vec![Span::styled(
-            format!("  ✋ {phase}Completely blocked"),
-            Style::default().fg(rgb(225, 165, 90)),
-        )];
-    }
-    let failed = stage.item_indices().any(|i| {
-        !is_done(todos[i])
-            && todos[i].assigned_to.as_deref().is_some_and(|owner| {
-                agents.iter().any(|agent| {
-                    agent.matches(owner) && matches!(agent.status.as_str(), "failed" | "crashed")
-                })
-            })
-    });
-    if !failed {
-        return Vec::new();
-    }
-    let label = match stage.number {
-        Some(n) => format!("  ⏸ phase {n} blocked"),
-        None => "  ⏸ blocked".to_string(),
-    };
-    vec![Span::styled(
-        label,
-        Style::default().fg(todo_failure_color()),
-    )]
-}
+#[path = "ui_todo_stages_blocked.rs"]
+mod blocked;
+pub(crate) use blocked::blocked_phase_spans;

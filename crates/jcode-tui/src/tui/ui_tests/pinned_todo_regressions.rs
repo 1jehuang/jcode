@@ -3,7 +3,10 @@ use ratatui::{Terminal, backend::TestBackend};
 
 /// Keep pinning deterministic without modifying the developer's config.
 fn with_pinned_todos_config(f: impl FnOnce()) {
+    // Always acquire environment before render state. App construction under
+    // with_temp_jcode_home takes these locks in this same order.
     let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = viewport_snapshot_test_lock();
     let home = tempfile::tempdir().expect("temporary test home");
     struct RestoreHome(Option<std::ffi::OsString>);
     impl Drop for RestoreHome {
@@ -36,10 +39,82 @@ fn todo_payload() -> String {
     .to_string()
 }
 
+/// A subprocess bounds failure even if both worker threads deadlock while
+/// holding shared test locks. A timed channel alone would leave the rest of
+/// the test binary wedged behind those locks after the assertion failed.
+#[test]
+fn pinned_config_and_app_reset_lock_order_does_not_deadlock() {
+    use std::time::{Duration, Instant};
+
+    const CHILD: &str = "JCODE_TEST_PINNED_CONFIG_LOCK_ORDER_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        for _ in 0..8 {
+            let env = crate::storage::lock_test_env();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let pinned = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                // Exercise the actual rendering test's lock acquisition path,
+                // not a duplicate of the helper's intended implementation.
+                justrust_status_is_below_todos_and_never_wraps();
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            // Give the pinned test a chance to block on the held environment.
+            // Previously it first held render state, creating the ABBA cycle
+            // when the environment owner reset render state below.
+            std::thread::sleep(Duration::from_millis(25));
+            crate::tui::ui::clear_test_render_state_for_tests();
+            drop(env);
+            pinned.join().unwrap();
+        }
+        return;
+    }
+
+    let name = format!(
+        "{}::pinned_config_and_app_reset_lock_order_does_not_deadlock",
+        module_path!()
+    );
+    // libtest names omit the crate prefix from module_path!().
+    let name = name.split_once("::").unwrap().1;
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env(CHILD, "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn isolated lock-order regression");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll regression child") {
+            let output = child.wait_with_output().expect("collect regression output");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                status.success(),
+                "lock-order regression failed: {status}\n{stdout}\n{stderr}"
+            );
+            assert!(
+                stdout.contains("1 passed"),
+                "child did not run the regression: {stdout}"
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill deadlocked regression child");
+            child.wait().expect("reap regression child");
+            panic!("environment/render lock acquisition deadlocked (10s deadline)");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn justrust_status_is_below_todos_and_never_wraps() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
+        // Release commit titles may contain the product name too. The status
+        // assertion must distinguish UI chrome from unrelated changelog prose.
+        let _changelog = header::scoped_unseen_changelog_entries_override_for_tests(vec![
+            "justrust release update".to_string(),
+        ]);
         let mut state = TestState {
             pinned_todos_payload: Some(todo_payload()),
             justrust_status: Some(crate::tui::justrust_status::StatusRow {
@@ -66,8 +141,18 @@ fn justrust_status_is_below_todos_and_never_wraps() {
             .draw(|frame| crate::tui::ui::draw(frame, &state))
             .unwrap();
         let text = terminal_text(&terminal);
-        assert_eq!(text.matches("justrust").count(), 1, "{text}");
-        assert!(text.find("Pinned regression task").unwrap() < text.find("justrust").unwrap());
+        assert!(text.contains("justrust release update"), "{text}");
+        let status_rows: Vec<_> = text
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.trim_start().starts_with("justrust [remote/hosted]"))
+            .collect();
+        assert_eq!(status_rows.len(), 1, "{text}");
+        let todo_row = text
+            .lines()
+            .position(|line| line.contains("Pinned regression task"))
+            .unwrap();
+        assert!(todo_row < status_rows[0].0, "{text}");
 
         state.pinned_todos_payload = None;
         let (lines, _) = viewport::pinned_todo_band_lines(&state, 100, 24);
@@ -95,8 +180,7 @@ fn justrust_status_is_below_todos_and_never_wraps() {
 }
 
 #[test]
-fn pinned_todos_share_top_band_with_swarm_only_on_wide_terminals() {
-    let _render_lock = viewport_snapshot_test_lock();
+fn pinned_todos_do_not_duplicate_passive_swarm_gallery_at_any_width() {
     with_pinned_todos_config(|| {
         let member = crate::protocol::SwarmMemberStatus {
             session_id: "test-worker".into(),
@@ -126,21 +210,9 @@ fn pinned_todos_share_top_band_with_swarm_only_on_wide_terminals() {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert_eq!(
-                text.contains("placement-worker"),
-                width >= 120,
-                "{width}: {text}"
-            );
+            assert!(!text.contains("placement-worker"), "{width}: {text}");
             assert!(lines.iter().all(|line| line.width() <= width as usize));
-            if width >= 120 {
-                let row = lines
-                    .iter()
-                    .find(|line| line.to_string().contains("placement-worker"))
-                    .unwrap();
-                let text = row.to_string();
-                let prefix = text.split("placement-worker").next().unwrap();
-                assert!(unicode_width::UnicodeWidthStr::width(prefix) >= width as usize / 2);
-            }
+            assert!(text.contains("Pinned regression task"), "{width}: {text}");
         }
         clear_flicker_frame_history_for_tests();
         let mut terminal = Terminal::new(TestBackend::new(160, 36)).unwrap();
@@ -148,7 +220,8 @@ fn pinned_todos_share_top_band_with_swarm_only_on_wide_terminals() {
             .draw(|frame| crate::tui::ui::draw(frame, &state))
             .unwrap();
         let text = terminal_text(&terminal);
-        assert_eq!(text.matches("placement-worker").count(), 1, "{text}");
+        assert!(!text.contains("placement-worker"), "{text}");
+        assert_eq!(text.matches("Pinned regression task").count(), 1, "{text}");
     });
 }
 
@@ -183,7 +256,6 @@ fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
 
 #[test]
 fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
         let _changelog = header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
         reset_prompt_viewport_state_for_test();
@@ -245,7 +317,6 @@ fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() 
 
 #[test]
 fn pinned_todo_regression_hidden_message_has_zero_length_cache_boundary() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
         let mut state = TestState {
             display_messages: vec![

@@ -251,6 +251,12 @@ impl ModelCatalogService {
         if !self.should_refresh(scope) {
             return false;
         }
+        self.begin_forced_refresh(scope)
+    }
+
+    /// Explicit refresh ignores cached freshness and retry throttling, but must
+    /// still avoid overlapping requests for the same credential scope.
+    pub(crate) fn begin_forced_refresh(&self, scope: &str) -> bool {
         let Ok(mut in_flight) = self.in_flight.write() else {
             return false;
         };
@@ -352,6 +358,23 @@ mod tests {
 
         service.finish_refresh("default");
         assert!(!service.begin_refresh("default"));
+    }
+
+    #[test]
+    fn forced_catalog_refresh_bypasses_freshness_and_throttle_but_not_in_flight() {
+        let service = service();
+        service.replace_scope_models(
+            "default",
+            HashSet::from(["future-model".to_string()]),
+            SystemTime::now(),
+        );
+        assert!(!service.begin_refresh("default"));
+        assert!(service.begin_forced_refresh("default"));
+        assert!(!service.begin_forced_refresh("default"));
+        service.finish_refresh("default");
+        assert!(!service.begin_refresh("default"));
+        assert!(service.begin_forced_refresh("default"));
+        assert!(service.begin_forced_refresh("different-account"));
     }
 
     #[test]

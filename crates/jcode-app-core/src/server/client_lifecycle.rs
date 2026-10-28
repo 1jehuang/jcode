@@ -108,154 +108,12 @@ struct SwarmStatusRefs<'a> {
     event_tx: &'a broadcast::Sender<SwarmEvent>,
 }
 
-fn should_start_idle_soft_interrupt(
-    client_is_processing: bool,
-    active_turn_registered: bool,
-    session_connection_busy: bool,
-) -> bool {
-    !client_is_processing && !active_turn_registered && !session_connection_busy
-}
-
-struct RequestHandlerWatchdog {
-    done: Arc<AtomicBool>,
-}
-
-struct RequestHandlerWatchdogContext {
-    request_id: u64,
-    request_kind: String,
-    client_session_id: String,
-    client_connection_id: String,
-    client_instance_id: Option<String>,
-    client_is_processing: bool,
-    message_id: Option<u64>,
-    processing_session_id: Option<String>,
-    line_bytes: usize,
-    lifecycle_logged: bool,
-}
-
-impl RequestHandlerWatchdog {
-    fn spawn(ctx: RequestHandlerWatchdogContext) -> Self {
-        let done = Arc::new(AtomicBool::new(false));
-        let done_for_task = Arc::clone(&done);
-        tokio::spawn(async move {
-            let started = Instant::now();
-            let mut previous_threshold = Duration::ZERO;
-            for threshold_ms in REQUEST_HANDLER_STALL_THRESHOLDS_MS {
-                let threshold = Duration::from_millis(threshold_ms);
-                tokio::time::sleep(threshold.saturating_sub(previous_threshold)).await;
-                previous_threshold = threshold;
-                if done_for_task.load(Ordering::Acquire) {
-                    return;
-                }
-                crate::logging::event_warn(
-                    "SERVER_REQUEST_HANDLER_STALLED",
-                    vec![
-                        ("request_id", ctx.request_id.to_string()),
-                        ("request_kind", ctx.request_kind.clone()),
-                        ("session_id", ctx.client_session_id.clone()),
-                        ("client_connection_id", ctx.client_connection_id.clone()),
-                        (
-                            "client_instance_id",
-                            ctx.client_instance_id
-                                .clone()
-                                .unwrap_or_else(|| "none".to_string()),
-                        ),
-                        ("client_processing", ctx.client_is_processing.to_string()),
-                        (
-                            "message_id",
-                            ctx.message_id
-                                .map(|id| id.to_string())
-                                .unwrap_or_else(|| "none".to_string()),
-                        ),
-                        (
-                            "processing_session_id",
-                            ctx.processing_session_id
-                                .clone()
-                                .unwrap_or_else(|| "none".to_string()),
-                        ),
-                        ("line_bytes", ctx.line_bytes.to_string()),
-                        ("lifecycle_logged", ctx.lifecycle_logged.to_string()),
-                        ("threshold_ms", threshold_ms.to_string()),
-                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                    ],
-                );
-            }
-        });
-        Self { done }
-    }
-}
-
-impl Drop for RequestHandlerWatchdog {
-    fn drop(&mut self) {
-        self.done.store(true, Ordering::Release);
-    }
-}
-
-fn log_request_lifecycle_handled(
-    fields: ServerRequestLifecycleFields<'_>,
-    request_lifecycle_start: Instant,
-    request_decoded_at: Instant,
-) {
-    let mut fields = server_request_lifecycle_fields(fields);
-    fields.push((
-        "handler_total_ms".to_string(),
-        request_lifecycle_start.elapsed().as_millis().to_string(),
-    ));
-    fields.push((
-        "since_decode_ms".to_string(),
-        request_decoded_at.elapsed().as_millis().to_string(),
-    ));
-    crate::logging::event_info("SERVER_REQUEST_LIFECYCLE", fields);
-}
-
-fn reject_if_agent_busy_for_request(
-    request_id: u64,
-    request_kind: &'static str,
-    client_session_id: &str,
-    client_is_processing: bool,
-    agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) -> bool {
-    if agent.try_lock().is_ok() {
-        return false;
-    }
-
-    send_agent_busy_error(
-        request_id,
-        request_kind,
-        client_session_id,
-        client_is_processing,
-        client_event_tx,
-    );
-    true
-}
-
-fn send_agent_busy_error(
-    request_id: u64,
-    request_kind: &'static str,
-    client_session_id: &str,
-    client_is_processing: bool,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    crate::logging::event_warn(
-        "SERVER_REQUEST_BUSY_AGENT_REJECTED",
-        vec![
-            ("request_id", request_id.to_string()),
-            ("request_kind", request_kind.to_string()),
-            ("session_id", client_session_id.to_string()),
-            ("client_processing", client_is_processing.to_string()),
-            ("reason", "agent_busy".to_string()),
-        ],
-    );
-    let _ = client_event_tx.send(ServerEvent::Error {
-        id: request_id,
-        message: format!(
-            "Cannot handle {request_kind} while the session is busy. Try again after the current turn finishes."
-        ),
-        retry_after_secs: Some(1),
-    });
-}
-
+#[path = "request_watchdog.rs"]
+mod request_watchdog;
+use request_watchdog::{
+    RequestHandlerWatchdog, RequestHandlerWatchdogContext, log_request_lifecycle_handled,
+    reject_if_agent_busy_for_request, send_agent_busy_error, should_start_idle_soft_interrupt,
+};
 fn server_reload_starting() -> bool {
     matches!(
         crate::server::recent_reload_state(RELOAD_STARTING_GUARD_MAX_AGE),
@@ -1093,7 +951,9 @@ pub(super) async fn handle_client(
                 _ => unreachable!(),
             };
             let event = response.unwrap_or_else(|error| ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None });
-            let _ = client_event_tx.send(event);
+            if let Err(error) = client_event_tx.send(event) {
+                crate::logging::debug(&format!("Client disconnected before event delivery: {error}"));
+            }
             continue;
         }
 
@@ -2047,7 +1907,9 @@ pub(super) async fn handle_client(
                     Ok(overrides) => ServerEvent::AgentModelsChanged { id, session_id: client_session_id.clone(), overrides },
                     Err(error) => ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None },
                 };
-                let _ = client_event_tx.send(event);
+                if let Err(error) = client_event_tx.send(event) {
+                crate::logging::debug(&format!("Client disconnected before event delivery: {error}"));
+            }
             }
 
             Request::SetSubagentModel { id, model } => {
@@ -2477,7 +2339,9 @@ pub(super) async fn handle_client(
                 .await
                 {
                     Ok(event) => {
-                        let _ = client_event_tx.send(event);
+                        if let Err(error) = client_event_tx.send(event) {
+                crate::logging::debug(&format!("Client disconnected before event delivery: {error}"));
+            }
                     }
                     Err(error) => {
                         let _ = client_event_tx.send(ServerEvent::Error {
@@ -2786,7 +2650,9 @@ pub(super) async fn handle_client(
                     &sessions,
                     &provider_template,
                     |event| {
-                        let _ = client_event_tx.send(event);
+                        if let Err(error) = client_event_tx.send(event) {
+                crate::logging::debug(&format!("Client disconnected before event delivery: {error}"));
+            }
                     },
                 )
                 .await;
@@ -3456,7 +3322,11 @@ async fn append_context_message(
             retry_after_secs: None,
         },
     };
-    let _ = client_event_tx.send(event);
+    if let Err(error) = client_event_tx.send(event) {
+        crate::logging::debug(&format!(
+            "Client disconnected before event delivery: {error}"
+        ));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

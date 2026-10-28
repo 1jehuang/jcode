@@ -243,11 +243,14 @@ pub fn merge_worker_lane(
             }
             // Background task IDs belong to the destination session, not the
             // worker. New items get no references from the source session.
-            item.waiting_on = coordinator_todos
+            item.waiting_on = match coordinator_todos
                 .iter()
                 .find(|old| lane_id(old) == link.lane && old.id == item.id)
-                .map(|old| old.waiting_on.clone())
-                .unwrap_or_default();
+            {
+                Some(old) => old.waiting_on.clone(),
+                // A newly introduced worker item cannot inherit another session's waits.
+                None => Vec::new(),
+            };
             item
         })
         .collect();

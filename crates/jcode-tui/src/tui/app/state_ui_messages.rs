@@ -267,10 +267,23 @@ impl App {
         }) {
             return None;
         }
-        let status: crate::background::TaskStatusFile = serde_json::from_slice(
-            &std::fs::read(crate::background::global().status_path_for(task_id)).ok()?,
-        )
-        .ok()?;
+        let bytes = match std::fs::read(crate::background::global().status_path_for(task_id)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Cannot read background dependency status: {error}"
+                ));
+                return None;
+            }
+        };
+        let status: crate::background::TaskStatusFile = match serde_json::from_slice(&bytes) {
+            Ok(status) => status,
+            Err(error) => {
+                crate::logging::warn(&format!("Invalid background dependency status: {error}"));
+                return None;
+            }
+        };
         // UI rows are history, not proof that an owner survived a crash.
         let owner = if status.detached {
             status.pid

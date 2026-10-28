@@ -40,7 +40,13 @@ pub(super) fn todos_from_tool_input(tc: &ToolCall) -> Option<Vec<TodoItem>> {
             items: Vec<TodoItem>,
         }
 
-        let phases = serde_json::from_value::<Vec<Phase>>(phases.clone()).ok()?;
+        let phases = match serde_json::from_value::<Vec<Phase>>(phases.clone()) {
+            Ok(phases) => phases,
+            Err(error) => {
+                crate::logging::debug(&format!("Cannot render todo phase changes: {error}"));
+                return None;
+            }
+        };
         let mut todos = Vec::new();
         for phase in phases {
             if phase.phase == 0 || phase.lanes.is_empty() {
@@ -374,7 +380,8 @@ mod tests {
         after.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
             reason: "Only the owner can approve".into(),
         });
-        let lines = render_todo_change_lines(Some(&[before.clone()]), &[after.clone()], 200);
+        let lines =
+            render_todo_change_lines(Some(std::slice::from_ref(&before)), &[after.clone()], 200);
         let text = lines
             .iter()
             .map(ToString::to_string)
@@ -384,9 +391,13 @@ mod tests {
         assert!(text.contains("Only the owner can approve"));
         for width in 0..100 {
             assert!(
-                render_todo_change_lines(Some(&[before.clone()]), &[after.clone()], width)
-                    .iter()
-                    .all(|line| line.width() <= usize::from(width))
+                render_todo_change_lines(
+                    Some(std::slice::from_ref(&before)),
+                    &[after.clone()],
+                    width
+                )
+                .iter()
+                .all(|line| line.width() <= usize::from(width))
             );
         }
         assert!(render_todo_change_lines(Some(&[after.clone()]), &[after.clone()], 200).is_empty());

@@ -516,7 +516,13 @@ fn with_background_tasks(
     let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(&content) else {
         return content;
     };
-    payload["background_tasks"] = serde_json::to_value(tasks).unwrap_or_default();
+    match serde_json::to_value(tasks) {
+        Ok(tasks) => payload["background_tasks"] = tasks,
+        Err(error) => {
+            crate::logging::warn(&format!("Cannot encode todo background tasks: {error}"));
+            return content;
+        }
+    }
     payload.to_string()
 }
 
@@ -525,9 +531,16 @@ fn hash_background_tasks(tasks: &[crate::tui::ui::TodoCardBackgroundTask]) -> u6
         return 0;
     }
     let mut hasher = DefaultHasher::new();
-    serde_json::to_string(tasks)
-        .unwrap_or_default()
-        .hash(&mut hasher);
+    match serde_json::to_string(tasks) {
+        Ok(serialized) => serialized.hash(&mut hasher),
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot fingerprint todo background tasks: {error}"
+            ));
+            // Avoid mistaking a failed encoding for an empty task list.
+            tasks.len().hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -543,7 +556,12 @@ fn todo_card_payload_json_with_agents(
         "goals": goals,
     });
     if !agents.is_empty() {
-        payload["agents"] = serde_json::to_value(agents).unwrap_or_default();
+        match serde_json::to_value(agents) {
+            Ok(agents) => payload["agents"] = agents,
+            Err(error) => {
+                crate::logging::warn(&format!("Cannot encode todo agents: {error}"));
+            }
+        }
     }
     serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"todos":[],"goals":[]}"#.to_string())
 }
@@ -561,10 +579,11 @@ fn advance_todo_agent_elapsed(
         &mut agent.age_secs,
         &mut agent.activity_age_secs,
         &mut agent.wait_age_secs,
-    ] {
-        if let Some(age) = age {
-            *age = age.saturating_add(elapsed.as_secs());
-        }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *age = age.saturating_add(elapsed.as_secs());
     }
 }
 
@@ -678,11 +697,13 @@ fn format_todo_compact_markdown(todo: &TodoItem) -> String {
         .map(|group| format!(" _({group})_"))
         .unwrap_or_default();
     let blocker_detail = if crate::todo::todo_completely_blocked(todo) {
-        let blocker = todo
-            .completely_blocked
-            .as_ref()
-            .expect("validated complete blocker");
-        format!("\n  ✋ **Completely blocked**: {}\n", blocker.reason)
+        match todo.completely_blocked.as_ref() {
+            Some(blocker) => format!("\n  ✋ **Completely blocked**: {}\n", blocker.reason),
+            None => {
+                crate::logging::warn("Todo marked completely blocked without blocker details");
+                String::new()
+            }
+        }
     } else {
         String::new()
     };
@@ -806,8 +827,10 @@ mod tests {
 
     #[test]
     fn shortcut_changes_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent::default();
-        agent.shortcut = Some(1);
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            shortcut: Some(1),
+            ..Default::default()
+        };
         let before = hash_todo_card_agents(&[agent.clone()]);
         agent.shortcut = Some(0);
         assert_ne!(before, hash_todo_card_agents(&[agent]));
@@ -815,8 +838,10 @@ mod tests {
 
     #[test]
     fn worker_item_status_changes_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent::default();
-        agent.todo_statuses = vec!["pending".into(), "in_progress".into()];
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            todo_statuses: vec!["pending".into(), "in_progress".into()],
+            ..Default::default()
+        };
         let before = hash_todo_card_agents(&[agent.clone()]);
         agent.todo_statuses.swap(0, 1);
         assert_ne!(before, hash_todo_card_agents(&[agent]));

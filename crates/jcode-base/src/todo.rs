@@ -398,11 +398,25 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 fn load_lane_links(session_id: &str) -> Vec<stages::LaneLink> {
-    todo_state_path(session_id, TodoFile::LaneLinks)
-        .ok()
-        .filter(|path| path.exists())
-        .and_then(|path| storage::read_json(&path).ok())
-        .unwrap_or_default()
+    let path = match todo_state_path(session_id, TodoFile::LaneLinks) {
+        Ok(path) => path,
+        Err(error) => {
+            crate::logging::warn(&format!("Cannot locate todo lane links: {error}"));
+            return Vec::new();
+        }
+    };
+    match storage::read_json(&path) {
+        Ok(links) => links,
+        Err(error) => {
+            if path.exists() {
+                crate::logging::warn(&format!(
+                    "Cannot read todo lane links {}: {error}",
+                    path.display()
+                ));
+            }
+            Vec::new()
+        }
+    }
 }
 
 fn save_lane_links(session_id: &str, links: &[stages::LaneLink]) -> Result<()> {

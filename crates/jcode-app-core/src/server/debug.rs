@@ -307,7 +307,8 @@ pub(super) async fn handle_debug_client(
         // shared request reservation here would make it reject its own request.
         let transfer_control = matches!(&request, Request::DebugCommand { command, .. }
             if command.trim().starts_with("group_transfer:") || command.trim().starts_with("server:group_transfer:"));
-        let _request_activity = match if transfer_control {
+        let read_only_probe = matches!(&request, Request::Ping { .. });
+        let _request_activity = match if transfer_control || read_only_probe {
             Ok(None)
         } else {
             crate::runtime_activity::global().try_enter().map(Some)

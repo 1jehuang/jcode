@@ -127,6 +127,8 @@ pub enum PreparedSectionKind {
     Streaming,
     /// Inline images rendered in the transcript flow (below the body).
     InlineImages,
+    /// Full blocker explanations beneath the latest response, not in pinned chrome.
+    TodoBlockers,
 }
 
 #[derive(Clone)]

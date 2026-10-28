@@ -82,10 +82,8 @@ fn remove_record_files(path: &std::path::Path) -> Result<()> {
     }
 
     #[cfg(unix)]
-    if let Some(parent) = path.parent()
-        && let Ok(directory) = std::fs::File::open(parent)
-    {
-        let _ = directory.sync_all();
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
 }
@@ -223,11 +221,15 @@ pub(super) fn peek_for_session(session_id: &str) -> Result<Option<ReloadRecovery
 }
 
 pub(super) fn has_pending_for_session(session_id: &str) -> bool {
-    peek_for_session(session_id)
-        .ok()
-        .flatten()
-        .map(|record| record.status == ReloadRecoveryStatus::Pending)
-        .unwrap_or(false)
+    match peek_for_session(session_id) {
+        Ok(record) => record.is_some_and(|record| record.status == ReloadRecoveryStatus::Pending),
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot read pending reload intent for {session_id}: {error}"
+            ));
+            false
+        }
+    }
 }
 
 /// Return the pending recovery directive for inclusion in a bootstrap/history
@@ -341,7 +343,11 @@ pub(super) fn mark_delivered_if_matching_continuation(
     crate::storage::write_json(&path, &record)?;
     // Startup GC removes delivered records, so leftover selfdev context must
     // not outlive delivery or History could rebuild this continuation later.
-    let _ = crate::tool::selfdev::ReloadContext::load_for_session(session_id);
+    if let Err(error) = crate::tool::selfdev::ReloadContext::load_for_session(session_id) {
+        crate::logging::warn(&format!(
+            "Could not consume delivered reload context for {session_id}: {error}"
+        ));
+    }
     super::reload_trace::record_value(
         &record.reload_id,
         "intent_delivered",

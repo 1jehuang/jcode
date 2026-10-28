@@ -1,5 +1,7 @@
 # Jcode vs Maki: local TUI performance and resources
 
+> Follow-up: the same Jcode binary later measured 128 to 130 MiB for one session, not the original 219 MiB. See “Follow-up: one-session memory attribution” below before treating the original figures as a stable baseline.
+
 Measured October 27, 2026 UTC, on the user's Dell XPS 14, Intel Core Ultra X9 388H, 62.3 GiB RAM. Linux x86_64, kernel 7.2.11-arch1-1, 16 logical CPUs. Initial load averages: 2.63 / 3.18 / 3.82. This was an active development laptop, not a dedicated benchmark machine.
 
 ## Scope and conclusion
@@ -122,6 +124,42 @@ python -m unittest discover -s scripts -p test_bench_jcode_maki.py -v
 ```
 
 Validation: all **27 runs completed**, every recorded executable matched its pinned path, and all **five harness tests passed**. Tests cover live/missing process accounting, application input echo, rejection of unrendered input as readiness, and owned-process cleanup.
+
+## Follow-up: one-session memory attribution
+
+A follow-up on October 27 at approximately 23:36 to 23:40 UTC reran the **same pinned `8e1417e79` binary** and inspected `/proc/<pid>/smaps` separately for its server and client. Important correction: three new runs of the unmodified benchmark harness measured **128.0 / 128.3 / 130.1 MiB PSS**, rather than reproducing the earlier 218.8 MiB median. The earlier result remains the historical observation, not a proven stable one-session baseline. The initial suite did not save mapping-level data, so the approximately 90 MiB difference cannot now be attributed conclusively. Repeating the original binary-hashing prewarm step did not restore the larger footprint.
+
+The mapping-level diagnostic run measured approximately **130.5 MiB PSS** in total:
+
+| Resident component, summed server + client | PSS MiB |
+|---|---:|
+| Jcode executable mappings, including relocated data | 112.85 |
+| Anonymous allocator/mmap/thread mappings | 7.88 |
+| `brk` heap | 3.48 |
+| Main-thread stacks | 4.87 |
+| Shared libraries and other file mappings | 1.43 |
+
+The executable figure includes about **10.96 MiB of anonymous relocated data**, 5.48 MiB per process. It is not all clean instruction pages. The runtime/allocator rows can contain both live allocations and retained free pages. This is a mapping breakdown, not a live-object heap profile.
+
+This points to the following causes of the measured remaining gap:
+
+1. **The comparison used the unoptimized self-development build.** At the benchmarked revision, `[profile.selfdev]` inherits release settings but sets `opt-level = 0`. ELF inspection shows approximately **122.6 MiB of `.text` machine code**, versus **42.0 MiB** in Maki's binary. The Jcode executable links the full server, TUI, providers, tools, rendering, and their generic/serialization machinery. The footprint is predominantly mapped executable code/data, not a 130 MiB transcript or embedding heap.
+2. **One session means two processes.** The server and TUI have separate allocator/runtime state and private relocated executable data. In one diagnostic snapshot their PSS shares were roughly **69 MiB server + 62 MiB client**. Shared clean pages are already proportionally apportioned by PSS, so this does **not** mean charging the full executable twice. Different server/client code paths also touch different parts of the executable.
+3. **This is not an embedding-model allocation.** Memory features were disabled, the workspace was empty, and no prompts were submitted. The observed non-executable mappings are much smaller than the executable mappings.
+
+A contemporaneous Maki splash-disabled run measured about **65.7 MiB PSS**, with approximately **34 MiB executable mappings** and roughly **31 to 34 MiB anonymous mappings** during observation. Therefore the live heap is not demonstrated to be worse in Jcode by this investigation. The major demonstrated difference is the development executable's resident code/data and its two-process startup baseline.
+
+The first meaningful optimization experiment would compare a **proper optimized Jcode distribution build of the same revision**, rather than merely stripping symbols. The large ELF symbol tables are not in loadable segments, so file-size reduction from stripping alone is not evidence of a runtime-memory improvement. A smaller client-only executable and less eager client initialization are possible further experiments, not yet measured fixes. No runtime code or allocator settings were changed in this follow-up.
+
+Follow-up scripts and raw measurements are retained locally under:
+
+```text
+/home/jeremy/.jcode/scratch/maki-bench/attribute.py
+/home/jeremy/.jcode/scratch/maki-bench/attribution/jcode.json
+/home/jeremy/.jcode/scratch/maki-bench/attribution/jcode-prewarmed.json
+/home/jeremy/.jcode/scratch/maki-bench/attribution/maki.json
+/home/jeremy/.jcode/scratch/maki-bench/attribution/repeat-original.json
+```
 
 ## Limitations and next useful measurements
 

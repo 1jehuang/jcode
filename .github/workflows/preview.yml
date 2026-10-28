@@ -60,9 +60,11 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: jcode-linux-x86_64
             compat: true
+            hosted: true
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: jcode-linux-aarch64
+            hosted: true
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: jcode-macos-aarch64
@@ -90,44 +92,69 @@ jobs:
         with:
           arch: ${{ matrix.msvc }}
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.hosted != true
         with:
           targets: ${{ matrix.target }}
-      - uses: dtolnay/rust-toolchain@nightly
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        with:
-          targets: aarch64-unknown-linux-gnu
-          components: rust-src
       - uses: Swatinem/rust-cache@v2
+        if: matrix.hosted != true
         with:
           key: preview-${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.hosted == true
+        with:
+          toolchain: 1.99.0
       - name: Install pinned justrust
-        if: matrix.compat != true
+        if: matrix.hosted != true
         shell: bash
         run: bash scripts/install_justrust_ci.sh
-      - name: Build portable Linux x86_64 using stable packaging
+      - name: Install source-pinned hosted justrust
+        if: matrix.hosted == true
+        shell: bash
+        run: bash scripts/install_justrust_hosted_ci.sh
+      - name: Build Linux preview on hosted justrust
+        if: matrix.hosted == true
+        shell: bash
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
+        run: bash scripts/build_preview_linux_hosted.sh "${{ matrix.target }}"
+      - name: Verify and package portable hosted Linux preview
         if: matrix.compat == true
         shell: bash
-        run: bash scripts/build_linux_compat.sh dist
-        env:
-          JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
+        run: bash scripts/package_preview_linux_hosted.sh
       - name: Build native preview
-        if: matrix.compat != true
+        if: matrix.hosted != true && runner.os != 'Windows'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           EXTRA_ARGS: ${{ matrix.cargo_args }}
-          # Native macOS/Windows and ARM emulated TLS require local builds.
+          # SDK-backed hosted macOS/MSVC builds still need provisioning.
           JUSTRUST_DISABLE: "1"
         run: |
           set -euo pipefail
-          if [ "$TARGET" = aarch64-unknown-linux-gnu ]; then
-            # Preserve stable release's Termux-compatible emulated TLS contract.
-            export RUSTFLAGS='-Z tls-model=emulated'
-            RUSTUP_TOOLCHAIN=nightly justrust build --local --locked -Z build-std=std,panic_abort --release --target "$TARGET" -p jcode --bin jcode
-          else
+          # Positional parameters also expand safely when empty on macOS Bash 3.2.
+          set --
+          if [ -n "$EXTRA_ARGS" ]; then
             read -r -a extra_args <<< "$EXTRA_ARGS"
-            justrust build --local --locked --release --target "$TARGET" -p jcode --bin jcode "${extra_args[@]}"
+            set -- "${extra_args[@]}"
           fi
+          justrust build --local --locked --release --target "$TARGET" -p jcode --bin jcode "$@"
+      - name: Build Windows preview with MSVC environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          EXTRA_ARGS: ${{ matrix.cargo_args }}
+          JUSTRUST_DISABLE: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Git Bash prepends its Unix link.exe ahead of the MSVC linker.
+          # PowerShell preserves the developer-command-prompt PATH ordering.
+          $extraArgs = @()
+          if ($env:EXTRA_ARGS) {
+            $extraArgs = $env:EXTRA_ARGS -split '\s+'
+          }
+          & justrust build --local --locked --release --target $env:TARGET -p jcode --bin jcode @extraArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package native binary
         if: matrix.compat != true
         shell: bash

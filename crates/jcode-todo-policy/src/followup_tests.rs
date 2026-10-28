@@ -623,7 +623,7 @@ fn delivered_final_latches_completion_without_requesting_another_response() {
     assert!(policy.final_response_requested);
     assert_eq!(
         policy.final_response_fingerprint,
-        serde_json::to_string(&(&state.todos, &state.plan, &state.goals)).ok()
+        Some((state.todos.clone(), state.plan.clone(), state.goals.clone()))
     );
     // A later turn without a response or with stale observations stays quiet.
     assert_eq!(policy.decide_after_turn(&state, false), Decision::default());

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 mod display;
+mod update_policy;
+pub use update_policy::{CrossProviderFailoverMode, UpdateChannel};
 mod menubar;
 mod power;
 mod session;
@@ -281,86 +283,6 @@ impl ReasoningDisplayMode {
     }
 }
 
-/// Update channel: how aggressively to receive updates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum UpdateChannel {
-    /// Only update from tagged GitHub Releases (default).
-    #[default]
-    Stable,
-    /// Opt in to published v1.0.0-preview.N prereleases.
-    Preview,
-    /// Update from latest commit on main branch (bleeding edge).
-    Main,
-}
-
-impl UpdateChannel {
-    /// Parse a channel name, returning `None` for unknown values.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "stable" | "release" => Some(Self::Stable),
-            "preview" => Some(Self::Preview),
-            "main" | "nightly" | "edge" => Some(Self::Main),
-            _ => None,
-        }
-    }
-}
-
-/// Config deserialization is deliberately lenient: an unknown or removed
-/// channel name (e.g. a stale `update_channel = "manual"` left in
-/// config.toml) falls back to the default channel instead of failing the
-/// entire config parse. A strict enum here once made the freshly exec'd
-/// server die during the reload handoff, leaving the handoff marker stuck
-/// in `starting` and clients re-requesting the reload forever (issue #349).
-impl<'de> Deserialize<'de> for UpdateChannel {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(Self::parse(&value).unwrap_or_default())
-    }
-}
-
-impl std::fmt::Display for UpdateChannel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Stable => write!(f, "stable"),
-            Self::Preview => write!(f, "preview"),
-            Self::Main => write!(f, "main"),
-        }
-    }
-}
-
-/// Cross-provider failover behavior when the same input would be resent elsewhere.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum CrossProviderFailoverMode {
-    /// Show a 3-second cancelable countdown, then resend on another provider.
-    #[default]
-    Countdown,
-    /// Do not resend the prompt to another provider automatically.
-    #[serde(alias = "off", alias = "false", alias = "disabled", alias = "none")]
-    Manual,
-}
-
-impl CrossProviderFailoverMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Manual => "manual",
-            Self::Countdown => "countdown",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "manual" | "off" | "false" | "disabled" | "none" => Some(Self::Manual),
-            "countdown" | "auto" | "automatic" => Some(Self::Countdown),
-            _ => None,
-        }
-    }
-}
-
 /// Compaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -585,9 +507,12 @@ pub struct AgentsConfig {
     ///
     /// Leave unset (or use `"inherit"` / `"coordinator"`) to have spawned swarm
     /// agents inherit the spawning coordinator's model. Set to a concrete model
-    /// string to change the worker default. An explicit `model` in the swarm
-    /// tool overrides this default for newly spawned workers.
+    /// string to change the worker default.
     pub swarm_model: Option<String>,
+    /// Opt in to agent-selected worker models, restricted to the exact allowlist.
+    pub swarm_model_selection: bool,
+    /// Exact model/route strings the agent may request. Empty denies all overrides.
+    pub swarm_model_allowlist: Vec<String>,
     /// Reasoning effort for spawned swarm workers (`"low"`, `"medium"`,
     /// `"high"`, ...). The swarm tool does not let agents choose worker
     /// effort. Unset means `"low"`.
@@ -713,6 +638,8 @@ impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             swarm_model: None,
+            swarm_model_selection: false,
+            swarm_model_allowlist: Vec::new(),
             swarm_effort: None,
             swarm_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
@@ -740,6 +667,30 @@ impl Default for AgentsConfig {
 }
 
 impl AgentsConfig {
+    /// Validate an agent-supplied override before resolving any provider route.
+    /// Matching is exact: a bare model never authorizes another provider's route.
+    pub fn validate_swarm_model_request(&self, model: Option<&str>) -> Result<(), &'static str> {
+        let Some(model) = model else {
+            return Ok(());
+        };
+        if !self.swarm_model_selection {
+            return Err(
+                "Agent-selected swarm models are disabled. Omit model to use the user-configured default.",
+            );
+        }
+        if model.trim().is_empty()
+            || !self
+                .swarm_model_allowlist
+                .iter()
+                .any(|allowed| allowed == model)
+        {
+            return Err(
+                "Requested swarm model is not in agents.swarm_model_allowlist. Omit model to use the user-configured default.",
+            );
+        }
+        Ok(())
+    }
+
     /// Resolve swarm mode's root effort without allowing the orchestration
     /// sentinel to recurse into itself. Unknown values use the low-effort
     /// default without invalidating other settings.

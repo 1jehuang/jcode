@@ -32,6 +32,12 @@ with Path(os.environ['TEST_LOG']).open('a') as log:
     log.write(json.dumps([name, args]) + '\\n')
 if name == 'uname':
     print('Darwin')
+elif name == 'security' and args[0] == 'list-keychains':
+    if '-s' not in args:
+        print('    "/Users/runner/Library/Keychains/login.keychain-db"')
+        print('    "/Library/Keychains/Fixture With Spaces.keychain-db"')
+    elif os.environ.get('TEST_BAD_SEARCH_LIST') and any('handoff.keychain-db' in arg for arg in args):
+        sys.exit(1)
 elif name == 'security' and args[0] == 'find-identity':
     identity = os.environ['APPLE_SIGNING_IDENTITY']
     if os.environ.get('TEST_WRONG_IDENTITY'):
@@ -39,8 +45,11 @@ elif name == 'security' and args[0] == 'find-identity':
     print('  1) ' + 'A' * 40 + ' "' + identity + '"')
     if os.environ.get('TEST_DUPLICATE_IDENTITY'):
         print('  2) ' + 'B' * 40 + ' "' + identity + '"')
-elif name == 'codesign' and '--verify' in args and os.environ.get('TEST_BAD_CHAIN'):
-    sys.exit(1)
+elif name == 'codesign' and '--verify' in args:
+    if not args[args.index('-R') + 1].startswith('='):
+        sys.exit('Inline requirement must start with =, not a filename')
+    if os.environ.get('TEST_BAD_CHAIN'):
+        sys.exit(1)
 elif name == 'ditto':
     Path(args[-1]).write_bytes(b'fixture zip')
 elif name == 'xcrun':
@@ -78,6 +87,7 @@ elif name == 'xcrun':
         self.assertEqual(signing[signing.index('--sign') + 1], 'A' * 40)
         verification = next(args for name, args in calls if name == 'codesign' and '--verify' in args)
         requirement = verification[verification.index('-R') + 1]
+        self.assertTrue(requirement.startswith('=anchor apple generic'))
         for clause in ('anchor apple generic', 'certificate 1[field.1.2.840.113635.100.6.2.6] exists',
                        'certificate leaf[field.1.2.840.113635.100.6.1.13] exists',
                        'identifier "com.jcode.cli"', 'certificate leaf[subject.OU] = "ABCDEFGHIJ"'):
@@ -85,6 +95,31 @@ elif name == 'xcrun':
         self.assertEqual(result.stdout.count('jcode Usage: fixture'), 3)
         self.assertTrue((self.root / 'signed-handoff/signing-provenance.json').is_file())
         self.assertTrue(any(name == 'security' and args[0] == 'delete-keychain' for name, args in calls))
+
+    def test_search_list_preserved_and_restored_before_keychain_deletion(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        security = [args for name, args in calls if name == 'security']
+        self.assertEqual(security[0], ['list-keychains', '-d', 'user'])
+        updates = [args for args in security if args[:4] == ['list-keychains', '-d', 'user', '-s']]
+        originals = ['/Users/runner/Library/Keychains/login.keychain-db',
+                     '/Library/Keychains/Fixture With Spaces.keychain-db']
+        self.assertEqual(len(updates), 2)
+        self.assertTrue(updates[0][4].endswith('/handoff.keychain-db'))
+        self.assertEqual(updates[0][5:], originals)
+        self.assertEqual(updates[1][4:], originals)
+        self.assertEqual(security[-1][0], 'delete-keychain')
+
+    def test_failed_search_list_setup_aborts_before_signing_and_restores_state(self):
+        result = self.run_script(TEST_BAD_SEARCH_LIST='1')
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.calls()
+        self.assertFalse(any(name in ('codesign', 'xcrun') for name, _ in calls))
+        security = [args for name, args in calls if name == 'security']
+        self.assertEqual(security[-2][:4], ['list-keychains', '-d', 'user', '-s'])
+        self.assertEqual(security[-2][4], '/Users/runner/Library/Keychains/login.keychain-db')
+        self.assertEqual(security[-1][0], 'delete-keychain')
 
     def test_adhoc_partial_and_other_certificate_names_rejected(self):
         for identity in ('-', 'Fixture', 'A' * 40, 'Apple Development: Fixture (ABCDEFGHIJ)',
@@ -107,6 +142,9 @@ elif name == 'xcrun':
         result = self.run_script(TEST_BAD_CHAIN='1')
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(any(name == 'xcrun' for name, _ in self.calls()))
+        security = [args for name, args in self.calls() if name == 'security']
+        self.assertEqual(security[-2][:4], ['list-keychains', '-d', 'user', '-s'])
+        self.assertEqual(security[-1][0], 'delete-keychain')
 
     def test_signed_runtime_failure_prevents_notarization(self):
         (self.root / 'handoff/jcode').write_text('#!/bin/sh\nexit 1\n')

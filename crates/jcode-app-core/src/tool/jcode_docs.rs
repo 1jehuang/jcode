@@ -19,7 +19,11 @@ static DOCUMENTS: OnceLock<BundledDocs> = OnceLock::new();
 /// not invalidate the application core or the TUI. Repeated startup setup is
 /// harmless: the first corpus remains authoritative for this process.
 pub fn register_bundled_docs(docs: BundledDocs) {
-    let _ = DOCUMENTS.set(docs);
+    if DOCUMENTS.set(docs).is_err() {
+        crate::logging::debug(
+            "Bundled documentation already registered, preserving the original corpus",
+        );
+    }
 }
 
 /// The executable's registered corpus, or an explicit setup error.

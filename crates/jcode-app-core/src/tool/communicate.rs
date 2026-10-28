@@ -1620,14 +1620,14 @@ fn format_swarm_model_list(
             out.push_str(&format!("Configured agents.swarm_model default: {pin}\n"));
         }
         _ => out.push_str(
-            "No agents.swarm_model default configured (workers inherit the coordinator's model unless model is passed).\n",
+            "No agents.swarm_model default configured (workers inherit the coordinator's model).\n",
         ),
     }
     if model_routes.is_empty() {
-        out.push_str("\nNo model routes reported. Omit model to use the configured default, or pass inherit to use the coordinator.");
+        out.push_str("\nNo model routes reported. Omit model to use the configured default.");
         return out;
     }
-    out.push_str("\nAvailable model routes (pass model with a bare model or route-pinned value to override the configured default):\n");
+    out.push_str("\nModel routes (informational only, overrides require agents.swarm_model_selection and an exact agents.swarm_model_allowlist entry):\n");
     for route in model_routes {
         let availability = if route.available {
             ""
@@ -1773,8 +1773,7 @@ struct CommunicateInput {
     /// threshold.
     #[serde(default)]
     tldr: Option<String>,
-    /// Per-worker model override for spawn and assignment-created workers.
-    /// Takes precedence over agents.swarm_model; see list_models for routes.
+    /// Optional model override, authorized by the user's opt-in and exact allowlist.
     #[serde(default)]
     model: Option<String>,
     /// Short human-readable label for a spawned agent shown in swarm UI.
@@ -1839,6 +1838,9 @@ fn canonical_swarm_action(action: &str) -> &str {
     }
 }
 
+#[path = "swarm_model_schema.rs"]
+mod swarm_model_schema;
+use swarm_model_schema::apply_swarm_model_policy;
 #[async_trait]
 impl Tool for CommunicateTool {
     fn name(&self) -> &str {
@@ -1858,7 +1860,7 @@ impl Tool for CommunicateTool {
                 "action": {
                     "type": "string",
                     "enum": ADVERTISED_SWARM_ACTIONS,
-                    "description": "Action. launch runs your todo list (one agent per lane). spawn starts one worker on a lane; spawn requires label; its existing todo lane is the source of truth and prompt is optional extra context. message sends to one agent (to_session) or a channel; only the coordinator may omit both to message everyone. list_models shows available models/routes."
+                    "description": "launch: lanes. spawn requires label. message: agent/channel, coordinator-only broadcast. list_models."
                 },
                 "message": {
                     "type": "string",
@@ -1887,7 +1889,7 @@ impl Tool for CommunicateTool {
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn: the worker's lane name (e.g. 'auth refactor'). The existing lane is the source of truth, prepopulated into the worker before it starts and synced only to that lane. If missing, a lane is created from prompt or label."
+                    "description": "Required for spawn: lane name, the source of truth. Existing lane tasks are prepopulated and synced."
                 },
                 "phase": {
                     "type": "integer",
@@ -1900,7 +1902,7 @@ impl Tool for CommunicateTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Optional extra context for spawn. The assigned todo lane is already prepopulated and sent to the worker before startup, so do not repeat its tasks here."
+                    "description": "Optional extra context for spawn. Lane tasks are prepopulated: do not repeat its tasks."
                 },
                 "initial_message": {
                     "type": "string",
@@ -1920,10 +1922,6 @@ impl Tool for CommunicateTool {
                     "enum": ["visible", "headless", "inline", "auto"],
                     "description": "Omit to use the user's configured mode. Set only when the user asks for one."
                 },
-                "model": {
-                    "type": "string",
-                    "description": "Model for new workers, e.g. 'openai-api:gpt-5.6-luna'. 'inherit' uses yours. See list_models."
-                },
                 "session_ids": {
                     "type": "array",
                     "items": {"type": "string"}
@@ -1941,7 +1939,7 @@ impl Tool for CommunicateTool {
                 "timeout_minutes": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional timeout for await_members. Returns a durable dependency ID for todo.waiting_on, which pauses dependent todos until completion or timeout."
+                    "description": "await_members timeout. Returned dependency ID pauses todo.waiting_on until completion or timeout."
                 },
                 "background": {
                     "type": "boolean",
@@ -2011,11 +2009,16 @@ impl Tool for CommunicateTool {
             }
         ]);
 
+        apply_swarm_model_policy(&mut schema, &crate::config::config().agents);
         schema
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: CommunicateInput = serde_json::from_value(input)?;
+        crate::config::config()
+            .agents
+            .validate_swarm_model_request(params.model.as_deref())
+            .map_err(anyhow::Error::msg)?;
 
         // `to_session` and `target_session` both name a single session id. Historically
         // different actions required different field names (e.g. `dm` wanted `to_session`

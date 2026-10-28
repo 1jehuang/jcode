@@ -522,6 +522,7 @@ fn reset_prompt_viewport_state_for_test() {
 
 #[path = "pinned_todo_regressions.rs"]
 mod pinned_todo_regressions;
+mod todo_blocker_notes;
 
 #[path = "basic.rs"]
 mod basic;

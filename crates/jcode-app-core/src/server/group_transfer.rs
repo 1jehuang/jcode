@@ -660,6 +660,32 @@ async fn import_bundle(
         );
     }
     validate_destination(bundle, sessions, state).await?;
+    // Validate all runtime projections before writing snapshots or mutating
+    // live maps, so a malformed member cannot partially install a group.
+    let restored_members = swarms
+        .iter()
+        .map(|swarm| {
+            swarm
+                .members
+                .iter()
+                .map(|member| {
+                    swarm_persistence::from_persisted_member(
+                        member.clone(),
+                        swarm.updated_at_unix_ms,
+                        swarm.updated_at_unix_ms,
+                        std::time::Duration::MAX,
+                    )
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Transferred member {} unexpectedly expired in swarm {}",
+                            member.record.session_id,
+                            swarm.swarm_id
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .collect::<Result<Vec<_>>>()?;
     // Durable writes happen before installation. No unrelated snapshot is read,
     // rewritten or pruned via the startup loader.
     for swarm in &swarms {
@@ -672,17 +698,10 @@ async fn import_bundle(
     let mut by_id = state.swarms_by_id.write().await;
     let mut plans = state.plans.write().await;
     let mut coordinators = state.coordinators.write().await;
-    for swarm in swarms {
+    for (swarm, restored_members) in swarms.into_iter().zip(restored_members) {
         members.retain(|_, member| member.swarm_id.as_deref() != Some(&swarm.swarm_id));
         let mut member_ids = HashSet::new();
-        for member in swarm.members {
-            let member = swarm_persistence::from_persisted_member(
-                member,
-                swarm.updated_at_unix_ms,
-                swarm.updated_at_unix_ms,
-                std::time::Duration::MAX,
-            )
-            .expect("transfer members never expire during import");
+        for member in restored_members {
             member_ids.insert(member.session_id.clone());
             members.insert(member.session_id.clone(), member);
         }

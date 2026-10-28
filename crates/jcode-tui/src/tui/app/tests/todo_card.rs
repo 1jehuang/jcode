@@ -816,7 +816,7 @@ fn pinned_todo_live_status_is_full_width_without_passive_gallery() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        text.contains("↑12k ↓456") && text.contains("https") && text.contains("12s"),
+        text.contains("↑12k ↓456") && !text.contains("https") && text.contains("12s"),
         "{text}"
     );
     assert!(
