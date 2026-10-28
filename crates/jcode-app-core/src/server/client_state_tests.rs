@@ -18,6 +18,87 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 struct MockProvider(Option<&'static str>);
 
 #[derive(Clone)]
+struct StaticDiscoveryProvider(Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait]
+impl Provider for StaticDiscoveryProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("not used")
+    }
+    fn name(&self) -> &str {
+        "static-discovery-regression"
+    }
+    fn model(&self) -> String {
+        "static-fallback".into()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+    fn available_models_display(&self) -> Vec<String> {
+        let mut models = vec![self.model()];
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            models.push("newly-published-model".into());
+        }
+        models
+    }
+    async fn prefetch_models(&self) -> Result<()> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+fn model_prefetch_discovers_new_models_despite_static_fallback_names() {
+    let _guard = crate::storage::lock_test_env();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let provider: Arc<dyn Provider> = Arc::new(StaticDiscoveryProvider(Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            )));
+            let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
+            assert!(!provider.model_capabilities_need_refresh());
+            assert_eq!(provider.available_models_display(), vec!["static-fallback"]);
+            let mut events = crate::bus::Bus::global().subscribe();
+            super::spawn_model_prefetch_update(provider.clone(), agent.clone());
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if matches!(
+                        events.recv().await.unwrap(),
+                        crate::bus::BusEvent::ModelsUpdated
+                    ) && provider.available_models_display().len() == 2
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("static fallback names must not suppress discovery or publication");
+            let event =
+                crate::server::provider_control::available_models_updated_event(&agent).await;
+            let crate::protocol::ServerEvent::AvailableModelsUpdated {
+                available_models, ..
+            } = event
+            else {
+                panic!("expected picker catalog update")
+            };
+            assert!(
+                available_models
+                    .iter()
+                    .any(|model| model == "newly-published-model")
+            );
+        });
+}
+
+#[derive(Clone)]
 struct CapabilityRefreshProvider {
     refreshed: Arc<std::sync::atomic::AtomicBool>,
 }

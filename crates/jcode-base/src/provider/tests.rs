@@ -236,6 +236,121 @@ fn test_multi_provider_with_openai() -> MultiProvider {
 }
 
 #[test]
+fn catalog_refresh_reaches_every_runtime_slot_and_compatible_profile() {
+    #[derive(Clone, Default)]
+    struct CatalogProbe {
+        prefetches: Arc<std::sync::atomic::AtomicUsize>,
+        forced: Arc<std::sync::atomic::AtomicUsize>,
+        fail: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for CatalogProbe {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<EventStream> {
+            unreachable!("catalog refresh must not complete a prompt")
+        }
+        fn name(&self) -> &str {
+            "catalog-probe"
+        }
+        fn model(&self) -> String {
+            "static-fallback".into()
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+        fn available_models_display(&self) -> Vec<String> {
+            vec![self.model()]
+        }
+        async fn prefetch_models(&self) -> Result<()> {
+            self.prefetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
+            self.forced
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("probe catalog unavailable");
+            }
+            Ok(ModelCatalogRefreshSummary::default())
+        }
+    }
+
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _enter = runtime.enter();
+        let provider = test_multi_provider_with_openai();
+        let slots = [
+            ("anthropic", &provider.anthropic),
+            ("openai", &provider.openai),
+            ("openrouter", &provider.openrouter),
+            ("copilot", &provider.copilot_api),
+            ("antigravity", &provider.antigravity),
+            ("gemini", &provider.gemini),
+            ("cursor", &provider.cursor),
+        ];
+        let mut probes = Vec::new();
+        for (name, slot) in slots {
+            let probe = Arc::new(CatalogProbe::default());
+            *slot.write().unwrap() = Some(probe.clone());
+            probes.push((name, probe));
+        }
+        for id in [GROK_BUILD_PROFILE_ID, "custom-endpoint"] {
+            let probe = Arc::new(CatalogProbe::default());
+            ProviderRegistry::new(&provider).install_compatible_profile(id, probe.clone());
+            probes.push((id, probe));
+        }
+        runtime.block_on(provider.prefetch_models()).unwrap();
+        runtime.block_on(provider.refresh_model_catalog()).unwrap();
+        for (name, probe) in &probes {
+            assert_eq!(
+                probe.prefetches.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "startup must prefetch {name} exactly once"
+            );
+            assert_eq!(
+                probe.forced.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "manual refresh must honor {name}'s force-refresh override"
+            );
+        }
+        // A compatible endpoint is not the real OpenRouter runtime. An
+        // optional OpenRouter failure must not fail the active profile refresh.
+        *provider.active.write().unwrap() = ActiveProvider::OpenRouter;
+        ProviderRegistry::new(&provider).set_active_compatible_profile(GROK_BUILD_PROFILE_ID);
+        let real_openrouter = &probes
+            .iter()
+            .find(|(name, _)| *name == "openrouter")
+            .unwrap()
+            .1;
+        real_openrouter
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime.block_on(provider.refresh_model_catalog()).unwrap();
+        let active = &probes
+            .iter()
+            .find(|(name, _)| *name == GROK_BUILD_PROFILE_ID)
+            .unwrap()
+            .1;
+        active.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let generation_before = catalog_generation();
+        let error = runtime
+            .block_on(provider.refresh_model_catalog())
+            .unwrap_err();
+        assert!(error.to_string().contains(GROK_BUILD_PROFILE_ID));
+        assert!(
+            catalog_generation() > generation_before,
+            "partial success must invalidate route memos even when the active catalog fails"
+        );
+    });
+}
+
+#[test]
 fn model_capabilities_refresh_forwards_only_active_present_openai() {
     struct RefreshMock(std::sync::atomic::AtomicBool);
 

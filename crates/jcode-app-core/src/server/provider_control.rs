@@ -816,6 +816,11 @@ pub(super) async fn handle_refresh_models(
                 }
             }
         };
+        // Unified refresh can return an error after publishing fresh catalogs
+        // for other providers. Send the current snapshot on both paths.
+        crate::bus::Bus::global().publish_models_updated();
+        let event = available_models_updated_event(&agent_clone).await;
+        let _ = client_event_tx_clone.send(event);
         match result {
             Ok(_) => {
                 send_catalog_activity(
@@ -825,9 +830,6 @@ pub(super) async fn handle_refresh_models(
                         Some(95),
                     ),
                 );
-                crate::bus::Bus::global().publish_models_updated();
-                let event = available_models_updated_event(&agent_clone).await;
-                let _ = client_event_tx_clone.send(event);
                 send_catalog_activity(
                     &client_event_tx_clone,
                     &crate::message::format_model_refresh_progress_markdown(

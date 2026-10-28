@@ -1215,9 +1215,9 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
         };
 
         let needs_capability_refresh = provider.model_capabilities_need_refresh();
-        if !initial_models.is_empty() && !needs_capability_refresh {
-            return;
-        }
+        // Nonempty names may be built-in fallbacks, not a discovered catalog.
+        // Let each provider apply its own freshness policy rather than making
+        // static defaults permanently suppress discovery for the whole picker.
 
         if should_debounce_attach_model_prefetch(&provider_name) {
             crate::logging::info(&format!(
@@ -1231,7 +1231,8 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             crate::logging::debug(&format!(
                 "Attach-time model prefetch failed for {provider_name}: {error}"
             ));
-            return;
+            // A unified provider can fail after other runtimes refreshed.
+            // Publish those successful discoveries rather than hiding them.
         }
 
         let refreshed = {
