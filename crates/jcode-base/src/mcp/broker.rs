@@ -459,6 +459,7 @@ struct Broker {
     slots: Mutex<HashMap<String, Slot>>,
     next_conn: AtomicU64,
     active_conns: AtomicU64,
+    accepted_conns: AtomicU64,
     idle_since: std::sync::Mutex<Option<Instant>>,
 }
 
@@ -632,6 +633,7 @@ impl Broker {
         }
         live == 0
             && self.active_conns.load(Ordering::SeqCst) == 0
+            && self.accepted_conns.load(Ordering::SeqCst) == 0
             && self
                 .idle_since
                 .lock()
@@ -696,7 +698,17 @@ pub async fn serve(socket: &Path, upstream_idle: Duration, broker_idle: Duration
         tokio::select! {
             accepted = listener.accept() => {
                 if let Ok((stream, _)) = accepted {
-                    tokio::spawn(Arc::clone(&broker).handle_connection(stream));
+                    broker.accepted_conns.fetch_add(1, Ordering::SeqCst);
+                    *broker.idle_since.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                    let broker = Arc::clone(&broker);
+                    tokio::spawn(async move {
+                        Arc::clone(&broker).handle_connection(stream).await;
+                        if broker.accepted_conns.fetch_sub(1, Ordering::SeqCst) == 1
+                            && broker.active_conns.load(Ordering::SeqCst) == 0
+                        {
+                            *broker.idle_since.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+                        }
+                    });
                 }
             }
             _ = sweep.tick() => {

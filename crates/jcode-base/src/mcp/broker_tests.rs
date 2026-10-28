@@ -74,6 +74,29 @@ async fn start_broker(upstream_idle: Duration, broker_idle: Duration) -> Harness
     }
 }
 
+#[tokio::test]
+async fn idle_broker_keeps_accepted_connection_alive_during_hello() {
+    let h = start_broker(Duration::from_millis(50), Duration::from_millis(150)).await;
+    let mut stream = UnixStream::connect(&h.socket).await.expect("connect");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert!(
+        !h.task.is_finished(),
+        "broker exited while a client was sending hello"
+    );
+    stream
+        .write_all(json_line(&json!({"broker": PROTOCOL_VERSION, "status": true})).as_bytes())
+        .await
+        .expect("write hello");
+    let mut lines = BufReader::new(stream).lines();
+    let reply = lines
+        .next_line()
+        .await
+        .expect("read reply")
+        .expect("reply present");
+    assert_eq!(serde_json::from_str::<Value>(&reply).unwrap()["ok"], true);
+    h.task.abort();
+}
+
 async fn attach(h: &Harness, config: &McpServerConfig) -> McpClient {
     match McpClient::connect_via_broker("fake".into(), config, h.socket.clone(), false).await {
         Ok(client) => client,
@@ -378,7 +401,9 @@ async fn dropped_broker_client_releases_its_broker_connection() {
 
 #[cfg(target_os = "macos")]
 fn open_fd_count() -> usize {
-    std::fs::read_dir("/dev/fd").map(|dir| dir.count()).unwrap_or(0)
+    std::fs::read_dir("/dev/fd")
+        .map(|dir| dir.count())
+        .unwrap_or(0)
 }
 
 #[cfg(target_os = "macos")]
