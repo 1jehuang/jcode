@@ -63,69 +63,76 @@ impl Provider for CapabilityRefreshProvider {
     }
 }
 
-#[tokio::test]
-async fn model_prefetch_hydrates_capabilities_with_existing_model_names() {
+#[test]
+fn model_prefetch_hydrates_capabilities_with_existing_model_names() {
     let _guard = crate::storage::lock_test_env();
-    let temp_home = tempfile::TempDir::new().unwrap();
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
-    let provider: Arc<dyn Provider> = Arc::new(CapabilityRefreshProvider {
-        refreshed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    });
-    let session_id = "capability-refresh-session";
-    let session = crate::session::Session::create_with_id(session_id.into(), None, None);
-    let agent = Arc::new(Mutex::new(Agent::new_with_session(
-        provider.clone(),
-        Registry::empty(),
-        session,
-        None,
-    )));
-    assert!(!provider.available_models_display().is_empty());
-    assert!(provider.available_service_tiers().is_empty());
-    let mut events = crate::bus::Bus::global().subscribe();
-    super::spawn_model_prefetch_update(provider.clone(), agent.clone());
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if matches!(
-                events.recv().await.unwrap(),
-                crate::bus::BusEvent::ModelsUpdated
-            ) && !provider.model_capabilities_need_refresh()
-            {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("capability-only hydration must publish a catalog update");
-    assert_eq!(provider.available_models_display(), vec!["known-model"]);
-    assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
+    // Serialize process-wide environment outside the asynchronous runtime.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(async {
+            let temp_home = tempfile::TempDir::new().unwrap();
+            let prev_home = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", temp_home.path());
+            let provider: Arc<dyn Provider> = Arc::new(CapabilityRefreshProvider {
+                refreshed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+            let session_id = "capability-refresh-session";
+            let session = crate::session::Session::create_with_id(session_id.into(), None, None);
+            let agent = Arc::new(Mutex::new(Agent::new_with_session(
+                provider.clone(),
+                Registry::empty(),
+                session,
+                None,
+            )));
+            assert!(!provider.available_models_display().is_empty());
+            assert!(provider.available_service_tiers().is_empty());
+            let mut events = crate::bus::Bus::global().subscribe();
+            super::spawn_model_prefetch_update(provider.clone(), agent.clone());
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if matches!(
+                        events.recv().await.unwrap(),
+                        crate::bus::BusEvent::ModelsUpdated
+                    ) && !provider.model_capabilities_need_refresh()
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("capability-only hydration must publish a catalog update");
+            assert_eq!(provider.available_models_display(), vec!["known-model"]);
+            assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
 
-    let (stream, mut peer) = crate::transport::stream_pair().unwrap();
-    let (_, writer) = stream.into_split();
-    let writer = Arc::new(Mutex::new(writer));
-    handle_get_model_catalog(44, session_id, &agent, &provider, &writer)
-        .await
-        .unwrap();
-    drop(writer);
-    let mut bytes = Vec::new();
-    peer.read_to_end(&mut bytes).await.unwrap();
-    let event: crate::protocol::ServerEvent = serde_json::from_slice(&bytes).unwrap();
-    let crate::protocol::ServerEvent::History {
-        available_service_tiers,
-        ..
-    } = event
-    else {
-        panic!("expected history")
-    };
-    assert_eq!(
-        available_service_tiers,
-        Some(vec!["priority".into(), "flex".into()])
-    );
-    if let Some(home) = prev_home {
-        crate::env::set_var("JCODE_HOME", home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
+            let (stream, mut peer) = crate::transport::stream_pair().unwrap();
+            let (_, writer) = stream.into_split();
+            let writer = Arc::new(Mutex::new(writer));
+            handle_get_model_catalog(44, session_id, &agent, &provider, &writer)
+                .await
+                .unwrap();
+            drop(writer);
+            let mut bytes = Vec::new();
+            peer.read_to_end(&mut bytes).await.unwrap();
+            let event: crate::protocol::ServerEvent = serde_json::from_slice(&bytes).unwrap();
+            let crate::protocol::ServerEvent::History {
+                available_service_tiers,
+                ..
+            } = event
+            else {
+                panic!("expected history")
+            };
+            assert_eq!(
+                available_service_tiers,
+                Some(vec!["priority".into(), "flex".into()])
+            );
+            if let Some(home) = prev_home {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        });
 }
 
 struct IdentityProvider {

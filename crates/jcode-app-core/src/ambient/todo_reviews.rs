@@ -29,13 +29,12 @@ pub fn reconcile_stored_todo_reviews(session_id: &str) -> Result<()> {
 fn reconcile_items(items: &mut Vec<ScheduledItem>, session_id: &str, todos: &[TodoItem]) {
     let desired: Vec<_> = todos
         .iter()
-        .filter(|todo| {
-            is_incomplete_todo(todo)
+        .filter_map(|todo| {
+            let blocker = todo.external_blocker.as_ref()?;
+            (is_incomplete_todo(todo)
                 && !crate::todo::todo_completely_blocked(todo)
-                && todo
-                    .external_blocker
-                    .as_ref()
-                    .is_some_and(|blocker| !blocker.reason.trim().is_empty())
+                && !blocker.reason.trim().is_empty())
+            .then_some((todo, blocker))
         })
         .collect();
     // Keep one existing ID for each exact current generation, preserving user
@@ -55,11 +54,10 @@ fn reconcile_items(items: &mut Vec<ScheduledItem>, session_id: &str, todos: &[To
         }
         desired
             .iter()
-            .any(|todo| todo.id == *todo_id && todo.external_blocker.as_ref() == Some(blocker))
+            .any(|(todo, desired_blocker)| todo.id == *todo_id && *desired_blocker == blocker)
             && seen.insert(todo_id.clone())
     });
-    for todo in desired {
-        let blocker = todo.external_blocker.as_ref().expect("checked blocker");
+    for (todo, blocker) in desired {
         if seen.contains(&todo.id) || blocker.review_at <= chrono::Utc::now() {
             continue;
         }
@@ -94,16 +92,20 @@ pub fn scheduled_todo_review_is_current(item: &ScheduledItem) -> bool {
     else {
         return true;
     };
-    crate::todo::load_todos(session_id)
-        .ok()
-        .is_some_and(|todos| {
-            todos.iter().any(|todo| {
-                todo.id == *todo_id
-                    && is_incomplete_todo(todo)
-                    && !crate::todo::todo_completely_blocked(todo)
-                    && todo.external_blocker.as_ref() == Some(blocker)
-                    && !blocker.reason.trim().is_empty()
-                    && blocker.review_at <= chrono::Utc::now()
-            })
-        })
+    match crate::todo::load_todos(session_id) {
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot validate scheduled todo review for {session_id}: {error}"
+            ));
+            false
+        }
+        Ok(todos) => todos.iter().any(|todo| {
+            todo.id == *todo_id
+                && is_incomplete_todo(todo)
+                && !crate::todo::todo_completely_blocked(todo)
+                && todo.external_blocker.as_ref() == Some(blocker)
+                && !blocker.reason.trim().is_empty()
+                && blocker.review_at <= chrono::Utc::now()
+        }),
+    }
 }

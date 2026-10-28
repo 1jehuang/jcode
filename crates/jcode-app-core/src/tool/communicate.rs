@@ -1838,21 +1838,9 @@ fn canonical_swarm_action(action: &str) -> &str {
     }
 }
 
-fn apply_swarm_model_policy(schema: &mut Value, agents: &crate::config::AgentsConfig) {
-    let properties = schema["properties"]
-        .as_object_mut()
-        .expect("swarm properties");
-    if !agents.swarm_model_selection || agents.swarm_model_allowlist.is_empty() {
-        properties.remove("model");
-    } else {
-        properties.insert("model".to_string(), json!({
-            "type": "string",
-            "enum": agents.swarm_model_allowlist,
-            "description": "Optional worker model. Only exact user-allowlisted routes are permitted. Omit to use the configured default."
-        }));
-    }
-}
-
+#[path = "swarm_model_schema.rs"]
+mod swarm_model_schema;
+use swarm_model_schema::apply_swarm_model_policy;
 #[async_trait]
 impl Tool for CommunicateTool {
     fn name(&self) -> &str {
@@ -1872,7 +1860,7 @@ impl Tool for CommunicateTool {
                 "action": {
                     "type": "string",
                     "enum": ADVERTISED_SWARM_ACTIONS,
-                    "description": "Action. launch runs your todo list (one agent per lane). spawn starts one worker on a lane; spawn requires label; its existing todo lane is the source of truth and prompt is optional extra context. message sends to one agent (to_session) or a channel; only the coordinator may omit both to message everyone. list_models shows available models/routes."
+                    "description": "launch: lanes. spawn requires label. message: agent/channel, coordinator-only broadcast. list_models."
                 },
                 "message": {
                     "type": "string",
@@ -1901,7 +1889,7 @@ impl Tool for CommunicateTool {
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn: the worker's lane name (e.g. 'auth refactor'). The existing lane is the source of truth, prepopulated into the worker before it starts and synced only to that lane. If missing, a lane is created from prompt or label."
+                    "description": "Required for spawn: lane name, the source of truth. Existing lane tasks are prepopulated and synced."
                 },
                 "phase": {
                     "type": "integer",
@@ -1914,7 +1902,7 @@ impl Tool for CommunicateTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Optional extra context for spawn. The assigned todo lane is already prepopulated and sent to the worker before startup, so do not repeat its tasks here."
+                    "description": "Optional extra context for spawn. Lane tasks are prepopulated: do not repeat its tasks."
                 },
                 "initial_message": {
                     "type": "string",
@@ -1951,7 +1939,7 @@ impl Tool for CommunicateTool {
                 "timeout_minutes": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional timeout for await_members. Returns a durable dependency ID for todo.waiting_on, which pauses dependent todos until completion or timeout."
+                    "description": "await_members timeout. Returned dependency ID pauses todo.waiting_on until completion or timeout."
                 },
                 "background": {
                     "type": "boolean",

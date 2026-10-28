@@ -326,6 +326,70 @@ pub(crate) fn sync_plan(coordinator_session: &str, items: &[PlanItem]) {
     update_todos(coordinator_session, |todos| apply_plan(todos, items));
 }
 
+/// Re-derive a lane plan from the coordinator's todos, keeping the status and
+/// owner of lanes already in `existing`. `None` when `existing` is not a lane
+/// plan (hand-written plans stay authoritative) or nothing changed.
+pub(crate) fn resync_lane_plan(todos: &[TodoItem], existing: &[PlanItem]) -> Option<Vec<PlanItem>> {
+    if existing.is_empty() || !existing.iter().all(|item| is_lane_task(&item.id)) {
+        return None;
+    }
+    let mut items = plan_items_from_todos(todos);
+    for item in &mut items {
+        if let Some(previous) = existing.iter().find(|previous| previous.id == item.id) {
+            item.status = previous.status.clone();
+            item.assigned_to = previous.assigned_to.clone();
+        }
+    }
+    // Keep finished lanes that dropped out of the open todos, so a completed
+    // lane is not forgotten and its dependants stay satisfied.
+    for previous in existing {
+        if !items.iter().any(|item| item.id == previous.id)
+            && crate::plan::is_completed_status(&previous.status)
+        {
+            items.push(previous.clone());
+        }
+    }
+    (items.as_slice() != existing).then_some(items)
+}
+
+/// Keep a running lane plan mirroring the coordinator's todo list on every
+/// todo save, so lanes added or reshaped mid-run are picked up without a
+/// relaunch. Returns the swarm id when the plan changed.
+pub(crate) async fn resync_plan_after_todo_save(
+    session_id: &str,
+    todos: &[TodoItem],
+    swarm_members: &std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, super::SwarmMember>>,
+    >,
+    swarm_plans: &std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, super::VersionedPlan>>,
+    >,
+    swarm_coordinators: &std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    >,
+) -> Option<String> {
+    let swarm_id = swarm_members
+        .read()
+        .await
+        .get(session_id)
+        .and_then(|member| member.swarm_id.clone())?;
+    if swarm_coordinators
+        .read()
+        .await
+        .get(&swarm_id)
+        .map(String::as_str)
+        != Some(session_id)
+    {
+        return None;
+    }
+    let mut plans = swarm_plans.write().await;
+    let plan = plans.get_mut(&swarm_id)?;
+    let items = resync_lane_plan(todos, &plan.items)?;
+    plan.replace_items(items);
+    plan.version += 1;
+    Some(swarm_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,68 +708,4 @@ mod tests {
         apply_plan(&mut todos, &items);
         assert_eq!(todos[0].status, "completed");
     }
-}
-
-/// Re-derive a lane plan from the coordinator's todos, keeping the status and
-/// owner of lanes already in `existing`. `None` when `existing` is not a lane
-/// plan (hand-written plans stay authoritative) or nothing changed.
-pub(crate) fn resync_lane_plan(todos: &[TodoItem], existing: &[PlanItem]) -> Option<Vec<PlanItem>> {
-    if existing.is_empty() || !existing.iter().all(|item| is_lane_task(&item.id)) {
-        return None;
-    }
-    let mut items = plan_items_from_todos(todos);
-    for item in &mut items {
-        if let Some(previous) = existing.iter().find(|previous| previous.id == item.id) {
-            item.status = previous.status.clone();
-            item.assigned_to = previous.assigned_to.clone();
-        }
-    }
-    // Keep finished lanes that dropped out of the open todos, so a completed
-    // lane is not forgotten and its dependants stay satisfied.
-    for previous in existing {
-        if !items.iter().any(|item| item.id == previous.id)
-            && crate::plan::is_completed_status(&previous.status)
-        {
-            items.push(previous.clone());
-        }
-    }
-    (items.as_slice() != existing).then_some(items)
-}
-
-/// Keep a running lane plan mirroring the coordinator's todo list on every
-/// todo save, so lanes added or reshaped mid-run are picked up without a
-/// relaunch. Returns the swarm id when the plan changed.
-pub(crate) async fn resync_plan_after_todo_save(
-    session_id: &str,
-    todos: &[TodoItem],
-    swarm_members: &std::sync::Arc<
-        tokio::sync::RwLock<std::collections::HashMap<String, super::SwarmMember>>,
-    >,
-    swarm_plans: &std::sync::Arc<
-        tokio::sync::RwLock<std::collections::HashMap<String, super::VersionedPlan>>,
-    >,
-    swarm_coordinators: &std::sync::Arc<
-        tokio::sync::RwLock<std::collections::HashMap<String, String>>,
-    >,
-) -> Option<String> {
-    let swarm_id = swarm_members
-        .read()
-        .await
-        .get(session_id)
-        .and_then(|member| member.swarm_id.clone())?;
-    if swarm_coordinators
-        .read()
-        .await
-        .get(&swarm_id)
-        .map(String::as_str)
-        != Some(session_id)
-    {
-        return None;
-    }
-    let mut plans = swarm_plans.write().await;
-    let plan = plans.get_mut(&swarm_id)?;
-    let items = resync_lane_plan(todos, &plan.items)?;
-    plan.replace_items(items);
-    plan.version += 1;
-    Some(swarm_id)
 }

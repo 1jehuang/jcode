@@ -1,82 +1,5 @@
 use super::*;
 
-#[cfg(test)]
-mod durable_error_tests {
-    use super::*;
-
-    struct NoNetworkProvider;
-
-    #[async_trait::async_trait]
-    impl crate::provider::Provider for NoNetworkProvider {
-        async fn complete(
-            &self,
-            _: &[crate::message::Message],
-            _: &[crate::message::ToolDefinition],
-            _: &str,
-            _: Option<&str>,
-        ) -> anyhow::Result<crate::provider::EventStream> {
-            anyhow::bail!("test must not call provider")
-        }
-
-        fn name(&self) -> &str {
-            "mock"
-        }
-
-        fn fork(&self) -> Arc<dyn crate::provider::Provider> {
-            Arc::new(Self)
-        }
-    }
-
-    #[test]
-    fn failed_wake_error_is_saved_without_an_assistant_message() {
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
-        struct RestoreHome(Option<std::ffi::OsString>);
-        impl Drop for RestoreHome {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => crate::env::set_var("JCODE_HOME", value),
-                    None => crate::env::remove_var("JCODE_HOME"),
-                }
-            }
-        }
-        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
-        crate::env::set_var("JCODE_HOME", home.path());
-        let mut agent = Agent::new(Arc::new(NoNetworkProvider), Registry::empty());
-        agent.add_message_with_display_role(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: "wake".into(),
-                cache_control: None,
-            }],
-            Some(StoredDisplayRole::System),
-        );
-        let error = anyhow::anyhow!("invalid_request_error: missing call_id")
-            .context("provider rejected wake");
-        let message = crate::util::format_error_chain(&error);
-        let message_count = agent.session.messages.len();
-        let provider_messages = serde_json::to_value(&agent.session.messages).unwrap();
-        agent.persist_turn_error(&message).unwrap();
-        let loaded = Session::load(agent.session_id()).unwrap();
-        assert_eq!(loaded.messages.len(), message_count);
-        assert_eq!(agent.session.messages.len(), message_count);
-        assert_eq!(
-            serde_json::to_value(&loaded.messages).unwrap(),
-            provider_messages
-        );
-        let history = crate::session::render_messages(&loaded);
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].content, "wake");
-        assert_eq!(history[1].role, "error");
-        assert_eq!(history[1].content, message);
-        assert!(
-            history[1]
-                .content
-                .contains("invalid_request_error: missing call_id")
-        );
-    }
-}
-
 impl Agent {
     /// Keep failed turns visible after reconnect without adding diagnostic text
     /// to the provider's conversation context.
@@ -263,5 +186,82 @@ impl Agent {
                 _ => false,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod durable_error_tests {
+    use super::*;
+
+    struct NoNetworkProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for NoNetworkProvider {
+        async fn complete(
+            &self,
+            _: &[crate::message::Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            anyhow::bail!("test must not call provider")
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn crate::provider::Provider> {
+            Arc::new(Self)
+        }
+    }
+
+    #[test]
+    fn failed_wake_error_is_saved_without_an_assistant_message() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        let mut agent = Agent::new(Arc::new(NoNetworkProvider), Registry::empty());
+        agent.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "wake".into(),
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        let error = anyhow::anyhow!("invalid_request_error: missing call_id")
+            .context("provider rejected wake");
+        let message = crate::util::format_error_chain(&error);
+        let message_count = agent.session.messages.len();
+        let provider_messages = serde_json::to_value(&agent.session.messages).unwrap();
+        agent.persist_turn_error(&message).unwrap();
+        let loaded = Session::load(agent.session_id()).unwrap();
+        assert_eq!(loaded.messages.len(), message_count);
+        assert_eq!(agent.session.messages.len(), message_count);
+        assert_eq!(
+            serde_json::to_value(&loaded.messages).unwrap(),
+            provider_messages
+        );
+        let history = crate::session::render_messages(&loaded);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "wake");
+        assert_eq!(history[1].role, "error");
+        assert_eq!(history[1].content, message);
+        assert!(
+            history[1]
+                .content
+                .contains("invalid_request_error: missing call_id")
+        );
     }
 }

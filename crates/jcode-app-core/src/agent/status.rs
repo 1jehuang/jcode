@@ -27,77 +27,6 @@ fn assistant_output_tail_after(messages: &[StoredMessage], start_index: usize) -
     )
 }
 
-#[cfg(test)]
-mod output_tail_tests {
-    use super::*;
-
-    fn message(role: &str, content: serde_json::Value) -> StoredMessage {
-        serde_json::from_value(serde_json::json!({
-            "id": "message", "role": role, "content": content,
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn automatic_output_tail_includes_commentary_when_turn_ends_on_tools() {
-        let messages = vec![
-            message(
-                "assistant",
-                serde_json::json!([{"type":"text", "text":"previous turn"}]),
-            ),
-            message(
-                "user",
-                serde_json::json!([{"type":"text", "text":"private user input"}]),
-            ),
-            message(
-                "assistant",
-                serde_json::json!([
-                    {"type":"reasoning", "text":"private reasoning must not leak"},
-                {"type":"reasoning_trace", "text":"private trace must not leak"},
-                {"type":"text", "text":"Implemented the parser fix."},
-                    {"type":"tool_use", "id":"test", "name":"bash", "input":{"intent":"Run parser tests"}}
-                ]),
-            ),
-            message(
-                "user",
-                serde_json::json!([{"type":"text", "text":"tool stdout must not leak"}]),
-            ),
-            message("assistant", serde_json::json!([])),
-        ];
-        assert_eq!(
-            assistant_output_tail_after(&messages, 1).as_deref(),
-            Some("Implemented the parser fix.\n\n[Tool: bash · Run parser tests]")
-        );
-        assert_eq!(assistant_output_tail_after(&messages, messages.len()), None);
-    }
-
-    #[test]
-    fn automatic_output_tail_spans_assistant_messages_and_keeps_newest_text() {
-        let messages = vec![
-            message(
-                "assistant",
-                serde_json::json!([{"type":"text", "text":"first commentary"}]),
-            ),
-            message(
-                "assistant",
-                serde_json::json!([{"type":"text", "text":"final commentary"}]),
-            ),
-        ];
-        assert_eq!(
-            assistant_output_tail_after(&messages, 0).as_deref(),
-            Some("first commentary\n\nfinal commentary")
-        );
-        let long = format!("{}\nLATEST RESULT", "old".repeat(3000));
-        let messages = [message(
-            "assistant",
-            serde_json::json!([{"type":"text", "text":long}]),
-        )];
-        let tail = assistant_output_tail_after(&messages, 0).unwrap();
-        assert!(tail.len() <= jcode_swarm_core::SWARM_OUTPUT_TAIL_TOKENS * 4);
-        assert!(tail.ends_with("LATEST RESULT"));
-    }
-}
-
 impl Agent {
     /// Read-only source for splitting a new session before its first persistence.
     pub(crate) fn session_for_split(&self) -> &Session {
@@ -362,5 +291,76 @@ impl Agent {
     /// Get the short/friendly name for this session (e.g., "fox")
     pub fn session_short_name(&self) -> Option<&str> {
         self.session.short_name.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod output_tail_tests {
+    use super::*;
+
+    fn message(role: &str, content: serde_json::Value) -> StoredMessage {
+        serde_json::from_value(serde_json::json!({
+            "id": "message", "role": role, "content": content,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn automatic_output_tail_includes_commentary_when_turn_ends_on_tools() {
+        let messages = vec![
+            message(
+                "assistant",
+                serde_json::json!([{"type":"text", "text":"previous turn"}]),
+            ),
+            message(
+                "user",
+                serde_json::json!([{"type":"text", "text":"private user input"}]),
+            ),
+            message(
+                "assistant",
+                serde_json::json!([
+                    {"type":"reasoning", "text":"private reasoning must not leak"},
+                {"type":"reasoning_trace", "text":"private trace must not leak"},
+                {"type":"text", "text":"Implemented the parser fix."},
+                    {"type":"tool_use", "id":"test", "name":"bash", "input":{"intent":"Run parser tests"}}
+                ]),
+            ),
+            message(
+                "user",
+                serde_json::json!([{"type":"text", "text":"tool stdout must not leak"}]),
+            ),
+            message("assistant", serde_json::json!([])),
+        ];
+        assert_eq!(
+            assistant_output_tail_after(&messages, 1).as_deref(),
+            Some("Implemented the parser fix.\n\n[Tool: bash · Run parser tests]")
+        );
+        assert_eq!(assistant_output_tail_after(&messages, messages.len()), None);
+    }
+
+    #[test]
+    fn automatic_output_tail_spans_assistant_messages_and_keeps_newest_text() {
+        let messages = vec![
+            message(
+                "assistant",
+                serde_json::json!([{"type":"text", "text":"first commentary"}]),
+            ),
+            message(
+                "assistant",
+                serde_json::json!([{"type":"text", "text":"final commentary"}]),
+            ),
+        ];
+        assert_eq!(
+            assistant_output_tail_after(&messages, 0).as_deref(),
+            Some("first commentary\n\nfinal commentary")
+        );
+        let long = format!("{}\nLATEST RESULT", "old".repeat(3000));
+        let messages = [message(
+            "assistant",
+            serde_json::json!([{"type":"text", "text":long}]),
+        )];
+        let tail = assistant_output_tail_after(&messages, 0).unwrap();
+        assert!(tail.len() <= jcode_swarm_core::SWARM_OUTPUT_TAIL_TOKENS * 4);
+        assert!(tail.ends_with("LATEST RESULT"));
     }
 }

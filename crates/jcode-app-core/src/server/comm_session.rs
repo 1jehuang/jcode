@@ -313,23 +313,6 @@ fn explicit_route_for_configured_model(model: &str) -> Option<SwarmSpawnSelectio
 }
 
 /// True when a model string is one of the "inherit the coordinator" sentinels.
-fn is_inherit_sentinel(model: &str) -> bool {
-    let trimmed = model.trim();
-    trimmed.eq_ignore_ascii_case("inherit") || trimmed.eq_ignore_ascii_case("coordinator")
-}
-
-/// Selection that inherits the coordinator's model, provider key, and route.
-fn inherit_coordinator_selection(coordinator: &CoordinatorSpawnIdentity) -> SwarmSpawnSelection {
-    SwarmSpawnSelection {
-        model: coordinator.model.clone(),
-        provider_key: coordinator
-            .provider_key
-            .clone()
-            .or_else(|| provider_key_for_spawn_model(coordinator.model.as_deref(), None)),
-        route_api_method: coordinator.route_api_method.clone(),
-    }
-}
-
 /// Selection for a concrete model string (optionally route-prefixed like
 /// `openai-api:gpt-5.5`), reconciled against the coordinator's identity.
 fn selection_for_concrete_model(
@@ -430,7 +413,14 @@ fn persist_headed_startup_message(session_id: &str, message: &str) {
 fn clear_headed_startup_message(session_id: &str) {
     if let Ok(jcode_dir) = crate::storage::jcode_dir() {
         let path = jcode_dir.join(format!("client-input-{}", session_id));
-        let _ = std::fs::remove_file(path);
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logging::warn(&format!(
+                "Unable to remove prepared spawn file {}: {error}",
+                path.display()
+            ));
+        }
     }
 }
 
@@ -575,41 +565,12 @@ async fn register_visible_spawned_member(
 /// `requested_effort` only arrives from direct protocol clients (SDK). It wins
 /// when present, then the user's `agents.swarm_effort` config pin, and
 /// otherwise workers run at [`DEFAULT_SWARM_WORKER_EFFORT`].
-pub(super) fn resolve_swarm_spawn_effort(
-    requested_effort: Option<&str>,
-    configured_swarm_effort: Option<&str>,
-) -> Option<String> {
-    let clean = |effort: Option<&str>| {
-        effort
-            .map(str::trim)
-            .filter(|effort| !effort.is_empty())
-            .map(str::to_string)
-    };
-    clean(requested_effort)
-        .or_else(|| clean(configured_swarm_effort))
-        .or_else(|| Some(DEFAULT_SWARM_WORKER_EFFORT.to_string()))
-}
-
-/// Reasoning effort for spawned swarm workers when neither the request nor
-/// `agents.swarm_effort` sets one.
-pub(super) const DEFAULT_SWARM_WORKER_EFFORT: &str = "low";
-
-/// Spawn mode for one swarm spawn. An explicit per-call mode wins, except
-/// `auto`: a model passing `auto` expresses no preference, so the user's
-/// configured `agents.swarm_spawn_mode` (inline by default) decides. Without
-/// this, `auto` tried a visible window first and, from terminals jcode cannot
-/// target (VS Code, Cursor), opened a separate terminal app instead of the
-/// inline gallery the user configured. Configuring `auto` still works.
-pub(super) fn resolve_swarm_spawn_mode(
-    requested: Option<SwarmSpawnMode>,
-    configured: SwarmSpawnMode,
-) -> SwarmSpawnMode {
-    match requested {
-        Some(SwarmSpawnMode::Auto) | None => configured,
-        Some(mode) => mode,
-    }
-}
-
+#[path = "spawn_policy.rs"]
+mod spawn_policy;
+use spawn_policy::inherit_coordinator_selection;
+pub(super) use spawn_policy::{
+    is_inherit_sentinel, resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
+};
 #[expect(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"

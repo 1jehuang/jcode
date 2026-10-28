@@ -207,10 +207,22 @@ async fn finalize_await(
         }));
     }
 
-    let result = state
-        .final_response
-        .as_ref()
-        .expect("final response was persisted");
+    let Some(result) = state.final_response.as_ref() else {
+        crate::logging::error(&format!(
+            "Await {} has no final response after finalization",
+            state.dependency_id()
+        ));
+        // Even a violated finalization invariant must release socket waiters.
+        respond_to_waiters(
+            runtime,
+            &state.dependency_id(),
+            false,
+            members,
+            "Await finalization failed: no terminal response was produced".to_string(),
+        )
+        .await;
+        return;
+    };
     respond_to_waiters(
         runtime,
         &state.dependency_id(),
