@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Noninteractive CI install. Update this literal only after inspecting published assets.
 set -euo pipefail
-readonly version='v0.1.0-alpha.17'
+readonly version='v0.1.0-alpha.19'
 fail() { printf 'install_justrust_ci: %s\n' "$*" >&2; exit 1; }
 case "$(uname -s):$(uname -m)" in
     Linux:x86_64) target=x86_64-unknown-linux-musl ;;

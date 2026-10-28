@@ -161,7 +161,7 @@ cp "$FIXTURES/${url##*/}" "$out"
         result = self.run_install()
         self.assertEqual(result.returncode, 0, result.stderr)
         log = (self.root / "curl_log").read_text()
-        self.assertIn("/releases/download/v0.1.0-alpha.17/", log)
+        self.assertIn("/releases/download/v0.1.0-alpha.19/", log)
         self.assertNotIn("/latest/", log)
 
 
