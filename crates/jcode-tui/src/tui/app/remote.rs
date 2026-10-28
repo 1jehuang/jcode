@@ -424,7 +424,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             if let Some(reminder) = reminder {
                 app.hidden_queued_system_messages.insert(0, reminder);
             }
-            if !combined.is_empty() {
+            if !combined.is_empty() || !queued_images.is_empty() {
                 app.queued_messages.insert(0, combined);
                 app.queued_message_images.splice(0..0, queued_images);
             }
@@ -1682,7 +1682,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             if let Some(reminder) = reminder {
                 app.hidden_queued_system_messages.insert(0, reminder);
             }
-            if !combined.is_empty() {
+            if !combined.is_empty() || !queued_images.is_empty() {
                 app.queued_messages.insert(0, combined);
                 app.queued_message_images.splice(0..0, queued_images);
             }

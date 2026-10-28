@@ -49,6 +49,287 @@ fn raw_bytes_create_edit_delete_resume_and_repeated_restore() {
 }
 
 #[test]
+fn legacy_history_without_metadata_remains_restorable() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path()).unwrap().join("legacy");
+    fs::write(&path, b"before").unwrap();
+    let cp = checkpoint("legacy", 0, "edit").unwrap();
+    mutate("legacy", &path, Some(b"after")).unwrap();
+    let dir = directory("legacy").unwrap();
+    let history_path = dir.join("history.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+    for state in json["expected"].as_object_mut().unwrap().values_mut() {
+        state.as_object_mut().unwrap().remove("metadata");
+    }
+    for checkpoint in json["checkpoints"].as_array_mut().unwrap() {
+        for state in checkpoint["before"].as_object_mut().unwrap().values_mut() {
+            state.as_object_mut().unwrap().remove("metadata");
+        }
+    }
+    crate::storage::write_json_secret(&history_path, &json).unwrap();
+    let legacy = load(&dir).unwrap();
+    let actual = state(&dir, &path).unwrap();
+    let expected = &legacy.expected[&path];
+    assert!(expected.matches(&actual));
+    #[cfg(unix)]
+    {
+        assert_ne!(expected, &actual, "ordinary equality stays strict");
+        assert!(!actual.matches(expected), "matching is directional");
+    }
+    // Metadata added since the old sidecar was written must survive rewind.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    write_xattrs(
+        &path,
+        &BTreeMap::from([(
+            if cfg!(target_os = "macos") {
+                "com.jcode.legacy"
+            } else {
+                "user.jcode-legacy"
+            }
+            .into(),
+            b"live metadata".to_vec(),
+        )]),
+    )
+    .unwrap();
+    let live = state(&dir, &path).unwrap().metadata;
+    let info = checkpoints("legacy").unwrap().remove(0);
+    assert!(info.can_restore_files);
+    assert_eq!(info.changed_file_count, 1);
+    assert_eq!(restore("legacy", &cp.id).unwrap(), 1);
+    assert_eq!(fs::read(&path).unwrap(), b"before");
+    assert_eq!(state(&dir, &path).unwrap().metadata, live);
+    assert_eq!(load(&dir).unwrap().expected[&path].metadata, live);
+    assert_eq!(restore("legacy", &cp.id).unwrap(), 0);
+    // Continuing tracked edits must not mark a legacy checkpoint as conflicted.
+    mutate("legacy", &path, Some(b"next edit")).unwrap();
+    assert!(checkpoints("legacy").unwrap()[0].can_restore_files);
+    assert_eq!(restore("legacy", &cp.id).unwrap(), 1);
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_test_xattr(path: &Path, name: &str, value: &[u8]) {
+    let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let name = std::ffi::CString::new(name).unwrap();
+    assert_eq!(
+        unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        },
+        0,
+        "{}",
+        std::io::Error::last_os_error()
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn get_macos_test_xattr(path: &Path, name: &str) -> Vec<u8> {
+    let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let name = std::ffi::CString::new(name).unwrap();
+    let mut value = vec![0u8; 256];
+    let size = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    assert!(size >= 0, "{}", std::io::Error::last_os_error());
+    value.truncate(size as usize);
+    value
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_generated_provenance_does_not_block_new_file_rewind() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path()).unwrap().join("new-metadata");
+    let first = checkpoint("macos-new-metadata", 0, "create").unwrap();
+    mutate("macos-new-metadata", &path, Some(b"created")).unwrap();
+    let dir = directory("macos-new-metadata").unwrap();
+    let history = load(&dir).unwrap();
+    let actual = state(&dir, &path).unwrap();
+    assert!(history.expected[&path].matches(&actual));
+    assert!(
+        !actual
+            .metadata
+            .unwrap()
+            .xattrs
+            .contains_key("com.apple.provenance")
+    );
+    assert!(history.checkpoints[0].blocked.is_empty());
+    let second = checkpoint("macos-new-metadata", 1, "edit").unwrap();
+    mutate("macos-new-metadata", &path, Some(b"edited")).unwrap();
+    mutate("macos-new-metadata", &path, None).unwrap();
+    assert_eq!(restore("macos-new-metadata", &second.id).unwrap(), 1);
+    assert_eq!(restore("macos-new-metadata", &second.id).unwrap(), 0);
+    assert_eq!(restore("macos-new-metadata", &first.id).unwrap(), 1);
+    assert!(!path.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_edit_and_rewind_preserve_xattrs_and_detect_external_conflicts() {
+    use std::os::unix::fs::MetadataExt;
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path())
+        .unwrap()
+        .join("macos-metadata");
+    fs::write(&path, b"before").unwrap();
+    let original = fs::metadata(&path).unwrap();
+    // macOS names need no Linux user. prefix; also cover binary and empty values.
+    let attrs = [
+        ("com.jcode.binary", &b"\0\xffpreserved"[..]),
+        ("com.jcode.empty", &b""[..]),
+    ];
+    for (name, value) in attrs {
+        set_macos_test_xattr(&path, name, value);
+    }
+    let cp = checkpoint("macos-metadata", 0, "edit").unwrap();
+    mutate("macos-metadata", &path, Some(b"after")).unwrap();
+    for (name, value) in attrs {
+        assert_eq!(get_macos_test_xattr(&path, name), value);
+    }
+    assert_eq!(restore("macos-metadata", &cp.id).unwrap(), 1);
+    assert_eq!(fs::read(&path).unwrap(), b"before");
+    for (name, value) in attrs {
+        assert_eq!(get_macos_test_xattr(&path, name), value);
+    }
+    let restored = fs::metadata(&path).unwrap();
+    assert_eq!(
+        (restored.uid(), restored.gid()),
+        (original.uid(), original.gid())
+    );
+    mutate("macos-metadata", &path, Some(b"tracked edit")).unwrap();
+    set_macos_test_xattr(&path, "com.jcode.binary", b"external");
+    assert!(!checkpoints("macos-metadata").unwrap()[0].can_restore_files);
+    assert!(restore("macos-metadata", &cp.id).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"tracked edit");
+    assert_eq!(get_macos_test_xattr(&path, "com.jcode.binary"), b"external");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn tracked_edit_and_rewind_preserve_unprivileged_xattrs_and_group() {
+    use std::os::unix::fs::MetadataExt;
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = work.path().join("metadata");
+    fs::write(&path, b"before").unwrap();
+    let group = fs::metadata(&path).unwrap().gid();
+    let name = std::ffi::CString::new("user.jcode-test").unwrap();
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let value = b"preserved";
+    assert_eq!(
+        unsafe {
+            libc::setxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        },
+        0
+    );
+    let checkpoint = checkpoint("metadata", 0, "edit").unwrap();
+    mutate("metadata", &path, Some(b"after")).unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().gid(), group);
+    // A fresh process/session read compares user xattrs as part of the state,
+    // and restore materializes the before-image metadata from durable history.
+    let durable: History = serde_json::from_slice(
+        &fs::read(directory("metadata").unwrap().join("history.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(durable.expected[&path].metadata.is_some());
+    let mut restored = [0u8; 32];
+    let size = unsafe {
+        libc::getxattr(
+            c_path.as_ptr(),
+            name.as_ptr(),
+            restored.as_mut_ptr().cast(),
+            restored.len(),
+        )
+    };
+    assert_eq!(&restored[..size as usize], value);
+    restore("metadata", &checkpoint.id).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"before");
+    assert_eq!(fs::metadata(&path).unwrap().gid(), group);
+    let size = unsafe {
+        libc::getxattr(
+            c_path.as_ptr(),
+            name.as_ptr(),
+            restored.as_mut_ptr().cast(),
+            restored.len(),
+        )
+    };
+    assert_eq!(&restored[..size as usize], value);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn external_user_xattr_change_blocks_rewind_even_when_bytes_are_unchanged() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = work.path().join("metadata-conflict");
+    fs::write(&path, b"same bytes").unwrap();
+    let name = std::ffi::CString::new("user.jcode-conflict").unwrap();
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let initial = b"initial";
+    assert_eq!(
+        unsafe {
+            libc::setxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                initial.as_ptr().cast(),
+                initial.len(),
+                0,
+            )
+        },
+        0
+    );
+    let cp = checkpoint("metadata-conflict", 0, "capture").unwrap();
+    mutate("metadata-conflict", &path, Some(b"tracked edit")).unwrap();
+    let changed = b"external";
+    assert_eq!(
+        unsafe {
+            libc::setxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                changed.as_ptr().cast(),
+                changed.len(),
+                0,
+            )
+        },
+        0
+    );
+    assert!(restore("metadata-conflict", &cp.id).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"tracked edit");
+    let mut current = [0u8; 32];
+    let size = unsafe {
+        libc::getxattr(
+            c_path.as_ptr(),
+            name.as_ptr(),
+            current.as_mut_ptr().cast(),
+            current.len(),
+        )
+    };
+    assert_eq!(&current[..size as usize], changed);
+}
+
+#[test]
 fn external_changes_refuse_all_files_and_between_tool_writes() {
     let _env = crate::storage::lock_test_env();
     let (_home, work) = fixture();

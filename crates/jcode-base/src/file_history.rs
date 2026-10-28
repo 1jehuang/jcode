@@ -27,6 +27,32 @@ thread_local! {
 struct FileState {
     blob: Option<String>,
     mode: Option<u32>,
+    #[serde(default)]
+    metadata: Option<FileMetadata>,
+}
+
+impl FileState {
+    /// Legacy snapshots constrain bytes and mode but know nothing about metadata.
+    /// This is directional matching, not equality: a modern snapshot still
+    /// requires its recorded metadata to be present and unchanged.
+    fn matches(&self, actual: &Self) -> bool {
+        self.blob == actual.blob
+            && self.mode == actual.mode
+            && self
+                .metadata
+                .as_ref()
+                .is_none_or(|metadata| actual.metadata.as_ref() == Some(metadata))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FileMetadata {
+    #[cfg(unix)]
+    uid: u32,
+    #[cfg(unix)]
+    gid: u32,
+    #[cfg(unix)]
+    xattrs: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -212,6 +238,7 @@ fn state(dir: &Path, path: &Path) -> Result<FileState> {
             return Ok(FileState {
                 blob: None,
                 mode: None,
+                metadata: None,
             });
         }
         Err(error) => return Err(error.into()),
@@ -225,9 +252,21 @@ fn state(dir: &Path, path: &Path) -> Result<FileState> {
     };
     #[cfg(not(unix))]
     let mode = Some(u32::from(metadata.permissions().readonly()));
+    #[cfg(unix)]
+    let metadata_state = {
+        use std::os::unix::fs::MetadataExt;
+        Some(FileMetadata {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            xattrs: read_xattrs(path)?,
+        })
+    };
+    #[cfg(not(unix))]
+    let metadata_state = None;
     Ok(FileState {
         blob: Some(blob),
         mode,
+        metadata: metadata_state,
     })
 }
 
@@ -240,6 +279,183 @@ fn store_blob(dir: &Path, bytes: &[u8]) -> Result<String> {
         crate::storage::harden_secret_file_permissions(&path);
     }
     Ok(hash)
+}
+
+#[cfg(target_os = "linux")]
+fn read_xattrs(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let size = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
+    ensure!(size >= 0, "Could not list file extended attributes");
+    let mut names = vec![0u8; size as usize];
+    let got = unsafe { libc::llistxattr(c_path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    ensure!(got >= 0, "Could not read file extended attribute names");
+    names.truncate(got as usize);
+    let mut attrs = BTreeMap::new();
+    for name in names
+        .split(|byte| *byte == 0)
+        .filter(|name| name.starts_with(b"user."))
+    {
+        let name_c = std::ffi::CString::new(name)?;
+        let size =
+            unsafe { libc::lgetxattr(c_path.as_ptr(), name_c.as_ptr(), std::ptr::null_mut(), 0) };
+        ensure!(size >= 0, "Could not read extended attribute size");
+        let mut value = vec![0u8; size as usize];
+        let got = unsafe {
+            libc::lgetxattr(
+                c_path.as_ptr(),
+                name_c.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        };
+        ensure!(got >= 0, "Could not read extended attribute");
+        value.truncate(got as usize);
+        attrs.insert(String::from_utf8(name.to_vec())?, value);
+    }
+    Ok(attrs)
+}
+
+#[cfg(target_os = "macos")]
+fn read_xattrs(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let size = unsafe {
+        libc::listxattr(
+            c_path.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    if size < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("Could not list file extended attributes");
+    }
+    let mut names = vec![0u8; size as usize];
+    let got = unsafe {
+        libc::listxattr(
+            c_path.as_ptr(),
+            names.as_mut_ptr().cast(),
+            names.len(),
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    if got < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("Could not read file extended attribute names");
+    }
+    // A zero-sized call only queries the size. Refuse a concurrently grown list.
+    ensure!(
+        got as usize <= names.len(),
+        "File extended attributes changed during capture"
+    );
+    names.truncate(got as usize);
+    let mut attrs = BTreeMap::new();
+    for name in names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        // macOS generates provenance on new inodes, including our staging
+        // files. It is platform bookkeeping, not restorable user metadata.
+        if name == b"com.apple.provenance" {
+            continue;
+        }
+        let name_c = std::ffi::CString::new(name)?;
+        let size = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                name_c.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        };
+        if size < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Could not read extended attribute size");
+        }
+        let mut value = vec![0u8; size as usize];
+        let got = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                name_c.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        };
+        if got < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Could not read extended attribute");
+        }
+        ensure!(
+            got as usize <= value.len(),
+            "File extended attribute changed during capture"
+        );
+        value.truncate(got as usize);
+        attrs.insert(String::from_utf8(name.to_vec())?, value);
+    }
+    Ok(attrs)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn read_xattrs(_path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    Ok(BTreeMap::new())
+}
+
+#[cfg(target_os = "linux")]
+fn write_xattrs(path: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    for (name, value) in attrs.iter().filter(|(name, _)| name.starts_with("user.")) {
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let result = unsafe {
+            libc::lsetxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        ensure!(result == 0, "Could not restore extended attribute");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn write_xattrs(path: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    for (name, value) in attrs
+        .iter()
+        .filter(|(name, _)| name.as_str() != "com.apple.provenance")
+    {
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let result = unsafe {
+            libc::setxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Could not restore extended attribute");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn write_xattrs(_path: &Path, _attrs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    Ok(())
 }
 
 fn bytes(dir: &Path, state: &FileState) -> Result<Option<Vec<u8>>> {
@@ -269,8 +485,9 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
     } else {
         (&change.before, &change.after)
     };
+    let actual = state(dir, &change.path)?;
     ensure!(
-        state(dir, &change.path)? == *expected,
+        expected.matches(&actual),
         "File changed outside tracked tools: {}",
         change.path.display()
     );
@@ -295,6 +512,17 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
         let mut file = options.open(&temporary)?;
         file.write_all(&data)?;
         #[cfg(unix)]
+        if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
+            use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+            let current = file.metadata()?;
+            if current.uid() != metadata.uid || current.gid() != metadata.gid {
+                let c_path = std::ffi::CString::new(temporary.as_os_str().as_bytes())?;
+                let result = unsafe { libc::chown(c_path.as_ptr(), metadata.uid, metadata.gid) };
+                ensure!(result == 0, "Could not preserve file owner and group");
+            }
+            write_xattrs(&temporary, &metadata.xattrs)?;
+        }
+        #[cfg(unix)]
         if let Some(mode) = desired.mode {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(fs::Permissions::from_mode(mode))?;
@@ -308,7 +536,7 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
         file.sync_all()?;
         // Recheck after staging, rather than overwriting a newer external edit.
         ensure!(
-            state(dir, &change.path)? == *expected,
+            actual.matches(&state(dir, &change.path)?),
             "File changed during restore: {}",
             change.path.display()
         );
@@ -333,7 +561,7 @@ fn load(dir: &Path) -> Result<History> {
         let actual = state(dir, &pending.path)?;
         let completed_new_file = pending.before.blob.is_none() && actual.blob == pending.after.blob;
         ensure!(
-            actual == pending.before || actual == pending.after || completed_new_file,
+            pending.before.matches(&actual) || pending.after.matches(&actual) || completed_new_file,
             "Interrupted file mutation conflicts with external changes: {}",
             pending.path.display()
         );
@@ -349,7 +577,7 @@ fn load(dir: &Path) -> Result<History> {
         {
             for change in &history.restoring {
                 ensure!(
-                    state(dir, &change.path)? == change.after,
+                    change.after.matches(&state(dir, &change.path)?),
                     "Committed rewind conflicts with external changes: {}",
                     change.path.display()
                 );
@@ -370,11 +598,11 @@ fn load(dir: &Path) -> Result<History> {
         // persistence is owned by Agent and must not observe half a restore.
         for change in history.restoring.iter().rev() {
             let actual = state(dir, &change.path)?;
-            if actual == change.before {
+            if change.before.matches(&actual) {
                 continue;
             }
             ensure!(
-                actual == change.after,
+                change.after.matches(&actual),
                 "Interrupted restore conflicts with external changes: {}",
                 change.path.display()
             );
@@ -391,7 +619,7 @@ fn note_external(history: &mut History, path: &Path, actual: &FileState) {
     if history
         .expected
         .get(path)
-        .is_some_and(|expected| expected != actual)
+        .is_some_and(|expected| !expected.matches(actual))
     {
         for checkpoint in &mut history.checkpoints {
             checkpoint.blocked.insert(path.to_owned());
@@ -536,23 +764,30 @@ fn restore_with_commit(
     let mut changes = Vec::new();
     for (path, desired) in &checkpoint.before {
         let actual = state(&dir, path)?;
-        if &actual == desired {
+        if desired.matches(&actual) {
             continue;
         }
         ensure!(
-            history.expected.get(path) == Some(&actual),
+            history
+                .expected
+                .get(path)
+                .is_some_and(|expected| expected.matches(&actual)),
             "File changed outside tracked tools: {}",
             path.display()
         );
         // Validate every backup before touching any file.
         bytes(&dir, desired)?;
-        if &actual != desired {
-            changes.push(Change {
-                path: path.clone(),
-                before: actual,
-                after: desired.clone(),
-            });
+        let mut after = desired.clone();
+        if after.blob.is_some() && after.metadata.is_none() {
+            // Persist the live metadata in the transaction too, so recovery and
+            // subsequent conflict checks know what the legacy restore retained.
+            after.metadata = actual.metadata.clone();
         }
+        changes.push(Change {
+            path: path.clone(),
+            before: actual,
+            after,
+        });
     }
     history.restoring = changes.clone();
     history.conversation_commit = conversation_commit;
@@ -836,6 +1071,26 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
         } else {
             None
         },
+        metadata: if content.is_some() {
+            #[cfg(unix)]
+            {
+                Some(before.metadata.clone().unwrap_or_else(|| {
+                    use std::os::unix::fs::MetadataExt;
+                    let parent = path.parent().and_then(|parent| fs::metadata(parent).ok());
+                    FileMetadata {
+                        uid: unsafe { libc::geteuid() },
+                        gid: parent.map_or_else(|| unsafe { libc::getegid() }, |meta| meta.gid()),
+                        xattrs: BTreeMap::new(),
+                    }
+                }))
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        } else {
+            None
+        },
     };
     note_external(&mut history, &path, &before);
     for checkpoint in &mut history.checkpoints {
@@ -855,8 +1110,8 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
     // leaves the original intact, never a torn in-place truncation.
     let result = apply(&dir, &change, false);
     let actual = state(&dir, &path)?;
-    if (result.is_ok() && actual != change.after)
-        || (actual != change.before && actual != change.after)
+    if (result.is_ok() && !change.after.matches(&actual))
+        || (!change.before.matches(&actual) && !change.after.matches(&actual))
     {
         for checkpoint in &mut history.checkpoints {
             checkpoint.blocked.insert(path.clone());

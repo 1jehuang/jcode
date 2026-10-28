@@ -251,6 +251,67 @@ fn test_disconnect_recovers_inflight_image_with_queued_text() {
 }
 
 #[test]
+fn test_busy_rejection_recovers_image_only_followup() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: String::new(),
+        images: vec![("image/png".to_string(), "aGk=".to_string())],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+        overload_attempts: 0,
+    });
+
+    app.is_remote = true;
+    app.auto_poke_incomplete_todos = false;
+    remote.mark_history_loaded();
+    rt.block_on(remote::begin_remote_send(
+        &mut app,
+        &mut remote,
+        String::new(),
+        vec![("image/png".to_string(), "aGk=".to_string())],
+        false,
+        None,
+        false,
+        0,
+    ))
+    .unwrap();
+    let rejected_id = app.current_message_id.unwrap();
+    app.queued_messages.clear();
+    app.queued_message_images.clear();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: rejected_id,
+            message: "Already processing a message".to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    assert!(app.rate_limit_pending_message.is_none());
+    assert_eq!(app.queued_messages, vec![String::new()]);
+    assert_eq!(
+        app.queued_message_images,
+        vec![("image/png".to_string(), "aGk=".to_string())]
+    );
+
+    app.is_processing = false;
+    app.pending_queued_dispatch = false;
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    let pending = app.rate_limit_pending_message.as_ref().unwrap();
+    assert!(pending.content.is_empty());
+    assert_eq!(
+        pending.images,
+        vec![("image/png".to_string(), "aGk=".to_string())]
+    );
+}
+
+#[test]
 fn test_disconnect_recovers_interleave_image_without_touching_composer() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
