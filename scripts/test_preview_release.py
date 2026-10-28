@@ -62,6 +62,7 @@ class PreviewPublicationTests(unittest.TestCase):
     def publish(self, ci_error=None):
         with (patch.object(preview, "gh", side_effect=self.fake_gh),
               patch.object(preview, "require_head", side_effect=self.head),
+              patch.object(preview, "change_notes", return_value="## What changed\n\nTest change\n\n"),
               patch.object(preview, "authorize", side_effect=ci_error) as authorize):
             preview.publish(preview.REPOSITORY, SHA, TAG, self.directory)
         authorize.assert_called_once_with(preview.REPOSITORY, SHA, timeout=0)
@@ -74,6 +75,7 @@ class PreviewPublicationTests(unittest.TestCase):
         self.assertIn("--latest=false", create)
         self.assertIn("--verify-tag", create)
         notes = create[create.index("--notes") + 1]
+        self.assertLess(notes.index("## What changed"), notes.index("## First-time preview setup"))
         for instruction in ("Existing stable versions do not support", "SHA256SUMS",
                             "extract the entire archive", "full path", "update --channel preview",
                             "update --channel stable", "v1.0.0"):
@@ -178,6 +180,64 @@ class PreviewPublicationTests(unittest.TestCase):
         with patch.object(preview, "api", return_value={"object": {"sha": "b" * 40}}):
             with self.assertRaisesRegex(ValueError, "master advanced"):
                 preview.require_head(preview.REPOSITORY, SHA)
+
+
+class PreviewChangeNotesTests(unittest.TestCase):
+    def notes(self, releases, pages):
+        with patch.object(preview, "gh", side_effect=[json.dumps(releases), json.dumps(pages)]) as gh:
+            result = preview.change_notes(preview.REPOSITORY, SHA, TAG, gh)
+        return result, gh.call_args_list[-1].args[-1]
+
+    def commit(self, char, title):
+        return {"sha": char * 40, "commit": {"message": title}}
+
+    def test_first_preview_compares_latest_published_stable(self):
+        notes, endpoint = self.notes([[{"tag_name": "v0.99.1", "published_at": "2026-10-22"},
+                                      {"tag_name": "v0.98.0", "published_at": "2026-10-01"}]],
+                                    [{"total_commits": 3, "commits": [
+                                        self.commit("b", "feat: Add cloud handoff"),
+                                        self.commit("c", "Fix readiness race"),
+                                        self.commit("d", "Document migration")]}])
+        self.assertIn("v0.99.1..." + SHA, endpoint)
+        self.assertIn("3 commits since **v0.99.1**: 1 feature/addition commits, 1 fixes", notes)
+        self.assertIn("Add cloud handoff", notes)
+        self.assertIn("Fix readiness race", notes)
+
+    def test_numeric_previous_preview_excludes_drafts_current_and_future(self):
+        releases = [[{"tag_name": tag, "prerelease": True, "draft": draft}
+                     for tag, draft in [("v1.0.0-preview.9", False),
+                                        ("v1.0.0-preview.10", False),
+                                        ("v1.0.0-preview.11", True),
+                                        (TAG, False), ("v1.0.0-preview.13", False)]]]
+        notes, endpoint = self.notes(releases, [{"total_commits": 0, "commits": []}])
+        self.assertIn("preview.10...", endpoint)
+        self.assertIn("No source changes", notes)
+
+    def test_paginated_commits_preserved_and_titles_escaped(self):
+        commit = self.commit("b", "Fix <script> [link](bad)\nNot a subject")
+        notes, _ = self.notes([[{"tag_name": "v0.99.1"}]],
+                              [{"total_commits": 2, "commits": [commit]},
+                               {"commits": [commit, self.commit("c", "Add tests")]}])
+        self.assertEqual(notes.count("bbbbbbbb]"), 1)
+        self.assertIn("Add tests", notes)
+        self.assertNotIn("<script>", notes)
+        self.assertNotIn("Not a subject", notes)
+
+    def test_large_change_list_is_bounded_and_links_omitted_commits(self):
+        commits = [{"sha": f"{index:040x}", "commit": {"message": "Fix " + "x" * 500}}
+                   for index in range(200)]
+        notes, _ = self.notes([[{"tag_name": "v0.99.1"}]],
+                              [{"total_commits": 200, "commits": commits}])
+        self.assertLess(len(notes), 56000)
+        self.assertIn("more commits in the [full comparison]", notes)
+        self.assertLess(notes.index("000000c7)"), notes.index("000000c6)"))
+
+    def test_missing_baseline_or_incomplete_comparison_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "baseline"):
+            self.notes([[]], [])
+        with self.assertRaisesRegex(ValueError, "Incomplete"):
+            self.notes([[{"tag_name": "v0.99.1"}]],
+                       [{"total_commits": 1, "commits": []}])
 
 
 class PreviewWorkflowTests(unittest.TestCase):
