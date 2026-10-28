@@ -29,6 +29,27 @@ fn spawn_models_server(body: &'static str) -> String {
 
 use crate::*;
 
+#[test]
+fn grok_subscription_discovers_models_in_its_own_cache_namespace() {
+    let provider = OpenRouterProvider::new_grok_build_subscription("grok-4.6");
+    assert!(provider.supports_model_catalog);
+    assert_eq!(
+        provider.foreground_cache_namespace().as_deref(),
+        Some("grok-build")
+    );
+    provider.models_cache.blocking_write().models = vec![jcode_provider_openrouter::ModelInfo {
+        id: "grok-future-release".into(),
+        context_length: Some(900_000),
+        ..Default::default()
+    }];
+    provider.models_cache.blocking_write().fetched = true;
+    assert!(
+        provider
+            .available_models_display()
+            .contains(&"grok-future-release".into())
+    );
+}
+
 #[tokio::test]
 async fn static_only_named_profile_refresh_never_resolves_auth_or_fetches() {
     let _lock = ENV_LOCK.lock();

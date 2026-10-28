@@ -56,20 +56,34 @@ fn spawn_header_capturing_server() -> (std::net::SocketAddr, std::sync::mpsc::Re
     let addr = listener.local_addr().expect("addr");
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("read timeout");
-        let mut buf = vec![0u8; 65536];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
-        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = stream.write_all(response.as_bytes());
+        loop {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut buf = vec![0u8; 65536];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            // Chat preflight may fetch model/pricing metadata. Return the actual
+            // Grok catalog shape rather than treating GET /models as an SSE chat.
+            if String::from_utf8_lossy(&buf[..n]).starts_with("GET /v1/models ") {
+                let body = r#"{"data":[{"model":"grok-4.6","context_window":500000}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            break;
+        }
     });
     (addr, rx)
 }

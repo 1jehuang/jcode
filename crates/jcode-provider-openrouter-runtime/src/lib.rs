@@ -1761,9 +1761,9 @@ impl OpenRouterProvider {
                 })
             }),
             supports_provider_features: false,
-            // The proxy's `/models` shape is not a documented catalog; keep the
-            // curated list so `/model` works offline and before first request.
-            supports_model_catalog: false,
+            // The official CLI discovers releases through GET /v1/models.
+            // Static models remain only an offline/pre-discovery fallback.
+            supports_model_catalog: true,
             profile_id: Some("grok-build".to_string()),
             builtin_azure: false,
             reasoning_effort_support: Some(false),
