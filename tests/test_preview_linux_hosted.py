@@ -37,11 +37,15 @@ class HostedLinuxPreviewTests(unittest.TestCase):
         self.command("git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                      "commit", "-qm", "fixture source")
         self.install("justrust", r'''#!/usr/bin/env python3
-import json, os, pathlib, struct, sys
+import json, os, pathlib, struct, subprocess, sys
 with open(os.environ['RECORD'], 'a') as record:
     record.write(json.dumps({'args': sys.argv[1:], 'env': dict(os.environ)}) + '\n')
 if sys.argv[1:] == ['remote', 'use', 'hosted']:
     sys.exit(int(os.environ.get('BACKEND_FAILURE', '0')))
+# Model pinned source_roots(): caller cargo inherits RUSTUP_TOOLCHAIN, not
+# JUSTRUST_TOOLCHAIN, and metadata probes target flags before hosted dispatch.
+if subprocess.run(['cargo', 'metadata', '--format-version', '1', '--offline']).returncode:
+    sys.exit(29)
 if os.environ.get('BUILD_FAILURE'):
     sys.exit(23)
 if os.environ.get('NO_ARTIFACT'):
@@ -55,6 +59,25 @@ machine = 183 if target.startswith('aarch64') else 62
 struct.pack_into('<HH', header, 16, 3, int(os.environ.get('MACHINE', machine)))
 artifact.write_bytes(b'not ELF' if os.environ.get('INVALID_ELF') else header)
 artifact.chmod(0o755)
+''')
+        self.install("rustup", r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+path = pathlib.Path(os.environ['RECORD'] + '.rustup')
+path.write_text(json.dumps(sys.argv[1:]))
+sys.exit(int(os.environ.get('RUSTUP_FAILURE', '0')))
+''')
+        self.install("cargo", r'''#!/usr/bin/env python3
+import os, pathlib, sys
+assert sys.argv[1:] == ['metadata', '--format-version', '1', '--offline']
+# Model the native ARM CI caller: metadata probes its host with ARM target
+# flags. CI rustup default is stable even when the managed compiler is nightly.
+selected = os.environ.get('RUSTUP_TOOLCHAIN', '1.99.0')
+flags = os.environ.get('CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS', '')
+if '-Ztls-model=emulated' in flags:
+    if selected != 'nightly-2026-10-08':
+        print('error: the option Z is only accepted on the nightly compiler', file=sys.stderr)
+        sys.exit(1)
+    assert pathlib.Path(os.environ['RECORD'] + '.rustup').exists()
 ''')
         self.install("readelf", r'''#!/usr/bin/env python3
 import os, sys
@@ -122,6 +145,8 @@ else:
         self.assertTrue(build["env"]["JCODE_BUILD_GIT_DATE"])
         self.assertIn("GLIBC max 2.17", result.stdout)
         self.assertNotIn("--no-default-features", build["args"])
+        self.assertNotIn("RUSTUP_TOOLCHAIN", build["env"])
+        self.assertFalse(Path(self.env["RECORD"] + ".rustup").exists())
 
     def test_arm_rebuilds_std_with_target_only_tls(self):
         result = self.run_script(ARM, RUSTFLAGS="", CARGO_ENCODED_RUSTFLAGS="",
@@ -131,11 +156,39 @@ else:
         self.assertEqual(build["args"][0], "build")
         self.assertIn("-Zbuild-std=std,panic_abort", build["args"])
         self.assertEqual(build["env"]["JUSTRUST_TOOLCHAIN"], "nightly-2026-10-08")
+        self.assertEqual(build["env"]["RUSTUP_TOOLCHAIN"], "nightly-2026-10-08")
         self.assertEqual(build["env"]["CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS"],
                          "-Cdebuginfo=1 -Ztls-model=emulated")
         self.assertNotIn("RUSTFLAGS", build["env"])
         self.assertNotIn("CARGO_ENCODED_RUSTFLAGS", build["env"])
         self.assertIn("GLIBC max 2.39", result.stdout)
+
+    def test_arm_overrides_stable_caller_without_changing_managed_contract(self):
+        result = self.run_script(ARM, RUSTUP_TOOLCHAIN="1.99.0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(Path(self.env["RECORD"] + ".rustup").read_text()),
+                         ["toolchain", "install", "nightly-2026-10-08", "--profile", "minimal",
+                          "--no-self-update"])
+        build = self.records()[-1]
+        for key in ["JUSTRUST_REMOTE_REQUIRED", "JUSTRUST_TOOLCHAIN_REQUIRED"]:
+            self.assertEqual(build["env"][key], "1")
+        self.assertNotIn("RUSTC_BOOTSTRAP", build["env"])
+        self.assertNotIn("--local", build["args"])
+        self.assertNotIn("--no-default-features", build["args"])
+
+    def test_stable_metadata_fixture_rejects_native_target_tls(self):
+        # A managed nightly pin alone must not make the caller fixture pass.
+        env = {**self.env, "JUSTRUST_TOOLCHAIN": "nightly-2026-10-08",
+               "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "-Ztls-model=emulated"}
+        result = subprocess.run([str(self.bin / "cargo"), "metadata", "--format-version", "1",
+                                 "--offline"], cwd=self.root, env=env, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("only accepted on the nightly compiler", result.stderr)
+
+    def test_arm_nightly_install_failure_stops_before_hosted_dispatch(self):
+        result = self.run_script(ARM, RUSTUP_FAILURE="19")
+        self.assertEqual(result.returncode, 19, result.stderr)
+        self.assertFalse(self.records())
 
     def test_dirty_source_is_reported_honestly(self):
         (self.root / "untracked.txt").write_text("dirty")

@@ -56,6 +56,17 @@ export JUSTRUST_REMOTE_REQUIRED=1 JUSTRUST_TOOLCHAIN_REQUIRED=1
 export JUSTRUST_TOOLCHAIN=$toolchain
 # An empty encoded global flag also overrides target flags in Cargo.
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTUP_TOOLCHAIN
+if [[ $target == aarch64-unknown-linux-gnu ]]; then
+  # Pinned justrust 5c8c6e653 runs real_cargo() metadata on the caller before
+  # hosted dispatch. JUSTRUST_TOOLCHAIN selects the managed remote compiler,
+  # not this rustup shim. On the native ARM CI caller, metadata probes the
+  # host with ARM target flags, so stable rejects the target-only -Z TLS flag.
+  # Install only the caller's minimal nightly, not target std
+  # or rust-src, and scope selection to this script rather than rustup default.
+  command -v rustup >/dev/null || fail 'ARM hosted preview metadata requires rustup'
+  rustup toolchain install nightly-2026-10-08 --profile minimal --no-self-update
+  export RUSTUP_TOOLCHAIN=nightly-2026-10-08
+fi
 # Select hosted explicitly, never a legacy account-owned AWS backend. Credentials
 # come from JCODE_API_KEY (CI) or the existing tenant login. No key provisioning,
 # allowance changes, or billing exemptions occur here.
