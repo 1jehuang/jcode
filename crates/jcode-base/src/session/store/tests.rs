@@ -343,6 +343,8 @@ fn sqlite_orders_and_filters_nanoseconds_before_and_after_v1_migration() -> Resu
          ALTER TABLE sessions DROP COLUMN discovery_seconds;
          ALTER TABLE sessions DROP COLUMN discovery_nanos;
          ALTER TABLE sessions DROP COLUMN sort_key;
+         ALTER TABLE sessions DROP COLUMN picker_debug;
+         ALTER TABLE sessions DROP COLUMN picker_has_history;
          DROP INDEX sessions_updated_precise;
          DROP INDEX sessions_saved_precise;
          ALTER TABLE sessions DROP COLUMN updated_seconds;
@@ -627,6 +629,10 @@ fn sqlite_discovered_summaries_match_picker_order_across_v3_migration() -> Resul
     for (id, offset_ms, saved) in cases {
         let mut session = Session::create_with_id(id.into(), None, None);
         session.saved = saved;
+        session.is_debug = id.ends_with("_a") || id == "plain";
+        if id != "old_unsaved" {
+            session.add_message(Role::User, text("picker history"));
+        }
         let snapshot = root.path().join(format!("{id}.json"));
         crate::storage::write_json_secret(&snapshot, &session)?;
         std::fs::OpenOptions::new()
@@ -643,6 +649,37 @@ fn sqlite_discovered_summaries_match_picker_order_across_v3_migration() -> Resul
                     .into_iter()
                     .map(|row| row.id)
                     .collect();
+                for visible_limit in [0, 1, 2, 4, 100] {
+                    let ordered = store.list_discovered_summaries(limit, include_saved)?;
+                    let (mut visible, mut debug) = (0, 0);
+                    let mut expected = Vec::new();
+                    for row in ordered {
+                        if row.visible_message_count == 0 {
+                            continue;
+                        }
+                        let keep = if visible >= visible_limit {
+                            row.saved
+                        } else if row.is_debug {
+                            debug += 1;
+                            debug <= visible_limit
+                        } else {
+                            visible += 1;
+                            true
+                        };
+                        if keep {
+                            expected.push(row.id);
+                        }
+                    }
+                    let actual = store
+                        .list_picker_summaries(visible_limit, limit, include_saved)?
+                        .into_iter()
+                        .map(|row| row.id)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        actual, expected,
+                        "visible={visible_limit} candidates={limit} saved={include_saved}"
+                    );
+                }
                 assert_eq!(
                     actual,
                     expected_discovered(store, limit, include_saved)?,
@@ -689,6 +726,8 @@ fn sqlite_discovered_summaries_match_picker_order_across_v3_migration() -> Resul
          ALTER TABLE sessions DROP COLUMN discovery_seconds;
          ALTER TABLE sessions DROP COLUMN discovery_nanos;
          ALTER TABLE sessions DROP COLUMN sort_key;
+         ALTER TABLE sessions DROP COLUMN picker_debug;
+         ALTER TABLE sessions DROP COLUMN picker_has_history;
          PRAGMA user_version=3;",
     )?;
     drop(connection);
@@ -697,7 +736,7 @@ fn sqlite_discovered_summaries_match_picker_order_across_v3_migration() -> Resul
     let connection = rusqlite::Connection::open(root.path().join("sessions.sqlite3"))?;
     assert_eq!(
         connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
-        5
+        7
     );
     // A later save moves the session to the front through the indexed columns.
     let mut loaded = migrated.load("old_unsaved")?;

@@ -264,6 +264,31 @@ pub trait SessionStorage: Send + Sync {
         });
         Ok(summaries)
     }
+    /// Bound the visible and debug picker rows before fetching summary payloads.
+    fn list_picker_summaries(
+        &self,
+        visible_limit: usize,
+        candidate_limit: usize,
+        include_saved: bool,
+    ) -> Result<Vec<SessionSummary>> {
+        let mut rows = self.list_discovered_summaries(candidate_limit, include_saved)?;
+        let (mut visible, mut debug) = (0usize, 0usize);
+        rows.retain(|row| {
+            if row.visible_message_count == 0 {
+                return false;
+            }
+            if visible >= visible_limit {
+                return row.saved;
+            }
+            if row.is_debug {
+                debug += 1;
+                return debug <= visible_limit;
+            }
+            visible += 1;
+            true
+        });
+        Ok(rows)
+    }
     fn list_search_candidates(&self, max: usize) -> Result<Vec<SessionSearchCandidate>>;
     /// Native indexed candidates, or None when the backend uses the file index.
     fn indexed_search_candidates(&self, _query: &str) -> Result<Option<Vec<String>>> {
@@ -375,6 +400,15 @@ impl SessionStore {
         include_saved: bool,
     ) -> Result<Vec<SessionSummary>> {
         self.storage.list_discovered_summaries(limit, include_saved)
+    }
+    pub fn list_picker_summaries(
+        &self,
+        visible_limit: usize,
+        candidate_limit: usize,
+        include_saved: bool,
+    ) -> Result<Vec<SessionSummary>> {
+        self.storage
+            .list_picker_summaries(visible_limit, candidate_limit, include_saved)
     }
     pub fn list_search_candidates(&self, max: usize) -> Result<Vec<SessionSearchCandidate>> {
         self.storage.list_search_candidates(max)

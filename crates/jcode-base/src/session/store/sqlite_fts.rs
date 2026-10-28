@@ -24,17 +24,29 @@ fn normalized(column: &str) -> String {
 
 pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
     let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if current >= 5 {
+    if current >= 6 {
         return Ok(());
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 5 {
+    if version >= 6 {
         transaction.commit()?;
         return Ok(());
     }
-    ensure!(version == 4, "FTS migration requires session schema 4");
+    ensure!(
+        (4..=5).contains(&version),
+        "FTS migration requires session schema 4 or 5"
+    );
     for (table, column, _) in SOURCES {
+        if version == 5 {
+            transaction.execute_batch(&format!(
+                "DROP TRIGGER {table}_search_fts_insert;
+                 DROP TRIGGER {table}_search_fts_delete;
+                 DROP TRIGGER {table}_search_fts_update;
+                 DROP TABLE {table}_search_fts;
+                 DROP VIEW {table}_search_content;"
+            ))?;
+        }
         let index = format!("{table}_search_fts");
         let view = format!("{table}_search_content");
         let text = normalized(column);
@@ -42,7 +54,7 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
         let old_text = normalized(&format!("old.{column}"));
         transaction.execute_batch(&format!(
             "CREATE VIEW {view} AS SELECT rowid AS rowid,{text} AS text FROM {table};
-             CREATE VIRTUAL TABLE {index} USING fts5(text,content='{view}',content_rowid='rowid',tokenize='trigram',detail=none);
+             CREATE VIRTUAL TABLE {index} USING fts5(text,content='{view}',content_rowid='rowid',tokenize='trigram',detail=full);
              CREATE TRIGGER {index}_insert AFTER INSERT ON {table} BEGIN
                INSERT INTO {index}(rowid,text) VALUES(new.rowid,{new_text});
              END;
@@ -57,8 +69,10 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
              INSERT INTO {index}({index}) VALUES('rebuild');"
         ))?;
     }
-    transaction.execute_batch("PRAGMA user_version=5;")?;
+    transaction.execute_batch("PRAGMA user_version=6;")?;
     transaction.commit()?;
+    // Avoid replaying a bulk index-build WAL on every later process startup.
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     Ok(())
 }
 
@@ -80,25 +94,18 @@ pub(super) fn candidates(connection: &Connection, query: &str) -> Result<Vec<Str
     {
         return all_ids();
     }
-    // Each term's trigrams must occur in one persisted row. Positions are not
-    // stored, so the existing result scorer verifies the remaining candidates.
+    // Positional trigram phrases verify contiguous substrings using postings,
+    // without reading external transcript content before bounded scoring.
     let mut selects = Vec::new();
     let mut parameters: Vec<rusqlite::types::Value> = Vec::new();
     for (term_number, term) in profile.terms.iter().enumerate() {
-        // Individual three-character MATCH tokens work with detail=none and
-        // do not read external content to recheck a LIKE predicate.
-        let grams: BTreeSet<_> = term
-            .as_bytes()
-            .windows(3)
-            .take(64)
-            .map(|gram| format!("\"{}\"", std::str::from_utf8(gram).expect("ASCII term")))
-            .collect();
-        parameters.push(grams.into_iter().collect::<Vec<_>>().join(" AND ").into());
+        parameters.push(format!("\"{term}\"").into());
+        let match_parameter = parameters.len();
         for (table, _, id_column) in SOURCES {
             selects.push(format!(
                 "SELECT source.{id_column} AS id,{term_number} AS term
                  FROM {table}_search_fts JOIN {table} AS source ON source.rowid={table}_search_fts.rowid
-                 WHERE {table}_search_fts MATCH ?{}", term_number + 1
+                 WHERE {table}_search_fts MATCH ?{match_parameter}"
             ));
         }
     }

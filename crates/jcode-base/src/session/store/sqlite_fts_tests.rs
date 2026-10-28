@@ -23,7 +23,7 @@ fn sqlite_fts_tracks_public_commits_and_transaction_rollback() -> Result<()> {
     let mut session = Session::create_with_id("indexed-session".into(), None, None);
     session.add_message(
         Role::User,
-        text("firstneedle Observability Kelvin İmage 工具 42"),
+        text("firstneedle Observability Kelvin İmage 工具 42 abc bcd cde"),
     );
     store.save(&mut session)?;
     for query in [
@@ -31,13 +31,15 @@ fn sqlite_fts_tracks_public_commits_and_transaction_rollback() -> Result<()> {
         "servabil",
         "kelvin",
         "mage",
-        "工具",
-        "42",
         "indexed-session",
     ] {
         assert_eq!(hits(&store, query)?, vec![session.id.clone()], "{query}");
     }
+    for query in ["工具", "42"] {
+        assert!(store.indexed_search_candidates(query)?.is_none());
+    }
     assert!(hits(&store, "absentneedle")?.is_empty());
+    assert!(hits(&store, "abcde")?.is_empty());
     session.add_message(Role::Assistant, text("appendneedle"));
     session.record_replay_display_message("system", None, "replayneedle");
     session.record_memory_injection("test".into(), "memoryneedle".into(), 1, 0, vec![]);
@@ -132,7 +134,9 @@ fn sqlite_fts_migration_rebuilds_existing_content() -> Result<()> {
             ))?;
         }
         connection.execute_batch(
-            "PRAGMA user_version=4; ALTER TABLE session_memory RENAME TO memory_hold;",
+            "ALTER TABLE sessions DROP COLUMN picker_debug;
+             ALTER TABLE sessions DROP COLUMN picker_has_history;
+             PRAGMA user_version=4; ALTER TABLE session_memory RENAME TO memory_hold;",
         )?;
         assert!(migrate(&mut connection).is_err());
         assert_eq!(

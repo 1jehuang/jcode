@@ -39,7 +39,7 @@ impl SqliteSessionStorage {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 5 {
+        if version > 7 {
             bail!("Unsupported session database schema {version}");
         }
         if version == 0 {
@@ -97,6 +97,7 @@ impl SqliteSessionStorage {
             migrate_discovery_ordering(&mut connection)?;
         }
         super::sqlite_fts::migrate(&mut connection)?;
+        migrate_picker_flags(&mut connection)?;
         harden_database_files(&path)?;
         Ok(Self {
             root,
@@ -261,6 +262,8 @@ impl SqliteSessionStorage {
         });
         let (discovery_seconds, discovery_nanos) = super::discovery_key(&summary);
         let sort_key = super::sqlite_sort_key(&session.id);
+        let picker_debug = summary.is_debug;
+        let picker_has_history = summary.visible_message_count > 0;
         let summary = serde_json::to_string(&summary)?;
         let compaction_changed = initial
             || state
@@ -280,14 +283,15 @@ impl SqliteSessionStorage {
             previous.transcript_revision + i64::from(transcript_changed)
         });
         transaction.execute(
-            "INSERT INTO sessions(id,metadata,summary,updated_ms,saved,revision,size_bytes,updated_seconds,updated_nanos,transcript_revision,discovery_seconds,discovery_nanos,sort_key)
-             VALUES(?1,?2,?3,?4,?5,?6,0,?7,?8,?9,?10,?11,?12)
+            "INSERT INTO sessions(id,metadata,summary,updated_ms,saved,revision,size_bytes,updated_seconds,updated_nanos,transcript_revision,discovery_seconds,discovery_nanos,sort_key,picker_debug,picker_has_history)
+             VALUES(?1,?2,?3,?4,?5,?6,0,?7,?8,?9,?10,?11,?12,?13,?14)
              ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,summary=excluded.summary,
                updated_ms=excluded.updated_ms,saved=excluded.saved,revision=excluded.revision,
                updated_seconds=excluded.updated_seconds,updated_nanos=excluded.updated_nanos,
                transcript_revision=excluded.transcript_revision,
                discovery_seconds=excluded.discovery_seconds,discovery_nanos=excluded.discovery_nanos,
-               sort_key=excluded.sort_key",
+               sort_key=excluded.sort_key,picker_debug=excluded.picker_debug,
+               picker_has_history=excluded.picker_has_history",
             params![
                 session.id,
                 metadata,
@@ -300,7 +304,9 @@ impl SqliteSessionStorage {
                 transcript_revision,
                 discovery_seconds,
                 discovery_nanos,
-                sort_key
+                sort_key,
+                picker_debug,
+                picker_has_history
             ],
         )?;
         let mut size_delta = write_vector(
@@ -468,6 +474,26 @@ fn migrate_discovery_ordering(connection: &mut Connection) -> Result<()> {
             "CREATE INDEX sessions_discovery ON sessions(discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC);
              CREATE INDEX sessions_saved_discovery ON sessions(discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC) WHERE saved=1;
              PRAGMA user_version=4;",
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_picker_flags(connection: &mut Connection) -> Result<()> {
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version >= 7 {
+        return Ok(());
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version == 6 {
+        transaction.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN picker_debug INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN picker_has_history INTEGER NOT NULL DEFAULT 0;
+             UPDATE sessions SET picker_debug=coalesce(json_extract(summary,'$.is_debug'),0),
+               picker_has_history=coalesce(json_extract(summary,'$.visible_message_count'),0)>0;
+             PRAGMA user_version=7;",
         )?;
     }
     transaction.commit()?;
@@ -698,6 +724,45 @@ impl SessionStorage for SqliteSessionStorage {
             .map(|row| Ok(serde_json::from_str(row)?))
             .collect()
     }
+    fn list_picker_summaries(
+        &self,
+        visible_limit: usize,
+        candidate_limit: usize,
+        include_saved: bool,
+    ) -> Result<Vec<SessionSummary>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare_cached(
+            "WITH recent AS MATERIALIZED (
+               SELECT id,discovery_seconds,discovery_nanos,sort_key,saved,picker_debug,picker_has_history
+               FROM sessions WHERE instr(id,'imported_')!=1
+               ORDER BY discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC LIMIT ?2
+             ), pool AS (
+               SELECT * FROM recent UNION ALL
+               SELECT id,discovery_seconds,discovery_nanos,sort_key,saved,picker_debug,picker_has_history
+               FROM sessions WHERE ?3 AND saved=1 AND instr(id,'imported_')!=1
+                 AND id NOT IN (SELECT id FROM recent)
+             ), ranked AS (
+               SELECT *,sum(1-picker_debug) OVER ordering AS visible_rank,
+                 sum(picker_debug) OVER ordering AS debug_rank
+               FROM pool WHERE picker_has_history=1
+               WINDOW ordering AS (ORDER BY discovery_seconds DESC,discovery_nanos DESC,sort_key DESC,id DESC ROWS UNBOUNDED PRECEDING)
+             )
+             SELECT s.summary FROM ranked r JOIN sessions s ON s.id=r.id
+             WHERE ((visible_rank<?1 OR (visible_rank=?1 AND r.picker_debug=0))
+                    AND (r.picker_debug=0 OR debug_rank<=?1))
+                OR (r.saved=1 AND visible_rank>=?1)
+             ORDER BY r.discovery_seconds DESC,r.discovery_nanos DESC,r.sort_key DESC,r.id DESC",
+        )?;
+        let rows = statement.query_map(
+            params![
+                i64::try_from(visible_limit).unwrap_or(i64::MAX),
+                i64::try_from(candidate_limit).unwrap_or(i64::MAX),
+                include_saved
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
     fn list_search_candidates(&self, max: usize) -> Result<Vec<SessionSearchCandidate>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare_cached("SELECT id,updated_ms,revision,size_bytes FROM sessions ORDER BY updated_seconds DESC,updated_nanos DESC,id LIMIT ?1")?;
@@ -712,6 +777,16 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
     fn indexed_search_candidates(&self, query: &str) -> Result<Option<Vec<String>>> {
+        let profile = jcode_session_types::SessionSearchQueryProfile::new(query);
+        if !profile.is_actionable()
+            || profile.terms.len() > 64
+            || profile
+                .terms
+                .iter()
+                .any(|term| !term.is_ascii() || term.len() < 3)
+        {
+            return Ok(None);
+        }
         let connection = self.connection()?;
         Ok(Some(super::sqlite_fts::candidates(&connection, query)?))
     }
