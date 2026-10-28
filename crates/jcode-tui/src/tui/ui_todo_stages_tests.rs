@@ -76,7 +76,7 @@ fn lane_live_status_omits_transport_and_preserves_stop_precedence() {
         LIVE_DOT_SENTINEL,
     );
     let mut rows = Vec::new();
-    push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", 160);
+    push_lane_status_lines(&mut rows, &[&item], std::slice::from_ref(&worker), "", 160);
     assert_eq!(rows.len(), 1);
     assert!(rows[0].to_string().contains(&expected.to_string()));
     assert!(!rows[0].to_string().contains("https"));
@@ -89,12 +89,18 @@ fn lane_live_status_omits_transport_and_preserves_stop_precedence() {
     );
     for width in 0..100 {
         let mut rows = Vec::new();
-        push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", width);
+        push_lane_status_lines(
+            &mut rows,
+            &[&item],
+            std::slice::from_ref(&worker),
+            "",
+            width,
+        );
         assert!(rows.iter().all(|row| row.width() <= width));
     }
     worker.wait_reason = Some("Waiting for hosted build".into());
     let mut rows = Vec::new();
-    push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", 160);
+    push_lane_status_lines(&mut rows, &[&item], std::slice::from_ref(&worker), "", 160);
     assert!(rows[0].to_string().contains("Waiting for hosted build"));
     assert!(!rows[0].to_string().contains(LIVE_DOT_SENTINEL));
     item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
@@ -121,7 +127,7 @@ fn pinned_worker_status_hides_duplicate_intent_but_keeps_connection_progress() {
         ..Default::default()
     });
     let mut rows = Vec::new();
-    push_lane_status_lines(&mut rows, &[&item], &[worker.clone()], "", 160);
+    push_lane_status_lines(&mut rows, &[&item], std::slice::from_ref(&worker), "", 160);
     let text = rows[0].to_string();
     assert!(text.contains("bash"), "{text}");
     assert!(!text.contains("Verify result"), "{text}");
@@ -156,7 +162,7 @@ fn live_telemetry_uses_one_compact_lane_row_without_task_summaries() {
         connection_type: Some("websocket".into()),
         ..Default::default()
     });
-    let rows = render(&[item.clone()], &[worker.clone()], 180);
+    let rows = render(&[item.clone()], std::slice::from_ref(&worker), 180);
     assert_eq!(rows.len(), 2, "header plus one lane: {rows:?}");
     let lane = &rows[1];
     for label in [
@@ -186,7 +192,7 @@ fn live_telemetry_uses_one_compact_lane_row_without_task_summaries() {
     assert!(!lane.contains('│'));
     assert!(!lane.contains("Measure and optimize stock tests"));
     for width in 1..160 {
-        let rows = render(&[item.clone()], &[worker.clone()], width);
+        let rows = render(&[item.clone()], std::slice::from_ref(&worker), width);
         assert_eq!(rows.len(), 2, "one lane at width {width}: {rows:?}");
         assert_fits(&rows, width);
     }
@@ -221,7 +227,7 @@ fn inline_columns_stay_fixed_across_activity_and_name_changes() {
                 elapsed_ms: 999_000,
                 ..Default::default()
             });
-            let rows = render(&[item.clone()], &[worker.clone()], width);
+            let rows = render(&[item.clone()], std::slice::from_ref(&worker), width);
             assert_fits(&rows, width);
             let row = &rows[1];
             assert!(!row.contains('│'), "{width}: {row}");
@@ -323,7 +329,7 @@ fn inline_worker_states_have_only_one_activity_indicator() {
         if phase == "waiting" {
             worker.wait_reason = Some("Waiting for background task".into());
         }
-        let rows = render(&[item.clone()], &[worker.clone()], 180);
+        let rows = render(&[item.clone()], std::slice::from_ref(&worker), 180);
         let lane = &rows[1];
         assert!(lane.trim_start().starts_with('●'), "{phase}: {lane}");
         assert_eq!(
@@ -345,7 +351,10 @@ fn inline_worker_states_have_only_one_activity_indicator() {
             );
         }
         for width in 0..120 {
-            assert_fits(&render(&[item.clone()], &[worker.clone()], width), width);
+            assert_fits(
+                &render(&[item.clone()], std::slice::from_ref(&worker), width),
+                width,
+            );
         }
     }
 }
@@ -361,14 +370,14 @@ fn inline_tool_intent_is_single_line_and_bounded() {
         tool_intent: Some("Inspect\n  generated\t界 artifact".into()),
         ..Default::default()
     });
-    let rows = render(&[item.clone()], &[worker.clone()], 180);
+    let rows = render(&[item.clone()], std::slice::from_ref(&worker), 180);
     assert!(
         rows[1].contains("Inspect generated 界 artifact"),
         "{rows:?}"
     );
     worker.live_status.as_mut().unwrap().tool_intent = Some("Inspect 界 artifact ".repeat(100));
     for width in 0..180 {
-        let rows = render(&[item.clone()], &[worker.clone()], width);
+        let rows = render(&[item.clone()], std::slice::from_ref(&worker), width);
         assert_fits(&rows, width);
         assert!(
             rows.iter()
@@ -513,13 +522,13 @@ fn shortcut_badges_are_hidden_and_respect_lane_width() {
     let mut worker = agent("fox", "running", Some("Reading types"), Some(12));
     for digit in [1, 9, 0, 10] {
         worker.shortcut = Some(digit);
-        let rows = render(&[item.clone()], &[worker.clone()], 120);
+        let rows = render(&[item.clone()], std::slice::from_ref(&worker), 120);
         assert!(
             rows.join("\n").contains('🦊') && !rows.join("\n").contains("[alt+"),
             "{rows:?}"
         );
         for width in 1..60 {
-            for row in render(&[item.clone()], &[worker.clone()], width) {
+            for row in render(&[item.clone()], std::slice::from_ref(&worker), width) {
                 assert!(row.width() <= usize::from(width), "width {width}: {row:?}");
             }
         }
@@ -612,13 +621,13 @@ fn explicit_waits_show_clock_reason_and_age_without_busy_or_quiet_indicators() {
     ] {
         let mut item = assigned(todo("1", "Build project", "in_progress", stage), "fox");
         item.group = group.map(str::to_string);
-        let text = render(&[item.clone()], &[worker.clone()], 160).join("\n");
+        let text = render(&[item.clone()], std::slice::from_ref(&worker), 160).join("\n");
         assert!(text.contains("◷"), "{text}");
         assert!(text.contains("Waiting for build task · 3m"), "{text}");
         assert!(!text.contains("quiet"), "{text}");
         assert!(!text.contains(LIVE_DOT_SENTINEL), "{text}");
         for width in 1..80 {
-            for row in render(&[item.clone()], &[worker.clone()], width) {
+            for row in render(&[item.clone()], std::slice::from_ref(&worker), width) {
                 assert!(row.width() <= usize::from(width), "width {width}: {row:?}");
             }
         }
