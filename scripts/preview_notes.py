@@ -46,7 +46,20 @@ def change_notes(repository, sha, tag, gh):
              f"{total} commits since **{base}**: {features} feature/addition commits, "
              f"{fixes} fixes, and {total - features - fixes} other changes "
              "(classified from commit titles).", "",
-             f"[Full comparison]({url})", "", "## Commits", ""]
+             f"[Full comparison]({url})", ""]
+    highlights = []
+    for pattern in (r"(?:feat(?:\([^)]*\))?!?:|add\b|implement\b)",
+                    r"(?:fix(?:\([^)]*\))?!?:|fix\b|repair\b|resolve\b)"):
+        # Two recent titles per category keep the summary grounded and brief.
+        highlights.extend([subject for _, subject in reversed(commits)
+                           if re.match(pattern, subject, re.I)][:2])
+    if highlights:
+        lines.extend(["**Highlights from commit titles**", ""])
+        for subject in highlights[:4]:
+            literal = ''.join('\\' + char if char in '\\`*_{}[]()<>#' else char for char in subject)
+            lines.append(f"- {literal}")
+        lines.append("")
+    lines.extend(["## Commits", ""])
     # Newest commits first, so announcements lead with the latest changes.
     for index, (commit_sha, subject) in enumerate(reversed(commits)):
         # Keep arbitrary commit titles literal, with no injected HTML/Markdown.

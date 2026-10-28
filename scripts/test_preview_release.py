@@ -200,6 +200,9 @@ class PreviewChangeNotesTests(unittest.TestCase):
                                         self.commit("d", "Document migration")]}])
         self.assertIn("v0.99.1..." + SHA, endpoint)
         self.assertIn("3 commits since **v0.99.1**: 1 feature/addition commits, 1 fixes", notes)
+        self.assertIn("**Highlights from commit titles**", notes)
+        self.assertIn("- feat: Add cloud handoff", notes)
+        self.assertIn("- Fix readiness race", notes)
         self.assertIn("Add cloud handoff", notes)
         self.assertIn("Fix readiness race", notes)
 
