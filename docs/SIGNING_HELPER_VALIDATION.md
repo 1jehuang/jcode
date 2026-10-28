@@ -49,6 +49,8 @@ strict verification uses inline requirements with leading `=` for the Apple
 Developer ID chain, `com.jcode.cli` identifier, and exact Team ID. The signed
 binary must execute the expected string. The unsigned hash must remain unchanged,
 and retrying into the existing destination must fail without changing it.
+A separate real `--execute` invocation with an intentionally wrong SHA256 must
+fail without creating its requested output or changing the unsigned fixture.
 
 Only `signing-helper-validation/receipt.json` is uploaded. This public,
 allowlisted receipt binds repository, source SHA/ref, run ID/attempt, workflow,

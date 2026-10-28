@@ -95,6 +95,15 @@ PY
 )
 # Never export credentials to the helper process. Its native tools use a minimal env too.
 unset APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
+# A wrong trusted digest must refuse before invoking a signer or creating output.
+if python3 "$helper" --input "$fixture/unsigned" --output "$fixture/wrong-hash" \
+    --sha256 0000000000000000000000000000000000000000000000000000000000000000 \
+    --target aarch64-apple-darwin --identity "$certificate_sha1" --execute \
+    > "$work/hash-refusal.txt" 2>&1; then
+    echo 'Helper accepted a mismatched input hash' >&2; exit 1
+fi
+[[ ! -e "$fixture/wrong-hash" && ! -L "$fixture/wrong-hash" ]]
+[[ "$(hash "$fixture/unsigned")" == "$TRUSTED_SHA256" ]]
 args=(--input "$fixture/unsigned" --output "$fixture/signed" --sha256 "$TRUSTED_SHA256"
       --target aarch64-apple-darwin --identity "$certificate_sha1")
 python3 "$helper" "${args[@]}" > "$work/plan.json"
@@ -132,7 +141,7 @@ receipt = {
     'helper_revision': sys.argv[2], 'unsigned_sha256': os.environ['TRUSTED_SHA256'],
     'signed_sha256': sys.argv[3], 'team_id': sys.argv[4],
     'target': 'aarch64-apple-darwin', 'identifier': 'com.jcode.cli',
-    'checks': ['plan-no-output', 'real-helper-execute', 'apple-chain-identifier-team',
+    'checks': ['wrong-hash-no-output', 'plan-no-output', 'real-helper-execute', 'apple-chain-identifier-team',
                'signed-native-execution', 'unsigned-unchanged', 'existing-destination-preserved'],
     'notarized': False,
 }

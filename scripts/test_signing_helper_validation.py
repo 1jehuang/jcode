@@ -85,6 +85,7 @@ class ValidationFixtures(unittest.TestCase):
             self.assertEqual(receipt['run_attempt'], '2')
             self.assertEqual(receipt['unsigned_sha256'], 'b' * 64)
             self.assertFalse(receipt['notarized'])
+            self.assertIn('wrong-hash-no-output', receipt['checks'])
             execution.write_text('{"mode":"plan-only"}')
             self.assertNotEqual(self.run_python(5, tmp, 'c' * 40, 'd' * 64,
                                                'ABCDEFGHIJ', execution, env=env).returncode, 0)
@@ -110,6 +111,8 @@ class ValidationFixtures(unittest.TestCase):
         self.assertIn('path: signing-helper-validation/receipt.json', workflow)
         self.assertIn('-R "=$requirement"', TEXT)
         self.assertLess(TEXT.index('keychains.pending'), TEXT.index('security create-keychain'))
+        self.assertLess(TEXT.index('--output "$fixture/wrong-hash"'), TEXT.index('args=(--input'))
+        self.assertIn('[[ ! -e "$fixture/wrong-hash" && ! -L "$fixture/wrong-hash" ]]', TEXT)
 
 
 if __name__ == '__main__':
