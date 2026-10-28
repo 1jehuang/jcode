@@ -943,15 +943,13 @@ pub(crate) fn push_stage_lines(
             }
             if let Some(live) =
                 lane_live_agent(&items, agents).and_then(|agent| agent.live_status.as_ref())
+                && live.phase != "streaming"
+                && let Some(tps) = live.output_tps_milli
             {
-                if live.phase != "streaming" {
-                    if let Some(tps) = live.output_tps_milli {
-                        status.push(Span::styled(
-                            format!(" · {:.1} tps", tps as f64 / 1000.0),
-                            Style::default().fg(todo_meta_color()),
-                        ));
-                    }
-                }
+                status.push(Span::styled(
+                    format!(" · {:.1} tps", tps as f64 / 1000.0),
+                    Style::default().fg(todo_meta_color()),
+                ));
             }
             // Live activity owns the remaining width instead of repeating task titles.
             let status = super::truncate_line_with_ellipsis_to_width(&Line::from(status), room);
