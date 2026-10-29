@@ -25,6 +25,24 @@ const RESPONSES_MODELS: &[&str] = &[
     "muse-spark-1.2-contributor",
 ];
 
+/// Wire tool name mapped from Jcode tools for Meta/Muse subscription attestation.
+pub(crate) fn to_wire_tool_name(name: &str) -> &str {
+    match name {
+        "bash" => "execute_command",
+        "apply_patch" => "multi_edit",
+        other => other,
+    }
+}
+
+/// Jcode internal tool name mapped back from wire tool names emitted by Meta/Muse models.
+pub(crate) fn from_wire_tool_name(name: &str) -> &str {
+    match name {
+        "execute_command" | "exec_command" | "shellexec_command" => "bash",
+        "multi_edit" | "MultiEdit" => "apply_patch",
+        other => other,
+    }
+}
+
 pub(crate) fn model_uses_responses_api(
     api_base: &str,
     profile_id: Option<&str>,
@@ -78,7 +96,7 @@ pub(crate) fn build_request(
                 .map(|tool| {
                     serde_json::json!({
                         "type": "function",
-                        "name": tool.name,
+                        "name": to_wire_tool_name(&tool.name),
                         "description": tool.description,
                         "parameters": sanitize_schema(&tool.input_schema),
                         "strict": false,
@@ -160,7 +178,7 @@ fn build_input(messages: &[Message]) -> Vec<Value> {
                             input.push(serde_json::json!({
                                 "type": "function_call",
                                 "call_id": sanitize_tool_id(id),
-                                "name": name,
+                                "name": to_wire_tool_name(name),
                                 "arguments": arguments,
                             }));
                         }
@@ -361,13 +379,14 @@ impl ResponsesStream {
         if state.name.is_empty() {
             return;
         }
+        let internal_name = from_wire_tool_name(&state.name).to_string();
         self.pending.push(StreamEvent::ToolUseStart {
             id: sanitize_tool_id(if state.call_id.is_empty() {
                 fallback_id
             } else {
                 &state.call_id
             }),
-            name: state.name,
+            name: internal_name,
         });
         self.pending
             .push(StreamEvent::ToolInputDelta(if state.arguments.is_empty() {
@@ -644,6 +663,60 @@ mod tests {
             "Use only Jcode-approved tools in /work/project"
         );
         assert_eq!(request["model"], "muse-wonder-1.0");
+    }
+
+    #[test]
+    fn native_muse_tool_names_are_bidirectionally_translated() {
+        assert_eq!(to_wire_tool_name("bash"), "execute_command");
+        assert_eq!(to_wire_tool_name("apply_patch"), "multi_edit");
+        assert_eq!(to_wire_tool_name("read"), "read");
+        assert_eq!(to_wire_tool_name("edit"), "edit");
+        assert_eq!(to_wire_tool_name("write"), "write");
+
+        assert_eq!(from_wire_tool_name("execute_command"), "bash");
+        assert_eq!(from_wire_tool_name("exec_command"), "bash");
+        assert_eq!(from_wire_tool_name("shellexec_command"), "bash");
+        assert_eq!(from_wire_tool_name("multi_edit"), "apply_patch");
+        assert_eq!(from_wire_tool_name("MultiEdit"), "apply_patch");
+        assert_eq!(from_wire_tool_name("read"), "read");
+
+        let bash_tool = ToolDefinition::new(
+            "bash",
+            "Run shell command",
+            serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
+        );
+        let mut assistant = Message::assistant_text("");
+        assistant.content = vec![ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "echo hi"}),
+            thought_signature: None,
+        }];
+        let request = build_request(
+            &[assistant],
+            &[bash_tool],
+            "",
+            "muse-spark-1.3",
+            None,
+            None,
+            Value::clone,
+        );
+        assert_eq!(request["tools"][0]["name"], "execute_command");
+        assert_eq!(request["input"][0]["name"], "execute_command");
+
+        // Verify incoming stream translation
+        let mut stream = ResponsesStream::new(futures::stream::empty());
+        stream.parse_event(
+            r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","call_id":"call_1","name":"execute_command","arguments":"{\"command\":\"ls\"}"}"#,
+        );
+        let event = stream.next_event().unwrap();
+        match event {
+            StreamEvent::ToolUseStart { id, name } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "bash");
+            }
+            other => panic!("expected ToolUseStart with bash, got {other:?}"),
+        }
     }
 
     #[test]

@@ -75,3 +75,24 @@ pub(crate) fn apply_opencode_session_header(
 }
 
 pub(crate) const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
+
+/// User-Agent matching the official Muse launcher / CLI release.
+pub(crate) const MUSE_CODE_USER_AGENT: &str = "muse-code/1.4.14-R7309.1";
+
+pub(crate) fn is_muse_api_base(api_base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return false;
+    };
+    matches!(url.host_str(), Some("api.meta.ai"))
+}
+
+pub(crate) fn apply_muse_code_headers(
+    req: reqwest::RequestBuilder,
+    api_base: &str,
+) -> reqwest::RequestBuilder {
+    if is_muse_api_base(api_base) {
+        req.header("User-Agent", MUSE_CODE_USER_AGENT)
+    } else {
+        req
+    }
+}
