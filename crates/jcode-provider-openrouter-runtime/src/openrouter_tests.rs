@@ -296,7 +296,9 @@ fn a6api_astra_models_accept_image_input_for_laundering() {
         provider.supports_image_input(),
         "a6api + astra must accept image_url so the laundered pages ride the vision path"
     );
-    provider.set_model("claude-sonnet-5-5").expect("switch model");
+    provider
+        .set_model("claude-sonnet-5-5")
+        .expect("switch model");
     // On direct compatible profiles (no provider-features flag), `supports_image_input`
     // returns `true` for any model without an explicit `input: [image]`/fallback denial,
     // so the a6api+non-astra check correctly stays `true` via the final fallback — the
@@ -1673,7 +1675,12 @@ fn a6api_named_profile_applies_model_specific_efforts_across_model_switches() {
             jcode_base::config::NamedProviderModelConfig {
                 id: "grok-4.7".into(),
                 reasoning: Some(true),
-                reasoning_efforts: vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+                reasoning_efforts: vec![
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                ],
                 ..Default::default()
             },
             jcode_base::config::NamedProviderModelConfig {
@@ -3874,6 +3881,23 @@ fn named_openai_compatible_provider_keeps_stable_name_and_profile_display_name()
     // User-facing identity: the profile the user configured.
     assert_eq!(provider.runtime_display_name(), "example-compat");
     assert_eq!(Provider::display_name(&provider), "example-compat");
+}
+
+#[test]
+fn vsllm_uses_conservative_context_when_catalog_omits_limits() {
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://vsllm.cc/v1".to_string(),
+        api_key_env: Some("VSLLM_API_KEY".to_string()),
+        model_catalog: true,
+        default_model: Some("gpt-6.1-sol".to_string()),
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("vsllm-api", &profile)
+        .expect("VSLLM profile should initialize");
+    provider
+        .set_model("gpt-6.1-sol")
+        .expect("VSLLM accepts catalog model ids");
+    assert_eq!(provider.context_window(), 32_768);
 }
 
 #[path = "openrouter_wire_tests.rs"]
