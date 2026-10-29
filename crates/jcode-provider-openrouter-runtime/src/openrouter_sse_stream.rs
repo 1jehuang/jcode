@@ -3,6 +3,55 @@ use futures::Stream;
 use jcode_provider_openrouter::stream::OpenRouterStream;
 use std::pin::Pin;
 
+// VSLLM can accept a request while its selected upstream channel remains
+// silent. Avoid multiplying a five-minute idle budget by eight attempts.
+fn vsllm_endpoint(api_base: &str) -> bool {
+    reqwest::Url::parse(api_base)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "vsllm.cc" || host == "www.vsllm.cc")
+}
+
+fn endpoint_idle_timeout(api_base: &str, configured: std::time::Duration) -> std::time::Duration {
+    if vsllm_endpoint(api_base) {
+        configured.min(std::time::Duration::from_secs(60))
+    } else {
+        configured
+    }
+}
+
+fn endpoint_attempt_limit(api_base: &str, configured: u32) -> u32 {
+    if vsllm_endpoint(api_base) {
+        configured.clamp(1, 2)
+    } else {
+        configured.max(1)
+    }
+}
+
+#[cfg(test)]
+mod vsllm_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn stalled_vsllm_channels_have_bounded_waits_for_named_and_builtin_profiles() {
+        let configured = std::time::Duration::from_secs(300);
+        assert_eq!(
+            endpoint_idle_timeout("https://vsllm.cc/v1", configured).as_secs(),
+            60
+        );
+        assert_eq!(endpoint_attempt_limit("https://vsllm.cc/v1", 8), 2);
+        assert_eq!(
+            endpoint_idle_timeout("https://vsllm.cc/v1", std::time::Duration::from_secs(25))
+                .as_secs(),
+            25
+        );
+        for url in ["https://other.test/v1", "https://vsllm.cc.other.test/v1"] {
+            assert_eq!(endpoint_idle_timeout(url, configured), configured);
+            assert_eq!(endpoint_attempt_limit(url, 8), 8);
+        }
+    }
+}
+
 fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static str {
     let lower = api_base.to_ascii_lowercase();
     if lower.contains("localhost:11434") || lower.contains("127.0.0.1:11434") {
@@ -88,7 +137,7 @@ pub(super) async fn run_stream_with_retries(
     let mut last_error = None;
     let mut next_retry_delay = None;
     let config = jcode_base::config::config();
-    let max_retries = config.provider.max_retries.max(1);
+    let max_retries = endpoint_attempt_limit(&api_base, config.provider.max_retries);
     let retry_backoff_cap =
         std::time::Duration::from_secs(config.provider.retry_backoff_cap_secs.max(1));
 
@@ -232,7 +281,8 @@ async fn stream_response(
         }))
         .await;
     let connect_start = std::time::Instant::now();
-    let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
+    let stream_idle_timeout =
+        endpoint_idle_timeout(&api_base, jcode_base::provider::stream_idle_timeout());
 
     let route = if azure_responses || responses_api {
         "responses"
