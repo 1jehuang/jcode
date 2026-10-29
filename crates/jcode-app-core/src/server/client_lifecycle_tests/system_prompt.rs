@@ -357,3 +357,107 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn target_attach_does_not_persist_creation_prompt_to_provisional_session() {
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let fixture = SystemPromptSocketFixture::new();
+    let (owner_task, owner_stream) = fixture.connect();
+    let (mut owner_reader, mut owner_writer) = {
+        let (reader, writer) = owner_stream.into_split();
+        (BufReader::new(reader), writer)
+    };
+    async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
+        writer
+            .write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    async fn until(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        predicate: impl Fn(&ServerEvent) -> bool,
+    ) -> ServerEvent {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                if predicate(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("socket event timeout")
+    }
+    use serde_json::json;
+
+    send(&mut owner_writer, json!({"type":"subscribe","id":701,"working_dir":home._home.path(),"system_prompt":"TARGET_PROMPT_701"})).await;
+    until(&mut owner_reader, |e| {
+        matches!(e, ServerEvent::Done { id: 701 })
+    })
+    .await;
+    send(
+        &mut owner_writer,
+        serde_json::to_value(Request::GetState { id: 702 }).unwrap(),
+    )
+    .await;
+    let ServerEvent::State {
+        session_id: target_id,
+        ..
+    } = until(&mut owner_reader, |e| {
+        matches!(e, ServerEvent::State { id: 702, .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+
+    let (attacher_task, attacher_stream) = fixture.connect();
+    let (mut attacher_reader, mut attacher_writer) = {
+        let (reader, writer) = attacher_stream.into_split();
+        (BufReader::new(reader), writer)
+    };
+    let provisional_id = loop {
+        let sessions = fixture.sessions.read().await;
+        if let Some(id) = sessions.keys().find(|id| *id != &target_id).cloned() {
+            break id;
+        }
+        drop(sessions);
+        tokio::task::yield_now().await;
+    };
+    send(&mut attacher_writer, json!({"type":"subscribe","id":703,"working_dir":home._home.path(),"target_session_id":target_id,"system_prompt":"FOREIGN_PROMPT_703"})).await;
+    until(&mut attacher_reader, |e| {
+        matches!(e, ServerEvent::Done { id: 703 })
+    })
+    .await;
+    assert_eq!(
+        crate::session::Session::load(&provisional_id)
+            .unwrap()
+            .system_prompt,
+        None
+    );
+    assert_eq!(
+        crate::session::Session::load(&target_id)
+            .unwrap()
+            .system_prompt
+            .as_deref(),
+        Some("TARGET_PROMPT_701")
+    );
+
+    drop(attacher_writer);
+    drop(attacher_reader);
+    tokio::time::timeout(Duration::from_secs(5), attacher_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drop(owner_writer);
+    drop(owner_reader);
+    tokio::time::timeout(Duration::from_secs(5), owner_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
