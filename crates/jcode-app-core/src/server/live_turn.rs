@@ -663,6 +663,8 @@ mod identity_scope_tests {
     }
 
     #[tokio::test]
+    // This synchronous guard serializes process-wide environment changes across tests.
+    #[allow(clippy::await_holding_lock)]
     async fn concurrent_live_turns_keep_target_identity_and_reject_missing_or_ambiguous_env() {
         let _env_lock = crate::storage::lock_test_env();
         let home = tempfile::tempdir().expect("isolated Jcode home");
