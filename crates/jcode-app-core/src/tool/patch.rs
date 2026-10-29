@@ -278,7 +278,18 @@ fn parse_hunk(lines: &[&str], i: &mut usize) -> Result<Hunk> {
 /// Strict coordinates, not fuzzy matching: an offset accepted by git apply
 /// is not permission to splice some other text in the fallback applier.
 fn render_patch(patch: &FilePatch, old: &str) -> Result<String> {
-    let mut lines: Vec<String> = old.split_terminator('\n').map(str::to_owned).collect();
+    // Hunk lines are split with `str::lines`, which drops a trailing `\r`.
+    // Compare a CRLF file without its `\r` too, and write CRLF back out.
+    let crlf = old
+        .split_once('\n')
+        .is_some_and(|(first, _)| first.ends_with('\r'));
+    let mut lines: Vec<String> = old
+        .split_terminator('\n')
+        .map(|line| match line.strip_suffix('\r') {
+            Some(stripped) if crlf => stripped.to_owned(),
+            _ => line.to_owned(),
+        })
+        .collect();
     let mut previous_end = 0;
     let mut delta: i128 = 0;
     let mut trailing_newline = old.ends_with('\n');
@@ -356,9 +367,10 @@ fn render_patch(patch: &FilePatch, old: &str) -> Result<String> {
             hunk.new_lines.iter().cloned(),
         );
     }
-    let mut content = lines.join("\n");
+    let eol = if crlf { "\r\n" } else { "\n" };
+    let mut content = lines.join(eol);
     if trailing_newline && !lines.is_empty() {
-        content.push('\n');
+        content.push_str(eol);
     }
     Ok(content)
 }
@@ -521,6 +533,38 @@ mod tests {
         let error = render(diff, "concurrent edit\nanchor\nold\n").unwrap_err();
         assert!(error.to_string().contains("stale coordinates"), "{error}");
         assert!(render(diff, "entirely\nunrelated\n").is_err());
+    }
+
+    #[test]
+    fn unified_hunks_apply_to_crlf_files_and_keep_crlf() {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n anchor\n-old\n+new\n+added\n";
+        assert_eq!(
+            render(diff, "anchor\r\nold\r\n").unwrap(),
+            "anchor\r\nnew\r\nadded\r\n"
+        );
+        // A diff taken from a CRLF file carries the `\r` on its own lines.
+        let crlf_diff = diff.replace('\n', "\r\n");
+        assert_eq!(
+            render(&crlf_diff, "anchor\r\nold\r\n").unwrap(),
+            "anchor\r\nnew\r\nadded\r\n"
+        );
+        let eof = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";
+        assert_eq!(render(eof, "a\r\nold").unwrap(), "a\r\nnew");
+        let error = render(diff, "anchor\r\nother\r\n").unwrap_err();
+        assert!(error.to_string().contains("stale coordinates"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn unified_patch_tool_edits_crlf_file_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, "anchor\r\nold\r\n").unwrap();
+        let diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n anchor\n-old\n+new\n";
+        PatchTool::new()
+            .execute(json!({"patch_text": diff}), context(dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "anchor\r\nnew\r\n");
     }
 
     #[test]
