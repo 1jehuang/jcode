@@ -352,6 +352,9 @@ pub fn cursor_auth_file_path() -> Result<PathBuf> {
 
 /// Load direct Cursor tokens from env or Cursor's auth.json.
 pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
+    // ponytail: foreign credential — Cursor's own access/refresh tokens, read
+    // from the user's env or Cursor's auth.json; jcode never writes them, so
+    // raw env (live) is the only plausible source (#1389).
     if let Ok(access_token) = std::env::var("CURSOR_ACCESS_TOKEN") {
         let access_token = access_token.trim().to_string();
         if !access_token.is_empty() {
