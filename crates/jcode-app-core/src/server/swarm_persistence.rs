@@ -100,8 +100,9 @@ pub(super) struct LoadedSwarmRuntimeState {
 /// No headless process survives a restart (issue #1651).
 pub(super) const IDLE_WORKER_NOT_RESTORED_NOTE: &str =
     "idle worker not restored after server restart";
-/// Suffix appended once the worker's owner has been told it was stopped, so
-/// the notice is delivered exactly once even across further restarts.
+/// Suffix appended only after the owner's model-facing interrupt was accepted.
+/// Persisting it suppresses reconnect/restart duplicates. Delivery precedes
+/// acknowledgement, so a crash in between may repeat a notice rather than lose it.
 pub(super) const OWNER_NOTIFIED_NOTE: &str = "owner notified";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -491,7 +492,9 @@ fn hydrate_member_todos(member: &mut SwarmMember) {
     let completed = todos.iter().filter(|t| t.status == "completed").count() as u32;
     member.todo_progress = Some((completed, todos.len() as u32));
     member.todo_items = super::background_tasks::compact_todo_items(&todos);
-    member.runtime.todo_statuses = todos.iter().map(|todo| todo.status.clone()).collect();
+    let (statuses, blocked_reason) = super::background_tasks::todo_runtime_projection(&todos);
+    member.runtime.todo_statuses = statuses;
+    member.runtime.todo_blocked_reason = blocked_reason;
 }
 
 pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {

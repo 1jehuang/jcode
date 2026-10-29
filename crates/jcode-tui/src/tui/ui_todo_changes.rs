@@ -14,6 +14,7 @@
 //!   first plan, or more than one status change) show a header plus one line
 //!   per changed item.
 
+use super::messages::todo_complete_blocker_detail;
 use super::*;
 use crate::message::ToolCall;
 use crate::todo::TodoItem;
@@ -39,7 +40,13 @@ pub(super) fn todos_from_tool_input(tc: &ToolCall) -> Option<Vec<TodoItem>> {
             items: Vec<TodoItem>,
         }
 
-        let phases = serde_json::from_value::<Vec<Phase>>(phases.clone()).ok()?;
+        let phases = match serde_json::from_value::<Vec<Phase>>(phases.clone()) {
+            Ok(phases) => phases,
+            Err(error) => {
+                crate::logging::debug(&format!("Cannot render todo phase changes: {error}"));
+                return None;
+            }
+        };
         let mut todos = Vec::new();
         for phase in phases {
             if phase.phase == 0 || phase.lanes.is_empty() {
@@ -85,6 +92,7 @@ pub(super) fn previous_todos(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TodoChangeKind {
+    CompletelyBlocked,
     Added,
     Removed,
     StatusChanged { to: String, blocked: bool },
@@ -122,7 +130,8 @@ impl TodoDiff {
 }
 
 fn blocked_of(todo: &TodoItem) -> bool {
-    !todo.blocked_by.is_empty()
+    crate::todo::is_incomplete_todo(todo)
+        && (!todo.blocked_by.is_empty() || crate::todo::todo_has_external_blocker(todo))
 }
 
 fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
@@ -137,6 +146,34 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
     let find_prev = |id: &str| prev_items.iter().find(|p| p.id == id);
 
     for item in next {
+        let previous = find_prev(&item.id);
+        let blocker_changed = previous
+            .map(|old| {
+                old.completely_blocked
+                    .as_ref()
+                    .map(|blocker| &blocker.reason)
+                    != item
+                        .completely_blocked
+                        .as_ref()
+                        .map(|blocker| &blocker.reason)
+            })
+            .unwrap_or(true);
+        if crate::todo::todo_completely_blocked(item)
+            && (blocker_changed
+                || previous
+                    .is_some_and(|old| old.status != item.status || old.content != item.content))
+        {
+            if previous.is_none() {
+                diff.added += 1;
+            } else {
+                diff.edited += 1;
+            }
+            diff.changes.push(TodoChange {
+                kind: TodoChangeKind::CompletelyBlocked,
+                content: format!("{} · {}", todo_complete_blocker_detail(item), item.content),
+            });
+            continue;
+        }
         match find_prev(&item.id) {
             None => {
                 diff.added += 1;
@@ -146,7 +183,7 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
                 });
             }
             Some(prev_item) => {
-                if prev_item.status != item.status {
+                if prev_item.status != item.status || blocker_changed {
                     diff.status_changes += 1;
                     match item.status.as_str() {
                         "completed" => diff.to_completed += 1,
@@ -189,8 +226,8 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
 }
 
 fn status_icon(status: &str, blocked: bool) -> (&'static str, Color) {
-    if blocked && status != "completed" {
-        return ("⊳", rgb(180, 140, 100));
+    if blocked && !matches!(status, "completed" | "cancelled") {
+        return ("⊘", rgb(180, 140, 100));
     }
     match status {
         "completed" => ("✓", rgb(100, 180, 100)),
@@ -203,6 +240,7 @@ fn status_icon(status: &str, blocked: bool) -> (&'static str, Color) {
 /// Leading marker (glyph + color) and the text color used for a change line.
 fn change_marker(kind: &TodoChangeKind) -> (&'static str, Color, Color) {
     match kind {
+        TodoChangeKind::CompletelyBlocked => ("✋", rgb(225, 165, 90), rgb(225, 165, 90)),
         TodoChangeKind::Added => ("+", rgb(100, 180, 100), rgb(190, 200, 195)),
         TodoChangeKind::Removed => ("-", rgb(200, 110, 100), rgb(120, 120, 125)),
         TodoChangeKind::StatusChanged { to, blocked } => {
@@ -335,6 +373,45 @@ pub(super) fn render_todo_change_lines(
 mod tests {
     use super::*;
 
+    #[test]
+    fn complete_blocker_changes_are_visible_and_width_safe() {
+        let before = todo("1", "Connect", "pending");
+        let mut after = before.clone();
+        after.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            reason: "Only the owner can approve".into(),
+        });
+        let lines =
+            render_todo_change_lines(Some(std::slice::from_ref(&before)), &[after.clone()], 200);
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("✋ Completely blocked: Only the owner can approve"));
+        assert!(text.contains("Only the owner can approve"));
+        for width in 0..100 {
+            assert!(
+                render_todo_change_lines(
+                    Some(std::slice::from_ref(&before)),
+                    &[after.clone()],
+                    width
+                )
+                .iter()
+                .all(|line| line.width() <= usize::from(width))
+            );
+        }
+        assert!(render_todo_change_lines(Some(&[after.clone()]), &[after.clone()], 200).is_empty());
+        let cleared = render_todo_change_lines(Some(&[after.clone()]), &[before], 200);
+        assert!(!cleared.is_empty());
+        assert!(!cleared.iter().any(|line| line.to_string().contains('✋')));
+        after.status = "completed".into();
+        assert!(
+            !render_todo_change_lines(None, &[after], 200)
+                .iter()
+                .any(|line| line.to_string().contains('✋'))
+        );
+    }
+
     fn parse(input: serde_json::Value) -> Option<Vec<TodoItem>> {
         todos_from_tool_input(&ToolCall {
             input,
@@ -424,6 +501,7 @@ mod tests {
             completion_confidence: None,
             confidence_history: Vec::new(),
             external_blocker: None,
+            completely_blocked: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,

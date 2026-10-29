@@ -154,6 +154,10 @@ pub fn running_in_test_harness() -> bool {
         if env_truthy("JCODE_ALLOW_BROWSER_IN_TESTS") {
             return false;
         }
+        // Hosted runners can relocate test binaries outside Cargo's deps directory.
+        if cfg!(test) {
+            return true;
+        }
         std::env::current_exe()
             .ok()
             .map(|exe| is_test_harness_path(&exe.to_string_lossy()))
@@ -161,25 +165,8 @@ pub fn running_in_test_harness() -> bool {
     })
 }
 
-fn is_test_harness_path(path: &str) -> bool {
-    let path = path.replace('\\', "/");
-    // Preserve detection for the default target tree, including custom runners.
-    if path.contains("/target/") && path.contains("/deps/") {
-        return true;
-    }
-    let mut components = path.rsplit('/');
-    let Some(filename) = components.next() else {
-        return false;
-    };
-    if components.next() != Some("deps") {
-        return false;
-    }
-    let stem = filename.strip_suffix(".exe").unwrap_or(filename);
-    let Some((name, hash)) = stem.rsplit_once('-') else {
-        return false;
-    };
-    !name.is_empty() && hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
+mod test_harness;
+use test_harness::is_test_harness_path;
 
 fn env_truthy(key: &str) -> bool {
     std::env::var(key)

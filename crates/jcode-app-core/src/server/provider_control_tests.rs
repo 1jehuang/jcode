@@ -1297,56 +1297,5 @@ async fn notify_auth_changed_switches_only_current_session_model() {
     );
 }
 
-#[tokio::test]
-async fn refresh_models_emits_available_models_updated_after_prefetch() {
-    crate::bus::reset_models_updated_publish_state_for_tests();
-    let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
-    let registry = Registry::empty();
-    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
-
-    handle_refresh_models(7, &provider, &agent, &client_event_tx).await;
-
-    let mut saw_done = false;
-    let mut saw_models = None;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    while tokio::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let event = tokio::time::timeout(remaining, client_event_rx.recv())
-            .await
-            .expect("receive server event before timeout");
-        match event.expect("channel open") {
-            ServerEvent::Done { id } => {
-                assert_eq!(id, 7);
-                saw_done = true;
-            }
-            ServerEvent::AvailableModelsUpdated {
-                provider_name,
-                provider_model,
-                available_models,
-                available_model_routes,
-            } => {
-                saw_models = Some((
-                    provider_name,
-                    provider_model,
-                    available_models,
-                    available_model_routes,
-                ));
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(saw_done, "expected immediate Done ack");
-    let (provider_name, provider_model, available_models, available_model_routes) =
-        saw_models.expect("expected AvailableModelsUpdated event");
-    assert_eq!(provider_name.as_deref(), Some("mock-auth"));
-    assert_eq!(provider_model.as_deref(), Some("logged-out-model"));
-    assert_eq!(available_models, vec!["logged-out-model".to_string()]);
-    assert!(available_model_routes.iter().any(|route| {
-        route.model == "logged-out-model"
-            && route.provider == "MockAuth"
-            && route.api_method == "mock-auth"
-    }));
-}
+#[path = "provider_control_tests/model_catalog.rs"]
+mod model_catalog;

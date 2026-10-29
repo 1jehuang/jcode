@@ -1,8 +1,8 @@
 //! On-disk layout of a session's todo state, shared by the runtime (which
 //! writes it) and the harness bridge (which serves it to SDK clients).
 //!
-//! Everything lives under `<jcode home>/todos/`. Reads are tolerant: a missing
-//! or malformed file yields the empty value, matching the runtime's loaders.
+//! Everything lives under `<jcode home>/todos/`. Missing files mean absent
+//! state. Tolerant readers report damaged/unreadable state without logging its contents.
 
 use crate::followup::{TodoEffects, TodoSnapshot};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -67,10 +67,34 @@ impl TodoReviewState {
 }
 
 fn read_or_default<T: DeserializeOwned + Default>(path: &Path) -> T {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    match read_optional(path) {
+        Ok(Some(value)) => value,
+        Ok(None) => T::default(),
+        Err(_) => {
+            warn_state_read_failure();
+            T::default()
+        }
+    }
+}
+
+fn read_optional<T: DeserializeOwned>(path: &Path) -> std::io::Result<Option<T>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(std::io::Error::other)
+}
+
+fn warn_state_read_failure() {
+    // Snapshot APIs are deliberately tolerant. Report real failures once per
+    // process, without paths, todo content, or serde error excerpts.
+    static WARNING: std::sync::Once = std::sync::Once::new();
+    WARNING.call_once(|| {
+        jcode_logging::warn("todo state could not be read or decoded; using an empty snapshot")
+    });
 }
 
 /// Prepare a session's todos for saving. Linked workers always retain their
@@ -113,9 +137,13 @@ fn load_snapshot_with_background_dir(
     background_dir: &Path,
 ) -> TodoSnapshot {
     let path = |file| todo_file_path(home, session_id, file);
-    let review: Option<TodoReviewState> = std::fs::read_to_string(path(TodoFile::ReviewState))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok());
+    let review: Option<TodoReviewState> = match read_optional(&path(TodoFile::ReviewState)) {
+        Ok(review) => review,
+        Err(_) => {
+            warn_state_read_failure();
+            None
+        }
+    };
     let todos: Vec<crate::TodoItem> = read_or_default(&path(TodoFile::Todos));
     let running_background_tasks = running_dependencies(&todos, session_id, background_dir);
     TodoSnapshot {
@@ -190,10 +218,7 @@ pub fn apply_effects(home: &Path, session_id: &str, effects: TodoEffects) -> std
     }
     if effects.mark_long_session_review_delivered {
         let path = todo_file_path(home, session_id, TodoFile::ReviewState);
-        if let Some(mut state) = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<TodoReviewState>(&text).ok())
-        {
+        if let Some(mut state) = read_optional::<TodoReviewState>(&path)? {
             state.review_delivered = true;
             let tmp = path.with_extension("json.tmp");
             std::fs::write(&tmp, serde_json::to_vec(&state)?)?;
@@ -207,6 +232,25 @@ pub fn apply_effects(home: &Path, session_id: &str, effects: TodoEffects) -> std
 mod tests {
     use super::*;
     use crate::{GateObservation, GateObservationKind, TodoItem};
+
+    #[test]
+    fn review_acknowledgement_propagates_corrupt_or_unreadable_state() {
+        let dir = std::env::temp_dir().join(format!("todo-review-errors-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("todos")).unwrap();
+        let path = todo_file_path(&dir, "owner", TodoFile::ReviewState);
+        let effects = || TodoEffects {
+            mark_long_session_review_delivered: true,
+            ..Default::default()
+        };
+        assert!(apply_effects(&dir, "owner", effects()).is_ok());
+        std::fs::write(&path, "invalid-review").unwrap();
+        assert!(apply_effects(&dir, "owner", effects()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid-review");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(apply_effects(&dir, "owner", effects()).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn worker_replacement_persists_coordinator_lane_and_phase_on_both_sides() {
@@ -255,6 +299,7 @@ mod tests {
             details: Some("worker-authored details".into()),
             group: Some("server output reports".into()),
             stage: Some(9),
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: vec!["worker-task".into()],
             ..Default::default()
@@ -315,6 +360,7 @@ mod tests {
         let todo = crate::TodoItem {
             id: "validate".into(),
             status: "pending".into(),
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: vec![
                 "running".into(),

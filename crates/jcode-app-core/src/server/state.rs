@@ -414,6 +414,7 @@ pub(super) async fn fanout_session_event(
     session_id: &str,
     event: ServerEvent,
 ) -> usize {
+    super::live_status::observe(session_id, &event);
     let targets = {
         let mut members = swarm_members.write().await;
         let Some(member) = members.get_mut(session_id) else {

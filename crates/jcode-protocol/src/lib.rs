@@ -659,9 +659,18 @@ pub struct SwarmMemberStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberRuntime {
-    /// Ephemeral foreground blocking operation, never a durable dependency.
+    /// Current turn's event-derived status. Absent for older producers and
+    /// sessions that have not emitted live telemetry. Never session totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_status: Option<SwarmLiveStatus>,
+    /// Foreground blocking operation or completely blocked todo pause. A display reason,
+    /// not an automatically waking durable dependency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_reason: Option<String>,
+    /// Complete blocker derived from the worker's own unfinished todos. Kept
+    /// separate so stale foreground waits can never masquerade as todo gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_blocked_reason: Option<String>,
     /// Monotonic seconds spent in the current blocking operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_age_secs: Option<u64>,
@@ -696,7 +705,9 @@ pub struct SwarmMemberRuntime {
 
 impl SwarmMemberRuntime {
     fn is_empty(&self) -> bool {
-        self.wait_reason.is_none()
+        self.live_status.is_none()
+            && self.wait_reason.is_none()
+            && self.todo_blocked_reason.is_none()
             && self.wait_age_secs.is_none()
             && self.todo_statuses.is_empty()
             && self.model.is_none()
@@ -709,6 +720,27 @@ impl SwarmMemberRuntime {
             && self.context_limit.is_none()
             && self.output_tokens.is_none()
     }
+}
+
+/// The same provider/tool event stream used by an opened worker, projected for
+/// lightweight observers. Unknown provider values stay absent, not inferred.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SwarmLiveStatus {
+    pub phase: String,
+    pub elapsed_ms: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    /// Tokens per second multiplied by 1000, measured over active streaming
+    /// time, excluding tools and connection establishment.
+    pub output_tps_milli: Option<u64>,
+    pub connection_type: Option<String>,
+    pub connection_phase: Option<String>,
+    pub status_detail: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_intent: Option<String>,
+    pub stop_reason: Option<String>,
+    pub stream_message_ended: bool,
 }
 
 /// One compact todo entry crossing the swarm status boundary. Only the

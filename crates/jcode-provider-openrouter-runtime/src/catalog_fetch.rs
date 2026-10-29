@@ -99,7 +99,12 @@ pub(super) async fn fetch_models_from_api(
         .text()
         .await
         .with_context(|| format!("Failed to read model catalog response body from {}", url))?;
-    let mut models = parse_openai_compatible_models_response(&raw_body).with_context(|| {
+    let parsed = if cache_namespace.as_deref() == Some("grok-build") {
+        models_catalog_parse::parse_grok_models_response(&raw_body)
+    } else {
+        parse_openai_compatible_models_response(&raw_body)
+    };
+    let mut models = parsed.with_context(|| {
             format!(
                 "Failed to parse OpenAI-compatible model catalog response\n  endpoint: {}\n  auth: {}\n  expected: JSON object with a `data` or `models` array, or a top-level array, with model objects containing at least `id` or `name`\n  response: {}",
                 url,

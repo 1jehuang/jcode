@@ -41,3 +41,35 @@ fn swarm_runtime_wait_metadata_is_optional_and_nonempty() {
         .is_empty()
     );
 }
+
+#[test]
+fn swarm_live_status_defaults_and_roundtrips() {
+    let legacy: super::SwarmMemberRuntime =
+        serde_json::from_str(r#"{"context_tokens":4200,"output_tokens":99}"#).unwrap();
+    assert!(legacy.live_status.is_none());
+    assert!(legacy.todo_blocked_reason.is_none());
+    let partial: super::SwarmLiveStatus =
+        serde_json::from_str(r#"{"phase":"streaming","future_field":true}"#).unwrap();
+    assert_eq!(partial.input_tokens, None);
+    assert_eq!(partial.connection_type, None);
+    let runtime = super::SwarmMemberRuntime {
+        todo_blocked_reason: Some("Required data is permanently unavailable".into()),
+        live_status: Some(super::SwarmLiveStatus {
+            phase: "streaming".into(),
+            input_tokens: Some(0),
+            output_tokens: Some(17),
+            output_tps_milli: Some(12500),
+            connection_type: Some("websocket".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!runtime.is_empty());
+    assert_eq!(
+        serde_json::from_value::<super::SwarmMemberRuntime>(
+            serde_json::to_value(&runtime).unwrap()
+        )
+        .unwrap(),
+        runtime
+    );
+}

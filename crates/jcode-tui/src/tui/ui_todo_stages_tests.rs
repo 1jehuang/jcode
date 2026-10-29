@@ -2,6 +2,463 @@ use super::*;
 use crate::todo::TodoItem;
 
 #[test]
+fn mixed_complete_blocker_lane_keeps_independent_peer_visible() {
+    let mut paused = assigned(todo("paused", "Approve", "in_progress", Some(1)), "fox");
+    paused.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        reason: "Owner only".into(),
+    });
+    let active = assigned(todo("active", "Test", "in_progress", Some(1)), "wolf");
+    let workers = [
+        agent("fox", "running", Some("Paused operation"), Some(1)),
+        agent("wolf", "running", Some("Run tests"), Some(2)),
+    ];
+    let mut lines = Vec::new();
+    push_lane_status_lines(&mut lines, &[&paused, &active], &workers, "", 160);
+    assert_eq!(lines.len(), 1);
+    let text = lines[0].to_string();
+    assert!(text.contains("working"), "{text}");
+    assert!(!text.contains("Paused operation") && !text.contains('🦊'));
+    assert!(text.contains(LIVE_DOT_SENTINEL));
+    for width in 0..80 {
+        let mut lines = Vec::new();
+        push_lane_status_lines(&mut lines, &[&paused, &active], &workers, "", width);
+        assert!(lines.iter().all(|line| line.width() <= width));
+    }
+}
+
+#[test]
+fn terminal_worker_reason_beats_stale_intent_with_or_without_telemetry() {
+    for status in ["failed", "stopped", "completed"] {
+        for telemetry in [false, true] {
+            let mut member: crate::protocol::SwarmMemberStatus = serde_json::from_value(serde_json::json!({
+                "session_id":"session_fox_1700000000", "friendly_name":"fox", "status":status,
+                "detail":"Actual terminal reason",
+                "todo_items":[{"content":"Stale task", "status":"in_progress", "tool_intents":[{"tool_name":"bash", "intent":"Stale running intent", "status":"running"}]}]
+            })).unwrap();
+            if telemetry {
+                member.runtime.live_status = Some(crate::protocol::SwarmLiveStatus {
+                    phase: "running_tool".into(),
+                    stop_reason: Some("Older stop reason".into()),
+                    ..Default::default()
+                });
+            }
+            let worker = TodoCardAgent::from_member(&member);
+            assert_eq!(worker.activity.as_deref(), Some("Actual terminal reason"));
+            let item = assigned(todo("1", "Task", "in_progress", Some(1)), "fox");
+            let mut lines = Vec::new();
+            push_lane_status_lines(&mut lines, &[&item], &[worker], "", 160);
+            let text = lines[0].to_string();
+            assert!(text.contains("Actual terminal reason"), "{text}");
+            assert!(!text.contains("Stale") && !text.contains(LIVE_DOT_SENTINEL));
+        }
+    }
+}
+
+#[test]
+fn lane_live_status_omits_transport_and_preserves_stop_precedence() {
+    let mut item = assigned(todo("1", "Verify result", "in_progress", Some(1)), "fox");
+    let mut worker = agent("fox", "running", Some("Verify result"), Some(1));
+    worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+        phase: "running_tool".into(),
+        elapsed_ms: 12_300,
+        input_tokens: Some(12_345),
+        output_tokens: Some(456),
+        connection_type: Some("https/sse".into()),
+        tool_name: Some("bash".into()),
+        tool_intent: Some("Run 界 tests".into()),
+        ..Default::default()
+    });
+    let mut compact = worker.live_status.clone().unwrap();
+    compact.connection_type = None;
+    let expected = super::super::super::input_ui::live_processing_status_line(
+        &compact,
+        Some(1.0),
+        LIVE_DOT_SENTINEL,
+    );
+    let mut rows = Vec::new();
+    push_lane_status_lines(&mut rows, &[&item], std::slice::from_ref(&worker), "", 160);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].to_string().contains(&expected.to_string()));
+    assert!(!rows[0].to_string().contains("https"));
+    assert!(!rows[0].to_string().contains(&worker.icon()));
+    assert!(
+        rows[0]
+            .spans
+            .iter()
+            .any(|span| span.content == LIVE_DOT_SENTINEL && span.style.fg == Some(ai_color()))
+    );
+    for width in 0..100 {
+        let mut rows = Vec::new();
+        push_lane_status_lines(
+            &mut rows,
+            &[&item],
+            std::slice::from_ref(&worker),
+            "",
+            width,
+        );
+        assert!(rows.iter().all(|row| row.width() <= width));
+    }
+    worker.wait_reason = Some("Waiting for hosted build".into());
+    let mut rows = Vec::new();
+    push_lane_status_lines(&mut rows, &[&item], std::slice::from_ref(&worker), "", 160);
+    assert!(rows[0].to_string().contains("Waiting for hosted build"));
+    assert!(!rows[0].to_string().contains(LIVE_DOT_SENTINEL));
+    item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        reason: "Owner only".into(),
+    });
+    rows.clear();
+    push_lane_status_lines(&mut rows, &[&item], &[worker], "", 160);
+    assert!(
+        rows.is_empty(),
+        "Complete blocker suppresses live telemetry"
+    );
+}
+
+#[test]
+fn pinned_worker_status_hides_duplicate_intent_but_keeps_connection_progress() {
+    let item = assigned(todo("1", "Verify result", "in_progress", Some(1)), "fox");
+    let mut worker = agent("fox", "running", Some("Verify result"), Some(1));
+    worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+        phase: "running_tool".into(),
+        tool_name: Some("bash".into()),
+        tool_intent: Some("Verify result".into()),
+        connection_type: Some("websocket".into()),
+        status_detail: Some("opening websocket".into()),
+        ..Default::default()
+    });
+    let mut rows = Vec::new();
+    push_lane_status_lines(&mut rows, &[&item], std::slice::from_ref(&worker), "", 160);
+    let text = rows[0].to_string();
+    assert!(text.contains("bash"), "{text}");
+    assert!(!text.contains("Verify result"), "{text}");
+    assert!(!text.contains("websocket"), "{text}");
+
+    let live = worker.live_status.as_mut().unwrap();
+    live.phase = "connecting".into();
+    live.connection_phase = Some("authenticating".into());
+    rows.clear();
+    push_lane_status_lines(&mut rows, &[&item], &[worker], "", 160);
+    assert!(rows[0].to_string().contains("refreshing auth"));
+}
+
+#[test]
+fn live_telemetry_uses_one_compact_lane_row_without_task_summaries() {
+    let mut item = laned(
+        "Measure and optimize stock tests",
+        "in_progress",
+        1,
+        "Rewrite slow tests",
+    );
+    item.assigned_to = Some("fox".into());
+    let mut worker = agent("fox", "running", None, Some(12));
+    worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+        phase: "running_tool".into(),
+        elapsed_ms: 481_000,
+        tool_name: Some("bash".into()),
+        tool_intent: Some("Run focused tests".into()),
+        input_tokens: Some(61_000),
+        output_tokens: Some(159),
+        output_tps_milli: Some(26_900),
+        connection_type: Some("websocket".into()),
+        ..Default::default()
+    });
+    let rows = render(&[item.clone()], std::slice::from_ref(&worker), 180);
+    assert_eq!(rows.len(), 2, "header plus one lane: {rows:?}");
+    let lane = &rows[1];
+    for label in [
+        "Rewrite slow tests",
+        LIVE_DOT_SENTINEL,
+        "bash",
+        "Run focused tests",
+        "8m",
+        "26.9 tps",
+        "↑61k",
+        "↓159",
+    ] {
+        assert!(lane.contains(label), "missing {label}: {rows:?}");
+    }
+    assert_eq!(lane.matches('🦊').count(), 1, "{lane}");
+    assert!(
+        lane.trim_start().starts_with('●'),
+        "static progress pip: {lane}"
+    );
+    assert_eq!(
+        lane.matches(LIVE_DOT_SENTINEL).count(),
+        1,
+        "one activity spinner: {lane}"
+    );
+    assert!(!lane.contains("websocket"));
+    assert!(lane.contains("  "), "fixed columns use padding: {lane}");
+    assert!(!lane.contains('│'));
+    assert!(!lane.contains("Measure and optimize stock tests"));
+    for width in 1..160 {
+        let rows = render(&[item.clone()], std::slice::from_ref(&worker), width);
+        assert_eq!(rows.len(), 2, "one lane at width {width}: {rows:?}");
+        assert_fits(&rows, width);
+    }
+}
+
+#[test]
+fn inline_columns_stay_fixed_across_activity_and_name_changes() {
+    let mut item = laned("Stable task title", "in_progress", 1, "Build");
+    item.assigned_to = Some("fox".into());
+    let mut worker = agent("fox", "running", None, Some(1));
+    for width in [80, 100, 120, 180, 240] {
+        let mut expected = None;
+        for (phase, intent, name, count) in [
+            ("thinking", "", "Build", 1),
+            ("running_tool", "Run tests", "Build", 3),
+            (
+                "running_tool",
+                "Inspect 界 artifact ",
+                "Very long worker lane name that must be truncated",
+                20,
+            ),
+            ("waiting", "Waiting for background task", "Build", 1),
+        ] {
+            item.group = Some(name.into());
+            worker.todo_statuses = vec!["in_progress".into(); count];
+            worker.wait_reason = (phase == "waiting").then(|| intent.into());
+            worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+                phase: phase.into(),
+                tool_name: Some("bash".into()),
+                tool_intent: Some(intent.repeat(10)),
+                input_tokens: Some(999_999),
+                elapsed_ms: 999_000,
+                ..Default::default()
+            });
+            let rows = render(&[item.clone()], std::slice::from_ref(&worker), width);
+            assert_fits(&rows, width);
+            let row = &rows[1];
+            assert!(!row.contains('│'), "{width}: {row}");
+            assert!(!row.contains("Stable task title"), "{width}: {row}");
+            let divider = row.find(" · ").expect("status column");
+            let column = row[..divider].width();
+            assert_eq!(*expected.get_or_insert(column), column, "{width}: {row}");
+            if count == 20 {
+                assert!(row.contains('…'), "overflow must ellipsize: {row}");
+            }
+        }
+    }
+}
+
+#[test]
+fn simultaneous_live_lanes_keep_columns_during_animation() {
+    let mut items = Vec::new();
+    let mut workers = Vec::new();
+    for (owner, name, phase, count) in [
+        ("fox", "Short", "thinking", 1),
+        ("wolf", "界界界 long Unicode lane name", "running_tool", 30),
+        ("sheep", "Waiting", "waiting", 2),
+    ] {
+        let mut item = laned("Task title remains in its column", "in_progress", 1, name);
+        item.assigned_to = Some(owner.into());
+        items.push(item);
+        let mut worker = agent(owner, "running", None, Some(1));
+        worker.todo_statuses = vec!["in_progress".into(); count];
+        worker.wait_reason = (phase == "waiting").then(|| "Waiting for build".into());
+        worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+            phase: phase.into(),
+            tool_name: Some("bash".into()),
+            tool_intent: Some("Long 界 intent ".repeat(40)),
+            elapsed_ms: 9_999_000,
+            input_tokens: Some(999_999),
+            output_tokens: Some(999_999),
+            ..Default::default()
+        });
+        workers.push(worker);
+    }
+    let refs: Vec<_> = items.iter().collect();
+    for width in 0..260 {
+        let mut lines = Vec::new();
+        push_stage_lines(&mut lines, &refs, &workers, &[], "", width);
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.width() <= width));
+        if width >= 80 {
+            let positions: Vec<_> = lines
+                .iter()
+                .map(|line| {
+                    let text = line.to_string();
+                    let status = text.find(" · ").expect("status column");
+                    assert!(!text.contains('│'));
+                    text[..status].width()
+                })
+                .collect();
+            assert!(
+                positions.iter().all(|p| *p == positions[0]),
+                "{width}: {positions:?}"
+            );
+            let before: Vec<_> = lines.iter().map(|line| line.to_string()).collect();
+            animate_lane_spinners(&mut lines);
+            for (old, line) in before.iter().zip(&lines) {
+                let new = line.to_string();
+                assert!(!new.contains(LIVE_DOT_SENTINEL));
+                assert_eq!(old.width(), new.width());
+                let old_status = old.find(" · ").unwrap();
+                let new_status = new.find(" · ").unwrap();
+                assert_eq!(
+                    &old[..old_status],
+                    &new[..new_status],
+                    "progress pips must not animate"
+                );
+                assert!(!new.contains('│'));
+            }
+        }
+    }
+}
+
+#[test]
+fn inline_worker_states_have_only_one_activity_indicator() {
+    let mut item = laned("Verify output", "in_progress", 1, "Validation");
+    item.assigned_to = Some("fox".into());
+    for phase in [
+        "running",
+        "running_tool",
+        "thinking",
+        "streaming",
+        "waiting",
+    ] {
+        let mut worker = agent("fox", "running", None, Some(12));
+        worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+            phase: phase.into(),
+            elapsed_ms: 12_000,
+            tool_name: Some("bash".into()),
+            tool_intent: Some("Inspect generated artifact".into()),
+            ..Default::default()
+        });
+        if phase == "waiting" {
+            worker.wait_reason = Some("Waiting for background task".into());
+        }
+        let rows = render(&[item.clone()], std::slice::from_ref(&worker), 180);
+        let lane = &rows[1];
+        assert!(lane.trim_start().starts_with('●'), "{phase}: {lane}");
+        assert_eq!(
+            lane.matches(LIVE_DOT_SENTINEL).count(),
+            usize::from(phase != "waiting"),
+            "{phase}: {lane}"
+        );
+        if matches!(phase, "running" | "running_tool") {
+            assert!(
+                lane.contains("Inspect generated artifact"),
+                "{phase}: {lane}"
+            );
+        }
+        if phase == "waiting" {
+            assert!(lane.contains("Waiting for background task"), "{lane}");
+            assert!(
+                !lane.contains("Inspect generated artifact"),
+                "stale intent: {lane}"
+            );
+        }
+        for width in 0..120 {
+            assert_fits(
+                &render(&[item.clone()], std::slice::from_ref(&worker), width),
+                width,
+            );
+        }
+    }
+}
+
+#[test]
+fn inline_tool_intent_is_single_line_and_bounded() {
+    let mut item = laned("Verify output", "in_progress", 1, "Validation");
+    item.assigned_to = Some("fox".into());
+    let mut worker = agent("fox", "running", None, Some(12));
+    worker.live_status = Some(crate::protocol::SwarmLiveStatus {
+        phase: "running_tool".into(),
+        tool_name: Some("bash".into()),
+        tool_intent: Some("Inspect\n  generated\t界 artifact".into()),
+        ..Default::default()
+    });
+    let rows = render(&[item.clone()], std::slice::from_ref(&worker), 180);
+    assert!(
+        rows[1].contains("Inspect generated 界 artifact"),
+        "{rows:?}"
+    );
+    worker.live_status.as_mut().unwrap().tool_intent = Some("Inspect 界 artifact ".repeat(100));
+    for width in 0..180 {
+        let rows = render(&[item.clone()], std::slice::from_ref(&worker), width);
+        assert_fits(&rows, width);
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains('\n') && !row.contains('\t'))
+        );
+        if width >= 120 {
+            assert!(rows[1].contains("Inspect 界 artifact"), "{width}: {rows:?}");
+            assert!(!rows[1].contains('│'), "{width}: {rows:?}");
+            assert!(!rows[1].contains("Verify output"), "{width}: {rows:?}");
+        }
+    }
+}
+
+#[test]
+fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips() {
+    let mut item = assigned(
+        todo("action", "Authorize 界", "in_progress", Some(1)),
+        "fox",
+    );
+    item.group = Some("Setup".into());
+    item.blocked_by = vec!["dependency".into()];
+    item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        reason: "Only the account owner can approve access".into(),
+    });
+    let mut worker = agent("fox", "running", Some("Working"), Some(1));
+    worker.todo_statuses = vec!["in_progress".into(), "pending".into()];
+    let workers = [worker];
+    assert_eq!(pip_span(&item).content, "✋");
+    assert_eq!(pip_span(&item).width(), 2);
+    let statuses = lane_item_statuses(&[&item], &workers);
+    assert_eq!(statuses, vec![("completely_blocked", false)]);
+    let strip = lane_strip_spans(&statuses, 2);
+    assert_eq!(strip[0].content, "✋");
+    assert_eq!(width_of(&strip), 4);
+    let label = Line::from(blocked_phase_spans(&[&item], &workers)).to_string();
+    assert!(
+        label.is_empty(),
+        "blocked state already appears in the phase pips"
+    );
+    let note = Line::from(lane_note_spans(&[&item], &workers)).to_string();
+    assert_eq!(note, "Completely blocked");
+    for width in 0..120 {
+        let mut pips = Vec::new();
+        push_stage_pips(&mut pips, &[&item], width);
+        assert!(width_of(&pips) <= width);
+        for row in render(&[item.clone()], &workers, width as u16) {
+            assert!(row.width() <= width, "{width}: {row:?}");
+            assert!(!row.contains(LIVE_DOT_SENTINEL));
+        }
+    }
+    item.completely_blocked = None;
+    assert_eq!(todo_pip_status(&item), "blocked");
+    item.blocked_by.clear();
+    assert_eq!(lane_item_statuses(&[&item], &workers).len(), 2);
+}
+
+#[test]
+fn complete_blocker_requires_reason_and_never_marks_terminal_todos() {
+    let mut item = todo("1", "Activation", "pending", Some(1));
+    for (reason, marked) in [("Owner only", true), (" ", false), ("\n", false)] {
+        item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            reason: reason.into(),
+        });
+        assert_eq!(pip_span(&item).content == "✋", marked);
+    }
+    item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        reason: "Owner only".into(),
+    });
+    for status in ["completed", "cancelled"] {
+        item.status = status.into();
+        assert_ne!(pip_span(&item).content, "✋");
+        assert!(blocked_phase_spans(&[&item], &[]).is_empty());
+        assert!(
+            !Line::from(lane_note_spans(&[&item], &[]))
+                .to_string()
+                .contains("Completely blocked")
+        );
+    }
+}
+
+#[test]
 fn blocked_todos_have_distinct_phase_and_lane_pips() {
     for external in [false, true] {
         let mut item = todo("1", "Activation", "pending", Some(2));
@@ -14,13 +471,13 @@ fn blocked_todos_have_distinct_phase_and_lane_pips() {
         } else {
             item.blocked_by = vec!["dependency".into()];
         }
-        assert_eq!(pip_span(&item).content, "⊳");
+        assert_eq!(pip_span(&item).content, "⊘");
         let statuses = lane_item_statuses(&[&item], &[]);
         assert_eq!(statuses, vec![("blocked", false)]);
-        assert_eq!(lane_strip_spans(&statuses, 1)[0].content, "⊳");
+        assert_eq!(lane_strip_spans(&statuses, 1)[0].content, "⊘");
         let mut header = Vec::new();
         push_stage_pips(&mut header, &[&item], 80);
-        assert!(Line::from(header).to_string().contains('⊳'));
+        assert!(Line::from(header).to_string().contains('⊘'));
         for width in 1..80 {
             for row in render(&[item.clone()], &[], width) {
                 assert!(row.width() <= usize::from(width), "{width}: {row:?}");
@@ -28,7 +485,7 @@ fn blocked_todos_have_distinct_phase_and_lane_pips() {
         }
         for status in ["completed", "cancelled"] {
             item.status = status.into();
-            assert_ne!(pip_span(&item).content, "⊳");
+            assert_ne!(pip_span(&item).content, "⊘");
             assert_ne!(lane_item_statuses(&[&item], &[])[0].0, "blocked");
         }
     }
@@ -47,7 +504,7 @@ fn blocked_marker_overrides_live_worker_and_clears_when_review_is_due() {
     let statuses = lane_item_statuses(&[&item], &workers);
     assert_eq!(statuses, vec![("blocked", false)]);
     let strip = lane_strip_spans(&statuses, 2);
-    assert_eq!(strip[0].content, "⊳");
+    assert_eq!(strip[0].content, "⊘");
     assert_eq!(strip[0].style.fg, Some(rgb(225, 165, 90)));
     assert!(!Line::from(strip).to_string().contains(LIVE_DOT_SENTINEL));
 
@@ -55,7 +512,7 @@ fn blocked_marker_overrides_live_worker_and_clears_when_review_is_due() {
         chrono::Utc::now() - chrono::Duration::seconds(1);
     assert_eq!(todo_pip_status(&item), "in_progress");
     assert_eq!(lane_item_statuses(&[&item], &workers).len(), 2);
-    assert_ne!(pip_span(&item).content, "⊳");
+    assert_ne!(pip_span(&item).content, "⊘");
 }
 
 #[test]
@@ -65,13 +522,13 @@ fn shortcut_badges_are_hidden_and_respect_lane_width() {
     let mut worker = agent("fox", "running", Some("Reading types"), Some(12));
     for digit in [1, 9, 0, 10] {
         worker.shortcut = Some(digit);
-        let rows = render(&[item.clone()], &[worker.clone()], 120);
+        let rows = render(&[item.clone()], std::slice::from_ref(&worker), 120);
         assert!(
             rows.join("\n").contains('🦊') && !rows.join("\n").contains("[alt+"),
             "{rows:?}"
         );
         for width in 1..60 {
-            for row in render(&[item.clone()], &[worker.clone()], width) {
+            for row in render(&[item.clone()], std::slice::from_ref(&worker), width) {
                 assert!(row.width() <= usize::from(width), "width {width}: {row:?}");
             }
         }
@@ -134,6 +591,7 @@ fn assigned(mut item: TodoItem, who: &str) -> TodoItem {
 fn agent(name: &str, status: &str, activity: Option<&str>, age: Option<u64>) -> TodoCardAgent {
     TodoCardAgent {
         session_id: format!("session_{name}_1700000000"),
+        live_status: None,
         name: Some(name.to_string()),
         status: status.to_string(),
         activity: activity.map(str::to_string),
@@ -163,13 +621,13 @@ fn explicit_waits_show_clock_reason_and_age_without_busy_or_quiet_indicators() {
     ] {
         let mut item = assigned(todo("1", "Build project", "in_progress", stage), "fox");
         item.group = group.map(str::to_string);
-        let text = render(&[item.clone()], &[worker.clone()], 160).join("\n");
+        let text = render(&[item.clone()], std::slice::from_ref(&worker), 160).join("\n");
         assert!(text.contains("◷"), "{text}");
         assert!(text.contains("Waiting for build task · 3m"), "{text}");
         assert!(!text.contains("quiet"), "{text}");
         assert!(!text.contains(LIVE_DOT_SENTINEL), "{text}");
         for width in 1..80 {
-            for row in render(&[item.clone()], &[worker.clone()], width) {
+            for row in render(&[item.clone()], std::slice::from_ref(&worker), width) {
                 assert!(row.width() <= usize::from(width), "width {width}: {row:?}");
             }
         }
@@ -648,129 +1106,5 @@ fn failed_lane_blocks_its_phase_and_offers_retry() {
     assert!(!rows[0].contains("blocked"), "{rows:?}");
 }
 
-#[test]
-fn grouped_checklist_shows_owner_and_activity_only_in_heading() {
-    let mut todos = vec![
-        assigned(todo("1", "Read types", "completed", None), "fox"),
-        assigned(todo("2", "Update callers", "in_progress", None), "fox"),
-        assigned(todo("3", "Add tests", "pending", None), "fox"),
-    ];
-    for todo in &mut todos {
-        todo.group = Some("Parser 界".into());
-    }
-    let agents = vec![agent("fox", "running", Some("Checking callers"), Some(12))];
-    let rows = render(&todos, &agents, 120);
-    let text = rows.join("\n");
-    assert_eq!(text.matches('🦊').count(), 1, "{rows:?}");
-    assert_eq!(text.matches("Checking callers").count(), 1, "{rows:?}");
-    let heading = rows.iter().find(|row| row.contains("Parser 界")).unwrap();
-    assert!(
-        heading.contains('🦊') && heading.contains("Checking callers"),
-        "{rows:?}"
-    );
-    for width in [8, 14, 24, 40, 80] {
-        let narrow = render(&todos, &agents, width);
-        assert_fits(&narrow, width);
-        assert_eq!(narrow.len(), rows.len(), "no wrapping at {width}");
-    }
-}
-
-#[test]
-fn plain_checklist_only_active_row_has_worker_and_duplicate_activity_is_hidden() {
-    let todos = vec![
-        assigned(todo("1", "Read types", "completed", None), "fox"),
-        assigned(todo("2", "Update callers", "in_progress", None), "fox"),
-        assigned(todo("3", "Add tests", "pending", None), "fox"),
-    ];
-    let agents = vec![agent(
-        "fox",
-        "running",
-        Some(" Update   callers "),
-        Some(12),
-    )];
-    let rows = render(&todos, &agents, 120);
-    assert_eq!(rows.join("\n").matches('🦊').count(), 1, "{rows:?}");
-    assert!(
-        rows.iter()
-            .find(|r| r.contains("Update callers"))
-            .unwrap()
-            .contains('🦊')
-    );
-    assert!(!rows.join("\n").contains(" Update   callers "), "{rows:?}");
-    assert!(
-        rows.iter().any(|row| row.contains("12s")),
-        "age is retained: {rows:?}"
-    );
-}
-
-#[test]
-fn compact_lane_hides_activity_identical_to_a_task_title() {
-    let mut todos = live_lane_todos();
-    let agents = vec![agent("fox", "running", Some("Update callers"), Some(12))];
-    let rows = render(&todos, &agents, 160);
-    assert_eq!(
-        rows.join("\n").matches("Update callers").count(),
-        1,
-        "{rows:?}"
-    );
-    for todo in &mut todos {
-        todo.stage = None;
-    }
-    let rows = render(&todos, &agents, 160);
-    assert_eq!(
-        rows.join("\n").matches("Update callers").count(),
-        1,
-        "{rows:?}"
-    );
-}
-
-#[test]
-fn mixed_list_keeps_unrepresented_owners_without_repeating_lane_owners() {
-    let mut grouped = assigned(todo("1", "Read types", "in_progress", None), "fox");
-    grouped.group = Some("Parser".into());
-    let todos = vec![
-        grouped,
-        assigned(todo("2", "Follow up", "pending", None), "fox"),
-        assigned(todo("3", "Documentation", "pending", None), "sheep"),
-    ];
-    let agents = vec![
-        agent("fox", "running", Some("Inspect types"), None),
-        agent("sheep", "queued", None, None),
-    ];
-    let rows = render(&todos, &agents, 120);
-    assert!(!rows[0].contains('🦊'), "{rows:?}");
-    assert!(rows[0].contains('🐑'), "unstarted owner retained: {rows:?}");
-    assert_eq!(rows.join("\n").matches('🦊').count(), 1, "{rows:?}");
-    assert_eq!(rows.join("\n").matches('🐑').count(), 1, "{rows:?}");
-}
-
-#[test]
-fn group_heading_keeps_distinct_owners_once_and_hides_duplicate_failure_reason() {
-    let mut todos = vec![
-        assigned(todo("1", "修复 parser", "in_progress", None), "fox"),
-        assigned(todo("2", "Add tests", "pending", None), "fox"),
-        assigned(todo("3", "Review", "pending", None), "sheep"),
-    ];
-    for todo in &mut todos {
-        todo.group = Some("解析器".into());
-    }
-    let agents = vec![
-        agent("fox", "failed", Some("修复 parser"), None),
-        agent("sheep", "queued", None, None),
-    ];
-    let refs: Vec<_> = todos.iter().collect();
-    for width in [1, 8, 14, 40, 120] {
-        let row = render_group_header("解析器", &refs, &agents, "", width);
-        assert!(row.width() <= width);
-        let text: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
-        assert!(!text.contains("修复 parser"), "{text}");
-        if width == 120 {
-            assert_eq!(text.matches('🦊').count(), 1, "{text}");
-            assert_eq!(text.matches('🐑').count(), 1, "{text}");
-            assert!(
-                text.contains("failed") && text.contains("swarm retry"),
-                "{text}"
-            );
-        }
-    }
-}
+#[path = "ui_todo_worker_heading_tests.rs"]
+mod worker_headings;

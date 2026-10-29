@@ -18,6 +18,7 @@ mod client_lifecycle_logging;
 mod client_lightweight_control;
 mod client_session;
 mod client_state;
+mod model_refresh;
 mod session_connections;
 pub(crate) use client_state::provider_oauth_email;
 mod client_writer;
@@ -50,6 +51,7 @@ pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, Persisted
 mod idle_hibernation;
 mod jade_relay;
 mod lifecycle;
+mod live_status;
 mod live_turn;
 mod provider_control;
 mod reload;
@@ -684,62 +686,12 @@ const IDLE_TIMEOUT_SECS: u64 = 300;
 const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
 
 #[cfg(test)]
-mod reload_marker_scope_tests {
-    use super::reload_marker_policy;
-    use super::reload_state::ForeignMarkerPolicy;
-
-    /// Only the shared socket's server may clear a reload marker owned by
-    /// another process; a custom-socket server preserves it, because clearing
-    /// would erase the shared daemon's in-flight `Starting` state (review of
-    /// #1768). Both the bind-time clear and the socket-ready publish consult
-    /// this. The publish path was missed on the first attempt and reopened
-    /// the hole. The policy says nothing about a server's *own* marker, which
-    /// it must always be free to advance.
-    #[test]
-    fn only_shared_socket_server_may_clear_a_foreign_reload_marker() {
-        let _guard = crate::storage::lock_test_env();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-        let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
-        crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
-
-        assert_eq!(
-            reload_marker_policy(&runtime_dir.join("jcode.sock")),
-            ForeignMarkerPolicy::MayClear
-        );
-        assert_eq!(
-            reload_marker_policy(&runtime_dir.join("run-isolated.sock")),
-            ForeignMarkerPolicy::Preserve
-        );
-
-        if let Some(prev_runtime) = prev_runtime {
-            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
-        } else {
-            crate::env::remove_var("JCODE_RUNTIME_DIR");
-        }
-    }
-}
+#[path = "server/reload_marker_scope_tests.rs"]
+mod reload_marker_scope_tests;
 
 #[cfg(test)]
-mod idle_monitor_tests {
-    use super::idle_monitor_should_start;
-
-    #[test]
-    fn shared_idle_monitor_preserves_live_headless_worker() {
-        assert!(!idle_monitor_should_start(0, true));
-    }
-
-    #[test]
-    fn temporary_idle_monitor_preserves_live_headless_worker() {
-        assert!(!idle_monitor_should_start(0, true));
-    }
-
-    #[test]
-    fn idle_monitor_starts_only_without_clients_or_headless_workers() {
-        assert!(idle_monitor_should_start(0, false));
-        assert!(!idle_monitor_should_start(1, false));
-    }
-}
+#[path = "server/idle_monitor_tests.rs"]
+mod idle_monitor_tests;
 
 /// How often the retained-heap watchdog samples allocator retention.
 const HEAP_RETENTION_CHECK_SECS: u64 = 120;
@@ -950,7 +902,14 @@ impl Server {
             let members = self.swarm_state.members.read().await;
             members
                 .values()
-                .filter(|member| headless_member_should_restore(&member.status, member.is_headless))
+                .filter(|member| {
+                    // Shutdown can persist `ready` after recording recovery
+                    // intent. On load that becomes `stopped`, but the durable
+                    // continuation must still take priority over that status.
+                    member.is_headless
+                        && (headless_member_should_restore(&member.status, true)
+                            || reload_recovery::has_pending_for_session(&member.session_id))
+                })
                 .map(|member| member.session_id.clone())
                 .collect::<Vec<_>>()
         };

@@ -86,6 +86,7 @@ pub enum Tone {
 pub struct StatusRow {
     pub text: String,
     pub tone: Tone,
+    pub own_session: bool,
 }
 
 fn clean(value: &str) -> String {
@@ -206,6 +207,7 @@ impl Snapshot {
             return Some(StatusRow {
                 text,
                 tone: Tone::Active,
+                own_session: relevance(run.agent_session.as_deref(), &run.cwd, session, repo) == 2,
             });
         }
         let run = self.recent.as_ref()?;
@@ -229,6 +231,7 @@ impl Snapshot {
                 duration(run.wall)
             ),
             tone: if run.ok { Tone::Success } else { Tone::Failure },
+            own_session: relevance(run.agent_session.as_deref(), &run.cwd, session, repo) == 2,
         })
     }
 }
@@ -238,7 +241,8 @@ async fn query(program: &std::ffi::OsStr) -> Option<Snapshot> {
 }
 
 async fn query_with_timeout(program: &std::ffi::OsStr, timeout: Duration) -> Option<Snapshot> {
-    tokio::time::timeout(timeout, async {
+    use anyhow::Context;
+    let result = tokio::time::timeout(timeout, async {
         let mut child = tokio::process::Command::new(program)
             .args(["status", "--json"])
             .stdin(std::process::Stdio::null())
@@ -246,27 +250,42 @@ async fn query_with_timeout(program: &std::ffi::OsStr, timeout: Duration) -> Opt
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .ok()?;
+            .context("start justrust status query")?;
         let mut bytes = Vec::new();
         child
             .stdout
-            .take()?
+            .take()
+            .context("justrust status stdout was not piped")?
             .take((MAX_RESPONSE + 1) as u64)
             .read_to_end(&mut bytes)
             .await
-            .ok()?;
+            .context("read justrust status response")?;
         if bytes.len() > MAX_RESPONSE {
-            let _ = child.kill().await;
-            return None;
+            child
+                .kill()
+                .await
+                .context("terminate oversized justrust status response")?;
+            anyhow::bail!("justrust status response exceeds {MAX_RESPONSE} bytes");
         }
-        if !child.wait().await.ok()?.success() {
-            return None;
-        }
-        serde_json::from_slice(&bytes).ok()
+        let status = child
+            .wait()
+            .await
+            .context("wait for justrust status query")?;
+        anyhow::ensure!(status.success(), "justrust status exited with {status}");
+        serde_json::from_slice(&bytes).context("decode justrust status response")
     })
-    .await
-    .ok()
-    .flatten()
+    .await;
+    match result {
+        Ok(Ok(snapshot)) => Some(snapshot),
+        Ok(Err(error)) => {
+            crate::logging::debug(&format!("Build status unavailable: {error:#}"));
+            None
+        }
+        Err(error) => {
+            crate::logging::debug(&format!("Build status query timed out: {error}"));
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -331,8 +350,7 @@ impl Poller {
         self.row = self.snapshot.as_ref().and_then(|snapshot| {
             let age = self
                 .received
-                .map(|at| now.saturating_duration_since(at))
-                .unwrap_or_default();
+                .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
             (age < Duration::from_secs(5))
                 .then(|| snapshot.row(session, repo, age))
                 .flatten()
@@ -353,7 +371,12 @@ impl Poller {
             let (sender, receiver) = oneshot::channel();
             self.pending = Some(receiver);
             runtime.spawn(async move {
-                let _ = sender.send(query(std::ffi::OsStr::new("justrust")).await);
+                if sender
+                    .send(query(std::ffi::OsStr::new("justrust")).await)
+                    .is_err()
+                {
+                    crate::logging::debug("Discarded build status after poller was closed");
+                }
             });
         }
         self.row != previous
@@ -363,6 +386,40 @@ impl Poller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ownership_distinguishes_session_from_repository_for_all_outcomes() {
+        for active in [true, false] {
+            for ok in [true, false] {
+                for owner in ["ours", "other"] {
+                    let run = serde_json::json!({
+                        "cwd": "/repo/app", "agent_session": owner,
+                        "wall": 5, "ago": 1, "ok": ok
+                    });
+                    let value = if active {
+                        serde_json::json!({"active": [run]})
+                    } else {
+                        serde_json::json!({"recent": run})
+                    };
+                    let snapshot: Snapshot = serde_json::from_value(value).unwrap();
+                    let row = snapshot
+                        .row(Some("ours"), Some("/repo/app"), Duration::ZERO)
+                        .unwrap();
+                    assert_eq!(row.own_session, owner == "ours");
+                    assert_eq!(
+                        row.tone,
+                        if active {
+                            Tone::Active
+                        } else if ok {
+                            Tone::Success
+                        } else {
+                            Tone::Failure
+                        }
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn old_waybar_api_remains_usable_without_resource_fields() {
@@ -504,6 +561,7 @@ mod tests {
             row: Some(StatusRow {
                 text: "old".into(),
                 tone: Tone::Active,
+                own_session: false,
             }),
             ..Default::default()
         };

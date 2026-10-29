@@ -76,6 +76,7 @@ fn scheduled_live_delivery_case(todo_review: bool) {
                         id: "acceptance".to_string(),
                         content: "Wait for acceptance".to_string(),
                         status: "pending".into(),
+                        completely_blocked: None,
                         external_blocker: Some(blocker.clone()),
                         ..Default::default()
                     }],

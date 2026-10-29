@@ -1,6 +1,5 @@
 //! Display-only, uncapped completion reports. This module never schedules work.
 use crate::*;
-use std::fmt::Write;
 
 // Encode structural punctuation, HTML, and line breaks without losing Unicode.
 fn escape(value: &str) -> String {
@@ -10,10 +9,10 @@ fn escape(value: &str) -> String {
             '\n' => out.push_str("&#10;"),
             '\r' => out.push_str("&#13;"),
             ch if ch.is_ascii_punctuation() => {
-                write!(out, "&#{};", ch as u32).unwrap();
+                out.push_str(&format!("&#{};", ch as u32));
             }
             ch if ch.is_control() => {
-                write!(out, "&#{};", ch as u32).unwrap();
+                out.push_str(&format!("&#{};", ch as u32));
             }
             ch => out.push(ch),
         }
@@ -22,26 +21,22 @@ fn escape(value: &str) -> String {
 }
 
 fn text(out: &mut String, label: &str, value: Option<&str>) {
-    writeln!(
-        out,
-        "- **{label}:** {}",
+    out.push_str(&format!(
+        "- **{label}:** {}\n",
         value.map(escape).unwrap_or_else(|| "not recorded".into())
-    )
-    .unwrap();
+    ));
 }
 
 fn history(out: &mut String, label: &str, values: impl Iterator<Item = &'static str>) {
     let values: Vec<_> = values.map(escape).collect();
-    writeln!(
-        out,
-        "- **{label} history (oldest first):** {}",
+    out.push_str(&format!(
+        "- **{label} history (oldest first):** {}\n",
         if values.is_empty() {
             "not recorded".into()
         } else {
             values.join(" → ")
         }
-    )
-    .unwrap();
+    ));
 }
 
 fn issue(out: &mut Vec<String>, label: &str, passes: bool) {
@@ -247,14 +242,14 @@ pub fn render_completion_report(todos: &[TodoItem], plan: &TodoPlan, goals: &[To
             earlier,
         ),
     ] {
-        writeln!(out, "## {heading}\n").unwrap();
+        out.push_str(&format!("## {heading}\n\n"));
         if issues.is_empty() {
             out.push_str(
                 "None identified in the recorded data. This is not independent verification.\n",
             );
         }
         for value in issues {
-            writeln!(out, "- {}", escape(&value)).unwrap();
+            out.push_str(&format!("- {}\n", escape(&value)));
         }
         out.push('\n');
     }
@@ -272,12 +267,16 @@ pub fn render_completion_report(todos: &[TodoItem], plan: &TodoPlan, goals: &[To
             .iter()
             .map(|v| v.as_str()),
     );
-    writeln!(out, "\n## Todos ({})\n", todos.len()).unwrap();
+    out.push_str(&format!("\n## Todos ({})\n\n", todos.len()));
     if todos.is_empty() {
         out.push_str("No todos recorded.\n");
     }
     for (index, todo) in todos.iter().enumerate() {
-        writeln!(out, "\n### {}. {}\n", index + 1, escape(&todo.content)).unwrap();
+        out.push_str(&format!(
+            "\n### {}. {}\n\n",
+            index + 1,
+            escape(&todo.content)
+        ));
         for (label, value) in [
             ("ID", Some(todo.id.as_str())),
             ("Status", Some(todo.status.as_str())),
@@ -314,17 +313,15 @@ pub fn render_completion_report(todos: &[TodoItem], plan: &TodoPlan, goals: &[To
             todo.confidence_history.iter().map(|v| v.as_str()),
         );
     }
-    writeln!(out, "\n## Goals ({})\n", goals.len()).unwrap();
+    out.push_str(&format!("\n## Goals ({})\n\n", goals.len()));
     if goals.is_empty() {
         out.push_str("No goal assessments recorded.\n");
     }
     for goal in goals {
-        writeln!(
-            out,
-            "\n### Goal: {}\n",
+        out.push_str(&format!(
+            "\n### Goal: {}\n\n",
             escape(goal.group.as_deref().unwrap_or("ungrouped"))
-        )
-        .unwrap();
+        ));
         text(&mut out, "Group", goal.group.as_deref());
         text(&mut out, "Feedback loop", goal.feedback_loop.as_deref());
         macro_rules! field {

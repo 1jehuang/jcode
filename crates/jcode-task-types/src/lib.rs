@@ -437,6 +437,26 @@ pub struct TodoExternalBlocker {
     pub review_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// No way forward.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoCompleteBlocker {
+    #[serde(deserialize_with = "deserialize_nonempty_blocker_reason")]
+    pub reason: String,
+}
+
+fn deserialize_nonempty_blocker_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "completely blocked reason must be nonempty",
+        ));
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub content: String,
@@ -478,6 +498,9 @@ pub struct TodoItem {
     pub waiting_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_blocker: Option<TodoExternalBlocker>,
+    /// No way forward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completely_blocked: Option<TodoCompleteBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
     /// Optional execution stage. Stages run in order: stage 2 starts only
@@ -506,7 +529,11 @@ fn deserialize_waiting_on<'de, D>(deserializer: D) -> Result<Vec<String>, D::Err
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
+    match Option::<Vec<String>>::deserialize(deserializer)? {
+        Some(dependencies) => Ok(dependencies),
+        // Null explicitly clears dependency references, just like an empty list.
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Accept `2`, `2.0`, `"2"`, `"stage 2"`, `""`, or `null` for a todo stage.
@@ -771,6 +798,15 @@ mod semantic_state_tests {
                     serde_json::from_value::<Vec<String>>(value).unwrap()
                 }
             );
+        }
+        for invalid in [
+            serde_json::json!(42),
+            serde_json::json!([null]),
+            serde_json::json!({"task": "a"}),
+        ] {
+            let mut payload = old.clone();
+            payload["waiting_on"] = invalid;
+            assert!(serde_json::from_value::<TodoItem>(payload).is_err());
         }
     }
 

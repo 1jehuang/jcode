@@ -23,6 +23,137 @@ fn context() -> ToolContext {
 }
 
 #[tokio::test]
+async fn completely_blocked_tool_validates_updates_clears_and_cancels_reviews() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
+    let dir = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let tool = TodoTool::new();
+    let required = json!({"reason":"No implementation or alternative exists"});
+    let review = chrono::Utc::now() + chrono::Duration::minutes(5);
+    tool.execute(
+        json!({"add":[{
+            "id":"a", "content":"Owner approval", "status":"pending", "priority":"high", "phase":1, "lane":"approval",
+            "blocked_by":["prerequisite"],
+            "external_blocker":{"reason":"Waiting for confirmation", "review_at":review}
+        }]}),
+        context(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        crate::ambient::AmbientManager::new().unwrap().queue().len(),
+        1
+    );
+    // A historical task may have been cleaned up. Retaining its useful
+    // dependency reference must not block or erase the new complete blocker.
+    let mut prior = load_todos("external-blocker-tool").unwrap();
+    prior[0].waiting_on = vec!["historical-task".into()];
+    save_todos("external-blocker-tool", &prior).unwrap();
+    for bad in [json!({"reason":""}), json!({"reason":" \t\n"}), json!({})] {
+        assert!(
+            tool.execute(
+                json!({"update":[{"id":"a", "completely_blocked":bad}]}),
+                context()
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            load_todos("external-blocker-tool").unwrap()[0]
+                .completely_blocked
+                .is_none()
+        );
+    }
+    tool.execute(
+        json!({"update":[{"id":"a", "completely_blocked":required}]}),
+        context(),
+    )
+    .await
+    .unwrap();
+    let stored = load_todos("external-blocker-tool").unwrap();
+    assert!(crate::todo::todo_completely_blocked(&stored[0]));
+    assert!(stored[0].external_blocker.is_none());
+    assert_eq!(stored[0].blocked_by, vec!["prerequisite"]);
+    assert_eq!(stored[0].waiting_on, vec!["historical-task"]);
+    assert!(
+        crate::ambient::AmbientManager::new()
+            .unwrap()
+            .queue()
+            .is_empty()
+    );
+    tool.execute(
+        json!({"update":[{"id":"a", "completely_blocked":null}]}),
+        context(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        load_todos("external-blocker-tool").unwrap()[0]
+            .completely_blocked
+            .is_none()
+    );
+    for status in ["completed", "cancelled"] {
+        tool.execute(
+            json!({"update":[{"id":"a", "status":"pending", "completely_blocked":required}]}),
+            context(),
+        )
+        .await
+        .unwrap();
+        tool.execute(json!({"update":[{"id":"a", "status":status}]}), context())
+            .await
+            .unwrap();
+        assert!(
+            load_todos("external-blocker-tool").unwrap()[0]
+                .completely_blocked
+                .is_none()
+        );
+        assert!(
+            crate::ambient::AmbientManager::new()
+                .unwrap()
+                .queue()
+                .is_empty()
+        );
+    }
+    tool.execute(json!({"add":[{"id":"b", "content":"Verify identity", "status":"pending", "priority":"high", "phase":1, "lane":"identity", "completely_blocked":required}]}), context()).await.unwrap();
+    assert!(crate::todo::todo_completely_blocked(
+        &load_todos("external-blocker-tool").unwrap()[1]
+    ));
+    assert!(
+        crate::ambient::AmbientManager::new()
+            .unwrap()
+            .queue()
+            .is_empty()
+    );
+}
+
+#[test]
+fn completely_blocked_schema_is_shared_and_strict() {
+    let schema = TodoTool::new().parameters_schema();
+    let update = &schema["properties"]["update"]["items"]["properties"]["completely_blocked"];
+    let add = &schema["properties"]["add"]["items"]["properties"]["completely_blocked"];
+    let phase = &schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]["properties"]
+        ["items"]["items"]["properties"]["completely_blocked"];
+    assert_eq!(update, add);
+    assert_eq!(update, phase);
+    assert_eq!(update["type"], json!(["object", "null"]));
+    assert_eq!(update["required"], json!(["reason"]));
+    assert_eq!(update["additionalProperties"], false);
+    assert_eq!(update["description"], "No way forward.");
+    assert!(update["properties"].get("action").is_none());
+    assert!(
+        schema["properties"]["update"]["items"]["properties"]
+            .get("requires_user_action")
+            .is_none()
+    );
+    assert!(
+        TodoTool::new()
+            .description()
+            .contains("completely_blocked: No way forward.")
+    );
+}
+
+#[tokio::test]
 async fn external_blocker_schedule_failure_clears_suppression() {
     let _lock = crate::storage::lock_test_env();
     let _home = HomeGuard(std::env::var_os("JCODE_HOME"));

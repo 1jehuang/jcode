@@ -13,6 +13,7 @@ import re
 import subprocess
 
 from check_release_ci import authorize
+from preview_notes import change_notes
 
 REPOSITORY = "1jehuang/jcode"
 ASSETS = tuple(f"jcode-{platform}-{arch}.tar.gz" for platform in ("linux", "macos", "windows")
@@ -66,6 +67,7 @@ def publish(repository, sha, tag, directory):
     authorize(repository, sha, timeout=0)
     require_preview_window(repository)
     require_head(repository, sha)
+    changes = change_notes(repository, sha, tag, gh)
     checksum = Path(directory) / "SHA256SUMS"
     checksum.write_text("".join(f"{hashlib.sha256(files[name].read_bytes()).hexdigest()}  {name}\n"
                                 for name in sorted(files)))
@@ -80,6 +82,7 @@ def publish(repository, sha, tag, directory):
     notes = (f"Opt-in v1 preview built from master commit {sha}.\n\n"
              "Experimental binaries, not a stable release. Windows preview binaries are unsigned. "
              "Use the stable channel for production. Preview numbers may have gaps.\n\n"
+             f"{changes}"
              "## First-time preview setup\n\n"
              "Existing stable versions do not support `--channel`. Download the archive for your "
              "OS and architecture from this release, verify it against `SHA256SUMS`, and extract "

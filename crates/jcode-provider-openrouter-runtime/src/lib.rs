@@ -76,13 +76,8 @@ const DEFAULT_MODEL: &str = "anthropic/claude-opus-5.5";
 
 /// Which model should replace the placeholder default, if any. Pure so it can
 /// be tested without a network catalog.
-fn select_promoted_default(current: &str, catalog: &[&str]) -> Option<String> {
-    if current != DEFAULT_MODEL {
-        return None;
-    }
-    jcode_base::auth::lifecycle::preferred_model_for_provider("openrouter", catalog)
-        .filter(|best| best != DEFAULT_MODEL)
-}
+mod default_selection;
+use default_selection::select_promoted_default;
 
 /// Soft refresh TTL for the model catalog.
 ///
@@ -1852,9 +1847,9 @@ impl OpenRouterProvider {
                 label: GROK_BUILD_AUTH_LABEL.to_string(),
             },
             supports_provider_features: false,
-            // The proxy's `/models` shape is not a documented catalog; keep the
-            // curated list so `/model` works offline and before first request.
-            supports_model_catalog: false,
+            // The official CLI discovers releases through GET /v1/models.
+            // Static models remain only an offline/pre-discovery fallback.
+            supports_model_catalog: true,
             profile_id: Some("grok-build".to_string()),
             builtin_azure: false,
             reasoning_effort_support: Some(false),
@@ -2701,6 +2696,10 @@ impl OpenRouterProvider {
 
     /// Force refresh the models cache from API
     pub async fn refresh_models(&self) -> Result<Vec<ModelInfo>> {
+        if !self.supports_model_catalog {
+            return Ok(Vec::new());
+        }
+
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),

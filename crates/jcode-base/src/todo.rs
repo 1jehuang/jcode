@@ -309,6 +309,7 @@ mod tests {
             completion_confidence: None,
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: Vec::new(),
             assigned_to: None,
@@ -397,11 +398,25 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 fn load_lane_links(session_id: &str) -> Vec<stages::LaneLink> {
-    todo_state_path(session_id, TodoFile::LaneLinks)
-        .ok()
-        .filter(|path| path.exists())
-        .and_then(|path| storage::read_json(&path).ok())
-        .unwrap_or_default()
+    let path = match todo_state_path(session_id, TodoFile::LaneLinks) {
+        Ok(path) => path,
+        Err(error) => {
+            crate::logging::warn(&format!("Cannot locate todo lane links: {error}"));
+            return Vec::new();
+        }
+    };
+    match storage::read_json(&path) {
+        Ok(links) => links,
+        Err(error) => {
+            if path.exists() {
+                crate::logging::warn(&format!(
+                    "Cannot read todo lane links {}: {error}",
+                    path.display()
+                ));
+            }
+            Vec::new()
+        }
+    }
 }
 
 fn save_lane_links(session_id: &str, links: &[stages::LaneLink]) -> Result<()> {
@@ -598,6 +613,7 @@ mod lane_sync_tests {
             content: "add lexer tests".into(),
             status: "pending".into(),
             priority: "high".into(),
+            completely_blocked: None,
             external_blocker: None,
             waiting_on: vec!["fox-new-task".into()],
             ..Default::default()

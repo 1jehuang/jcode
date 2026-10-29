@@ -12,354 +12,6 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[test]
-fn ndjson_preserves_provider_reported_service_tier_without_inferring_it() {
-    let mut state = NdjsonRunState::default();
-    assert_eq!(state.served_service_tier, None);
-    let mut output = Vec::new();
-    for (requested, served) in [
-        (Some("ultrafast"), "default"),
-        (Some("priority"), "priority"),
-        (None, "default"),
-    ] {
-        emit_ndjson_event(
-            &mut output,
-            &mut state,
-            crate::protocol::ServerEvent::ServiceTierReported {
-                requested: requested.map(str::to_owned),
-                tier: served.to_owned(),
-            },
-        )
-        .expect("emit tier metadata");
-        assert_eq!(state.requested_service_tier.as_deref(), requested);
-        assert_eq!(state.served_service_tier.as_deref(), Some(served));
-    }
-    let events: Vec<serde_json::Value> = String::from_utf8(output)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(events.len(), 3);
-    assert_eq!(
-        events[0],
-        serde_json::json!({
-            "type": "service_tier", "requested": "ultrafast", "tier": "default",
-            "report_status": "reported_mismatch"
-        })
-    );
-    assert!(events[2]["requested"].is_null());
-}
-
-#[test]
-fn ndjson_service_tier_status_never_infers_confirmation() {
-    for (requested, reported, expected) in [
-        (None, None, "not_reported"),
-        (Some("ultrafast"), Some("auto"), "unresolved"),
-        (Some("ultrafast"), Some("default"), "reported_mismatch"),
-        (Some("ultrafast"), Some("ultrafast"), "reported_match"),
-        (Some("fast"), Some("priority"), "reported_match"),
-        (Some("off"), Some("standard"), "reported_match"),
-        (None, Some("default"), "reported_match"),
-        (Some("flex"), Some("default"), "reported_mismatch"),
-        (Some("future-tier"), Some("default"), "reported_mismatch"),
-    ] {
-        let state = NdjsonRunState {
-            requested_service_tier: requested.map(str::to_string),
-            served_service_tier: reported.map(str::to_string),
-            ..Default::default()
-        };
-        assert_eq!(state.service_tier_report_status(), expected);
-        assert!(!state.service_tier_report_status().contains("confirmed"));
-    }
-}
-
-#[test]
-fn server_reload_report_preserves_json_fields_and_exit_status_contract() {
-    let cases = [
-        (false, false, false, false),
-        (true, true, true, false),
-        (true, false, true, false),
-        (true, false, false, true),
-    ];
-
-    for (had_listener, already_current, handoff_ready, should_fail) in cases {
-        let report = ServerReloadReport {
-            socket: "/tmp/jcode.sock".to_string(),
-            had_listener,
-            forced: false,
-            reloaded: had_listener && !already_current,
-            already_current,
-            handoff_ready,
-            detail: "test reload outcome".to_string(),
-        };
-
-        let json = serde_json::to_value(&report).expect("serialize reload report");
-        assert_eq!(json["had_listener"], had_listener);
-        assert_eq!(json["already_current"], already_current);
-        assert_eq!(json["handoff_ready"], handoff_ready);
-
-        let result = validate_server_reload_report(&report);
-        assert_eq!(result.is_err(), should_fail, "report: {json}");
-        if should_fail {
-            assert!(
-                result
-                    .expect_err("not-ready handoff must fail")
-                    .to_string()
-                    .contains("never became ready")
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn server_reload_without_listener_is_a_successful_json_noop() {
-    let _env_lock = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_SOCKET"]);
-    let home = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::env::set_var("JCODE_SOCKET", home.path().join("isolated.sock"));
-
-    let mut output = Vec::new();
-    let result = run_server_reload_command_to(false, true, &mut output).await;
-
-    result.expect("reload without a listener must be a successful no-op");
-    let report: serde_json::Value =
-        serde_json::from_slice(&output).expect("reload --json must emit one JSON report");
-    assert_eq!(report["had_listener"], false);
-    assert_eq!(report["already_current"], false);
-    assert_eq!(report["handoff_ready"], false);
-    assert_eq!(report["reloaded"], false);
-    assert_eq!(report["forced"], false);
-    assert!(
-        report["detail"]
-            .as_str()
-            .is_some_and(|detail| { detail.contains("No running jcode server found") })
-    );
-}
-
-#[tokio::test]
-async fn memory_cli_project_import_uses_explicit_directory_and_persists() {
-    let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
-    let temp = tempfile::tempdir().expect("temp dir");
-    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).expect("create project");
-
-    let entry = crate::memory::MemoryEntry::new(
-        crate::memory::MemoryCategory::Fact,
-        "persisted project memory".to_string(),
-    );
-    let input = temp.path().join("memories.json");
-    std::fs::write(
-        &input,
-        serde_json::to_vec(&vec![entry.clone()]).expect("serialize memory"),
-    )
-    .expect("write import");
-
-    run_memory_command_for_dir(
-        MemorySubcommand::Import {
-            input: input.display().to_string(),
-            scope: "project".to_string(),
-            overwrite: false,
-        },
-        Some(project.clone()),
-    )
-    .await
-    .expect("import project memory");
-
-    let reloaded = crate::memory::MemoryManager::new()
-        .with_project_dir(project)
-        .load_project_graph()
-        .expect("reload project graph");
-    assert_eq!(
-        reloaded
-            .get_memory(&entry.id)
-            .map(|memory| memory.content.as_str()),
-        Some("persisted project memory")
-    );
-}
-
-#[tokio::test]
-async fn memory_cli_project_import_fails_without_durable_project_store() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let input = temp.path().join("memories.json");
-    std::fs::write(&input, "[]").expect("write import");
-
-    let error = run_memory_command_for_dir(
-        MemorySubcommand::Import {
-            input: input.display().to_string(),
-            scope: "project".to_string(),
-            overwrite: false,
-        },
-        None,
-    )
-    .await
-    .expect_err("project import must require a durable store");
-
-    assert!(error.to_string().contains("without a project directory"));
-}
-
-#[tokio::test]
-async fn memory_cli_semantic_requires_jev_but_keyword_search_remains_local() {
-    let _guard = crate::storage::lock_test_env();
-    let keys = [
-        "JCODE_HOME",
-        "JCODE_API_KEY",
-        "OPENROUTER_API_KEY",
-        "TYPESAFE_API_KEY",
-        "AIMLAPI_API_KEY",
-        "JCODE_MEMORY_JEV_PROVIDER",
-    ];
-    let _saved = SavedEnv::capture(&keys);
-    let temp = tempfile::tempdir().expect("temp dir");
-    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
-    for key in &keys[1..] {
-        crate::env::remove_var(key);
-    }
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let manager = crate::memory::MemoryManager::new().with_project_dir(&project);
-    manager
-        .remember_project(crate::memory::MemoryEntry::new(
-            crate::memory::MemoryCategory::Fact,
-            "cli-jev-probe without embedding",
-        ))
-        .unwrap();
-    assert!(
-        manager
-            .list_all()
-            .unwrap()
-            .iter()
-            .all(|entry| entry.embedding.is_none())
-    );
-
-    let command = |semantic| MemorySubcommand::Search {
-        query: "cli-jev-probe".into(),
-        semantic,
-    };
-    run_memory_command_for_dir(command(false), Some(project.clone()))
-        .await
-        .expect("local keyword search must remain available without credentials");
-    let error = run_memory_command_for_dir(command(true), Some(project))
-        .await
-        .expect_err("--semantic must report missing Jev access, not silently use embeddings");
-    assert!(error.to_string().contains("Jev memory search failed"));
-    assert!(!format!("{error:#}").contains("cli-jev-probe"));
-
-    // Scope still comes from the explicit directory, never the process cwd.
-    run_memory_command_for_dir(command(true), Some(temp.path().join("empty-project")))
-        .await
-        .expect("an empty project must not leak another project's candidates");
-}
-
-struct SavedEnv {
-    vars: Vec<(String, Option<String>)>,
-}
-
-impl SavedEnv {
-    fn capture(keys: &[&str]) -> Self {
-        Self {
-            vars: keys
-                .iter()
-                .map(|key| (key.to_string(), std::env::var(key).ok()))
-                .collect(),
-        }
-    }
-}
-
-impl Drop for SavedEnv {
-    fn drop(&mut self) {
-        for (key, value) in &self.vars {
-            if let Some(value) = value {
-                crate::env::set_var(key, value);
-            } else {
-                crate::env::remove_var(key);
-            }
-        }
-    }
-}
-
-struct TestProvider;
-
-#[async_trait]
-impl Provider for TestProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
-        tokio::spawn(async move {
-            let _ = tx.send(Ok(StreamEvent::TextDelta("ok".to_string()))).await;
-            let _ = tx
-                .send(Ok(StreamEvent::MessageEnd {
-                    stop_reason: Some("end_turn".to_string()),
-                }))
-                .await;
-        });
-        Ok(Box::pin(ReceiverStream::new(rx)))
-    }
-
-    fn name(&self) -> &str {
-        "test"
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
-    }
-}
-
-struct FailingTestProvider;
-
-#[async_trait]
-impl Provider for FailingTestProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        Err(anyhow::anyhow!("one-shot sentinel failure"))
-    }
-
-    fn name(&self) -> &str {
-        "failing-test"
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
-    }
-}
-
-struct OpenRouterSlotProvider;
-
-#[async_trait]
-impl Provider for OpenRouterSlotProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        Err(anyhow::anyhow!(
-            "the provider label test never sends a request"
-        ))
-    }
-
-    fn name(&self) -> &str {
-        "openrouter"
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
-    }
-}
-
-#[test]
 fn run_report_names_local_profile_instead_of_openrouter_slot() {
     // Ollama/LM Studio share the OpenRouter transport slot (#804).
     assert_eq!(
@@ -609,6 +261,67 @@ fn dependency_todo(id: &str, dependencies: &[&str]) -> crate::todo::TodoItem {
 }
 
 #[tokio::test]
+async fn completely_blocked_cli_pauses_without_review_and_keeps_peers_actionable() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
+    let mut blocked = dependency_todo("blocked", &[]);
+    blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        reason: "Required source data no longer exists".into(),
+    });
+    let (actionable, resumed) =
+        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
+    assert!(actionable.is_empty());
+    assert!(resumed.is_none());
+    let notice = run_blocked_notice(&[blocked.clone()]).unwrap();
+    assert_eq!(
+        notice,
+        "✋ Completely blocked. No way forward.\nblocked: Required source data no longer exists"
+    );
+    assert!(!notice.contains("review deadline"));
+    assert!(run_external_blocker_notice(&[blocked.clone()]).is_none());
+
+    let independent = dependency_todo("independent", &[]);
+    let all = vec![blocked.clone(), independent];
+    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &all, true).await;
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(actionable[0].id, "independent");
+    let poke = run_actionable_poke_message("original".into(), &all, &actionable);
+    assert!(poke.contains("independent"));
+    assert!(!poke.contains("Required source data"));
+
+    blocked.completely_blocked = None;
+    let (actionable, _) =
+        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(actionable[0].status, "pending");
+    assert!(run_completely_blocked_notice(&[blocked]).is_none());
+}
+
+#[test]
+fn completely_blocked_cli_ignores_terminal_tasks_and_keeps_external_notice() {
+    let mut blocked = dependency_todo("blocked", &[]);
+    blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        reason: "Required source data no longer exists".into(),
+    });
+    let mut external = dependency_todo("service", &[]);
+    external.external_blocker = Some(crate::todo::TodoExternalBlocker {
+        reason: "Service is unavailable".into(),
+        review_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+    });
+    let notice = run_blocked_notice(&[blocked.clone(), external]).unwrap();
+    assert!(notice.contains("Completely blocked. No way forward."));
+    assert!(notice.contains("Service is unavailable"));
+    for status in ["completed", "cancelled"] {
+        blocked.status = status.into();
+        assert!(run_completely_blocked_notice(&[blocked.clone()]).is_none());
+        assert_eq!(
+            run_actionable_todos(&[blocked.clone()], &[], "owner").len(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
 async fn external_blocker_cli_suppresses_only_blocked_work_and_reports_durable_review() {
     let temp = tempfile::tempdir().unwrap();
     let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
@@ -723,7 +436,10 @@ async fn run_dependency_mixed_work_stays_actionable_and_scoped() {
     assert_eq!(count, 1);
     let message = run_actionable_poke_message(message, &todos, &actionable);
     assert!(message.contains("Actionable todos:\n- independent:"));
-    assert!(message.contains("Leave todos waiting"));
+    assert!(
+        !message.contains("- waiting:"),
+        "blocked work is not actionable"
+    );
     assert!(crate::todo::is_auto_poke_message(&message));
     let mut completed = dependency_todo("completed", &[&task.task_id]);
     completed.status = "completed".to_string();
@@ -1317,380 +1033,6 @@ fn cli_provider_choice_filter_uses_typed_api_methods() {
 }
 
 #[test]
-fn cloud_sessions_args_match_jade_helper_contract() {
-    let args = build_jade_sessions_args(CloudSessionsSubcommand::UploadLatest {
-        sessions_dir: "/tmp/sessions".to_string(),
-        raw: true,
-        user_id: "jeremy".to_string(),
-        profile: Some("test-profile".to_string()),
-        region: Some("us-east-1".to_string()),
-        helper: None,
-    });
-
-    assert_eq!(
-        args,
-        vec![
-            "upload-latest",
-            "--user-id",
-            "jeremy",
-            "--profile",
-            "test-profile",
-            "--region",
-            "us-east-1",
-            "--sessions-dir",
-            "/tmp/sessions",
-            "--raw",
-        ]
-    );
-
-    let args = build_jade_sessions_args(CloudSessionsSubcommand::View {
-        session_id: "session_123".to_string(),
-        format: "html".to_string(),
-        output: Some("/tmp/session.html".to_string()),
-        open: true,
-        user_id: "dev".to_string(),
-        profile: Some("profile".to_string()),
-        region: Some("region".to_string()),
-        helper: None,
-    });
-
-    assert_eq!(
-        args,
-        vec![
-            "view",
-            "--user-id",
-            "dev",
-            "--profile",
-            "profile",
-            "--region",
-            "region",
-            "--format",
-            "html",
-            "--output",
-            "/tmp/session.html",
-            "--open",
-            "session_123",
-        ]
-    );
-}
-
-#[test]
-fn cloud_sessions_config_persists_secret_and_feeds_helper_env_without_args() {
-    let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JADE_TOKEN_FOR_TEST"]);
-    let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
-    crate::env::set_var("JADE_TOKEN_FOR_TEST", "secret-token-value");
-
-    run_cloud_sessions_configure(
-        Some("https://jade.example".to_string()),
-        None,
-        Some("JADE_TOKEN_FOR_TEST".to_string()),
-        Some("dev-admin".to_string()),
-        Some("alice".to_string()),
-        Some("/tmp/jade_sessions.py".to_string()),
-        false,
-    )
-    .expect("configure");
-
-    let path = cloud_sessions_config_path().expect("config path");
-    assert!(path.exists());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
-    }
-
-    let config = load_cloud_sessions_config()
-        .expect("load config")
-        .expect("config exists");
-    assert_eq!(config.api_base.as_deref(), Some("https://jade.example"));
-    assert_eq!(config.api_token.as_deref(), Some("secret-token-value"));
-    assert_eq!(config.api_token_id.as_deref(), Some("dev-admin"));
-    assert_eq!(config.user_id.as_deref(), Some("alice"));
-    assert_eq!(config.helper.as_deref(), Some("/tmp/jade_sessions.py"));
-
-    let env = cloud_sessions_helper_env(&config);
-    assert!(env.contains(&("JADE_API_BASE", "https://jade.example".to_string())));
-    assert!(env.contains(&("JADE_API_TOKEN", "secret-token-value".to_string())));
-    assert!(env.contains(&("JADE_API_TOKEN_ID", "dev-admin".to_string())));
-
-    let args = build_jade_sessions_args_with_config(
-        CloudSessionsSubcommand::List {
-            limit: 2,
-            json: true,
-            user_id: "dev".to_string(),
-            profile: None,
-            region: None,
-            helper: None,
-        },
-        &config,
-    );
-    assert_eq!(
-        args,
-        vec!["list", "--user-id", "alice", "--limit", "2", "--json"]
-    );
-    assert!(!args.iter().any(|arg| arg.contains("secret-token-value")));
-
-    run_cloud_sessions_configure(None, None, None, None, None, None, true).expect("clear");
-    assert!(!path.exists());
-}
-
-#[test]
-fn is_syncable_session_stem_filters_non_session_files() {
-    assert!(is_syncable_session_stem("session_abc_123"));
-    assert!(is_syncable_session_stem("imported_codex_456"));
-    assert!(!is_syncable_session_stem("req"));
-    assert!(!is_syncable_session_stem("test_selfdev_session"));
-    assert!(!is_syncable_session_stem("session_abc.journal"));
-}
-
-#[test]
-fn collect_sync_candidates_picks_only_session_json() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let dir = temp.path();
-    std::fs::write(dir.join("session_one.json"), b"{\"id\":\"one\"}").unwrap();
-    std::fs::write(dir.join("imported_codex_two.json"), b"{\"id\":\"two\"}").unwrap();
-    std::fs::write(dir.join("req.json"), b"{}").unwrap();
-    std::fs::write(dir.join("session_three.journal.json"), b"{}").unwrap();
-    std::fs::write(dir.join("session_four.bak"), b"{}").unwrap();
-
-    let mut ids: Vec<String> = collect_sync_candidates(dir)
-        .expect("collect")
-        .into_iter()
-        .map(|candidate| candidate.session_id)
-        .collect();
-    ids.sort();
-    assert_eq!(ids, vec!["imported_codex_two", "session_one"]);
-}
-
-#[test]
-fn cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state() {
-    let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_JADE_SESSIONS_HELPER"]);
-    let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
-
-    // A dummy helper that should never run during a dry run.
-    let helper = temp.path().join("never_runs.sh");
-    std::fs::write(&helper, b"#!/bin/sh\nexit 7\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    crate::env::set_var("JCODE_JADE_SESSIONS_HELPER", &helper);
-
-    let sessions_dir = temp.path().join("sessions");
-    std::fs::create_dir_all(&sessions_dir).unwrap();
-    std::fs::write(sessions_dir.join("session_alpha.json"), b"{\"id\":\"a\"}").unwrap();
-    std::fs::write(sessions_dir.join("session_beta.json"), b"{\"id\":\"b\"}").unwrap();
-
-    run_cloud_sessions_sync(CloudSessionsSyncRequest {
-        sessions_dir: Some(sessions_dir.display().to_string()),
-        since_days: None,
-        all: true,
-        max: 50,
-        min_interval_mins: None,
-        raw: false,
-        dry_run: true,
-        force: false,
-        json: true,
-        user_id: "dev".to_string(),
-        profile: None,
-        region: None,
-        helper: None,
-    })
-    .expect("dry run sync");
-
-    // Dry run must not persist any sync state.
-    assert!(!cloud_sessions_sync_state_path().unwrap().exists());
-}
-
-#[test]
-fn cloud_sessions_sync_respects_min_interval_throttle() {
-    let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_JADE_SESSIONS_HELPER"]);
-    let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
-
-    // Helper that would fail loudly if it ever ran during a throttled run.
-    let helper = temp.path().join("must_not_run.sh");
-    std::fs::write(&helper, b"#!/bin/sh\nexit 13\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    crate::env::set_var("JCODE_JADE_SESSIONS_HELPER", &helper);
-
-    let sessions_dir = temp.path().join("sessions");
-    std::fs::create_dir_all(&sessions_dir).unwrap();
-    std::fs::write(sessions_dir.join("session_gamma.json"), b"{\"id\":\"g\"}").unwrap();
-
-    // Seed sync state with a very recent last_sync_at so throttle should trigger.
-    let state = CloudSessionsSyncState {
-        last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
-        ..Default::default()
-    };
-    save_cloud_sessions_sync_state(&state).expect("seed state");
-
-    // Should be skipped (not error) because last sync was just now.
-    run_cloud_sessions_sync(CloudSessionsSyncRequest {
-        sessions_dir: Some(sessions_dir.display().to_string()),
-        since_days: None,
-        all: true,
-        max: 50,
-        min_interval_mins: Some(60),
-        raw: false,
-        dry_run: false,
-        force: false,
-        json: true,
-        user_id: "dev".to_string(),
-        profile: None,
-        region: None,
-        helper: None,
-    })
-    .expect("throttled sync returns ok without running helper");
-
-    // The session should NOT be recorded as uploaded.
-    let reloaded = load_cloud_sessions_sync_state().expect("reload state");
-    assert!(!reloaded.sessions.contains_key("session_gamma"));
-}
-
-#[test]
-fn render_cloud_sessions_dashboard_html_escapes_and_lists_rows() {
-    let items: Vec<CloudSessionListItem> = serde_json::from_str(
-        r#"[
-          {"session_id":"session_x","title":"Hello <b> & \"world\"","message_count":12,"uploaded_at":"2026-05-29T00:00:00Z"},
-          {"session_id":"session_y","short_name":"shorty","message_count":"3","uploaded_at":"2026-05-28T00:00:00Z"}
-        ]"#,
-    )
-    .expect("parse items");
-
-    let html =
-        render_cloud_sessions_dashboard_html("alice", &items, &std::collections::BTreeMap::new());
-    assert!(html.contains("Jade Cloud Sessions"));
-    assert!(html.contains("user: alice"));
-    assert!(html.contains("2 session(s)"));
-    assert!(html.contains("session_x"));
-    assert!(html.contains("shorty"));
-    // Raw title must be escaped (no live markup, quotes escaped).
-    assert!(!html.contains("Hello <b>"));
-    assert!(html.contains("Hello &lt;b&gt; &amp; &quot;world&quot;"));
-    // Numeric and string message counts both render.
-    assert!(html.contains(">12<"));
-    assert!(html.contains(">3<"));
-}
-
-#[test]
-fn render_cloud_sessions_dashboard_html_handles_empty() {
-    let html = render_cloud_sessions_dashboard_html("dev", &[], &std::collections::BTreeMap::new());
-    assert!(html.contains("0 session(s)"));
-    assert!(html.contains("No uploaded sessions found."));
-}
-
-#[test]
-fn render_cloud_sessions_dashboard_html_links_rows_with_view_files() {
-    let items: Vec<CloudSessionListItem> = serde_json::from_str(
-        r#"[
-          {"session_id":"session_x","title":"X","message_count":1,"uploaded_at":"2026-05-29T00:00:00Z"},
-          {"session_id":"session_y","title":"Y","message_count":2,"uploaded_at":"2026-05-28T00:00:00Z"}
-        ]"#,
-    )
-    .expect("parse items");
-    let mut links = std::collections::BTreeMap::new();
-    links.insert(
-        "session_x".to_string(),
-        "dash-views/session_x.html".to_string(),
-    );
-
-    let html = render_cloud_sessions_dashboard_html("alice", &items, &links);
-    // Linked session gets an anchor to its relative viewer file.
-    assert!(html.contains("<a href='dash-views/session_x.html'>session_x</a>"));
-    // Session without a generated viewer stays plain text (no anchor).
-    assert!(html.contains("<td class='id'>session_y</td>"));
-}
-
-#[test]
-fn sanitize_filename_keeps_safe_chars_and_replaces_others() {
-    assert_eq!(
-        sanitize_filename("session_abc-123.json"),
-        "session_abc-123.json"
-    );
-    assert_eq!(sanitize_filename("a/b c:d"), "a_b_c_d");
-}
-
-#[test]
-fn dashboard_views_dir_is_sibling_of_dashboard() {
-    let dir = dashboard_views_dir(std::path::Path::new("/tmp/out/dash.html"));
-    assert_eq!(dir, std::path::PathBuf::from("/tmp/out/dash-views"));
-}
-
-#[test]
-fn relative_link_is_relative_to_dashboard_parent() {
-    let link = relative_link(
-        std::path::Path::new("/tmp/out/dash.html"),
-        std::path::Path::new("/tmp/out/dash-views/session_x.html"),
-    );
-    assert_eq!(link.as_deref(), Some("dash-views/session_x.html"));
-}
-
-#[test]
-fn parse_cloud_session_list_json_accepts_array_and_object_wrappers() {
-    // Real helper shape: a top-level array.
-    let array = parse_cloud_session_list_json(
-        r#"[{"session_id":"session_a","message_count":2,"uploaded_at":"2026-05-29T00:00:00Z"}]"#,
-    )
-    .expect("parse array");
-    assert_eq!(array.len(), 1);
-    assert_eq!(array[0].session_id.as_deref(), Some("session_a"));
-
-    // Tolerated object wrappers.
-    let items = parse_cloud_session_list_json(r#"{"items":[{"session_id":"session_b"}]}"#)
-        .expect("parse items wrapper");
-    assert_eq!(items[0].session_id.as_deref(), Some("session_b"));
-
-    let sessions = parse_cloud_session_list_json(r#"{"sessions":[{"session_id":"session_c"}]}"#)
-        .expect("parse sessions wrapper");
-    assert_eq!(sessions[0].session_id.as_deref(), Some("session_c"));
-
-    // Empty array stays empty.
-    assert!(
-        parse_cloud_session_list_json("[]")
-            .expect("parse empty")
-            .is_empty()
-    );
-}
-
-#[test]
-fn parse_cloud_session_list_json_rejects_unexpected_shapes() {
-    // A bare object without a recognized array key is an error.
-    let err = parse_cloud_session_list_json(r#"{"unexpected":true}"#)
-        .expect_err("object without items/sessions");
-    assert!(err.to_string().contains("items"));
-
-    // A scalar is also rejected with a descriptive message.
-    let err = parse_cloud_session_list_json("42").expect_err("scalar");
-    assert!(err.to_string().contains("a number"));
-}
-
-#[test]
-fn resolve_jade_sessions_helper_prefers_explicit_and_env_paths() {
-    let _saved = SavedEnv::capture(&["JCODE_JADE_SESSIONS_HELPER"]);
-    crate::env::set_var("JCODE_JADE_SESSIONS_HELPER", "/tmp/from-env.py");
-
-    assert_eq!(
-        resolve_jade_sessions_helper(Some("/tmp/explicit.py")).unwrap(),
-        std::path::PathBuf::from("/tmp/explicit.py")
-    );
-    assert_eq!(
-        resolve_jade_sessions_helper(None).unwrap(),
-        std::path::PathBuf::from("/tmp/from-env.py")
-    );
-}
-
-#[test]
 fn auth_test_retryable_error_detection_handles_rate_limits() {
     let err = anyhow::anyhow!(
         "Gemini request generateContent failed (HTTP 429 Too Many Requests): RESOURCE_EXHAUSTED"
@@ -2062,20 +1404,24 @@ async fn run_dependency_resumes_same_session_in_all_output_modes() {
             let mut run = std::pin::pin!(run_single_message_with_agent(
                 &mut agent, provider, "go", json, ndjson
             ));
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(200), &mut run)
-                    .await
-                    .is_err(),
-                "{mode} must remain alive while the dependency runs"
-            );
-            assert!(
-                !crate::background::global()
-                    .status(&task.task_id)
-                    .await
-                    .unwrap()
-                    .wake,
-                "{mode} should own continuation rather than scheduling a daemon wake"
-            );
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    tokio::select! {
+                        result = &mut run => panic!("{mode} finished before dependency completion: {result:?}"),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    }
+                    if !crate::background::global()
+                        .status(&task.task_id)
+                        .await
+                        .unwrap()
+                        .wake
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("CLI must take continuation ownership while dependency is running");
             finish.send(()).unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(5), &mut run)
                 .await
@@ -2269,3 +1615,118 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
         ));
     }
 }
+
+#[path = "commands/tests/cloud_sessions_tests.rs"]
+mod cloud_sessions;
+#[path = "commands/tests/ndjson_metadata_tests.rs"]
+mod ndjson_metadata;
+
+struct SavedEnv {
+    vars: Vec<(String, Option<String>)>,
+}
+
+impl SavedEnv {
+    fn capture(keys: &[&str]) -> Self {
+        Self {
+            vars: keys
+                .iter()
+                .map(|key| (key.to_string(), std::env::var(key).ok()))
+                .collect(),
+        }
+    }
+}
+
+impl Drop for SavedEnv {
+    fn drop(&mut self) {
+        for (key, value) in &self.vars {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
+        }
+    }
+}
+
+struct TestProvider;
+
+#[async_trait]
+impl Provider for TestProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(StreamEvent::TextDelta("ok".to_string()))).await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "test"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+struct FailingTestProvider;
+
+#[async_trait]
+impl Provider for FailingTestProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!("one-shot sentinel failure"))
+    }
+
+    fn name(&self) -> &str {
+        "failing-test"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+struct OpenRouterSlotProvider;
+
+#[async_trait]
+impl Provider for OpenRouterSlotProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!(
+            "the provider label test never sends a request"
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+#[path = "commands/tests/memory_tests.rs"]
+mod memory;

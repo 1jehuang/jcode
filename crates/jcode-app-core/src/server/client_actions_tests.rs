@@ -376,6 +376,7 @@ fn transfer_preserves_system_prompt_including_empty_override() {
                 id: "validate".into(),
                 content: "Validate source build".into(),
                 status: "pending".into(),
+                completely_blocked: None,
                 external_blocker: None,
                 waiting_on: vec!["source-build".into()],
                 ..Default::default()

@@ -136,8 +136,14 @@ pub(crate) fn run_migrate(
                 repo: None,
                 env: ENV_ALLOWLIST
                     .iter()
-                    .filter_map(|key| std::env::var(key).ok().map(|v| (key.to_string(), v)))
-                    .collect(),
+                    .filter_map(|key| match std::env::var(key) {
+                        Ok(value) => Some(Ok((key.to_string(), value))),
+                        Err(std::env::VarError::NotPresent) => None,
+                        Err(std::env::VarError::NotUnicode(_)) => Some(Err(anyhow::anyhow!(
+                            "cloud environment variable has invalid encoding"
+                        ))),
+                    })
+                    .collect::<Result<_>>()?,
                 toolchain_hints: toolchain_hints(repo_root.as_deref()),
                 not_transferred: describe_local_only_state(&sess.id),
                 mcp_servers: configured_mcp_servers(),
@@ -212,11 +218,15 @@ pub(crate) fn run_migrate(
                 .exists()
                 .then(|| digest(&member_dir.join("todos.json")))
                 .transpose()?;
-            if let Ok(memory) = crate::memory::project_memory_file(Path::new(
-                &member.manifest.repo.as_ref().unwrap().working_dir,
-            )) {
-                copy_if_exists(&memory, &member_dir.join("project_memory.json"))?;
-            }
+            let memory = crate::memory::project_memory_file(Path::new(
+                &member
+                    .manifest
+                    .repo
+                    .as_ref()
+                    .context("missing member repository")?
+                    .working_dir,
+            ))?;
+            copy_if_exists(&memory, &member_dir.join("project_memory.json"))?;
         }
         std::fs::write(
             stage.join("limits.json"),
@@ -337,13 +347,13 @@ fn finish_activation(
         .context("group activation unconfirmed; all source members remain fenced. Retry the same cloud migrate command to recover safely")?;
     journal.phase = Phase::Complete;
     save_journal(directory, &journal)?;
-    if let Some(repo) = &root(&journal.group)?.manifest.repo {
-        if let Err(error) = environment::sync_saved(Path::new(&repo.root), target) {
-            step(
-                "environment",
-                &format!("group migrated; saved environment synchronization needs retry: {error}"),
-            );
-        }
+    if let Some(repo) = &root(&journal.group)?.manifest.repo
+        && let Err(error) = environment::sync_saved(Path::new(&repo.root), target)
+    {
+        step(
+            "environment",
+            &format!("group migrated; saved environment synchronization needs retry: {error}"),
+        );
     }
     step(
         "done",

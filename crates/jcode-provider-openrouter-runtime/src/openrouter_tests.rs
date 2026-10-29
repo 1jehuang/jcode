@@ -82,6 +82,7 @@ async fn catalog_request_headers_follow_provider_auth_rules() {
 use bytes::Bytes;
 use futures::StreamExt;
 use jcode_provider_openrouter::stream::OpenRouterStream;
+
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -3608,3 +3609,6 @@ fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
     );
     assert!(OpenRouterProvider::with_profile_default_extra_body(Some("cerebras"), None).is_none());
 }
+
+#[path = "catalog_auth_tests.rs"]
+mod catalog_auth;

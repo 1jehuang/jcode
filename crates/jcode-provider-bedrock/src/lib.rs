@@ -1,3 +1,5 @@
+mod catalog;
+
 #[cfg(feature = "aws-sdk")]
 use anyhow::Context;
 use anyhow::Result;
@@ -281,87 +283,6 @@ impl BedrockProvider {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .or_else(|| jcode_provider_env::load_env_value_from_env_or_config(name, ENV_FILE))
-    }
-
-    fn persisted_catalog_path() -> Result<std::path::PathBuf> {
-        Ok(jcode_storage::app_config_dir()?.join("bedrock_models_cache.json"))
-    }
-
-    fn load_persisted_catalog() -> Option<PersistedCatalog> {
-        let path = Self::persisted_catalog_path().ok()?;
-        jcode_storage::read_json(&path).ok()
-    }
-
-    // Only written from aws-sdk catalog refreshes, but kept ungated so cached
-    // catalogs behave identically in both build modes (and for tests).
-    #[cfg_attr(not(feature = "aws-sdk"), allow(dead_code))]
-    fn persist_catalog(
-        models: &[String],
-        inference_profiles: &[String],
-        profile_required_models: &HashSet<String>,
-        inference_profile_routes: &HashMap<String, String>,
-        legacy_models: &HashSet<String>,
-    ) {
-        let Ok(path) = Self::persisted_catalog_path() else {
-            return;
-        };
-        let payload = PersistedCatalog {
-            models: models.to_vec(),
-            inference_profiles: inference_profiles.to_vec(),
-            profile_required_models: profile_required_models.iter().cloned().collect(),
-            inference_profile_routes: inference_profile_routes.clone(),
-            legacy_models: legacy_models.iter().cloned().collect(),
-            region: Self::configured_region(),
-            fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
-        };
-        if let Err(err) = jcode_storage::write_json(&path, &payload) {
-            jcode_logging::warn(&format!(
-                "Failed to persist Bedrock model catalog {}: {}",
-                path.display(),
-                err
-            ));
-        }
-    }
-
-    fn seed_cached_catalog(&self) {
-        if let Some(catalog) = Self::load_persisted_catalog() {
-            let configured_region = Self::configured_region();
-            if catalog.region.as_deref() != configured_region.as_deref() {
-                jcode_logging::info(&format!(
-                    "Ignoring Bedrock model cache for region {:?}; configured region is {:?}",
-                    catalog.region, configured_region
-                ));
-                return;
-            }
-            let PersistedCatalog {
-                models: cached_models,
-                inference_profiles,
-                profile_required_models,
-                inference_profile_routes,
-                legacy_models,
-                ..
-            } = catalog;
-            let mut inference_profile_routes = inference_profile_routes;
-            Self::merge_profile_routes_from_profile_ids(
-                &mut inference_profile_routes,
-                inference_profiles.iter(),
-            );
-            if let Ok(mut guard) = self.fetched_models.write() {
-                *guard = cached_models;
-            }
-            if let Ok(mut profiles) = self.fetched_inference_profiles.write() {
-                *profiles = inference_profiles;
-            }
-            if let Ok(mut required) = self.profile_required_models.write() {
-                *required = profile_required_models.into_iter().collect();
-            }
-            if let Ok(mut routes) = self.inference_profile_routes.write() {
-                *routes = inference_profile_routes;
-            }
-            if let Ok(mut legacy) = self.legacy_models.write() {
-                *legacy = legacy_models.into_iter().collect();
-            }
-        }
     }
 
     // Pure string logic; only reachable from aws-sdk request paths and tests.
@@ -1127,6 +1048,14 @@ impl BedrockProvider {
     #[cfg(feature = "aws-sdk")]
     async fn refresh_catalog(&self) -> Result<(Vec<String>, Vec<String>)> {
         let client = Self::control_client().await;
+        self.refresh_catalog_with_client(&client).await
+    }
+
+    #[cfg(feature = "aws-sdk")]
+    async fn refresh_catalog_with_client(
+        &self,
+        client: &BedrockControlClient,
+    ) -> Result<(Vec<String>, Vec<String>)> {
         let mut models = Vec::new();
         let mut profile_required_models = HashSet::new();
         let mut legacy_models = HashSet::new();
@@ -1165,46 +1094,55 @@ impl BedrockProvider {
 
         let mut profiles = Vec::new();
         let mut inference_profile_routes = HashMap::new();
-        match client.list_inference_profiles().send().await {
-            Ok(resp) => {
-                for summary in resp.inference_profile_summaries() {
-                    let id = summary.inference_profile_id();
-                    if !id.is_empty() {
-                        profiles.push(id.to_string());
+        let mut profile_pages = client.list_inference_profiles().into_paginator().send();
+        let mut received_profile_page = false;
+        while let Some(page) = profile_pages.next().await {
+            let resp = match page {
+                Ok(resp) => resp,
+                Err(err) => {
+                    // Never replace a complete warm profile catalog with the
+                    // prefix of a paginated response after a later-page error.
+                    if received_profile_page {
+                        return Err(anyhow::anyhow!(Self::classify_error_message(
+                            &Self::sdk_error_message(&err)
+                        )));
                     }
-                    let arn = summary.inference_profile_arn();
-                    if !arn.is_empty() {
-                        profiles.push(arn.to_string());
-                    }
-                    if summary.status().as_str() == "ACTIVE" && !id.is_empty() {
-                        for model in summary.models() {
-                            if let Some(model_arn) = model.model_arn()
-                                && let Some(foundation_model) =
-                                    Self::foundation_model_id_from_arn(model_arn)
-                            {
-                                Self::insert_preferred_profile_route(
-                                    &mut inference_profile_routes,
-                                    &foundation_model,
-                                    id,
-                                );
-                            }
+                    jcode_logging::info(&format!(
+                        "Bedrock inference profile discovery skipped: {}",
+                        Self::classify_error_message(&Self::sdk_error_message(&err))
+                    ));
+                    break;
+                }
+            };
+            received_profile_page = true;
+            for summary in resp.inference_profile_summaries() {
+                let id = summary.inference_profile_id();
+                if !id.is_empty() {
+                    profiles.push(id.to_string());
+                }
+                let arn = summary.inference_profile_arn();
+                if !arn.is_empty() {
+                    profiles.push(arn.to_string());
+                }
+                if summary.status().as_str() == "ACTIVE" && !id.is_empty() {
+                    for model in summary.models() {
+                        if let Some(model_arn) = model.model_arn()
+                            && let Some(foundation_model) =
+                                Self::foundation_model_id_from_arn(model_arn)
+                        {
+                            Self::insert_preferred_profile_route(
+                                &mut inference_profile_routes,
+                                &foundation_model,
+                                id,
+                            );
                         }
                     }
                 }
-                profiles.sort();
-                profiles.dedup();
-                Self::merge_profile_routes_from_profile_ids(
-                    &mut inference_profile_routes,
-                    profiles.iter(),
-                );
-            }
-            Err(err) => {
-                jcode_logging::info(&format!(
-                    "Bedrock inference profile discovery skipped: {}",
-                    Self::classify_error_message(&Self::sdk_error_message(&err))
-                ));
             }
         }
+        profiles.sort();
+        profiles.dedup();
+        Self::merge_profile_routes_from_profile_ids(&mut inference_profile_routes, profiles.iter());
 
         if let Ok(mut guard) = self.fetched_models.write() {
             *guard = models.clone();

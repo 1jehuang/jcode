@@ -446,8 +446,9 @@ pub fn render_messages_and_images_with_compacted_history(
             .peek()
             .is_some_and(|(timestamp, _)| msg.timestamp.is_some_and(|next| *timestamp < next))
         {
-            let (_, content) = errors.next().expect("peeked error");
-            rendered.push(render_error(content));
+            if let Some((_, content)) = errors.next() {
+                rendered.push(render_error(content));
+            }
         }
         if is_internal_system_reminder(msg) {
             continue;

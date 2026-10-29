@@ -31,10 +31,18 @@ impl AwaitDependency {
 }
 
 pub fn now_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_millis() as u64,
+        Err(_) => {
+            static WARNING: std::sync::Once = std::sync::Once::new();
+            WARNING.call_once(|| {
+                jcode_logging::warn(
+                    "system clock precedes Unix epoch; durable waits cannot expire yet",
+                )
+            });
+            0
+        }
+    }
 }
 
 /// The generation prevents a completed wait from blocking again when the same
@@ -44,16 +52,42 @@ pub fn dependency_id(key: &str, created_at_unix_ms: u64) -> String {
 }
 
 pub fn load(runtime_dir: &Path, id: &str) -> Option<AwaitDependency> {
-    let rest = id.strip_prefix(ID_PREFIX)?;
-    let (key, generation) = rest.rsplit_once('-')?;
-    if !crate::store::is_safe_session_id(key) {
-        return None;
+    match load_checked(runtime_dir, id) {
+        Ok(state) => state,
+        Err(_) => {
+            static WARNING: std::sync::Once = std::sync::Once::new();
+            WARNING.call_once(|| jcode_logging::warn("durable wait state could not be read or decoded; treating dependency as actionable"));
+            None
+        }
     }
-    let generation: u64 = generation.parse().ok()?;
-    let bytes = std::fs::read(runtime_dir.join(STATE_DIR).join(format!("{key}.json"))).ok()?;
-    let state: AwaitDependency = serde_json::from_slice(&bytes).ok()?;
-    (state.key == key && state.created_at_unix_ms == generation && state.id() == id)
-        .then_some(state)
+}
+
+/// Invalid, absent, or superseded identifiers are expected absence. Real IO or
+/// decoding failures are retained for callers that need strict validation.
+pub fn load_checked(runtime_dir: &Path, id: &str) -> std::io::Result<Option<AwaitDependency>> {
+    let Some(rest) = id.strip_prefix(ID_PREFIX) else {
+        return Ok(None);
+    };
+    let Some((key, generation)) = rest.rsplit_once('-') else {
+        return Ok(None);
+    };
+    if !crate::store::is_safe_session_id(key) {
+        return Ok(None);
+    }
+    let generation: u64 = match generation.parse() {
+        Ok(generation) => generation,
+        Err(_) => return Ok(None), // An out-of-range/non-numeric identifier is not a dependency.
+    };
+    let bytes = match std::fs::read(runtime_dir.join(STATE_DIR).join(format!("{key}.json"))) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let state: AwaitDependency = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    Ok(
+        (state.key == key && state.created_at_unix_ms == generation && state.id() == id)
+            .then_some(state),
+    )
 }
 
 pub fn running(runtime_dir: &Path, id: &str, session_id: &str) -> bool {
@@ -63,6 +97,24 @@ pub fn running(runtime_dir: &Path, id: &str, session_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_reads_distinguish_missing_invalid_and_unreadable_state() {
+        let dir = std::env::temp_dir().join(format!("await-read-errors-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        let id = dependency_id("owner", 42);
+        assert!(load_checked(&dir, "unrelated").unwrap().is_none());
+        assert!(load_checked(&dir, "await-owner-invalid").unwrap().is_none());
+        assert!(load_checked(&dir, &id).unwrap().is_none());
+        let path = dir.join(STATE_DIR).join("owner.json");
+        std::fs::write(&path, "secret-invalid-json").unwrap();
+        assert!(load_checked(&dir, &id).is_err());
+        assert!(load(&dir, &id).is_none());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(load_checked(&dir, &id).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn durable_dependency_validates_identity_generation_owner_and_deadline() {

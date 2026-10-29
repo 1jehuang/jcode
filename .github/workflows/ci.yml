@@ -141,10 +141,13 @@ jobs:
         run: |
           python3 tests/test_ci_workflow_guards.py
           python3 tests/test_install_justrust_ci.py
+          python3 tests/test_install_justrust_hosted_ci.py
           python3 tests/test_public_release_builds.py
           python3 tests/test_release_ci.py
           python3 scripts/test_quick_release.py
           python3 scripts/test_preview_release.py
+          python3 tests/test_preview_linux_hosted.py
+          python3 tests/test_package_preview_linux_hosted.py
           python3 tests/test_verify_public_release.py
           python3 tests/test_watch_release_run.py
           bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh scripts/quick-release.sh
@@ -274,6 +277,25 @@ jobs:
         run: |
           cargo test --locked --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
           cargo test --locked --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
+
+      - name: Run automatic model discovery regressions (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        # Provider crates are not covered by the TUI library test invocation.
+        # Execute these contracts, including a future Grok ID not in the binary,
+        # rather than merely compiling them with --no-run.
+        run: |
+          set -euo pipefail
+          cargo_bin="$(rustup which cargo)"
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-grok-build-runtime --lib
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-openrouter-runtime --lib
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-gemini-runtime --lib developer_catalog
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-copilot-runtime -p jcode-provider-cursor-runtime -p jcode-provider-antigravity-runtime --lib
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-bedrock --features aws-sdk --lib
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-base --lib catalog_refresh_reaches_every_runtime_slot_and_compatible_profile
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-base --lib forced_catalog_refresh_bypasses_freshness_and_throttle_but_not_in_flight
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-app-core --lib model_prefetch
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-app-core --lib periodic_model_refresh
 
       - name: Run embedding numeric-stability cohort (Linux only)
         if: runner.os == 'Linux'

@@ -18,6 +18,8 @@
 mod reasoning_request;
 mod usage_recording;
 
+mod catalog;
+
 use jcode_base::auth;
 use jcode_base::auth::oauth;
 use jcode_provider_core::{EventStream, NativeToolResultSender, Provider};
@@ -571,66 +573,6 @@ impl AnthropicProvider {
             AnthropicCredentialMode::ApiKey
         };
         self.set_credential_mode(mode)
-    }
-
-    /// Fetch the live Anthropic model catalog using the resolved credential.
-    ///
-    /// Mirrors [`Provider::prefetch_models`] but returns the model ids to the
-    /// caller (rather than only persisting them) so the doctor can assert the
-    /// live `GET /v1/models` endpoint works and that the model under test is in
-    /// the live catalog.
-    pub async fn fetch_live_model_ids_for_doctor(&self) -> Result<Vec<String>> {
-        let oauth_scope = self.catalog_scope_for_route(true);
-        let api_scope = self.catalog_scope_for_route(false);
-        let (token, is_oauth) = self.get_access_token().await?;
-        let scope = if is_oauth { oauth_scope } else { api_scope };
-        if token.trim().is_empty() {
-            anyhow::bail!("resolved an empty Anthropic access token");
-        }
-        let catalog = if is_oauth {
-            jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
-        } else {
-            jcode_base::provider::fetch_anthropic_model_catalog(&token).await?
-        };
-        // Persist so the rest of the process benefits from the warm catalog,
-        // exactly like the runtime's own prefetch.
-        jcode_base::provider::persist_anthropic_model_catalog_for_scope(&scope, &catalog);
-        if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits.clone());
-        }
-        if !catalog.available_models.is_empty() {
-            jcode_base::provider::populate_anthropic_models_for_scope(
-                &scope,
-                catalog.available_models.clone(),
-            );
-        }
-        Ok(catalog.available_models)
-    }
-
-    async fn refresh_model_catalog_for_route(&self, oauth: bool, scope: &str) -> Result<()> {
-        let catalog = if oauth {
-            let (token, _) = self.get_oauth_access_token().await?;
-            match jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await {
-                Ok(catalog) => catalog,
-                Err(err) if is_oauth_catalog_auth_error(&err.to_string()) => {
-                    let token = force_refresh_oauth_token(
-                        Arc::clone(&self.credentials),
-                        &self.oauth_refresh_label(),
-                    )
-                    .await?;
-                    jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
-                }
-                Err(err) => return Err(err),
-            }
-        } else {
-            jcode_base::provider::fetch_anthropic_model_catalog(&self.direct_api_key()?).await?
-        };
-        jcode_base::provider::persist_anthropic_model_catalog_for_scope(scope, &catalog);
-        if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits);
-        }
-        jcode_base::provider::populate_anthropic_models_for_scope(scope, catalog.available_models);
-        Ok(())
     }
 
     pub fn new() -> Self {
@@ -1675,45 +1617,21 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        // A custom messages URL (ANTHROPIC_BASE_URL / named profile) must not
-        // leak gateway API keys to Anthropic's official model-catalog
-        // endpoint. Genuine Anthropic OAuth credentials are a different case:
-        // users often route /v1/messages through a local proxy (e.g. a
-        // caching proxy) while authenticating with their real subscription,
-        // and skipping the refresh for them silently freezes the model list
-        // at the last disk snapshot, hiding newly released models. The
-        // catalog fetch itself always goes directly to api.anthropic.com.
-        let custom_gateway = self.direct_transport.api_url != API_URL;
-        // Discovery is independent of the selected chat credential mode. Do not
-        // mutate that mode on this shared provider just to inspect another route.
-        // API discovery gets first opportunity, OAuth still runs on API failure.
-        for oauth in [false, true] {
-            if custom_gateway && !oauth {
-                // Never send named gateway API keys to Anthropic's catalog.
-                continue;
-            }
-            let configured = if oauth {
-                auth::claude::load_credentials().is_ok()
-            } else {
-                self.direct_api_key().is_ok()
-            };
-            if !configured {
-                continue;
-            }
-            let scope = self.catalog_scope_for_route(oauth);
-            if !jcode_base::provider::begin_anthropic_model_catalog_refresh_for_scope(&scope) {
-                continue;
-            }
-            let result = self.refresh_model_catalog_for_route(oauth, &scope).await;
-            jcode_base::provider::finish_anthropic_model_catalog_refresh_for_scope(&scope);
-            if let Err(err) = result {
-                jcode_base::logging::warn(&format!(
-                    "Anthropic {} model catalog refresh failed; keeping cached list: {err}",
-                    if oauth { "OAuth" } else { "API key" }
-                ));
-            }
-        }
-        Ok(())
+        self.refresh_catalogs(false).await
+    }
+
+    async fn refresh_model_catalog(
+        &self,
+    ) -> Result<jcode_provider_core::ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        self.refresh_catalogs(true).await?;
+        Ok(jcode_provider_core::summarize_model_catalog_refresh(
+            before_models,
+            self.available_models_display(),
+            before_routes,
+            self.model_routes(),
+        ))
     }
 
     fn name(&self) -> &'static str {

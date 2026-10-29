@@ -53,38 +53,10 @@ const ORIGINATOR: &str = "codex_cli_rs";
 
 pub(crate) const CHATGPT_WEB_MODEL: &str = jcode_provider_core::CHATGPT_WEB_MODEL;
 
-pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
-    model.trim() == CHATGPT_WEB_MODEL
-}
-
-/// Whether the hosted `image_generation` tool can be attached for `model_id`.
-///
-/// The Responses backend only exposes `image_generation` to general
-/// ChatGPT/GPT models. Codex models (ids containing `codex`) reject unknown
-/// hosted tools, so they must not receive it. See issue #369.
-/// Responses `additional_tools` / deferred tool loading requires gpt-5.4 or
-/// newer. Unknown model families stay eager, which is always correct.
-fn model_supports_additional_tools(model_id: &str) -> bool {
-    let lower = model_id.to_ascii_lowercase();
-    let Some(rest) = lower.strip_prefix("gpt-") else {
-        return false;
-    };
-    let version: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect();
-    let mut parts = version.split('.').filter(|p| !p.is_empty());
-    let major: u32 = match parts.next().and_then(|p| p.parse().ok()) {
-        Some(major) => major,
-        None => return false,
-    };
-    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    major > 5 || (major == 5 && minor >= 4)
-}
-
-fn model_supports_image_generation(model_id: &str) -> bool {
-    !model_id.to_ascii_lowercase().contains("codex")
-}
+use model_capabilities::{
+    is_chatgpt_web_model, model_supports_additional_tools, model_supports_image_generation,
+};
+mod model_capabilities;
 
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
@@ -1077,6 +1049,14 @@ impl OpenAIProvider {
     /// so validation, availability, and refresh must all use the loaded
     /// credential's own catalog instead of one shared per-account slot.
     pub(crate) fn catalog_scope_for(credentials: &CodexCredentials) -> String {
+        if Self::is_chatgpt_mode(credentials)
+            && let Ok(accounts) = jcode_base::auth::codex::list_accounts()
+            && let Some(label) =
+                jcode_base::auth::codex::account_label_for_credentials(&accounts, credentials)
+        {
+            return label;
+        }
+        // Unmatched legacy OAuth credentials retain the existing account fallback.
         jcode_base::provider::openai_catalog_scope_for_credential(
             Self::is_chatgpt_mode(credentials),
             &credentials.access_token,
@@ -1575,6 +1555,7 @@ use self::stream::{handle_openai_output_item, parse_text_wrapped_tool_call};
 
 mod chatgpt_web;
 mod native_web_search;
+mod openai_prewarm_request;
 #[path = "openai_provider_impl.rs"]
 mod openai_provider_impl;
 #[path = "openai_stream_runtime.rs"]

@@ -540,9 +540,17 @@ wake_mode = "internal"
 # Default model for spawned swarm/subagent sessions.
 # Leave unset (or "inherit"/"coordinator") so workers inherit the model of the
 # session that spawned them. Set a concrete model to change the worker default.
-# An explicit `model` in the swarm tool overrides this default for new workers.
 # Env override: JCODE_SWARM_MODEL
 # swarm_model = "inherit"
+#
+# Agent-selected worker models are disabled by default, even if an allowlist exists.
+# Enable explicitly and list exact model/route strings to permit selection.
+# A bare model does not authorize a provider-prefixed route (or vice versa).
+swarm_model_selection = false
+swarm_model_allowlist = []
+# Example opt-in:
+# swarm_model_selection = true
+# swarm_model_allowlist = ["openai:gpt-5.5", "claude:claude-sonnet-4-6"]
 #
 # Reasoning effort for spawned swarm workers ("low", "medium", "high", ...).
 # Agents cannot choose worker effort through the swarm tool. Unset = "low".

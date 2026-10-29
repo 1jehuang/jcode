@@ -99,7 +99,7 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
-        last_input_item_hashes: persistent_ws_input_item_hashes(&[user.clone()]),
+        last_input_item_hashes: persistent_ws_input_item_hashes(std::slice::from_ref(&user)),
         last_response_output: Vec::new(),
     })));
     let (tx, _rx) = mpsc::channel(100);

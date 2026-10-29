@@ -3,6 +3,7 @@
 use super::App;
 use crate::protocol::{SessionToolConfig, SessionToolDefinition};
 use crate::tui::backend::RemoteConnection;
+use anyhow::Context;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -54,21 +55,47 @@ fn lease_remaining(
     if session != marker {
         return None;
     }
-    crate::cloud_environment::validate_lease(lease, session, host, now).ok()?;
-    let updated = chrono::DateTime::parse_from_rfc3339(&lease.updated_at)
-        .ok()?
-        .with_timezone(&chrono::Utc);
-    let age = now.signed_duration_since(updated).to_std().ok()?;
+    if crate::cloud_environment::validate_lease(lease, session, host, now).is_err() {
+        crate::logging::warn("Cloud resource access denied: lease validation failed");
+        return None;
+    }
+    let updated = match chrono::DateTime::parse_from_rfc3339(&lease.updated_at) {
+        Ok(updated) => updated.with_timezone(&chrono::Utc),
+        Err(_) => {
+            crate::logging::warn("Cloud resource access denied: invalid lease timestamp");
+            return None;
+        }
+    };
+    let age = match now.signed_duration_since(updated).to_std() {
+        Ok(age) => age,
+        Err(_) => {
+            crate::logging::warn("Cloud resource access denied: lease timestamp is in the future");
+            return None;
+        }
+    };
     Duration::from_secs(crate::cloud_environment::LOCAL_ACCESS_SECONDS as u64)
         .checked_sub(age)
         .filter(|left| !left.is_zero())
 }
+fn environment_marker(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            crate::logging::warn(&format!(
+                "Cloud resource access denied: {name} is not Unicode"
+            ));
+            None
+        }
+    }
+}
+
 fn remaining(session: &str) -> Option<Duration> {
     lease_remaining(
         &crate::storage::read_session_lease(session)?,
         session,
-        &std::env::var("JCODE_CLOUD_ENV_SESSION").ok()?,
-        &std::env::var("JCODE_SSH_REMOTE").ok()?,
+        &environment_marker("JCODE_CLOUD_ENV_SESSION")?,
+        &environment_marker("JCODE_SSH_REMOTE")?,
         chrono::Utc::now(),
     )
 }
@@ -93,12 +120,22 @@ fn configuration() -> SessionToolConfig {
     }
 }
 fn valid_request(input: &Value) -> bool {
-    serde_json::to_vec(input)
-        .ok()
-        .is_some_and(|bytes| crate::cloud_environment::parse_request(&bytes).is_ok())
+    match serde_json::to_vec(input) {
+        Ok(bytes) => crate::cloud_environment::parse_request(&bytes).is_ok(),
+        Err(_) => {
+            crate::logging::warn("Cloud resource request could not be encoded");
+            false
+        }
+    }
 }
 fn safe_status(raw: &[u8]) -> Option<String> {
-    let status: crate::cloud_environment::Status = serde_json::from_slice(raw).ok()?;
+    let status: crate::cloud_environment::Status = match serde_json::from_slice(raw) {
+        Ok(status) => status,
+        Err(_) => {
+            crate::logging::warn("Cloud resource response rejected: invalid status JSON");
+            return None;
+        }
+    };
     if !matches!(
         status.code.as_str(),
         "available" | "received" | "unavailable"
@@ -108,10 +145,18 @@ fn safe_status(raw: &[u8]) -> Option<String> {
         return None;
     }
     // Only the typed, closed status object may cross into model context.
-    serde_json::to_string(&status).ok()
+    match serde_json::to_string(&status) {
+        Ok(status) => Some(status),
+        Err(_) => {
+            crate::logging::warn("Cloud resource response rejected: status encoding failed");
+            None
+        }
+    }
 }
-async fn fulfill(session: &str, input: &Value) -> Option<String> {
-    let mut command = tokio::process::Command::new(std::env::current_exe().ok()?);
+async fn fulfill(session: &str, input: &Value) -> anyhow::Result<String> {
+    let mut command = tokio::process::Command::new(
+        std::env::current_exe().context("locate resource callback executable")?,
+    );
     command
         .args([
             "--no-update",
@@ -131,31 +176,43 @@ async fn fulfill(session: &str, input: &Value) -> Option<String> {
         use std::os::unix::process::CommandExt;
         command.as_std_mut().process_group(0);
     }
-    let mut child = command.spawn().ok()?;
+    let mut child = command.spawn().context("spawn resource callback")?;
     #[cfg(unix)]
-    let _group = FulfillProcessGroup(child.id()?);
-    let mut stdin = child.stdin.take()?;
+    let _group = FulfillProcessGroup(child.id().context("resource callback has no process ID")?);
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("resource callback has no stdin")?;
     stdin
-        .write_all(&serde_json::to_vec(input).ok()?)
+        .write_all(&serde_json::to_vec(input).context("encode resource request")?)
         .await
-        .ok()?;
-    stdin.shutdown().await.ok()?;
+        .context("write resource callback input")?;
+    stdin
+        .shutdown()
+        .await
+        .context("close resource callback input")?;
     drop(stdin);
     let mut output = Vec::new();
     child
         .stdout
-        .take()?
+        .take()
+        .context("resource callback has no stdout")?
         .take(16385)
         .read_to_end(&mut output)
         .await
-        .ok()?;
+        .context("read resource callback output")?;
     if output.len() > 16384 {
-        return None;
+        anyhow::bail!("resource callback output exceeds limit");
     }
-    if !child.wait().await.ok()?.success() {
-        return None;
+    if !child
+        .wait()
+        .await
+        .context("wait for resource callback")?
+        .success()
+    {
+        anyhow::bail!("resource callback exited unsuccessfully");
     }
-    safe_status(&output)
+    safe_status(&output).context("resource callback returned invalid status")
 }
 
 #[cfg(unix)]
@@ -291,18 +348,25 @@ impl App {
         let deadline = grant.deadline;
         let task = tokio::spawn(async move {
             let limit = deadline.min(tokio::time::Instant::now() + Duration::from_secs(75));
-            let result = tokio::time::timeout_at(limit, fulfill(&session, &input))
-                .await
-                .ok()
-                .flatten();
+            let result = match tokio::time::timeout_at(limit, fulfill(&session, &input)).await {
+                Ok(Ok(output)) => Some(output),
+                Ok(Err(_)) => {
+                    // Never log resource bytes or subprocess diagnostics.
+                    crate::logging::warn("Cloud resource callback failed");
+                    None
+                }
+                Err(_) => {
+                    crate::logging::warn("Cloud resource callback timed out");
+                    None
+                }
+            };
             if live.load(Ordering::SeqCst)
                 && remaining(&session).is_some()
                 && tokio::time::Instant::now() < deadline
+                && let Some(output) = result
             {
-                if let Some(output) = result {
-                    reply(call_id, output, None);
-                    return;
-                }
+                reply(call_id, output, None);
+                return;
             }
             reply(
                 call_id,

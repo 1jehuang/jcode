@@ -1,3 +1,5 @@
+#[path = "inline_interactive/cache_signature.rs"]
+mod cache_signature;
 use super::*;
 use crate::tui::session_picker::{self, OverlayAction, PickerResult, ResumeTarget, SessionPicker};
 use crate::tui::{
@@ -1049,56 +1051,6 @@ impl App {
         self.model_picker_catalog_revision = self.model_picker_catalog_revision.wrapping_add(1);
         self.pending_model_picker_load = None;
         self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
-    }
-
-    fn model_route_cache_marker(route: &crate::provider::ModelRoute) -> String {
-        format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            route.model, route.provider, route.api_method, route.available, route.detail
-        )
-    }
-
-    fn model_picker_cache_signature(
-        &self,
-        current_model: &str,
-        config_default_model: Option<String>,
-        config_default_provider: Option<String>,
-        current_effort: Option<String>,
-        available_efforts: &[&str],
-    ) -> ModelPickerCacheSignature {
-        ModelPickerCacheSignature {
-            is_remote: self.is_remote,
-            provider_name: if self.is_remote {
-                self.remote_provider_name
-                    .clone()
-                    .unwrap_or_else(|| "remote".to_string())
-            } else {
-                self.provider.name().to_string()
-            },
-            current_model: current_model.to_string(),
-            config_default_model,
-            config_default_provider,
-            reasoning_effort: current_effort,
-            available_efforts: available_efforts
-                .iter()
-                .map(|effort| (*effort).to_string())
-                .collect(),
-            simplified_model_picker: crate::perf::tui_policy().simplified_model_picker,
-            catalog_revision: self.model_picker_catalog_revision,
-            remote_provider_name: self.remote_provider_name.clone(),
-            remote_available_len: self.remote_available_entries.len(),
-            remote_available_first: self.remote_available_entries.first().cloned(),
-            remote_available_last: self.remote_available_entries.last().cloned(),
-            remote_routes_len: self.remote_model_options.len(),
-            remote_routes_first: self
-                .remote_model_options
-                .first()
-                .map(Self::model_route_cache_marker),
-            remote_routes_last: self
-                .remote_model_options
-                .last()
-                .map(Self::model_route_cache_marker),
-        }
     }
 
     fn open_cached_model_picker_if_fresh(
@@ -3128,6 +3080,46 @@ impl App {
             return;
         };
 
+        // Ownership takes precedence even over the picker entry labelled current:
+        // its local transcript may have moved while this client was open.
+        if let Some(lease) = crate::storage::read_session_lease(&session_id)
+            && let Some(host) = lease.away_host
+        {
+            if self.is_processing
+                || self.pending_turn
+                || self.cloud_job.is_some()
+                || self.cloud_handoff_blocks_work()
+                || self.should_quit
+            {
+                self.push_display_message(DisplayMessage::error(
+                    "Wait for the current turn or cloud handoff to finish before attaching to a cloud session.".to_string(),
+                ));
+                return;
+            }
+            // A picker selection consumes no composer command. In particular,
+            // a typed `/cloud` is still an unsent draft, not an accepted command.
+            if !self.input.trim().is_empty() {
+                self.push_display_message(DisplayMessage::error(
+                    "Cloud attach blocked: send or save the composer draft first. Nothing was removed.".to_string(),
+                ));
+                return;
+            }
+            // Reuse the cloud handoff guard before quitting this client. This
+            // covers attachments, queues and unacknowledged interrupts.
+            if !super::commands_cloud::check_cloud_handoff_input(self, "/cloud") {
+                return;
+            }
+            self.cloud_handoff_requested = Some(CloudHandoff::RemoteResume {
+                session_id,
+                host,
+                working_dir: lease.repo_root,
+            });
+            self.session_picker_overlay = None;
+            self.session_picker_mode = SessionPickerMode::Resume;
+            self.should_quit = true;
+            return;
+        }
+
         // Selecting the session we are already in (visible in the Active view,
         // labeled "current") should simply close the picker, not re-resume.
         if session_id == super::commands::active_session_id(self) {
@@ -4206,3 +4198,7 @@ impl App {
 #[cfg(test)]
 #[path = "inline_interactive_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "inline_interactive/cloud_resume_tests.rs"]
+mod cloud_resume_tests;

@@ -330,17 +330,19 @@ fn excluded_local_sessions_at(
     included: &[String],
 ) -> Result<Vec<String>> {
     let mut excluded = BTreeSet::new();
-    if !directory.exists() {
-        return Ok(Vec::new());
-    }
-    for entry in std::fs::read_dir(directory)?.flatten() {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("cannot inspect local sessions"),
+    };
+    for entry in entries {
+        let entry = entry.context("cannot inspect local session entry")?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Ok(value) = read_json::<serde_json::Value>(&path) else {
-            continue;
-        };
+        let value = read_json::<serde_json::Value>(&path)
+            .context("cannot inspect local session metadata")?;
         let (Some(id), Some(working_dir)) = (value["id"].as_str(), value["working_dir"].as_str())
         else {
             continue;
@@ -351,18 +353,39 @@ fn excluded_local_sessions_at(
         {
             continue;
         }
-        let Ok(canonical) = Path::new(working_dir).canonicalize() else {
-            continue;
+        let canonical = match Path::new(working_dir).canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("cannot resolve local session repository"),
         };
         if !canonical.starts_with(root) {
             continue;
         }
-        let Ok(candidate) = git(&canonical, &["rev-parse", "--show-toplevel"]) else {
-            continue;
-        };
-        if Path::new(&candidate).canonicalize().ok().as_deref() == Some(root) {
+        let candidate = git(&canonical, &["rev-parse", "--show-toplevel"])
+            .context("cannot identify local session repository")?;
+        if Path::new(&candidate).canonicalize()? == root {
             excluded.insert(id.to_owned());
         }
     }
     Ok(excluded.into_iter().collect())
+}
+
+#[cfg(test)]
+mod inspection_error_tests {
+    use super::*;
+
+    #[test]
+    fn exclusion_scan_distinguishes_absence_from_unreadable_state() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(
+            excluded_local_sessions_at(&temp.path().join("missing"), temp.path(), &[])
+                .unwrap()
+                .is_empty()
+        );
+        let not_directory = temp.path().join("not-directory");
+        std::fs::write(&not_directory, "not a directory").unwrap();
+        assert!(excluded_local_sessions_at(&not_directory, temp.path(), &[]).is_err());
+        std::fs::write(temp.path().join("broken.json"), "invalid json").unwrap();
+        assert!(excluded_local_sessions_at(temp.path(), temp.path(), &[]).is_err());
+    }
 }
