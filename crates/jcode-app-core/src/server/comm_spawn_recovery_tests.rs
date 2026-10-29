@@ -94,6 +94,12 @@ async fn spawn_worker(
     root: &std::path::Path,
 ) -> Result<(String, String, mpsc::UnboundedReceiver<ServerEvent>)> {
     let mut owner = Session::create(None, Some("fresh-spawn-owner".into()));
+    owner.system_prompt = Some("COORDINATOR_SYSTEM_PROMPT_MUST_NOT_INHERIT".into());
+    owner.agent_profile = Some(crate::agent_profile::AgentProfile {
+        name: "coordinator-profile".into(),
+        instructions: "COORDINATOR_PROFILE_MUST_NOT_INHERIT".into(),
+        instruction_sources: Vec::new(),
+    });
     owner.save_prepared()?;
     let owner_id = owner.id.clone();
     let swarm_id = "fresh-spawn-recovery".to_string();
@@ -204,6 +210,9 @@ async fn fresh_headless_spawn_quota_resumes_same_turn_once() -> Result<()> {
     let provider = Arc::new(LimitedOnce::default());
     let server = Server::new(provider.clone());
     let (owner, id, mut owner_events) = spawn_worker(&server, root.path()).await?;
+    let worker = Session::load(&id)?;
+    assert_eq!(worker.system_prompt, None);
+    assert_eq!(worker.agent_profile, None);
     wait_status(&server, &id, "rate_limited").await;
     assert_eq!(provider.calls(), 1);
     assert!(usage_limit_resume::pending_state(&id)?.is_some());
