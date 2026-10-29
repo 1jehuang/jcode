@@ -8,7 +8,6 @@
 pub mod budget;
 mod client;
 mod manager;
-mod pending;
 pub mod oauth;
 pub mod pool;
 mod protocol;
