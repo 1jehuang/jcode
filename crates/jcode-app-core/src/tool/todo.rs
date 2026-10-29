@@ -1179,6 +1179,14 @@ impl Tool for TodoTool {
          Set waiting_on to existing background task IDs or swarm await_members dependency IDs from this session when work \
          must wait. They block only while running, never after completion. Saving \
          enables completion notify/wake. Use [] or null to clear waiting_on. \
+         Block only when progress requires an indispensable action that only someone else can perform, \
+         and no safe workaround exists after investigation. The reason must name who must do exactly \
+         what to unblock this item, and why the agent cannot do it or work around it. Valid examples: \
+         a credential only its owner can provide, required data only its custodian can supply, or \
+         explicit approval genuinely required for an irreversible action. Implementation choices, \
+         uncertainty, task size, prioritization, and agent coordination never qualify. Decide, \
+         investigate, split the work, or coordinate directly instead. Do not invent approval \
+         requirements for already-authorized work. Continue independent items. \
          For an external blocker without a dependency ID, set external_blocker to \
          {reason, review_at}, with a concrete reason and future RFC3339 deadline. \
          Keep the todo pending/in_progress. Pokes pause until review_at and a durable \
@@ -1241,19 +1249,19 @@ impl Tool for TodoTool {
                                 "required": ["reason"],
                                 "additionalProperties": false,
                                 "properties": {
-                                    "reason": {"type": "string", "minLength": 1, "description": "Reason."}
+                                    "reason": {"type": "string", "minLength": 1, "description": "Who must do exactly what, and why the agent cannot do it or work around it."}
                                 },
-                                "description": "No way forward."
+                                "description": "Only when an indispensable action can be performed only by someone else and no safe workaround exists after investigation. Name who must do exactly what, and why the agent cannot do it or work around it. Not for implementation decisions, uncertainty, task size, or agent coordination."
                             },
                             "external_blocker": {
                                 "type": ["object", "null"],
                                 "required": ["reason", "review_at"],
                                 "additionalProperties": false,
                                 "properties": {
-                                    "reason": {"type": "string", "minLength": 1, "description": "Concrete external condition preventing useful work, not a completion claim."},
+                                    "reason": {"type": "string", "minLength": 1, "description": "Who must do exactly what, and why the agent cannot do it or work around it."},
                                     "review_at": {"type": "string", "format": "date-time", "description": "Future finite RFC3339 reassessment deadline. Does not mean the blocker resolves then."}
                                 },
-                                "description": "No dependency ID: pause until durable review_at to reassess the external condition. null cancels."
+                                "description": "Only when an indispensable action can be performed only by someone else and no safe workaround exists after investigation. Name who must do exactly what, and why the agent cannot do it or work around it. Not for implementation decisions, uncertainty, task size, or agent coordination. No dependency ID: pause until durable review_at to reassess. null cancels."
                             },
                             "status": {
                                 "type": "string",
