@@ -1433,39 +1433,43 @@ pub(super) async fn handle_client(
                     });
                     continue;
                 }
-                let profile = match new_session_agent_profile(
-                    provisional_session,
-                    target_session_id.as_deref(),
-                    agent_profile_name.as_deref(),
-                    subscribe_working_dir.as_deref().expect("validated working directory"),
-                ) {
-                    Ok(profile) => profile,
-                    Err(error) => {
+                // Resolve creation-only settings before changing session identity,
+                // but do not persist them until this Subscribe is committed as a
+                // fresh session. A target attach can still fail after validation
+                // (duplicate owner, takeover rejection, or restore failure).
+                let creation_profile = if provisional_session && target_session_id.is_none() {
+                    match new_session_agent_profile(
+                        true,
+                        None,
+                        agent_profile_name.as_deref(),
+                        subscribe_working_dir.as_deref().expect("validated working directory"),
+                    ) {
+                        Ok(profile) => profile,
+                        Err(error) => {
+                            let _ = client_event_tx.send(ServerEvent::Error {
+                                id, message: format!("{error:#}"), retry_after_secs: None,
+                                server_resumes: false,
+                            });
+                            continue;
+                        }
+                    }
+                } else {
+                    if agent_profile_name.is_some() {
                         let _ = client_event_tx.send(ServerEvent::Error {
-                            id, message: format!("{error:#}"), retry_after_secs: None,
+                            id,
+                            message: "Agent profiles can only be selected when creating a new session, not when resuming or attaching".to_string(),
+                            retry_after_secs: None,
                             server_resumes: false,
                         });
                         continue;
                     }
+                    None
                 };
-                if let Some(profile) = profile {
-                    if let Err(error) = agent.lock().await.set_agent_profile(Some(profile)) {
-                        let _ = client_event_tx.send(ServerEvent::Error {
-                            id, message: format!("Failed to save agent profile: {error:#}"),
-                            retry_after_secs: None, server_resumes: false,
-                        });
-                        continue;
-                    }
-                }
-                // Overrides are creation-only. In particular, never apply one to
-                // a target attachment or a repeated Subscribe on this connection.
-                if let Some(prompt) = new_session_system_prompt(
+                let creation_system_prompt = new_session_system_prompt(
                     provisional_session,
                     target_session_id.as_deref(),
                     system_prompt.as_deref(),
-                ) {
-                    agent.lock().await.set_system_prompt(prompt);
-                }
+                ).map(str::to_owned);
                 // Every Subscribe carries an authoritative snapshot. An empty
                 // snapshot must clear terminal vars inherited by the daemon
                 // rather than retaining a prior pane's values.
@@ -1581,6 +1585,18 @@ pub(super) async fn handle_client(
                             break;
                         }
                     } else {
+                        if let Some(profile) = creation_profile {
+                            if let Err(error) = agent.lock().await.set_agent_profile(Some(profile)) {
+                                let _ = client_event_tx.send(ServerEvent::Error {
+                                    id, message: format!("Failed to save agent profile: {error:#}"),
+                                    retry_after_secs: None, server_resumes: false,
+                                });
+                                continue;
+                            }
+                        }
+                        if let Some(prompt) = creation_system_prompt.as_deref() {
+                            agent.lock().await.set_system_prompt(prompt);
+                        }
                         if provisional_session {
                             agent.lock().await.activate_concurrency_tracking();
                         }
@@ -1611,6 +1627,18 @@ pub(super) async fn handle_client(
                         .await;
                     }
                 } else {
+                    if let Some(profile) = creation_profile {
+                        if let Err(error) = agent.lock().await.set_agent_profile(Some(profile)) {
+                            let _ = client_event_tx.send(ServerEvent::Error {
+                                id, message: format!("Failed to save agent profile: {error:#}"),
+                                retry_after_secs: None, server_resumes: false,
+                            });
+                            continue;
+                        }
+                    }
+                    if let Some(prompt) = creation_system_prompt.as_deref() {
+                        agent.lock().await.set_system_prompt(prompt);
+                    }
                     if provisional_session {
                         agent.lock().await.activate_concurrency_tracking();
                     }
