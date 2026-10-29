@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 use jcode_provider_metadata::{is_safe_env_file_name, is_safe_env_key_name};
@@ -197,6 +198,43 @@ pub fn load_env_value_from_config_file(env_key: &str, file_name: &str) -> Option
     None
 }
 
+static JCODE_MANAGED_PROCESS_ENV: LazyLock<RwLock<HashMap<String, Option<String>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Record that Jcode is syncing a credential into the process environment
+/// (e.g. during login activation). Captures the pre-existing environment value
+/// (if any) so that genuine shell overrides are preserved across logout.
+pub fn track_process_env_var_override(key: &str) {
+    if let Ok(mut map) = JCODE_MANAGED_PROCESS_ENV.write() {
+        map.entry(key.to_string())
+            .or_insert_with(|| std::env::var(key).ok());
+    }
+}
+
+/// Check if a process environment variable was modified/managed by Jcode.
+pub fn is_process_env_var_managed_by_jcode(key: &str) -> bool {
+    JCODE_MANAGED_PROCESS_ENV
+        .read()
+        .map(|map| map.contains_key(key))
+        .unwrap_or(false)
+}
+
+/// Clear a Jcode-installed process environment copy on logout.
+/// If there was an inherited shell override before Jcode modified it, that
+/// override is restored. If there was no inherited key, the variable is removed.
+pub fn clear_process_env_var_managed_by_jcode(key: &str) {
+    let baseline = JCODE_MANAGED_PROCESS_ENV
+        .write()
+        .ok()
+        .and_then(|mut map| map.remove(key));
+    if let Some(prev) = baseline {
+        match prev {
+            Some(original) => jcode_core::env::set_var(key, original),
+            None => jcode_core::env::remove_var(key),
+        }
+    }
+}
+
 pub fn save_env_value_to_env_file(
     env_key: &str,
     file_name: &str,
@@ -211,8 +249,23 @@ pub fn save_env_value_to_env_file(
 
     let config_dir = jcode_storage::app_config_dir()?;
     let file_path = config_dir.join(file_name);
-    // The env file is the only store: never write the process env (issue #1389).
+    let old_file_value = load_env_value_from_config_file(env_key, file_name);
+
+    // The env file is the credential store: never write the process env when
+    // saving credentials (issue #1389).
     jcode_storage::upsert_env_file_value(&file_path, env_key, value)?;
+
+    if value.is_none() {
+        // Reconcile login activation and logout so Jcode-created process copies
+        // are cleared without removing genuine shell overrides.
+        if is_process_env_var_managed_by_jcode(env_key) {
+            clear_process_env_var_managed_by_jcode(env_key);
+        } else if let Some(old) = old_file_value {
+            if std::env::var(env_key).ok().as_deref() == Some(old.as_str()) {
+                jcode_core::env::remove_var(env_key);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -513,5 +566,35 @@ mod tests {
         Creds::clear("JCODE_CREDS_TEST_API_KEY", "creds-test.env").expect("clear");
         assert!(!Creds::has("JCODE_CREDS_TEST_API_KEY", "creds-test.env"));
         assert!(std::env::var_os("JCODE_CREDS_TEST_API_KEY").is_none());
+    }
+
+    #[test]
+    fn login_sync_logout_clears_process_env_without_removing_genuine_shell_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_LOGIN_SYNC_TEST_API_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let key = "JCODE_LOGIN_SYNC_TEST_API_KEY";
+        let file = "login-sync-test.env";
+
+        // Case 1: No inherited key -> login save & sync -> logout -> credential reads are None
+        save_env_value_to_env_file(key, file, Some("saved-key")).expect("save");
+        track_process_env_var_override(key);
+        jcode_core::env::set_var(key, "saved-key");
+
+        assert_eq!(load_api_key_from_env_or_config(key, file).as_deref(), Some("saved-key"));
+        assert_eq!(load_env_value_from_env_or_config(key, file).as_deref(), Some("saved-key"));
+
+        // Logout
+        save_env_value_to_env_file(key, file, None).expect("logout");
+        assert_eq!(load_api_key_from_env_or_config(key, file), None);
+        assert_eq!(load_env_value_from_env_or_config(key, file), None);
+        assert!(std::env::var_os(key).is_none());
+
+        // Case 2: Genuine shell override that was never overwritten by Jcode
+        jcode_core::env::set_var(key, "genuine-shell-override");
+        save_env_value_to_env_file(key, file, None).expect("logout on unmanaged");
+        assert_eq!(std::env::var(key).as_deref(), Ok("genuine-shell-override"));
+        jcode_core::env::remove_var(key);
     }
 }

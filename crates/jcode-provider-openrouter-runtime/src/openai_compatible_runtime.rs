@@ -21,18 +21,29 @@ impl OpenRouterProvider {
         // keeps the `/serve` boot fail-fast contract. `load_openai_compatible_profile_api_key`
         // gates on the Muse subscription store too (a plain Meta API key is
         // never accepted for the native subscription route).
-        let auth = match load_openai_compatible_profile_api_key(&resolver_profile) {
-            Some(_) => ProviderAuth::AuthorizationBearer {
+        let auth = if resolver_profile.id == "muse-subscription" {
+            let auth = ProviderAuth::MuseSubscription {
+                label: resolver_profile.api_key_env.clone(),
+            };
+            auth.require_all()?;
+            auth
+        } else if !resolver_profile.requires_api_key {
+            ProviderAuth::OptionalBearer {
                 key_name: resolver_profile.api_key_env.clone(),
                 env_file: resolver_profile.env_file.clone(),
                 label: resolver_profile.api_key_env.clone(),
-            },
-            None if !resolver_profile.requires_api_key => ProviderAuth::None {
-                label: "local endpoint (no auth)".to_string(),
-            },
-            None => return Err(credentials_unavailable_error(&resolver_profile)),
+            }
+        } else {
+            let auth = ProviderAuth::AuthorizationBearer {
+                key_name: resolver_profile.api_key_env.clone(),
+                env_file: resolver_profile.env_file.clone(),
+                fallback_token: None,
+                label: resolver_profile.api_key_env.clone(),
+            };
+            auth.require_all()
+                .map_err(|_| credentials_unavailable_error(&resolver_profile))?;
+            auth
         };
-        auth.require_all()?;
 
         let static_context_limits = openai_compatible_profile_static_context_limits(profile);
         let static_models = openai_compatible_profile_static_models(profile);

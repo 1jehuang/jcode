@@ -418,12 +418,28 @@ enum ProviderAuth {
     AuthorizationBearer {
         key_name: String,
         env_file: String,
+        fallback_token: Option<String>,
         label: String,
     },
     HeaderValue {
         header_name: HeaderName,
         key_name: String,
         env_file: String,
+        fallback_token: Option<String>,
+        label: String,
+    },
+    /// Optional bearer auth for local/self-hosted profiles (e.g. LM Studio)
+    /// that do not require an API key: checked live per request, sending
+    /// `Bearer <token>` when present or proceeding anonymously when absent.
+    OptionalBearer {
+        key_name: String,
+        env_file: String,
+        label: String,
+    },
+    /// Native Muse subscription route: credentials live only in the Jcode-managed
+    /// Muse subscription store, resolved live per request without falling back
+    /// to or accepting separate pay-as-you-go keys from the environment or env file.
+    MuseSubscription {
         label: String,
     },
     /// Inline key that rode in on static config (a named profile's `api_key`
@@ -457,17 +473,31 @@ enum ProviderAuth {
 impl ProviderAuth {
     /// Look the key up right now: env var read live, then the env file. This
     /// is the only time a token ever materializes (issue #1389).
-    fn resolve_key(key_name: &str, env_file: &str, label: &str) -> Result<String> {
+    fn resolve_key(
+        key_name: &str,
+        env_file: &str,
+        fallback_token: Option<&str>,
+        label: &str,
+    ) -> Result<String> {
         if env_file.is_empty() {
             // Env-only profile (no env_file configured): the process env is the
             // store, read live (read-only override; we never write it).
             if let Ok(key) = std::env::var(key_name) {
-                return Ok(key);
+                let trimmed = key.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
             }
         } else if let Some(key) = load_runtime_api_key(key_name, env_file) {
             // `load_runtime_api_key` reads env-then-file and falls back to the
             // Jcode-managed Muse subscription store (issue #1389).
             return Ok(key);
+        }
+        if let Some(fallback) = fallback_token {
+            let trimmed = fallback.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
         }
         let path = if env_file.is_empty() {
             "the environment".to_string()
@@ -487,18 +517,29 @@ impl ProviderAuth {
             Self::AuthorizationBearer {
                 key_name,
                 env_file,
+                fallback_token,
                 label,
             } => {
-                Self::resolve_key(key_name, env_file, label)?;
+                Self::resolve_key(key_name, env_file, fallback_token.as_deref(), label)?;
             }
             Self::HeaderValue {
                 key_name,
                 env_file,
+                fallback_token,
                 label,
                 ..
             } => {
-                Self::resolve_key(key_name, env_file, label)?;
+                Self::resolve_key(key_name, env_file, fallback_token.as_deref(), label)?;
             }
+            Self::MuseSubscription { .. } => {
+                jcode_base::auth::muse::ensure_enabled()?;
+                let _ = jcode_base::auth::muse::load_credentials().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Muse subscription login unavailable. Run `jcode login --provider muse-subscription`. No pay-as-you-go key fallback was attempted."
+                    )
+                })?;
+            }
+            Self::OptionalBearer { .. } => {}
             _ => {}
         }
         Ok(())
@@ -509,14 +550,45 @@ impl ProviderAuth {
             Self::AuthorizationBearer {
                 key_name,
                 env_file,
+                fallback_token,
                 label,
-            } => Ok(req.bearer_auth(Self::resolve_key(key_name, env_file, label)?)),
+            } => Ok(req.bearer_auth(Self::resolve_key(
+                key_name,
+                env_file,
+                fallback_token.as_deref(),
+                label,
+            )?)),
             Self::HeaderValue {
                 header_name,
                 key_name,
                 env_file,
+                fallback_token,
                 label,
-            } => Ok(req.header(header_name, Self::resolve_key(key_name, env_file, label)?)),
+            } => Ok(req.header(
+                header_name,
+                Self::resolve_key(
+                    key_name,
+                    env_file,
+                    fallback_token.as_deref(),
+                    label,
+                )?,
+            )),
+            Self::OptionalBearer {
+                key_name,
+                env_file,
+                label,
+            } => {
+                if let Ok(key) = Self::resolve_key(key_name, env_file, None, label) {
+                    Ok(req.bearer_auth(key))
+                } else {
+                    Ok(req)
+                }
+            }
+            Self::MuseSubscription { .. } => {
+                jcode_base::auth::muse::ensure_enabled()?;
+                let credentials = jcode_base::auth::muse::load_credentials()?;
+                Ok(req.bearer_auth(credentials.api_key))
+            }
             Self::InlineBearer { token, .. } => Ok(req.bearer_auth(token)),
             Self::InlineHeader {
                 header_name, token, ..
@@ -541,6 +613,8 @@ impl ProviderAuth {
         match self {
             Self::AuthorizationBearer { label, .. } => label,
             Self::HeaderValue { label, .. } => label,
+            Self::OptionalBearer { label, .. } => label,
+            Self::MuseSubscription { label } => label,
             Self::InlineBearer { label, .. } => label,
             Self::InlineHeader { label, .. } => label,
             Self::AzureEntra { label } => label,
@@ -705,21 +779,31 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
     // Names, not tokens: `fetch_models_from_api` -> `apply` resolves the key
     // live from the env store when the request actually goes out (#1389). The
     // presence gate below keeps the schedule/backoff contract unchanged.
-    let auth =
-        if load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file).is_some() {
-            ProviderAuth::AuthorizationBearer {
-                key_name: resolved.api_key_env.clone(),
-                env_file: resolved.env_file.clone(),
-                label: resolved.api_key_env.clone(),
-            }
-        } else if !resolved.requires_api_key {
-            ProviderAuth::None {
-                label: "local endpoint (no auth)".to_string(),
-            }
-        } else {
+    let auth = if resolved.id == "muse-subscription" {
+        if load_openai_compatible_profile_api_key(&resolved).is_none() {
             finish_profile_catalog_refresh(&resolved.id);
             return false;
-        };
+        }
+        ProviderAuth::MuseSubscription {
+            label: resolved.api_key_env.clone(),
+        }
+    } else if !resolved.requires_api_key {
+        ProviderAuth::OptionalBearer {
+            key_name: resolved.api_key_env.clone(),
+            env_file: resolved.env_file.clone(),
+            label: resolved.api_key_env.clone(),
+        }
+    } else if load_openai_compatible_profile_api_key(&resolved).is_some() {
+        ProviderAuth::AuthorizationBearer {
+            key_name: resolved.api_key_env.clone(),
+            env_file: resolved.env_file.clone(),
+            fallback_token: None,
+            label: resolved.api_key_env.clone(),
+        }
+    } else {
+        finish_profile_catalog_refresh(&resolved.id);
+        return false;
+    };
 
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         finish_profile_catalog_refresh(&resolved.id);
@@ -834,6 +918,7 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
     let auth = ProviderAuth::AuthorizationBearer {
         key_name: DEFAULT_API_KEY_NAME.to_string(),
         env_file: DEFAULT_ENV_FILE.to_string(),
+        fallback_token: None,
         label: DEFAULT_API_KEY_NAME.to_string(),
     };
     let previous_fingerprint =
@@ -1432,9 +1517,15 @@ impl OpenRouterProvider {
             .filter(|v| !v.is_empty())
             .unwrap_or_default()
             .to_string();
-        // Enum carries the key *name* (plus the env file), not the token; the
-        // value is looked up at request time (issue #1389). Inline config keys
-        // resolve at construction — they are static config, not env reads.
+        let inline_fallback = profile
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+        // Enum carries the key *name* (plus the env file and optional inline fallback),
+        // not the token; the value is looked up at request time (issue #1389). Inline
+        // config keys without an env variable resolve at construction.
         let auth =
             match profile.auth {
                 jcode_base::config::NamedProviderAuth::None => ProviderAuth::None {
@@ -1444,10 +1535,11 @@ impl OpenRouterProvider {
                     Some(key_name) => ProviderAuth::AuthorizationBearer {
                         key_name,
                         env_file,
+                        fallback_token: inline_fallback,
                         label: key_label,
                     },
                     None => ProviderAuth::InlineBearer {
-                        token: profile.api_key.clone().ok_or_else(|| {
+                        token: inline_fallback.ok_or_else(|| {
                             anyhow::anyhow!("{} not found in environment", key_label)
                         })?,
                         label: key_label,
@@ -1464,6 +1556,7 @@ impl OpenRouterProvider {
                         )?,
                         key_name,
                         env_file,
+                        fallback_token: inline_fallback,
                         label: key_label,
                     },
                     None => ProviderAuth::InlineHeader {
@@ -1474,7 +1567,7 @@ impl OpenRouterProvider {
                                 .unwrap_or("api-key")
                                 .as_bytes(),
                         )?,
-                        token: profile.api_key.clone().ok_or_else(|| {
+                        token: inline_fallback.ok_or_else(|| {
                             anyhow::anyhow!("{} not found in environment", key_label)
                         })?,
                         label: key_label,
@@ -1877,6 +1970,7 @@ impl OpenRouterProvider {
         let auth = ProviderAuth::AuthorizationBearer {
             key_name: DEFAULT_API_KEY_NAME.to_string(),
             env_file: DEFAULT_ENV_FILE.to_string(),
+            fallback_token: None,
             label: DEFAULT_API_KEY_NAME.to_string(),
         };
         auth.require_all()?;
@@ -2576,12 +2670,14 @@ impl OpenRouterProvider {
                     AuthHeaderMode::AuthorizationBearer => ProviderAuth::AuthorizationBearer {
                         key_name: key_name.clone(),
                         env_file,
+                        fallback_token: None,
                         label: key_name,
                     },
                     AuthHeaderMode::ApiKey => ProviderAuth::HeaderValue {
                         header_name: configured_auth_header_name(),
                         key_name: key_name.clone(),
                         env_file,
+                        fallback_token: None,
                         label: key_name,
                     },
                 });
@@ -2606,12 +2702,14 @@ impl OpenRouterProvider {
             AuthHeaderMode::AuthorizationBearer => ProviderAuth::AuthorizationBearer {
                 key_name: key_name.clone(),
                 env_file,
+                fallback_token: None,
                 label: key_name,
             },
             AuthHeaderMode::ApiKey => ProviderAuth::HeaderValue {
                 header_name: configured_auth_header_name(),
                 key_name: key_name.clone(),
                 env_file,
+                fallback_token: None,
                 label: key_name,
             },
         })

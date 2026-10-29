@@ -1,7 +1,8 @@
 pub use jcode_provider_env::{
-    Creds, load_api_key_from_env_or_config, load_env_value_from_config_file,
+    Creds, clear_process_env_var_managed_by_jcode, is_process_env_var_managed_by_jcode,
+    load_api_key_from_env_or_config, load_env_value_from_config_file,
     load_env_value_from_env_or_config, register_api_key_fallback_resolver,
-    save_env_value_to_env_file, save_named_api_key,
+    save_env_value_to_env_file, save_named_api_key, track_process_env_var_override,
 };
 pub use jcode_provider_metadata::*;
 use std::collections::{HashMap, HashSet};

@@ -1223,6 +1223,50 @@ mod tests {
     }
 
     #[test]
+    fn login_sync_logout_sequence_clears_credential_readers_when_no_inherited_key() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        crate::env::remove_var("ANTHROPIC_API_KEY");
+        sandbox
+            .write_env_file("anthropic.env", "ANTHROPIC_API_KEY", "login-fake-key")
+            .expect("write env file");
+
+        let mut auth = AuthChanged::new("claude-api");
+        auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+        auth.auth_method = Some(crate::protocol::AuthMethod::TuiPasteApiKey);
+        let _ = activate_auth_change(&AuthActivationRequest::new(None, Some(auth)));
+
+        assert_eq!(
+            std::env::var("ANTHROPIC_API_KEY").as_deref(),
+            Ok("login-fake-key")
+        );
+
+        // Logout removes the env-file entry
+        crate::provider_catalog::save_env_value_to_env_file(
+            "ANTHROPIC_API_KEY",
+            "anthropic.env",
+            None,
+        )
+        .expect("logout");
+
+        // Both readers must return None
+        assert_eq!(
+            crate::provider_catalog::load_api_key_from_env_or_config(
+                "ANTHROPIC_API_KEY",
+                "anthropic.env"
+            ),
+            None
+        );
+        assert_eq!(
+            crate::provider_catalog::load_env_value_from_env_or_config(
+                "ANTHROPIC_API_KEY",
+                "anthropic.env"
+            ),
+            None
+        );
+        assert!(std::env::var_os("ANTHROPIC_API_KEY").is_none());
+    }
+
+    #[test]
     fn api_key_login_invalidates_auth_status_cached_before_activation() {
         let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
         assert_eq!(

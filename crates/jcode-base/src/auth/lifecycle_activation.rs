@@ -154,6 +154,7 @@ pub(super) fn sync_process_env_from_saved_credentials(
         // children and the AWS SDK (which cannot read our env files). Readers we
         // control are env-file aware (#1389); this sync replaces a stale inherited
         // var so those foreign readers see the fresh login (issue #453).
+        crate::provider_catalog::track_process_env_var_override(&env_key);
         crate::env::set_var(&env_key, &file_value);
         crate::logging::auth_event(
             "auth_changed_env_synced_from_file",

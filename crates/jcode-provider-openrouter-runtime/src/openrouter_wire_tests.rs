@@ -687,6 +687,7 @@ async fn auth_names_resolve_live_between_requests() {
     let auth_for = |key_name: &str| ProviderAuth::AuthorizationBearer {
         key_name: key_name.to_string(),
         env_file: env_file.to_string(),
+        fallback_token: None,
         label: key_name.to_string(),
     };
     let auth = auth_for(key_name);
@@ -743,4 +744,201 @@ async fn auth_names_resolve_live_between_requests() {
         .await
         .expect_err("no key after logout");
     assert!(err.to_string().contains("Run `jcode login`"));
+}
+
+#[test]
+fn resolve_key_trims_env_var_when_no_env_file() {
+    let _guard = super::EnvVarGuard::set("TEST_PADDED_KEY", "  sk-padded-secret  ");
+    let key = ProviderAuth::resolve_key("TEST_PADDED_KEY", "", None, "TEST_PADDED_KEY").unwrap();
+    assert_eq!(key, "sk-padded-secret");
+
+    let _guard2 = super::EnvVarGuard::set("TEST_EMPTY_KEY", "   ");
+    let err = ProviderAuth::resolve_key("TEST_EMPTY_KEY", "", None, "TEST_EMPTY_KEY").unwrap_err();
+    assert!(err.to_string().contains("not configured"));
+}
+
+#[tokio::test]
+async fn named_profile_preserves_inline_fallback() {
+    let _guard = super::EnvVarGuard::remove("TEST_ABSENT_ENV_KEY");
+    let profile = jcode_base::config::NamedProviderConfig {
+        provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
+        base_url: "https://example.test/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::Bearer,
+        api_key: Some("inline-fallback-token".to_string()),
+        api_key_env: Some("TEST_ABSENT_ENV_KEY".to_string()),
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("test-profile", &profile)
+        .expect("construction succeeds via fallback");
+    let req = provider
+        .auth
+        .apply(reqwest::Client::new().get("https://example.test/v1/models"))
+        .await
+        .unwrap();
+    let auth_header = req
+        .build()
+        .unwrap()
+        .headers()
+        .get("authorization")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(auth_header, "Bearer inline-fallback-token");
+
+    // When the env var is set, the live env var takes precedence:
+    let _guard2 = super::EnvVarGuard::set("TEST_ABSENT_ENV_KEY", "live-env-token");
+    let req2 = provider
+        .auth
+        .apply(reqwest::Client::new().get("https://example.test/v1/models"))
+        .await
+        .unwrap();
+    let auth_header2 = req2
+        .build()
+        .unwrap()
+        .headers()
+        .get("authorization")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(auth_header2, "Bearer live-env-token");
+}
+
+#[tokio::test]
+async fn optional_bearer_resolves_live_per_request() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = super::EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _key = super::EnvVarGuard::remove("LM_STUDIO_API_KEY");
+
+    let profile = jcode_base::provider_catalog::OpenAiCompatibleProfile {
+        id: "lm-studio",
+        display_name: "LM Studio",
+        api_base: "http://127.0.0.1:1234/v1",
+        api_key_env: "LM_STUDIO_API_KEY",
+        env_file: "lm-studio.env",
+        setup_url: "",
+        default_model: Some("test-model"),
+        requires_api_key: false,
+    };
+    let provider = OpenRouterProvider::new_openai_compatible_profile_runtime(profile)
+        .expect("construct without key");
+
+    // 1. Initially without key -> anonymous (no auth header)
+    let req = provider
+        .auth
+        .apply(reqwest::Client::new().get("http://127.0.0.1:1234/v1/models"))
+        .await
+        .unwrap();
+    assert!(req.build().unwrap().headers().get("authorization").is_none());
+
+    // 2. Add key to env file later -> next request is authenticated
+    jcode_base::provider_catalog::save_env_value_to_env_file(
+        "LM_STUDIO_API_KEY",
+        "lm-studio.env",
+        Some("saved-lm-key"),
+    )
+    .unwrap();
+    let req2 = provider
+        .auth
+        .apply(reqwest::Client::new().get("http://127.0.0.1:1234/v1/models"))
+        .await
+        .unwrap();
+    assert_eq!(
+        req2.build()
+            .unwrap()
+            .headers()
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "Bearer saved-lm-key"
+    );
+
+    // 3. Remove key -> next request returns to anonymous
+    jcode_base::provider_catalog::save_env_value_to_env_file(
+        "LM_STUDIO_API_KEY",
+        "lm-studio.env",
+        None,
+    )
+    .unwrap();
+    let req3 = provider
+        .auth
+        .apply(reqwest::Client::new().get("http://127.0.0.1:1234/v1/models"))
+        .await
+        .unwrap();
+    assert!(req3.build().unwrap().headers().get("authorization").is_none());
+}
+
+#[tokio::test]
+async fn muse_subscription_uses_native_store_only() {
+    let _lock = ENV_LOCK.lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = super::EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _optin = super::EnvVarGuard::set("JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION", "1");
+    let _env_key = super::EnvVarGuard::set(
+        "JCODE_MUSE_SUBSCRIPTION_API_KEY",
+        "conflicting-override-key",
+    );
+
+    // Save native subscription key
+    jcode_base::auth::muse::save_credentials(&jcode_base::auth::muse::MuseCredentials {
+        api_key: "native-subscription-key".to_string(),
+        access_token: "dca-test-token".to_string(),
+        base_url: jcode_base::auth::muse::EXPECTED_API_BASE_URL.to_string(),
+        user_email: None,
+        user_full_name: None,
+        is_subs_active: true,
+        minted_at_ms: 1,
+        subs_usage: None,
+    })
+    .unwrap();
+
+    let profile =
+        jcode_base::provider_catalog::openai_compatible_profile_by_id("muse-subscription").unwrap();
+    let provider = OpenRouterProvider::new_openai_compatible_profile_runtime(profile).unwrap();
+
+    let req = provider
+        .auth
+        .apply(reqwest::Client::new().post("https://api.meta.ai/v1/chat/completions"))
+        .await
+        .unwrap();
+    let auth_header = req
+        .build()
+        .unwrap()
+        .headers()
+        .get("authorization")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    // Must use native subscription key, NOT the conflicting env override!
+    assert_eq!(auth_header, "Bearer native-subscription-key");
+}
+
+#[tokio::test]
+async fn muse_subscription_background_catalog_refresh_succeeds_with_native_credentials() {
+    let _lock = ENV_LOCK.lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = super::EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _optin = super::EnvVarGuard::set("JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION", "1");
+    let _key = super::EnvVarGuard::remove("JCODE_MUSE_SUBSCRIPTION_API_KEY");
+
+    // Save native subscription key
+    jcode_base::auth::muse::save_credentials(&jcode_base::auth::muse::MuseCredentials {
+        api_key: "native-subscription-key".to_string(),
+        access_token: "dca-test-token".to_string(),
+        base_url: jcode_base::auth::muse::EXPECTED_API_BASE_URL.to_string(),
+        user_email: None,
+        user_full_name: None,
+        is_subs_active: true,
+        minted_at_ms: 1,
+        subs_usage: None,
+    })
+    .unwrap();
+
+    let profile =
+        jcode_base::provider_catalog::openai_compatible_profile_by_id("muse-subscription").unwrap();
+    let scheduled = maybe_schedule_openai_compatible_profile_catalog_refresh(profile, "test");
+    assert!(scheduled);
 }
