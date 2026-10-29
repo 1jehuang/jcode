@@ -57,6 +57,9 @@ pub fn anthropic_api_pricing_with_tier(
 
     if anthropic_tier_is_fast(service_tier) {
         match base {
+            "claude-opus-5-5" => {
+                return exact(8.0, 40.0, 0.40, "Anthropic API fast mode pricing");
+            }
             "claude-opus-4-8" => {
                 return exact(10.0, 50.0, 1.0, "Anthropic API fast mode pricing");
             }
@@ -398,6 +401,13 @@ mod tests {
             .expect("priced model");
         assert_eq!(opus48.input_price_per_mtok_micros, Some(10_000_000));
         assert_eq!(opus48.output_price_per_mtok_micros, Some(50_000_000));
+
+        // Opus 5.5 fast mode: $8/$40, cache read 0.05x fast input.
+        let opus55 = anthropic_api_pricing_with_tier("claude-opus-5-5[1m]", Some("priority"))
+            .expect("priced model");
+        assert_eq!(opus55.input_price_per_mtok_micros, Some(8_000_000));
+        assert_eq!(opus55.output_price_per_mtok_micros, Some(40_000_000));
+        assert_eq!(opus55.cache_read_price_per_mtok_micros, Some(400_000));
 
         // standard_only (off) and models without fast pricing use standard rates.
         assert_eq!(

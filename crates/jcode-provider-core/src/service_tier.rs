@@ -91,7 +91,7 @@ pub fn speed_tier_ladder(
         || provider.contains("anthropic")
         || (provider.is_empty() && model.starts_with("claude"));
     if is_anthropic {
-        return if model.contains("claude-opus-4-8") {
+        return if crate::anthropic::anthropic_model_supports_fast_mode(&model) {
             STANDARD_FAST.to_vec()
         } else {
             Vec::new()
@@ -251,6 +251,15 @@ mod tests {
             vec!["off", "priority"]
         );
         assert!(speed_tier_ladder(Some("claude"), Some("claude-sonnet-4-6")).is_empty());
+        assert_eq!(
+            speed_tier_ladder(Some("claude"), Some("claude-opus-5-5")),
+            vec!["off", "priority"]
+        );
+        assert_eq!(
+            speed_tier_ladder(Some("anthropic"), Some("claude-opus-5-5[1m]")),
+            vec!["off", "priority"]
+        );
+        assert!(speed_tier_ladder(Some("claude"), Some("claude-opus-5-50")).is_empty());
         assert!(speed_tier_ladder(Some("openrouter"), Some("openai/gpt-6-astra")).is_empty());
         assert!(speed_tier_ladder(Some("copilot"), Some("gpt-6-astra")).is_empty());
     }
