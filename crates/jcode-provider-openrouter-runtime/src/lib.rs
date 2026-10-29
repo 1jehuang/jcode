@@ -23,11 +23,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use jcode_base::provider_catalog::{
     OPENAI_COMPAT_PROFILE, is_safe_env_file_name, is_safe_env_key_name,
-    load_api_key_from_env_or_config, load_env_value_from_env_or_config, normalize_api_base,
-    openai_compatible_profile_by_id,
-    openai_compatible_profile_id_for_api_base, openai_compatible_profile_static_context_limits,
-    openai_compatible_profile_static_models, openai_compatible_profiles,
-    resolve_openai_compatible_profile,
+    load_api_key_from_env_or_config, load_env_value_from_env_or_config,
+    load_openai_compatible_profile_api_key, load_runtime_api_key, normalize_api_base,
+    openai_compatible_profile_by_id, openai_compatible_profile_id_for_api_base,
+    openai_compatible_profile_static_context_limits, openai_compatible_profile_static_models,
+    openai_compatible_profiles, resolve_openai_compatible_profile,
 };
 use jcode_message_types::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use jcode_provider_core::{EventStream, Provider};
@@ -469,7 +469,9 @@ impl ProviderAuth {
             if let Ok(key) = std::env::var(key_name) {
                 return Ok(key);
             }
-        } else if let Some(key) = load_api_key_from_env_or_config(key_name, env_file) {
+        } else if let Some(key) = load_runtime_api_key(key_name, env_file) {
+            // `load_runtime_api_key` reads env-then-file and falls back to the
+            // Jcode-managed Muse subscription store (issue #1389).
             return Ok(key);
         }
         let path = if env_file.is_empty() {
@@ -1695,7 +1697,6 @@ impl OpenRouterProvider {
     pub fn new() -> Result<Self> {
         let new_start = std::time::Instant::now();
         let autodetected_profile = autodetected_openai_compatible_profile();
-        let autodetect_ms = new_start.elapsed().as_millis();
         let api_base = configured_api_base();
         let supports_provider_features = provider_features_enabled(&api_base);
         let supports_model_catalog = model_catalog_enabled();
@@ -1908,85 +1909,6 @@ impl OpenRouterProvider {
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(Self::parse_provider_routing())),
-            provider_pin: Arc::new(Mutex::new(None)),
-            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
-            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
-        })
-    }
-
-    pub fn new_openai_compatible_profile_runtime(
-        profile: jcode_base::provider_catalog::OpenAiCompatibleProfile,
-    ) -> Result<Self> {
-        let resolved = resolve_openai_compatible_profile(profile);
-        let api_base = normalize_api_base(&resolved.api_base).ok_or_else(|| {
-            anyhow::anyhow!(
-                "OpenAI-compatible profile '{}' has invalid API base '{}'",
-                resolved.id,
-                resolved.api_base
-            )
-        })?;
-        let resolver_profile = resolved.clone();
-        // Names, not tokens: resolved at request time (issue #1389).
-        let auth = match load_api_key_from_env_or_config(
-            &resolver_profile.api_key_env,
-            &resolver_profile.env_file,
-        ) {
-            Some(_) => ProviderAuth::AuthorizationBearer {
-                key_name: resolver_profile.api_key_env.clone(),
-                env_file: resolver_profile.env_file.clone(),
-                label: resolver_profile.api_key_env.clone(),
-            },
-            None if !resolver_profile.requires_api_key => ProviderAuth::None {
-                label: "local endpoint (no auth)".to_string(),
-            },
-            None => {
-                let path = jcode_base::storage::app_config_dir()
-                    .map(|dir| dir.join(&resolver_profile.env_file).display().to_string())
-                    .unwrap_or_else(|_| resolver_profile.env_file.clone());
-                anyhow::bail!(
-                    "{} credentials not available. {} not found in environment or {}. Run `jcode login --provider {}` first.",
-                    resolver_profile.display_name,
-                    resolver_profile.api_key_env,
-                    path,
-                    resolver_profile.id,
-                );
-            }
-        };
-        auth.require_all()?;
-
-        let static_context_limits = openai_compatible_profile_static_context_limits(profile);
-        let static_models = openai_compatible_profile_static_models(profile);
-        let model = resolved
-            .default_model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-
-        Ok(Self {
-            client: jcode_provider_core::shared_http_client(),
-            model: Arc::new(RwLock::new(model)),
-            reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
-                None,
-                Some(&resolved.id),
-            ))),
-            api_base,
-            auth,
-            supports_provider_features: false,
-            supports_model_catalog: true,
-            profile_id: Some(resolved.id.clone()),
-            builtin_azure: false,
-            reasoning_effort_support: None,
-            disable_reasoning_heuristics: false,
-            static_reasoning_config: HashMap::new(),
-            max_tokens: Self::configured_max_tokens(Some(&resolved.id)),
-            extra_body: Self::resolve_extra_body(None, &resolved.env_file),
-            static_models,
-            static_context_limits,
-            static_image_input_support: HashMap::new(),
-            send_openrouter_headers: false,
-            conversation_id: new_conversation_id(),
-            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
-            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
-            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),

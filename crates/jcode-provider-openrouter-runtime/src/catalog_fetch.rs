@@ -290,7 +290,7 @@ mod tests {
         let models = fetch_models_from_api(
             client,
             api_base.clone(),
-            crate::ProviderAuth::AuthorizationBearer {
+            crate::ProviderAuth::InlineBearer {
                 token: "loopback-token".into(),
                 label: "TEST".into(),
             },
