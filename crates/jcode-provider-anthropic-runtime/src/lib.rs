@@ -1113,7 +1113,11 @@ impl AnthropicProvider {
         match mode {
             AnthropicCredentialMode::Auto => {}
             AnthropicCredentialMode::ApiKey => {
-                load_anthropic_api_key()?;
+                // Named Anthropic-compatible profiles capture their key when
+                // the runtime is constructed. The startup path may clear the
+                // profile environment after construction, so validating the
+                // process-global key here can reject a valid profile.
+                self.direct_api_key()?;
             }
             AnthropicCredentialMode::OAuth => {
                 auth::claude::load_credentials().context("Failed to load Claude credentials")?;
