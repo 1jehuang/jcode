@@ -2369,7 +2369,7 @@ impl App {
                         Some(value) => value,
                         None => {
                             self.push_display_message(DisplayMessage::error(
-                                "OpenAI-compatible API base must be https://... or http://localhost."
+                                "OpenAI-compatible API base must be https://..., or http:// with a localhost/.local name or a bare IP address."
                                     .to_string(),
                             ));
                             self.pending_login =
@@ -3404,7 +3404,7 @@ fn save_tui_openai_compatible_api_base(
     let trimmed = api_base.trim();
     if !trimmed.is_empty() {
         let normalized = crate::provider_catalog::normalize_api_base(trimmed).ok_or_else(|| {
-            anyhow::anyhow!("OpenAI-compatible API base must be https://... or http://localhost.")
+            anyhow::anyhow!("OpenAI-compatible API base must be https://..., or http:// with a localhost/.local name or a bare IP address.")
         })?;
         crate::provider_catalog::save_env_value_to_env_file(
             "JCODE_OPENAI_COMPAT_API_BASE",

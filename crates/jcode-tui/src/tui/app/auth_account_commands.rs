@@ -834,7 +834,7 @@ fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value
                     Some(value) => Some(value),
                     None => {
                         app.push_display_message(DisplayMessage::error(
-                            "OpenAI-compatible API base must be https://... or http://localhost."
+                            "OpenAI-compatible API base must be https://..., or http:// with a localhost/.local name or a bare IP address."
                                 .to_string(),
                         ));
                         return;

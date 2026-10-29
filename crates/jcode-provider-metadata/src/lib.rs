@@ -283,27 +283,24 @@ fn allows_insecure_http_host(host: &str) -> bool {
         return true;
     }
 
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => {
-                let raw = u32::from(v4);
-                let is_carrier_grade_nat = (raw & 0xffc0_0000) == 0x6440_0000;
-                v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.is_unspecified()
-                    || is_carrier_grade_nat
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback()
-                    || v6.is_unique_local()
-                    || v6.is_unicast_link_local()
-                    || v6.is_unspecified()
-            }
-        };
-    }
+    // Any IPv4/IPv6 literal is accepted for plaintext http. A bare address
+    // already names one machine, which is how self-hosted inference servers
+    // are reached: on the LAN (`10.15.15.53`), in a container network, or on a
+    // cloud host with a public address. Restricting the answer to RFC 1918
+    // ranges only forced those servers behind an extra https proxy.
+    ip_addr_from_host(&host_lower).is_some()
+}
 
-    false
+/// Parse a URL host as an IP literal, tolerating brackets and an IPv6 zone id
+/// (`[fe80::1%25eth0]` becomes `fe80::1`, which `IpAddr` cannot parse itself).
+pub fn ip_addr_from_host(host: &str) -> Option<std::net::IpAddr> {
+    let host = host.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    // `IpAddr` rejects zone ids, so compare on the address part only.
+    host.split('%').next().and_then(|host| host.parse().ok())
 }
 
 fn normalize_provider_input(input: &str) -> Option<String> {
@@ -389,9 +386,31 @@ mod tests {
     }
 
     #[test]
-    fn normalize_api_base_rejects_public_http_hosts() {
+    fn normalize_api_base_accepts_any_ip_http_host() {
+        // A bare IP names a single machine, so plaintext http is allowed even
+        // when that address is public.
+        assert_eq!(
+            normalize_api_base("http://8.8.8.8/v1").as_deref(),
+            Some("http://8.8.8.8/v1")
+        );
+        assert_eq!(
+            normalize_api_base("http://203.0.113.10:8080/v1/").as_deref(),
+            Some("http://203.0.113.10:8080/v1")
+        );
+        assert_eq!(
+            normalize_api_base("http://[2001:db8::1]:8080/v1").as_deref(),
+            Some("http://[2001:db8::1]:8080/v1")
+        );
+        assert_eq!(
+            normalize_api_base("http://[fe80::1%25eth0]:8080/v1").as_deref(),
+            Some("http://[fe80::1%25eth0]:8080/v1")
+        );
+        // Named hosts still need a local name or https.
         assert_eq!(normalize_api_base("http://example.com/v1"), None);
-        assert_eq!(normalize_api_base("http://8.8.8.8/v1"), None);
+        assert_eq!(
+            normalize_api_base("https://example.com/v1").as_deref(),
+            Some("https://example.com/v1")
+        );
     }
 
     #[test]
