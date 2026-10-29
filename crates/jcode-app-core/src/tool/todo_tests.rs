@@ -151,7 +151,12 @@ fn null_phases_is_treated_as_omitted() {
 fn null_phases_does_not_conflict_with_incremental_patch() {
     let stored = json!([{"id":"a","content":"A","status":"pending","priority":"high"}]);
     let patched = apply_todo_patch(
-        json!({"phases":null,"update":[{"id":"a","content":"changed"}]}),
+        json!({
+            "phases": null,
+            "update": [{"id":"a","content":"changed"}],
+            "add": null,
+            "remove": null,
+        }),
         || stored.clone(),
     )
     .unwrap();
