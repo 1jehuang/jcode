@@ -546,9 +546,14 @@ async fn test_batch_resolves_oauth_names() {
     };
 
     let result = registry
-        .execute("shell_exec", serde_json::json!({"command": "true"}), ctx)
+        .execute("shell_exec", serde_json::json!({"command": "true"}), ctx.clone())
         .await;
     assert!(result.is_ok(), "shell_exec should resolve to bash tool");
+
+    let result = registry
+        .execute("execute_command", serde_json::json!({"command": "true"}), ctx)
+        .await;
+    assert!(result.is_ok(), "execute_command should resolve to bash tool");
 }
 
 #[tokio::test]
