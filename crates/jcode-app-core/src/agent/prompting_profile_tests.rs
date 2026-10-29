@@ -32,6 +32,61 @@ async fn turn(agent: &mut Agent, streaming: bool) {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn fresh_worker_prompt_provenance_follows_global_symlinks_without_selecting_profile() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let cwd = home.external_dir().join("projects/repo");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let external_base = home.root().join("other/system-prompt.md");
+    let external_agents = home.root().join("other/AGENTS.md");
+    write(&external_base, "SYMLINK_GLOBAL_BASE_78192");
+    write(&external_agents, "SYMLINK_ANCESTOR_AGENTS_78192");
+    write(cwd.join("AGENTS.md"), "LOCAL_AGENTS_78192");
+    std::os::unix::fs::symlink(
+        &external_base,
+        crate::storage::jcode_dir().unwrap().join("system-prompt.md"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        &external_agents,
+        crate::storage::user_home_path("AGENTS.md").unwrap(),
+    )
+    .unwrap();
+
+    for own_system_prompt in [false, true] {
+        for worker in [false, true] {
+            let provider = Arc::new(PromptCaptureProvider {
+                own_system_prompt,
+                ..Default::default()
+            });
+            let mut agent = Agent::new(provider.clone(), Registry::empty());
+            agent.set_working_dir(cwd.to_str().unwrap());
+            agent.session.parent_id = worker.then(|| "coordinator".into());
+            assert!(agent.session.agent_profile.is_none());
+            assert!(agent.session.system_prompt.is_none());
+
+            let context = agent.debug_context().await;
+            let prompt = context["system_prompt"]["static"].as_str().unwrap();
+            for marker in [
+                "SYMLINK_GLOBAL_BASE_78192",
+                "SYMLINK_ANCESTOR_AGENTS_78192",
+                "LOCAL_AGENTS_78192",
+            ] {
+                assert_eq!(prompt.contains(marker), !own_system_prompt, "{marker}");
+            }
+            assert!(provider.requests.lock().unwrap().is_empty());
+
+            agent.set_agent_profile(Some(profile())).unwrap();
+            let context = agent.debug_context().await;
+            let prompt = context["system_prompt"]["static"].as_str().unwrap();
+            assert!(prompt.contains("CHOSEN_PROFILE_89341"));
+            assert!(!prompt.contains("78192"));
+            assert!(provider.requests.lock().unwrap().is_empty());
+        }
+    }
+}
+
 #[tokio::test]
 async fn profile_requests_exclude_unselected_files_and_swarm_descriptions_on_both_paths() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
