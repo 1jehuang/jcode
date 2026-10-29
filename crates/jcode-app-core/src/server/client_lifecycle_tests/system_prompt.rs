@@ -419,25 +419,37 @@ async fn target_attach_does_not_persist_creation_prompt_to_provisional_session()
         let (reader, writer) = attacher_stream.into_split();
         (BufReader::new(reader), writer)
     };
-    let provisional_id = loop {
-        let sessions = fixture.sessions.read().await;
-        if let Some(id) = sessions.keys().find(|id| *id != &target_id).cloned() {
-            break id;
+    // Initialization requires a first Subscribe. A rejected target profile
+    // leaves the connection provisional without committing a fresh session.
+    send(&mut attacher_writer, json!({"type":"subscribe","id":700,"working_dir":home._home.path(),"target_session_id":target_id,"agent_profile_name":"forbidden-on-attach"})).await;
+    until(&mut attacher_reader, |e| {
+        matches!(e, ServerEvent::Error { id: 700, message, .. } if message.contains("only be selected when creating"))
+    })
+    .await;
+    let provisional_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let sessions = fixture.sessions.read().await;
+            if let Some(id) = sessions.keys().find(|id| *id != &target_id).cloned() {
+                break id;
+            }
+            drop(sessions);
+            tokio::task::yield_now().await;
         }
-        drop(sessions);
-        tokio::task::yield_now().await;
-    };
+    })
+    .await
+    .expect("provisional session initialization timeout");
     send(&mut attacher_writer, json!({"type":"subscribe","id":703,"working_dir":home._home.path(),"target_session_id":target_id,"system_prompt":"FOREIGN_PROMPT_703"})).await;
     until(&mut attacher_reader, |e| {
         matches!(e, ServerEvent::Done { id: 703 })
     })
     .await;
-    assert_eq!(
-        crate::session::Session::load(&provisional_id)
-            .unwrap()
-            .system_prompt,
-        None
-    );
+    // A provisional session need not be persisted at all. If one was saved,
+    // require it to be readable and free of the attaching client's override.
+    if crate::session::session_exists(&provisional_id) {
+        let provisional = crate::session::Session::load(&provisional_id).unwrap();
+        assert_eq!(provisional.system_prompt, None);
+        assert_eq!(provisional.agent_profile, None);
+    }
     assert_eq!(
         crate::session::Session::load(&target_id)
             .unwrap()
