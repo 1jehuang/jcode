@@ -807,6 +807,7 @@ async fn named_profile_preserves_inline_fallback() {
 
 #[tokio::test]
 async fn optional_bearer_resolves_live_per_request() {
+    let _lock = super::ENV_LOCK.lock();
     let temp = tempfile::tempdir().expect("tempdir");
     let _home = super::EnvVarGuard::set("JCODE_HOME", temp.path());
     let _key = super::EnvVarGuard::remove("LM_STUDIO_API_KEY");

@@ -111,7 +111,7 @@ pub fn load_api_key_from_env_or_config(env_key: &str, file_name: &str) -> Option
     let prefix = format!("{}=", env_key);
 
     for line in content.lines() {
-        if let Some(key) = line.strip_prefix(&prefix)
+        if let Some(key) = line.trim().strip_prefix(&prefix)
             && let Some(key) = clean_loaded_value(key, env_key)
         {
             return Some(key);
@@ -188,7 +188,7 @@ pub fn load_env_value_from_config_file(env_key: &str, file_name: &str) -> Option
     let prefix = format!("{}=", env_key);
 
     for line in content.lines() {
-        if let Some(value) = line.strip_prefix(&prefix)
+        if let Some(value) = line.trim().strip_prefix(&prefix)
             && let Some(value) = clean_loaded_value(value, env_key)
         {
             return Some(value);
@@ -255,7 +255,14 @@ pub fn save_env_value_to_env_file(
     // saving credentials (issue #1389).
     jcode_storage::upsert_env_file_value(&file_path, env_key, value)?;
 
-    if value.is_none() {
+    if let Some(new_val) = value {
+        // Reconcile Jcode-managed process copies on replacement so that readers
+        // which prefer the process env (load_env_value_from_env_or_config) see
+        // the new key immediately rather than continuing to use the stale copy.
+        if is_process_env_var_managed_by_jcode(env_key) {
+            jcode_core::env::set_var(env_key, new_val);
+        }
+    } else {
         // Reconcile login activation and logout so Jcode-created process copies
         // are cleared without removing genuine shell overrides.
         if is_process_env_var_managed_by_jcode(env_key) {
@@ -596,5 +603,79 @@ mod tests {
         save_env_value_to_env_file(key, file, None).expect("logout on unmanaged");
         assert_eq!(std::env::var(key).as_deref(), Ok("genuine-shell-override"));
         jcode_core::env::remove_var(key);
+    }
+
+    /// Regression: indented entries (e.g. `  KEY=value`) in an env file must
+    /// still be found after the shared reader replaced per-provider readers that
+    /// trimmed each line before matching.
+    #[test]
+    fn loads_api_key_from_indented_env_file_line() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_INDENTED_LINE_TEST_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let config_dir = jcode_storage::app_config_dir().expect("config dir");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("indented-test.env"),
+            "  JCODE_INDENTED_LINE_TEST_KEY=indented-value\n",
+        )
+        .expect("write env file");
+
+        assert_eq!(
+            load_api_key_from_env_or_config("JCODE_INDENTED_LINE_TEST_KEY", "indented-test.env")
+                .as_deref(),
+            Some("indented-value"),
+            "indented env-file entry must be found by the shared reader"
+        );
+        assert_eq!(
+            load_env_value_from_config_file("JCODE_INDENTED_LINE_TEST_KEY", "indented-test.env")
+                .as_deref(),
+            Some("indented-value"),
+            "load_env_value_from_config_file must also handle indented entries"
+        );
+    }
+
+    /// Regression: `Creds::set` (save_env_value_to_env_file with Some) must update
+    /// the Jcode-managed process copy so that `Creds::get` returns the new value
+    /// even when a stale copy is still present in the process env.
+    #[test]
+    fn replacement_key_reconciles_jcode_managed_process_copy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_REKEY_RECONCILE_TEST_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let key = "JCODE_REKEY_RECONCILE_TEST_KEY";
+        let file = "rekey-reconcile-test.env";
+
+        // Simulate login activation: write the first key and install a process copy.
+        save_env_value_to_env_file(key, file, Some("first-key")).expect("save first key");
+        track_process_env_var_override(key);
+        jcode_core::env::set_var(key, "first-key");
+
+        assert_eq!(
+            load_env_value_from_env_or_config(key, file).as_deref(),
+            Some("first-key")
+        );
+
+        // Save a replacement key (e.g. from `/login` credential rotation).
+        save_env_value_to_env_file(key, file, Some("replacement-key")).expect("save replacement");
+
+        // The process env copy must be updated: subsequent requests must use the new key.
+        assert_eq!(
+            std::env::var(key).as_deref(),
+            Ok("replacement-key"),
+            "Jcode-managed process copy must be reconciled to the replacement key"
+        );
+        assert_eq!(
+            load_env_value_from_env_or_config(key, file).as_deref(),
+            Some("replacement-key"),
+            "Creds::get must return the replacement key after save"
+        );
+        assert_eq!(
+            load_api_key_from_env_or_config(key, file).as_deref(),
+            Some("replacement-key"),
+            "load_api_key_from_env_or_config must return the replacement key after save"
+        );
     }
 }
