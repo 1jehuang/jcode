@@ -386,7 +386,15 @@ impl Provider for OpenRouterProvider {
             {
                 return;
             }
-            let Some((snapshot, system_text, allow_reasoning, include_reasoning_content, allow_image_input, profile_for_retry)) = astra_retry else {
+            let Some((
+                snapshot,
+                system_text,
+                allow_reasoning,
+                include_reasoning_content,
+                allow_image_input,
+                profile_for_retry,
+            )) = astra_retry
+            else {
                 let auth = match (auth_factory)() {
                     Ok(auth) => auth,
                     Err(_) => return,
@@ -470,8 +478,9 @@ impl Provider for OpenRouterProvider {
                 // content in assistant context (recap-chaining); fresh images
                 // would re-trigger the transcription loop. The framing ladder
                 // escalates inside the assistant prefill instead.
-                if let Some(messages_arr) =
-                    attempt_request.get_mut("messages").and_then(|v| v.as_array_mut())
+                if let Some(messages_arr) = attempt_request
+                    .get_mut("messages")
+                    .and_then(|v| v.as_array_mut())
                 {
                     let tail_is_prefill = messages_arr
                         .last()
@@ -1024,6 +1033,16 @@ impl Provider for OpenRouterProvider {
             jcode_base::provider::cached_context_limit_for_model(&normalized_model_id)
         {
             return limit;
+        }
+        // VSLLM's public catalog omits context limits, and its gateway can leave
+        // oversized requests waiting on an upstream channel until they look like
+        // connectivity failures. Keep the unverified default conservative while
+        // allowing an explicit model/profile setting above to override it.
+        if self.profile_id.as_deref().is_some_and(|id| {
+            id.eq_ignore_ascii_case("vsllm") || id.eq_ignore_ascii_case("vsllm-api")
+        })
+        {
+            return 32_768;
         }
         // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
         // default 4096) and silently truncates anything longer, so a model's
