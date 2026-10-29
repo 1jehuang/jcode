@@ -144,7 +144,12 @@ fn hierarchy_rejects_malformed_structures() {
 
 #[test]
 fn null_phases_is_treated_as_omitted() {
-    assert!(parse_todo_input(json!({"phases":null})).unwrap().todos.is_none());
+    assert!(
+        parse_todo_input(json!({"phases":null}))
+            .unwrap()
+            .todos
+            .is_none()
+    );
 }
 
 #[test]
