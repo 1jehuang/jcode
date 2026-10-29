@@ -468,18 +468,25 @@ fn config_options_include_model_selector_and_effort_ladder() {
         model: Some("gpt-5.2".to_string()),
         available_models: vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()],
         reasoning_effort: Some("high".to_string()),
+        permission_mode: None,
     };
     let options = session_config_options(&state);
-    assert_eq!(options.len(), 2);
+    assert_eq!(options.len(), 3);
 
-    let model = &options[0];
+    let mode = &options[0];
+    assert_eq!(mode["id"], CONFIG_ID_MODE);
+    assert_eq!(mode["category"], "permission");
+    assert_eq!(mode["type"], "select");
+    assert_eq!(mode["currentValue"], MODE_READ_ONLY);
+
+    let model = &options[1];
     assert_eq!(model["id"], CONFIG_ID_MODEL);
     assert_eq!(model["category"], "model");
     assert_eq!(model["type"], "select");
     assert_eq!(model["currentValue"], "gpt-5.2");
     assert_eq!(model["options"].as_array().unwrap().len(), 2);
 
-    let effort = &options[1];
+    let effort = &options[2];
     assert_eq!(effort["id"], CONFIG_ID_EFFORT);
     assert_eq!(effort["category"], "thought_level");
     assert_eq!(effort["currentValue"], "high");
@@ -503,9 +510,10 @@ fn config_options_current_model_prepended_when_not_listed() {
         model: Some("claude-opus-4-6".to_string()),
         available_models: vec!["claude-sonnet-4-5".to_string()],
         reasoning_effort: None,
+        permission_mode: None,
     };
     let options = session_config_options(&state);
-    let model_values: Vec<&str> = options[0]["options"]
+    let model_values: Vec<&str> = options[1]["options"]
         .as_array()
         .unwrap()
         .iter()
@@ -522,6 +530,7 @@ fn legacy_models_catalog_is_emitted_alongside_config_options() {
         model: Some("deepseek-v4-flash".to_string()),
         available_models: vec!["deepseek-v4-pro".to_string()],
         reasoning_effort: Some("high".to_string()),
+        permission_mode: None,
     };
     let mut result = json!({"sessionId": "s1"});
     insert_session_configuration(&mut result, &state);
@@ -538,9 +547,65 @@ fn legacy_models_catalog_is_emitted_alongside_config_options() {
 }
 
 #[test]
-fn config_options_empty_without_model_state() {
+fn permission_mode_is_advertised_even_without_model_state() {
+    // A host that gates tool calls through the agent's session
+    // configuration looks for this option by id. A session that only
+    // advertised it once a host had already asked would be a session the
+    // host had to trust blind, so it is present unconditionally.
     let options = session_config_options(&SessionUiState::default());
-    assert!(options.is_empty());
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0]["id"], CONFIG_ID_MODE);
+
+    let mode = &options[0];
+    assert_eq!(mode["currentValue"], MODE_READ_ONLY);
+    let values: Vec<&str> = mode["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|option| option["value"].as_str().unwrap())
+        .collect();
+    assert_eq!(values, [MODE_READ_ONLY]);
+}
+
+#[test]
+fn permission_mode_option_reflects_the_mode_that_was_applied() {
+    let state = SessionUiState {
+        permission_mode: Some(MODE_READ_ONLY.to_string()),
+        ..SessionUiState::default()
+    };
+    let options = session_config_options(&state);
+    assert_eq!(options[0]["id"], CONFIG_ID_MODE);
+    assert_eq!(options[0]["currentValue"], MODE_READ_ONLY);
+}
+
+#[test]
+fn read_only_denies_the_write_capable_tools() {
+    // The denied list is the PROMISE the mode option makes, so the tools
+    // it names are the tools a read-only session must not be able to run.
+    for tool in [
+        "write",
+        "edit",
+        "replace",
+        "apply_patch",
+        "bash",
+        // Tools that run other tools, spawn agents, or drive the machine by
+        // another route.
+        "batch",
+        "swarm",
+        "panel",
+    ] {
+        assert!(
+            READ_ONLY_DENIED_TOOLS.contains(&tool),
+            "{tool} can change state and must be denied in read-only mode"
+        );
+    }
+    // And the read-only tools stay mounted, or the mode would be useless.
+    for tool in ["read", "ls", "agentgrep"] {
+        assert!(
+            !READ_ONLY_DENIED_TOOLS.contains(&tool),
+            "{tool} only reads and must stay available in read-only mode"
+        );
+    }
 }
 
 #[test]
@@ -550,6 +615,7 @@ fn context_limit_falls_back_to_default_for_unknown_models() {
         model: Some("mystery-model-9000".to_string()),
         available_models: Vec::new(),
         reasoning_effort: None,
+        permission_mode: None,
     };
     assert_eq!(
         state.context_limit(),

@@ -1,6 +1,6 @@
 use super::dispatch;
 use super::provider_init::ProviderChoice;
-use crate::protocol::{Request, ServerEvent};
+use crate::protocol::{Request, ServerEvent, SessionToolConfig};
 use crate::transport::{ReadHalf, WriteHalf};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -109,6 +109,13 @@ struct SessionUiState {
     model: Option<String>,
     available_models: Vec<String>,
     reasoning_effort: Option<String>,
+    /// The permission mode this session is actually in.
+    ///
+    /// `None` means the default (unrestricted) mode; `Some(MODE_READ_ONLY)`
+    /// means the session's write-capable tools have been disabled. The value
+    /// is what the `mode` config option advertises, so it must reflect what
+    /// was applied rather than what was requested.
+    permission_mode: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -300,6 +307,8 @@ impl SessionUiState {
             model: provider_model,
             available_models,
             reasoning_effort,
+            // A freshly created session is not yet in any restricted mode.
+            permission_mode: None,
         }
     }
 
@@ -804,6 +813,7 @@ impl AcpRuntime {
                     .await?;
                 wait_for_effort_changed(&session, request_id).await
             }
+            CONFIG_ID_MODE => apply_permission_mode(&session, &value).await,
             other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
         };
 
@@ -1514,6 +1524,56 @@ async fn wait_for_done(session: &DaemonSession, request_id: u64) -> Result<()> {
             _ => {}
         }
     }
+}
+
+/// Wait for a request the daemon answers with an ACK rather than a DONE.
+///
+/// `configure_tools` is an SDK control: the daemon validates it and answers
+/// with `Ack { id }`, and it never sends a `Done` for it. Waiting for a `Done`
+/// here would block until the session timed out.
+async fn wait_for_ack(session: &DaemonSession, request_id: u64) -> Result<()> {
+    loop {
+        match session.read_event().await? {
+            ServerEvent::Ack { id } if id == request_id => return Ok(()),
+            ServerEvent::Error { id, message, .. } if id == request_id => anyhow::bail!(message),
+            _ => {}
+        }
+    }
+}
+
+/// Apply a permission mode to a session, and record what was actually applied.
+///
+/// `read-only` disables every tool that can change the workspace or reach the
+/// outside world, by asking the daemon to drop them from the session's tool
+/// set. The recorded mode is what the `mode` config option then advertises,
+/// so a host that reads it back learns the truth.
+///
+/// A mode this agent does not implement is refused rather than accepted and
+/// ignored: a host that selected it would believe the session was restricted
+/// when it was not.
+async fn apply_permission_mode(session: &DaemonSession, value: &str) -> Result<()> {
+    if value != MODE_READ_ONLY {
+        anyhow::bail!(
+            "Unsupported permission mode: {value}. This agent implements {MODE_READ_ONLY} only."
+        );
+    }
+    let request_id = session.next_id();
+    session
+        .send(&Request::ConfigureTools {
+            id: request_id,
+            tools: SessionToolConfig {
+                enabled: None,
+                disabled: READ_ONLY_DENIED_TOOLS
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect(),
+                custom: Vec::new(),
+            },
+        })
+        .await?;
+    wait_for_ack(session, request_id).await?;
+    session.ui_state.lock().await.permission_mode = Some(MODE_READ_ONLY.to_string());
+    Ok(())
 }
 
 async fn request_history(session: &DaemonSession) -> Result<ServerEvent> {
