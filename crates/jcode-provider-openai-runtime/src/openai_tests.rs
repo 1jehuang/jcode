@@ -379,3 +379,5 @@ include!("openai_tests/persistent_prefix.rs");
 include!("openai_tests/cache_affinity.rs");
 
 include!("openai_tests/persistent_cancellation.rs");
+
+include!("openai_tests/http_idle.rs");
