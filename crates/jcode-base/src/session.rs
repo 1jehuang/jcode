@@ -1556,6 +1556,15 @@ request in this new forked session, using the inherited conversation only as con
                         text.clear();
                         shrunk += 1;
                     }
+                    ContentBlock::ToolUse { input, .. }
+                        if input.as_object().is_none_or(|o| !o.is_empty()) =>
+                    {
+                        // serde_json::Value trees are many tiny heap allocations
+                        // (about 300 B each); an empty object has none. id and
+                        // name stay so tool_use/tool_result pairing is intact.
+                        *input = serde_json::Value::Object(serde_json::Map::new());
+                        shrunk += 1;
+                    }
                     ContentBlock::AnthropicThinking { thinking, .. } if !thinking.is_empty() => {
                         thinking.clear();
                         shrunk += 1;
