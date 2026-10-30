@@ -230,8 +230,30 @@ pub fn install_binary_at_version(source: &std::path::Path, version: &str) -> Res
         std::fs::copy(source, &dest)?;
     }
     crate::platform_support::set_permissions_executable(&dest)?;
+    sign_with_shared_dev_cert(&dest);
 
     Ok(dest)
+}
+
+/// Re-sign with the shared development certificate (`~/.local/bin/dev-sign`) when present, so
+/// macOS permission grants survive rebuilds. Best effort: a missing helper or failed signing
+/// never blocks an install.
+fn sign_with_shared_dev_cert(binary: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let helper = PathBuf::from(home).join(".local/bin/dev-sign");
+        if helper.exists() {
+            let _ = std::process::Command::new(helper)
+                .arg(binary)
+                .arg("jcode")
+                .output();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = binary;
 }
 
 fn binary_source_metadata_path(binary: &Path) -> PathBuf {
