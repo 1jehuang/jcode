@@ -1,5 +1,94 @@
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn configured_streaming_budget_and_disabled_handoff() {
+    for budget in [Duration::from_millis(25), Duration::from_secs(12)] {
+        let bg = InterruptSignal::new();
+        let shutdown = InterruptSignal::new();
+        let start = tokio::time::Instant::now();
+        assert!(wait_for_tool_handoff(&bg, &shutdown, true, budget).await);
+        assert_eq!(start.elapsed(), budget);
+    }
+    for shutdown_requested in [false, true] {
+        let bg = InterruptSignal::new();
+        let shutdown = InterruptSignal::new();
+        tokio::select! {
+            biased;
+            _ = wait_for_tool_handoff(&bg, &shutdown, true, Duration::ZERO) => {
+                panic!("zero budget should disable automatic handoff");
+            }
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+        }
+        if shutdown_requested {
+            shutdown.fire();
+        } else {
+            bg.fire();
+        }
+        assert!(!wait_for_tool_handoff(&bg, &shutdown, true, Duration::ZERO).await);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn callback_paths_honor_custom_and_disabled_budgets() {
+    // SDK and nonstreaming calls share execute_with_background_budget.
+    for (budget, action, backgrounded) in [
+        (Duration::from_millis(1250), "status", true),
+        (Duration::from_secs(12), "status", false),
+        (Duration::ZERO, "status", false),
+        (Duration::from_millis(10), "wait", false),
+    ] {
+        let registry = Registry::empty();
+        registry.register("bg".into(), Arc::new(WaitProbe)).await;
+        let ctx = ToolContext {
+            session_id: format!("configured-handoff-{action}-{}", budget.as_millis()),
+            message_id: "message".into(),
+            tool_call_id: "configured-probe".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+        let start = tokio::time::Instant::now();
+        let result = execute_with_background_budget(
+            registry,
+            "bg".into(),
+            serde_json::json!({"action": action}),
+            ctx,
+            budget,
+        )
+        .await
+        .unwrap();
+        if backgrounded {
+            assert_eq!(start.elapsed(), budget);
+            assert!(result.output.contains("automatically after 1.25 seconds"));
+            assert!(result.output.contains("task_id:"));
+            let task_id = result
+                .output
+                .split("task_id: ")
+                .nth(1)
+                .unwrap()
+                .split(')')
+                .next()
+                .unwrap();
+            let finished = crate::background::global()
+                .wait(task_id, Duration::from_secs(30), false)
+                .await
+                .unwrap();
+            assert_eq!(
+                finished.task.status,
+                crate::bus::BackgroundTaskStatus::Completed
+            );
+            assert_eq!(
+                crate::background::global().output(task_id).await.unwrap(),
+                "wait finished"
+            );
+        } else {
+            assert_eq!(start.elapsed(), Duration::from_secs(8));
+            assert_eq!(result.output, "wait finished");
+        }
+    }
+}
+
 struct WaitProbe;
 
 #[async_trait::async_trait]
@@ -62,14 +151,14 @@ async fn background_wait_is_not_automatically_backgrounded() {
     let shutdown = InterruptSignal::new();
     tokio::select! {
         biased;
-        _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("bg", &input)) => {
+        _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("bg", &input), Duration::from_secs(3)) => {
             panic!("bg wait was backgrounded while waiting for its dependency");
         }
         _ = tokio::time::sleep(Duration::from_secs(30)) => {}
     }
     // Reloads still interrupt a wait safely, without waiting for its deadline.
     shutdown.fire();
-    assert!(!wait_for_tool_handoff(&bg, &shutdown, false).await);
+    assert!(!wait_for_tool_handoff(&bg, &shutdown, false, Duration::from_secs(3)).await);
 }
 
 #[tokio::test(start_paused = true)]
@@ -84,7 +173,7 @@ async fn slow_tool_handoff_occurs_after_three_seconds_without_cancelling_work() 
     tokio::select! {
         biased;
         _ = &mut work => panic!("slow work completed before handoff"),
-        automatic = wait_for_tool_handoff(&bg, &shutdown, true) => assert!(automatic),
+        automatic = wait_for_tool_handoff(&bg, &shutdown, true, Duration::from_secs(3)) => assert!(automatic),
     }
     assert_eq!(start.elapsed(), Duration::from_secs(3));
     assert!(!work.is_finished());
@@ -98,7 +187,7 @@ async fn fast_tool_finishes_in_foreground() {
     tokio::select! {
         biased;
         _ = tokio::time::sleep(Duration::from_secs(1)) => {},
-        _ = wait_for_tool_handoff(&bg, &shutdown, true) => panic!("fast tool backgrounded"),
+        _ = wait_for_tool_handoff(&bg, &shutdown, true, Duration::from_secs(3)) => panic!("fast tool backgrounded"),
     }
 }
 
@@ -113,7 +202,7 @@ async fn manual_background_and_shutdown_do_not_wait_for_budget() {
             bg.fire();
         }
         let start = tokio::time::Instant::now();
-        assert!(!wait_for_tool_handoff(&bg, &shutdown, true).await);
+        assert!(!wait_for_tool_handoff(&bg, &shutdown, true, Duration::from_secs(3)).await);
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }

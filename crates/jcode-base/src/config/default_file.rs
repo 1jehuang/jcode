@@ -403,6 +403,11 @@ bing_market = "en-US"
 # snippet_pointer = "/snippet"
 
 [tools]
+# Automatically hand long-running tool calls to the background after this many
+# milliseconds. Default: 3000 (3 seconds). Set 0 to disable automatic handoff.
+# Applies to streaming, nonstreaming, and SDK calls. bg wait stays foreground.
+# This does not kill tools or change their own execution timeouts.
+auto_background_timeout_ms = 3000
 # Controls which built-in tools are sent to the model.
 # Profiles: "full" (default), "acp", "minimal"/"lite", or "none".
 # acp keeps core coding tools plus batch for generic ACP clients.
@@ -917,6 +922,7 @@ mod tests {
         );
         assert_eq!(config.tools.mcp_tools, McpToolsMode::Auto);
         assert_eq!(config.tools.mcp_tools_token_threshold, 8_000);
+        assert_eq!(config.tools.auto_background_timeout_ms, 3_000);
         assert_eq!(config.session.hibernation_idle_secs, 1800);
         assert!(
             config.display.show_thinking,

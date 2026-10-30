@@ -1765,3 +1765,28 @@ fn removed_overscroll_status_key_still_loads_config() {
     assert!(config.display.centered);
     assert_eq!(config.display.usage_display, "used");
 }
+#[test]
+fn tool_auto_background_timeout_configuration() {
+    assert_eq!(ToolConfig::default().auto_background_timeout_ms, 3_000);
+    for contents in ["", "[tools]\n"] {
+        let config: Config = toml::from_str(contents).unwrap();
+        assert_eq!(config.tools.auto_background_timeout_ms, 3_000);
+    }
+    for timeout in [0_u64, 1, 1250, 60_000, u64::MAX / 2] {
+        let config: Config = toml::from_str(&format!(
+            "[tools]\nauto_background_timeout_ms = {timeout}\n"
+        ))
+        .unwrap();
+        assert_eq!(config.tools.auto_background_timeout_ms, timeout);
+        let roundtrip: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(roundtrip.tools.auto_background_timeout_ms, timeout);
+    }
+    for invalid in ["-1", "1.5", "\"3000\"", "true"] {
+        assert!(
+            toml::from_str::<Config>(&format!(
+                "[tools]\nauto_background_timeout_ms = {invalid}\n"
+            ))
+            .is_err()
+        );
+    }
+}

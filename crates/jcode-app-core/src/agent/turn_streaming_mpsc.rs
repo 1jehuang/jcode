@@ -1655,6 +1655,7 @@ impl Agent {
                 // tools without their own background execution support.
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
+                let foreground_budget = tool_handoff::foreground_budget();
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
                 let mut automatic_background = false;
@@ -1669,7 +1670,7 @@ impl Agent {
                             Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                         });
                     }
-                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, auto_background_allowed(&tc.name, &tc.input)) => {
+                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, auto_background_allowed(&tc.name, &tc.input), foreground_budget) => {
                         automatic_background = automatic;
                         if self.is_graceful_shutdown() && allow_reload_handoff {
                             tool_result = match tokio::time::timeout(
@@ -1826,9 +1827,9 @@ impl Agent {
                         .await;
 
                     let reason = if automatic_background {
-                        "automatically after 3 seconds"
+                        tool_handoff::automatic_handoff_reason(foreground_budget)
                     } else {
-                        "by the user"
+                        "by the user".to_string()
                     };
                     let bg_msg = format!(
                         "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
