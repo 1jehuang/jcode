@@ -88,10 +88,10 @@ class CloudCredentials(unittest.TestCase):
                            "--remote-binary", BINARY, "--transport", str(self.transport), "--json",
                            *extra, success=success)
 
-    def return_home(self, success=True):
+    def return_home(self, *extra, success=True):
         return self.invoke("return", "--session", "cloud-auth-test", "--host", "test-cloud",
                            "--remote-binary", BINARY, "--transport", str(self.transport), "--json",
-                           success=success)
+                           *extra, success=success)
 
     def assert_archives_secret_free(self):
         for archive in self.remote.rglob("*.tar"):
@@ -251,6 +251,16 @@ class CloudCredentials(unittest.TestCase):
         remote_session = json.loads((self.remote / "sessions" / "cloud-auth-test.json").read_text())
         self.assertEqual(remote_session["migration_epoch"], json.loads(where.stdout)[0]["epoch"])
         self.assertEqual(json.loads(store.read_text())[self.accounts][0]["account_id"], "different-local-user")
+
+        # Recovery must release ownership without replacing the newer local login.
+        original = store.read_bytes()
+        result = self.return_home("--refs-only", "--keep-local-auth")
+        self.assertIn(b"keeping local OAuth credentials", result.stderr)
+        self.assertEqual(store.read_bytes(), original)
+        local_where = json.loads(self.invoke("where", "--session", "cloud-auth-test", "--json").stdout)
+        self.assertEqual(local_where[0]["location"], "local")
+        remote_lease = json.loads((self.remote / "session_leases" / "cloud-auth-test.json").read_text())
+        self.assertEqual(remote_lease["away_host"], "returned")
 
     def seed_router(self):
         config = self.local / "config" / "jcode"

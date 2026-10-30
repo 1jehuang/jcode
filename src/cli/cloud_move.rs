@@ -822,6 +822,7 @@ pub(crate) fn run_return(
     session_ref: Option<&str>,
     target: &Target,
     refs_only: bool,
+    keep_local_auth: bool,
 ) -> Result<ReturnReport> {
     let session_id = resolve_session_id(session_ref)?;
     group::reject_member_return(&session_id)?;
@@ -885,7 +886,13 @@ pub(crate) fn run_return(
     } else {
         manifest.auth_accounts.clone()
     };
-    for account in &return_accounts {
+    if keep_local_auth {
+        step(
+            "credentials",
+            "keeping local OAuth credentials; cloud credentials will not be imported",
+        );
+    }
+    for account in return_accounts.iter().filter(|_| !keep_local_auth) {
         step(
             "credentials",
             "bringing refreshed OAuth credentials back securely",
@@ -915,7 +922,7 @@ pub(crate) fn run_return(
                 ..lease.clone()
             })?;
             return Err(
-                error.context("credential return refused; the session remains on the cloud host")
+                error.context("credential return refused; the session remains on the cloud host. To recover without replacing local OAuth credentials, retry with --keep-local-auth")
             );
         }
     }
@@ -1973,10 +1980,16 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             session,
             target,
             refs_only,
+            keep_local_auth,
             attach,
             json,
         } => {
-            let report = run_return(session.as_deref(), &target_of(target), refs_only)?;
+            let report = run_return(
+                session.as_deref(),
+                &target_of(target),
+                refs_only,
+                keep_local_auth,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {

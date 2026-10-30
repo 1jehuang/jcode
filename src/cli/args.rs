@@ -818,6 +818,9 @@ pub(crate) enum CloudCommand {
         /// Bring the work back as refs only (refs/jcode-cloud/<session>/*) without touching the working tree.
         #[arg(long)]
         refs_only: bool,
+        /// Keep local OAuth credentials instead of importing the cloud copy. Useful when recovering an old session after signing in again locally.
+        #[arg(long)]
+        keep_local_auth: bool,
         /// After returning, resume the session in this terminal.
         #[arg(long)]
         attach: bool,
