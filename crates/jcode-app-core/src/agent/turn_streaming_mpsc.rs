@@ -314,14 +314,14 @@ impl Agent {
 
             let mut cache_signature_messages =
                 if crate::config::config().features.message_timestamps {
-                    Message::with_timestamps(&messages)
+                    std::borrow::Cow::Owned(Message::with_timestamps(&messages))
                 } else {
-                    messages.iter().cloned().collect()
+                    std::borrow::Cow::Borrowed(messages.as_ref())
                 };
             let mut ephemeral_signature_messages = Vec::new();
 
             // Inject memory as a user message at the end (preserves cache prefix)
-            let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
+            let mut messages_with_memory = std::borrow::Cow::Borrowed(messages.as_ref());
             if let Some(memory) = memory_pending.as_ref() {
                 let memory_count = memory.count.max(1);
                 let computed_age_ms = memory.computed_at.elapsed().as_millis() as u64;
@@ -342,9 +342,9 @@ impl Agent {
                 if !persisted {
                     ephemeral_signature_messages.push(memory_msg.clone());
                 } else {
-                    cache_signature_messages.push(memory_msg.clone());
+                    cache_signature_messages.to_mut().push(memory_msg.clone());
                 }
-                messages_with_memory.push(memory_msg);
+                messages_with_memory.to_mut().push(memory_msg);
             }
             // Surface background plan-limit hits once so the user sees the
             // upgrade prompt in the reply (see turn_loops for rationale).
@@ -356,7 +356,7 @@ impl Agent {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
                 let reminder = Message::user(&Self::plan_limit_reminder(&notice));
                 ephemeral_signature_messages.push(reminder.clone());
-                messages_with_memory.push(reminder);
+                messages_with_memory.to_mut().push(reminder);
             }
 
             logging::info(&format!(
@@ -370,7 +370,7 @@ impl Agent {
                 .features
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
-            let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            let send_messages = stamped.as_deref().unwrap_or(messages_with_memory.as_ref());
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             let provider = Arc::clone(&self.provider);
             // Capture the model id the request was issued with. A provider may

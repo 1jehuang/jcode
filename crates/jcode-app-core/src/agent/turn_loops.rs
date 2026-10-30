@@ -135,7 +135,7 @@ impl Agent {
             self.session.release_provider_messages_cache();
 
             // Inject memory as a user message at the end (preserves cache prefix)
-            let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
+            let mut messages_with_memory = std::borrow::Cow::Borrowed(messages.as_ref());
             if let Some(memory) = memory_pending.as_ref() {
                 let memory_count = memory.count.max(1);
                 let age_ms = memory.computed_at.elapsed().as_millis() as u64;
@@ -146,13 +146,15 @@ impl Agent {
                     memory.prompt.len()
                 ));
                 let (memory_msg, _persisted) = self.prepare_memory_injection_message(memory);
-                messages_with_memory.push(memory_msg);
+                messages_with_memory.to_mut().push(memory_msg);
             }
             if Self::should_inject_batch_nudge(
                 batch_nudge_pending,
                 tools.iter().any(|tool| tool.name == "batch"),
             ) {
-                messages_with_memory.push(Message::user(Self::BATCH_NUDGE));
+                messages_with_memory
+                    .to_mut()
+                    .push(Message::user(Self::BATCH_NUDGE));
                 batch_nudge_pending = false;
                 sequential_single_tool_rounds = 0;
             }
@@ -167,7 +169,9 @@ impl Agent {
                 .flatten()
             {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
-                messages_with_memory.push(Message::user(&Self::plan_limit_reminder(&notice)));
+                messages_with_memory
+                    .to_mut()
+                    .push(Message::user(&Self::plan_limit_reminder(&notice)));
             }
 
             logging::info(&format!(
@@ -188,7 +192,7 @@ impl Agent {
                 .features
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
-            let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            let send_messages = stamped.as_deref().unwrap_or(messages_with_memory.as_ref());
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
             self.provider.set_session_id(&self.session.id);
