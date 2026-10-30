@@ -44,20 +44,23 @@ impl App {
         };
 
         match terminal_setup::apply(target, &home) {
-            Ok(Applied::Changed { detail }) => {
+            Ok(Applied::Changed { detail, note }) => {
                 self.push_display_message(DisplayMessage::system(format!(
                     "✓ Configured {} so Shift+Enter is reported distinctly from Enter.\n\
-                     {detail}\n{}",
-                    target.label(),
-                    target.activation_note()
+                     {detail}\n{note}",
+                    target.label()
                 )));
             }
-            Ok(Applied::AlreadyConfigured) => {
+            Ok(Applied::AlreadyConfigured { path }) => {
+                let location = match &path {
+                    Some(path) => format!(" in {}", path.display()),
+                    None => String::new(),
+                };
                 self.push_display_message(DisplayMessage::system(format!(
-                    "{} is already configured for Shift+Enter.\n\
+                    "{} is already configured for Shift+Enter{location}.\n\
                      If the chord still submits, {}",
                     target.label(),
-                    target.activation_note()
+                    target.activation_note(path.as_deref())
                 )));
             }
             Ok(Applied::Manual { message }) => {
