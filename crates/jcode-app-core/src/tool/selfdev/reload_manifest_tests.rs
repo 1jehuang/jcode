@@ -83,6 +83,9 @@ async fn synthetic_reload_preserves_manifest(override_home: bool, mode: ToolExec
     assert_eq!(std::fs::read(&manifest).unwrap(), original);
 }
 
+// dirs::home_dir honors HOME on Unix. Windows may resolve its known-folder
+// profile independently, so do not remove JCODE_HOME in that environment.
+#[cfg(unix)]
 #[tokio::test]
 async fn synthetic_reload_without_jcode_home_preserves_manifest() {
     synthetic_reload_preserves_manifest(false, ToolExecutionMode::Direct).await;
