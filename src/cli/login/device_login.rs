@@ -112,7 +112,7 @@ pub(super) async fn poll_muse_subscription_until_decided(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(expires_secs);
     loop {
         match poll_challenge(client, &challenge).await? {
-            auth::muse::PollOutcome::Approved(credentials) => return Ok(credentials),
+            auth::muse::PollOutcome::Approved(credentials) => return Ok(*credentials),
             auth::muse::PollOutcome::Denied => {
                 anyhow::bail!("Muse subscription login was denied or cancelled in the browser.")
             }
@@ -146,7 +146,7 @@ pub(super) async fn poll_muse_subscription_until_decided_by_code(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(expires_secs);
     loop {
         match poll_by_code(client, device_code, current_interval).await? {
-            auth::muse::PollOutcome::Approved(credentials) => return Ok(credentials),
+            auth::muse::PollOutcome::Approved(credentials) => return Ok(*credentials),
             auth::muse::PollOutcome::Denied => {
                 anyhow::bail!("Muse subscription login was denied or cancelled in the browser.")
             }

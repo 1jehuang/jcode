@@ -342,20 +342,25 @@ mod tests {
         let gate = Arc::new(ActivityGate::default());
         let selected = BTreeSet::from(["selected".into()]);
         let other_gate = gate.clone();
+        // The spawned callback yields the nested handle through a channel so the
+        // async block itself returns `()`; a future that yields another
+        // awaitable trips `clippy::async_yield_async`.
+        let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
         let child = gate
             .spawn_session("selected", async move {
-                other_gate.spawn(std::future::pending::<()>()).unwrap()
+                let inner = other_gate.spawn(std::future::pending::<()>()).unwrap();
+                let _ = inner_tx.send(inner);
             })
-            .unwrap()
-            .await
             .unwrap();
+        child.await.unwrap();
+        let inner = inner_rx.await.unwrap();
         assert!(gate.try_idle_sessions(&selected).is_none());
         assert!(
             gate.try_idle_sessions(&BTreeSet::from(["other".into()]))
                 .is_some()
         );
-        child.abort();
-        let _ = child.await;
+        inner.abort();
+        let _ = inner.await;
         assert!(gate.try_idle_sessions(&selected).is_some());
     }
 }
