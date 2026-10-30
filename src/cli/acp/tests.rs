@@ -1,6 +1,71 @@
 use super::*;
 use std::path::Path;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_new_and_resumed_sessions_advertise_server_failover() {
+    for resume in [false, true] {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (reader, writer) = client.into_split();
+        let daemon = tokio::spawn(async move {
+            let (reader, mut writer) = server.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request: Request = serde_json::from_str(&line).unwrap();
+            let Request::Subscribe {
+                id,
+                supports_server_failover,
+                target_session_id,
+                ..
+            } = request
+            else {
+                panic!("expected ACP subscription");
+            };
+            assert!(
+                supports_server_failover,
+                "ACP must delegate account failover to the daemon"
+            );
+            assert_eq!(target_session_id.as_deref(), resume.then_some("existing"));
+            // Stop after the subscription, without needing a live provider or daemon.
+            let response = json!({"type": "error", "id": id, "message": "subscription captured"});
+            writer
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        let runtime = AcpRuntime::new(AcpProfile::Standard, ProviderChoice::Claude, None, None);
+        let cwd = PathBuf::from("/acp-test");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            if resume {
+                runtime
+                    .attach_existing_session_connected(
+                        "existing".into(),
+                        cwd,
+                        false,
+                        reader,
+                        writer,
+                    )
+                    .await
+            } else {
+                runtime
+                    .create_new_session_connected(cwd, reader, writer)
+                    .await
+            }
+        })
+        .await
+        .expect("ACP subscription timed out");
+        daemon.await.unwrap();
+        assert_eq!(
+            result
+                .err()
+                .expect("mock daemon rejects subscription")
+                .to_string(),
+            "subscription captured"
+        );
+    }
+}
+
 #[test]
 fn acp_tool_kind_maps_core_tools() {
     assert_eq!(tool_kind("read"), "read");
