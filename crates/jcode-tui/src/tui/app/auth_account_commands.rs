@@ -372,7 +372,7 @@ pub(crate) fn account_command_from_picker(
 }
 
 pub(crate) fn execute_account_command_local(app: &mut App, command: AccountCommand) {
-    if app.is_remote || crate::tui::is_ssh_remote() {
+    if crate::tui::is_ssh_remote() {
         match command {
             AccountCommand::OpenOverlay { provider_filter } => {
                 app.open_remote_account_picker(provider_filter.as_deref())
@@ -464,6 +464,38 @@ pub(crate) async fn execute_account_command_remote(
     command: AccountCommand,
     remote: &mut crate::tui::backend::RemoteConnection,
 ) -> anyhow::Result<()> {
+    // Ordinary shared-daemon clients run on the same host as their auth/config.
+    // is_remote means wire-connected, not SSH. Only SSH/cloud must isolate the
+    // laptop stores. Named switches remain daemon-only for every wire client.
+    if !crate::tui::is_ssh_remote()
+        && !matches!(
+            &command,
+            AccountCommand::Switch { .. } | AccountCommand::SwitchShorthand { .. }
+        )
+    {
+        match command {
+            AccountCommand::SetOpenAiTransport(value) => {
+                save_openai_transport_setting_local(app, value.as_deref());
+                remote
+                    .set_transport(value.as_deref().unwrap_or("auto"))
+                    .await?;
+            }
+            AccountCommand::SetOpenAiEffort(value) => {
+                save_openai_effort_setting_local(app, value.as_deref());
+                if let Some(value) = value.as_deref() {
+                    remote.set_reasoning_effort(value).await?;
+                }
+            }
+            AccountCommand::SetOpenAiFast(enabled) => {
+                save_openai_fast_setting_local(app, enabled);
+                remote
+                    .set_service_tier(if enabled { "priority" } else { "off" })
+                    .await?;
+            }
+            other => execute_account_command_local(app, other),
+        }
+        return Ok(());
+    }
     match command {
         AccountCommand::OpenOverlay { provider_filter } => {
             app.open_remote_account_picker(provider_filter.as_deref());
@@ -483,15 +515,32 @@ pub(crate) async fn execute_account_command_remote(
             app.set_status_notice(format!("Account switch requested: {label}"));
         }
         AccountCommand::SwitchShorthand { label } => {
-            let Some((claude, openai)) = crate::usage::remote_account_list() else {
+            let inventory = if crate::tui::is_ssh_remote() {
+                crate::usage::remote_account_list().map(|(claude, openai)| {
+                    (
+                        claude.iter().any(|account| account.label == label),
+                        openai.iter().any(|account| account.label == label),
+                    )
+                })
+            } else {
+                Some((
+                    crate::auth::claude::list_accounts()
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|account| account.label == label),
+                    crate::auth::codex::list_accounts()
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|account| account.label == label),
+                ))
+            };
+            let Some((has_claude, has_openai)) = inventory else {
                 app.push_display_message(DisplayMessage::system(
                     "Remote account inventory is not available yet. Retry /accounts, or use /account claude switch <label> or /account openai switch <label>.",
                 ));
                 remote.poll_account_usage().await?;
                 return Ok(());
             };
-            let has_claude = claude.iter().any(|account| account.label == label);
-            let has_openai = openai.iter().any(|account| account.label == label);
             match (has_claude, has_openai) {
                 (true, false) => remote.switch_anthropic_account(&label).await?,
                 (false, true) => remote.switch_openai_account(&label).await?,

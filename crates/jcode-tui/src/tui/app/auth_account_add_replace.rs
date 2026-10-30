@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub(crate) fn open_account_add_replace_flow(&mut self, provider_filter: Option<&str>) {
-        if self.is_remote || crate::tui::is_ssh_remote() {
+        if crate::tui::is_ssh_remote() {
             self.remote_account_management_notice();
             return;
         }

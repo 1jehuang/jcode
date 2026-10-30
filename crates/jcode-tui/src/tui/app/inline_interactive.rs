@@ -2543,7 +2543,9 @@ impl App {
     }
 
     fn handle_account_picker_selection(&mut self, action: AccountPickerAction) {
-        if self.is_remote || crate::tui::is_ssh_remote() {
+        if (self.is_remote || crate::tui::is_ssh_remote())
+            && matches!(&action, AccountPickerAction::Switch { .. })
+        {
             if let AccountPickerAction::Switch { provider_id, label } = action {
                 self.set_status_notice(format!(
                     "Account switch queued: {} ({})",
@@ -2551,8 +2553,6 @@ impl App {
                 ));
                 self.pending_account_picker_action =
                     Some(AccountPickerAction::Switch { provider_id, label });
-            } else {
-                self.remote_account_management_notice();
             }
             return;
         }

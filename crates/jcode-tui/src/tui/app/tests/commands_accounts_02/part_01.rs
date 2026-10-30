@@ -13,8 +13,48 @@ fn remote_account_fixture(label: &str) -> crate::protocol::AccountUsageSnapshot 
 }
 
 #[test]
-fn test_remote_account_picker_pending_empty_and_scoped_inventory() {
+fn test_account_local_shared_daemon_retains_inventory_center_and_saved_defaults() {
     with_temp_jcode_home(|| {
+        let _env_guard = EnvRestoreGuard::capture(["JCODE_SSH_REMOTE", "GROQ_API_KEY"]);
+        crate::env::remove_var("JCODE_SSH_REMOTE");
+        crate::env::set_var("GROQ_API_KEY", "shared-local-regression-key");
+        crate::auth::AuthStatus::invalidate_cache();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        crate::usage::clear_remote_account_usage();
+        app.open_account_picker(None);
+        assert!(app.inline_interactive_state.as_ref().unwrap().entries.iter().any(|entry|
+            matches!(entry.action, crate::tui::PickerAction::Login(provider) if provider.id == "groq")
+        ));
+        app.open_account_center(Some("openai"));
+        assert!(app.account_picker_overlay.is_some());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            assert!(
+                super::auth::handle_account_command_remote(
+                    &mut app,
+                    "/account default-model shared-local-model",
+                    &mut remote
+                )
+                .await
+                .unwrap()
+            );
+        });
+        assert_eq!(
+            crate::config::Config::load()
+                .provider
+                .default_model
+                .as_deref(),
+            Some("shared-local-model")
+        );
+        crate::auth::AuthStatus::invalidate_cache();
+    });
+}
+
+#[test]
+fn test_remote_account_picker_pending_empty_and_scoped_inventory() {
+    with_ssh_remote_test_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
         crate::usage::clear_remote_account_usage();
@@ -94,7 +134,7 @@ fn test_remote_account_ssh_picker_keyboard_queues_host_switch() {
                 .last()
                 .unwrap()
                 .content
-                .contains("No local credentials or settings were accessed")
+                .contains("Nothing was changed on this computer")
         );
         crate::usage::clear_remote_account_usage();
     });
@@ -102,7 +142,7 @@ fn test_remote_account_ssh_picker_keyboard_queues_host_switch() {
 
 #[test]
 fn test_remote_accounts_plural_preview_focuses_without_switching() {
-    with_temp_jcode_home(|| {
+    with_ssh_remote_test_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
         crate::usage::set_remote_account_usage(
@@ -128,7 +168,7 @@ fn test_remote_accounts_plural_preview_focuses_without_switching() {
 
 #[test]
 fn test_remote_account_commands_send_only_wire_switches_and_block_local_management() {
-    with_temp_jcode_home(|| {
+    with_ssh_remote_test_home(|| {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let mut app = create_test_app();
         app.is_remote = true;
@@ -169,7 +209,7 @@ fn test_remote_account_commands_send_only_wire_switches_and_block_local_manageme
                 "/account doctor",
                 "/account openai settings",
                 "/account openai remove remote-only",
-                "/account add",
+                "/account add named",
                 "/account default-model unsafe",
                 "/account openai transport https",
             ] {
@@ -714,26 +754,27 @@ fn test_account_picker_includes_all_configured_credentials_even_excluded_and_man
             "credentials must precede management actions"
         );
 
-        // A remote daemon's API credential must never expose or select the
-        // laptop's configured API-key inventory. The wire snapshot is OAuth-only.
+        // A local shared-daemon client must retain its local credential
+        // inventory, even though it uses the same wire client as SSH.
         app.is_remote = true;
-        crate::usage::set_remote_account_usage(
-            Vec::new(),
-            vec![remote_account_fixture("remote-only")],
-        );
-        for name in ["OpenAI", "Groq"] {
+        for (name, credential, expected) in [
+            (
+                "OpenAI",
+                Some(jcode_provider_core::ResolvedCredential::ApiKey),
+                "openai-api",
+            ),
+            ("Groq", None, "groq"),
+        ] {
             app.remote_provider_name = Some(name.into());
-            app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+            app.remote_resolved_credential = credential;
             app.open_account_picker(None);
             let picker = app.inline_interactive_state.as_ref().unwrap();
-            assert_eq!(picker.entries.len(), 1);
-            assert!(!picker.entries[0].is_current);
-            assert!(matches!(&picker.entries[0].action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch { label, .. })
-                if label == "remote-only"
+            let selected = &picker.entries[picker.selected];
+            assert!(selected.is_current);
+            assert!(matches!(selected.action,
+                crate::tui::PickerAction::Login(provider) if provider.id == expected
             ));
         }
-        crate::usage::clear_remote_account_usage();
         app.is_remote = false;
 
         for (scope, expected, unexpected) in [

@@ -90,10 +90,6 @@ impl App {
     }
 
     pub(crate) fn edit_selected_account_priority(&mut self, code: KeyCode) -> Result<()> {
-        if self.is_remote {
-            self.remote_account_management_notice();
-            return Ok(());
-        }
         if super::commands_dispatch::ssh_local_action_blocked(self, "Saving account priorities") {
             return Ok(());
         }
@@ -131,7 +127,7 @@ impl App {
     }
 
     pub(crate) fn open_account_center(&mut self, provider_filter: Option<&str>) {
-        if self.is_remote || crate::tui::is_ssh_remote() {
+        if crate::tui::is_ssh_remote() {
             self.open_remote_account_picker(provider_filter);
             return;
         }
@@ -455,7 +451,7 @@ impl App {
     }
 
     pub(crate) fn open_account_picker(&mut self, provider_filter: Option<&str>) {
-        if self.is_remote || crate::tui::is_ssh_remote() {
+        if crate::tui::is_ssh_remote() {
             self.open_remote_account_picker(provider_filter);
             return;
         }

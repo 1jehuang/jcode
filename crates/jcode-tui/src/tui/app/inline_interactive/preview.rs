@@ -18,7 +18,7 @@ impl App {
     }
 
     fn account_picker_preview_request(&self, input: &str) -> Option<InlinePickerPreviewRequest> {
-        if (self.is_remote || crate::tui::is_ssh_remote())
+        if crate::tui::is_ssh_remote()
             && !crate::usage::remote_account_list()
                 .is_some_and(|(claude, openai)| !claude.is_empty() || !openai.is_empty())
         {
