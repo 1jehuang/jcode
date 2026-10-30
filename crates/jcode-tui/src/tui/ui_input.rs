@@ -1479,6 +1479,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         branch: overscroll_git_branch(&data),
         git: data.git_info.clone(),
         context: overscroll_context_usage(&data),
+        account_remaining: overscroll_account_remaining(&data),
         auth: overscroll_auth_label(data.auth_method),
         provider: (!provider.is_empty() && !overscroll_is_runtime_placeholder(&provider))
             .then(|| overscroll_provider_display(&provider)),
@@ -1515,6 +1516,7 @@ struct OverscrollFacts {
     branch: Option<String>,
     git: Option<crate::tui::info_widget::GitInfo>,
     context: Option<(usize, usize)>,
+    account_remaining: Option<u8>,
     auth: Option<(&'static str, Color)>,
     provider: Option<String>,
     model: Option<String>,
@@ -1529,6 +1531,7 @@ struct OverscrollLevels {
     dir: u8,
     branch: u8,
     git: u8,
+    context: u8,
     auth: u8,
     provider: u8,
     model: u8,
@@ -1546,6 +1549,7 @@ const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
     |l| l.git = 1,      // "~3 +1 ?2 ↑1" -> "±6 ↑1"
     |l| l.branch = 1,   // long branch -> 12 chars
     |l| l.provider = 1, // hide provider
+    |l| l.context = 1,  // "74k/256k 29%" -> "29%"
     |l| l.git = 2,      // hide git status
     |l| l.branch = 2,   // hide branch
     |l| l.model = 1,    // drop reasoning effort
@@ -1618,7 +1622,19 @@ fn overscroll_fact_spans(
     }
 
     if let Some((used, limit)) = facts.context {
-        out.push(vec![overscroll_context_percentage(used, limit)]);
+        let mut spans = Vec::new();
+        if levels.context == 0 {
+            spans.push(Span::styled(
+                format!(
+                    "{}/{} ",
+                    overscroll_format_tokens(used),
+                    overscroll_format_tokens(limit)
+                ),
+                muted,
+            ));
+        }
+        spans.push(overscroll_context_percentage(used, limit));
+        out.push(spans);
     }
 
     if levels.auth == 0
@@ -1633,7 +1649,11 @@ fn overscroll_fact_spans(
     if levels.provider == 0
         && let Some(provider) = &facts.provider
     {
-        out.push(vec![Span::styled(provider.clone(), muted)]);
+        let mut group = vec![Span::styled(provider.clone(), muted)];
+        if let Some(remaining) = facts.account_remaining {
+            group.push(Span::styled(format!(" {remaining}% left"), muted));
+        }
+        out.push(group);
     }
 
     if let Some(model) = &facts.model {
@@ -1893,7 +1913,45 @@ fn overscroll_context_usage(
     Some((used_tokens, limit))
 }
 
-/// Render context usage as a percentage, without a bar or token counts.
+/// The tightest subscription window determines the remaining account allowance.
+/// Never turn missing usage or an API-key cost total into a fictional quota.
+fn overscroll_account_remaining(data: &crate::tui::info_widget::InfoWidgetData) -> Option<u8> {
+    use crate::tui::info_widget::{AuthMethod, UsageProvider};
+    let info = data.usage_info.as_ref()?;
+    if !matches!(
+        (data.auth_method, info.provider),
+        (AuthMethod::OpenAIOAuth, UsageProvider::OpenAI)
+            | (AuthMethod::AnthropicOAuth, UsageProvider::Anthropic)
+    ) {
+        return None;
+    }
+    if info.limit_reached {
+        return Some(0);
+    }
+    if !info.available
+        || !info.five_hour.is_finite()
+        || !info.seven_day.is_finite()
+        || info.spark.is_some_and(|value| !value.is_finite())
+    {
+        return None;
+    }
+    Some(100u8.saturating_sub(info.max_usage_pct()))
+}
+
+/// Format context counts compactly while retaining useful precision.
+fn overscroll_format_tokens(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 10_000 {
+        format!("{}k", tokens / 1000)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Render the colored percentage alongside the context token counts.
 fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
     let limit = limit.max(1);
     let ratio = (used as f64 / limit as f64).clamp(0.0, 1.0);
@@ -1908,10 +1966,7 @@ fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
     } else {
         rgb(100, 200, 100)
     };
-    Span::styled(
-        format!("{}%", pct),
-        Style::default().fg(fill_color).bold(),
-    )
+    Span::styled(format!("{}%", pct), Style::default().fg(fill_color).bold())
 }
 pub(super) fn draw_input(
     frame: &mut Frame,
