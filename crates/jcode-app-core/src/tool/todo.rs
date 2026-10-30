@@ -20,6 +20,26 @@ pub struct TodoTool;
 #[path = "todo_external_blocker_tests.rs"]
 mod external_blocker_tests;
 
+#[cfg(test)]
+#[path = "todo_lane_dependency_tests.rs"]
+mod lane_dependency_tests;
+
+/// A prerequisite edit naming one member applies atomically to its entire lane.
+fn patch_lane_after(todos: &mut [Value], id: &str, value: Value) -> Result<()> {
+    let typed: Vec<TodoItem> = serde_json::from_value(Value::Array(todos.to_vec()))?;
+    let target = typed
+        .iter()
+        .find(|todo| todo.id == id)
+        .ok_or_else(|| anyhow::anyhow!("unknown todo {id:?}"))?;
+    let lane = crate::todo::stages::lane_id(target);
+    for (raw, todo) in todos.iter_mut().zip(&typed) {
+        if crate::todo::stages::lane_id(todo) == lane {
+            raw["lane_after"] = value.clone();
+        }
+    }
+    Ok(())
+}
+
 fn validate_external_blockers(previous: &[TodoItem], todos: &[TodoItem]) -> Result<()> {
     let now = chrono::Utc::now();
     for todo in todos {
@@ -306,6 +326,9 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
                 target.insert(key.to_string(), value.clone());
             }
         }
+        if let Some(value) = fields.get("lane_after") {
+            patch_lane_after(&mut todos, id, value.clone())?;
+        }
     }
 
     for mut add in adds {
@@ -350,6 +373,19 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
                 fields.insert(canonical.into(), value);
             }
         }
+        if !fields.contains_key("lane_after") {
+            if let Some(value) = todos
+                .iter()
+                .find(|todo| {
+                    todo.get("stage") == fields.get("stage")
+                        && todo.get("group") == fields.get("group")
+                })
+                .and_then(|todo| todo.get("lane_after"))
+            {
+                fields.insert("lane_after".into(), value.clone());
+            }
+        }
+        let lane_after = fields.get("lane_after").cloned();
         let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
         if let Some(id) = &id
             && todos.iter().any(|todo| id_of(todo).as_deref() == Some(id))
@@ -363,6 +399,9 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         }) {
             Some(index) => todos.insert(index + 1, add),
             None => todos.push(add),
+        }
+        if let (Some(id), Some(value)) = (id, lane_after) {
+            patch_lane_after(&mut todos, &id, value)?;
         }
     }
 
@@ -488,7 +527,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("lane must be an object"))?;
             if lane
                 .keys()
-                .any(|key| !["lane", "items"].contains(&key.as_str()))
+                .any(|key| !["lane", "items", "after"].contains(&key.as_str()))
             {
                 bail!("unexpected lane field");
             }
@@ -511,7 +550,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                     .as_object()
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("item must be an object"))?;
-                if ["phase", "lane", "stage", "group", "wave"]
+                if ["phase", "lane", "stage", "group", "wave", "lane_after"]
                     .iter()
                     .any(|key| item.contains_key(*key))
                 {
@@ -529,6 +568,9 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                 }
                 item.insert("stage".into(), json!(number));
                 item.insert("group".into(), json!(name));
+                if let Some(after) = lane.get("after") {
+                    item.insert("lane_after".into(), after.clone());
+                }
                 todos.push(Value::Object(item));
             }
         }
@@ -1389,6 +1431,11 @@ impl Tool for TodoTool {
         // Patch additions accept the same fields as full todos, plus an
         // insertion position. Keep their declarations in sync for providers
         // that require every `required` entry to appear in `properties`.
+        schema["properties"]["todos"]["items"]["properties"]["lane_after"] = json!({
+            "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1},
+            "description": "Lane-wide prerequisite todo IDs in strictly earlier phases by first appearance. Editing one member updates the entire lane. Null restores the default phase barrier."
+        });
         let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
         add_properties["after"] = json!({
             "type": "string",
@@ -1414,6 +1461,7 @@ impl Tool for TodoTool {
         if let Some(properties) = item["properties"].as_object_mut() {
             properties.remove("phase");
             properties.remove("lane");
+            properties.remove("lane_after");
         }
         item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
@@ -1422,7 +1470,11 @@ impl Tool for TodoTool {
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
-                        "properties": {"lane": {"type": "string", "minLength": 1}, "items": {"type": "array", "minItems": 1, "items": item}}
+                        "properties": {"lane": {"type": "string", "minLength": 1}, "after": {
+                            "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
+                            "items": {"type": "string", "minLength": 1},
+                            "description": "Prerequisite todo IDs from strictly earlier phases. Omit or null for the default phase barrier."
+                        }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
         });
@@ -1445,6 +1497,12 @@ impl Tool for TodoTool {
             // Goals/plan-only writes keep the stored todo list.
             let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
+            crate::todo::store::validate_session_lane_dependencies(
+                &crate::storage::jcode_dir()?,
+                &ctx.session_id,
+                &todos,
+            )
+            .map_err(anyhow::Error::msg)?;
             for todo in &mut todos {
                 if !crate::todo::is_incomplete_todo(todo) {
                     todo.external_blocker = None;

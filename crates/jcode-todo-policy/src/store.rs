@@ -121,6 +121,34 @@ pub fn canonicalize_worker_todos(
     crate::stages::canonicalize_worker_lane(&coordinator_todos, link, todos)
 }
 
+/// Validate a write in the complete coordinator graph when this is a worker.
+pub fn validate_session_lane_dependencies(
+    home: &Path,
+    session_id: &str,
+    todos: &[crate::TodoItem],
+) -> Result<(), String> {
+    let links: Vec<crate::stages::LaneLink> =
+        read_or_default(&todo_file_path(home, session_id, TodoFile::LaneLinks));
+    if let Some(link) = links.iter().find(|link| link.worker == session_id)
+        && is_safe_session_id(&link.coordinator)
+    {
+        let coordinator: Vec<crate::TodoItem> =
+            read_or_default(&todo_file_path(home, &link.coordinator, TodoFile::Todos));
+        // Worker snapshots omit prerequisite lanes. Validate their canonicalized
+        // replacement in the coordinator's full graph instead.
+        if let Some(merged) = crate::stages::merge_worker_lane(&coordinator, link, todos) {
+            return crate::stages::validate_lane_dependencies(&merged);
+        }
+        if coordinator
+            .iter()
+            .any(|todo| crate::stages::lane_id(todo) == link.lane)
+        {
+            return crate::stages::validate_lane_dependencies(&coordinator);
+        }
+    }
+    crate::stages::validate_lane_dependencies(todos)
+}
+
 /// Read everything the follow-up policy needs. Never fails: absent state is
 /// an empty snapshot.
 pub fn load_snapshot(home: &Path, session_id: &str) -> TodoSnapshot {

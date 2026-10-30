@@ -11,6 +11,10 @@
 
 use crate::TodoItem;
 
+#[cfg(test)]
+#[path = "lane_dependency_tests.rs"]
+mod lane_dependency_tests;
+
 /// One parallel lane inside a stage: indices into the original todo slice,
 /// in list order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +119,53 @@ pub fn stage_layout(todos: &[&TodoItem]) -> Vec<TodoStage> {
     stages
 }
 
+/// Validate lane-wide prerequisites against phase order of first appearance,
+/// not numeric phase labels. Restricting edges to earlier phases prevents cycles.
+pub fn validate_lane_dependencies(todos: &[TodoItem]) -> Result<(), String> {
+    let refs: Vec<_> = todos.iter().collect();
+    let stages = stage_layout(&refs);
+    let mut positions = std::collections::HashMap::new();
+    for (phase, stage) in stages.iter().enumerate() {
+        for index in stage.item_indices() {
+            if positions.insert(todos[index].id.as_str(), phase).is_some() {
+                return Err(format!("duplicate todo id {:?}", todos[index].id));
+            }
+        }
+    }
+    for (phase, stage) in stages.iter().enumerate() {
+        for lane in &stage.lanes {
+            let expected = &todos[lane.items[0]].lane_after;
+            if lane.items.iter().any(|&i| &todos[i].lane_after != expected) {
+                return Err("lane_after must be consistent across every lane member".into());
+            }
+            let Some(dependencies) = expected else {
+                continue;
+            };
+            if dependencies.is_empty() {
+                return Err(
+                    "lane_after must be nonempty, or null for the default phase barrier".into(),
+                );
+            }
+            let mut seen = std::collections::HashSet::new();
+            for id in dependencies {
+                if id.trim().is_empty() || !seen.insert(id) {
+                    return Err("lane_after must contain unique nonempty todo IDs".into());
+                }
+                match positions.get(id.as_str()) {
+                    Some(&position) if position < phase => {}
+                    Some(_) => {
+                        return Err(format!(
+                            "lane_after todo {id:?} must be in a strictly earlier phase"
+                        ));
+                    }
+                    None => return Err(format!("unknown lane_after todo {id:?}")),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +257,7 @@ pub fn canonicalize_worker_lane(
         .map(|todo| TodoItem {
             stage: template.stage,
             group: template.group.clone(),
+            lane_after: template.lane_after.clone(),
             ..todo.clone()
         })
         .collect()
@@ -237,6 +289,7 @@ pub fn merge_worker_lane(
             let mut item = todo.clone();
             item.stage = template.stage;
             item.group = template.group.clone();
+            item.lane_after = template.lane_after.clone();
             item.assigned_to = Some(link.worker.clone());
             if other_ids.contains(item.id.as_str()) {
                 item.id = format!("{}:{}", link.worker, item.id);
