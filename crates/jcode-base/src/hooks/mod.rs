@@ -271,6 +271,9 @@ pub fn dispatch_observer(event: HookEvent) {
 mod capabilities;
 mod feedback;
 mod gate;
+mod json_output;
+mod json_runner;
+mod payload;
 mod sync_runner;
 
 pub use capabilities::hook_capabilities;
@@ -278,6 +281,9 @@ pub use feedback::run_post_tool_feedback;
 #[cfg(test)]
 use gate::{CommandVerdict, parse_gate_stdout};
 pub use gate::{GateDecision, GateOutcome, run_pre_tool_gate, transform_tool_input};
+pub use json_output::{CommandResult, Verdict, interpret};
+pub use json_runner::run_json_commands;
+pub use payload::{TEXT_FIELD_LIMIT, common_payload, jcode_object, truncate_marked};
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
