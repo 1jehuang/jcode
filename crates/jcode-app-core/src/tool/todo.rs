@@ -373,17 +373,16 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
                 fields.insert(canonical.into(), value);
             }
         }
-        if !fields.contains_key("lane_after") {
-            if let Some(value) = todos
+        if !fields.contains_key("lane_after")
+            && let Some(value) = todos
                 .iter()
                 .find(|todo| {
                     todo.get("stage") == fields.get("stage")
                         && todo.get("group") == fields.get("group")
                 })
                 .and_then(|todo| todo.get("lane_after"))
-            {
-                fields.insert("lane_after".into(), value.clone());
-            }
+        {
+            fields.insert("lane_after".into(), value.clone());
         }
         let lane_after = fields.get("lane_after").cloned();
         let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
