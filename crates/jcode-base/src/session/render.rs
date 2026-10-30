@@ -120,18 +120,28 @@ const COMPACTED_HISTORY_MIN_RENDERABLE_TO_TRUNCATE: usize = 80;
 const COMPACTED_HISTORY_MIN_TURNS_TO_TRUNCATE: usize = 5;
 
 fn stored_message_is_user_turn(msg: &super::StoredMessage) -> bool {
-    matches!(msg.role, Role::User)
-        && msg.display_role.is_none()
-        && !is_auto_poke_user_message(msg)
-        && !super::is_scheduled_task_message(msg)
-        && !is_internal_system_reminder(msg)
-        // Tool results use the provider's user role, but render as tool cards,
-        // not prompts. Count only text that the user row actually displays.
-        && msg.content.iter().any(|block| matches!(
-            block,
-            ContentBlock::Text { text, .. }
-                if !text.is_empty() && !is_attached_image_label_text(text)
-        ))
+    if !matches!(msg.role, Role::User)
+        || msg.display_role.is_some()
+        || is_auto_poke_user_message(msg)
+        || super::is_scheduled_task_message(msg)
+        || is_internal_system_reminder(msg)
+    {
+        return false;
+    }
+    // Tool results use the provider's user role, but render as tool cards,
+    // not prompts. Join the visible text just as the renderer does, then use
+    // the same legacy-wake classification as DisplayMessage::effective_role.
+    let text: String = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } if !is_attached_image_label_text(text) => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    !text.is_empty() && !crate::message::is_background_task_notification_content(&text)
 }
 
 fn compacted_history_render_window(

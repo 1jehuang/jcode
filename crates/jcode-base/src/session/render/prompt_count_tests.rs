@@ -90,3 +90,48 @@ fn compacted_synthetic_user_envelopes_do_not_count_as_prompts() {
         );
     }
 }
+
+#[test]
+fn compacted_background_wakes_match_effective_display_role() {
+    let mut session = compacted_tool_session(10);
+    for content in [
+        "  🐝 **Swarm await finished**\n\nAll members done.",
+        "**Background task** `build` · `bash` · ✓ completed · 7.1s · exit 0\n\n_Full output:_ `bg action=output task_id=build`",
+        "**Background task progress** `build` · `bash`\n\n[#####-------] 42% · Running tests (reported)",
+    ] {
+        assert!(crate::message::is_background_task_notification_content(
+            content
+        ));
+        session.add_message(Role::User, vec![text(content)]);
+        let wake = session.messages.pop().unwrap();
+        assert!(!stored_message_is_user_turn(&wake));
+        // Legacy wakes in the compacted prefix must not increase the absolute
+        // prompt offset, even though they keep role=user in the raw history.
+        session.messages.insert(1, wake);
+        session.compaction.as_mut().unwrap().compacted_count += 1;
+    }
+    for window in [0, 1, 64, usize::MAX] {
+        let (rendered, _, info) =
+            render_messages_and_images_with_compacted_history(&session, window);
+        let visible_human_prompts = rendered
+            .iter()
+            .filter(|message| {
+                message.role == "user"
+                    && !crate::message::is_background_task_notification_content(&message.content)
+            })
+            .count();
+        assert_eq!(
+            info.unwrap().hidden_user_prompts + visible_human_prompts,
+            11,
+            "window={window}"
+        );
+    }
+    // Ordinary human discussion of background work must still be a prompt.
+    session.add_message(
+        Role::User,
+        vec![text("Please explain background task progress")],
+    );
+    assert!(stored_message_is_user_turn(
+        session.messages.last().unwrap()
+    ));
+}
