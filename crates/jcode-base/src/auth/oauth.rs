@@ -941,21 +941,35 @@ pub fn save_claude_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ClaudeProfileResponse {
     #[serde(default)]
     account: ClaudeProfileAccount,
+    // Optional metadata must not make an otherwise usable profile fail to parse.
+    #[serde(default)]
+    organization: serde_json::Value,
 }
 
-#[derive(Deserialize, Default)]
+impl ClaudeProfileResponse {
+    fn subscription_type(&self) -> Option<String> {
+        self.organization
+            .get("subscription_type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct ClaudeProfileAccount {
     email: Option<String>,
 }
 
-async fn fetch_claude_profile_email_at_url(
+async fn fetch_claude_profile_at_url(
     access_token: &str,
     profile_url: &str,
-) -> Result<Option<String>> {
+) -> Result<ClaudeProfileResponse> {
     let client = crate::provider::shared_http_client();
     let resp = client
         .get(profile_url)
@@ -975,8 +989,7 @@ async fn fetch_claude_profile_email_at_url(
         anyhow::bail!("Profile fetch failed ({}): {}", status, body);
     }
 
-    let profile: ClaudeProfileResponse = resp.json().await?;
-    Ok(profile.account.email)
+    Ok(resp.json().await?)
 }
 
 /// Fetch profile metadata for a Claude account and persist any discovered fields.
@@ -984,8 +997,10 @@ pub async fn update_claude_account_profile(
     label: &str,
     access_token: &str,
 ) -> Result<Option<String>> {
-    let email = fetch_claude_profile_email_at_url(access_token, claude::PROFILE_URL).await?;
-    claude_auth::update_account_profile(label, email.clone())?;
+    let profile = fetch_claude_profile_at_url(access_token, claude::PROFILE_URL).await?;
+    let subscription_type = profile.subscription_type();
+    let email = profile.account.email;
+    claude_auth::update_account_profile_metadata(label, email.clone(), subscription_type)?;
     Ok(email)
 }
 
