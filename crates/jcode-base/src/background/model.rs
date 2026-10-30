@@ -25,6 +25,29 @@ pub(super) fn task_dir() -> PathBuf {
 
 pub(super) const EXIT_MARKER_PREFIX: &str = "--- Command finished with exit code: ";
 const MAX_EVENT_HISTORY: usize = 50;
+/// Status files are tiny by design. A larger file is corrupt or runaway, and
+/// parsing it can allocate gigabytes, so it is never read.
+pub(super) const MAX_STATUS_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+pub(super) async fn read_status_text(path: &std::path::Path) -> Option<String> {
+    let len = tokio::fs::metadata(path).await.ok()?.len();
+    if len > MAX_STATUS_FILE_BYTES {
+        crate::logging::warn(&format!(
+            "background: ignoring oversized status file {} ({len} bytes)",
+            path.display()
+        ));
+        return None;
+    }
+    tokio::fs::read_to_string(path).await.ok()
+}
+
+pub(super) fn read_status_text_sync(path: &std::path::Path) -> Option<String> {
+    let len = std::fs::metadata(path).ok()?.len();
+    if len > MAX_STATUS_FILE_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

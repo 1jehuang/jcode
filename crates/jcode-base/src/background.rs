@@ -29,7 +29,8 @@ pub use model::{
 };
 use model::{
     EXIT_MARKER_PREFIX, RunningTask, normalize_delivery, progress_equivalent,
-    progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
+    progress_event_record, progress_wait_reason, push_task_event, read_status_text,
+    read_status_text_sync, task_dir, terminal_event_record,
 };
 
 /// Manages background task execution
@@ -140,7 +141,7 @@ impl BackgroundTaskManager {
     }
 
     async fn read_status_file(&self, path: &std::path::Path) -> Option<TaskStatusFile> {
-        let content = fs::read_to_string(path).await.ok()?;
+        let content = read_status_text(path).await?;
         serde_json::from_str(&content).ok()
     }
 
@@ -521,9 +522,8 @@ impl BackgroundTaskManager {
 
             let status_guard = status_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
-            let prior_status = tokio::fs::read_to_string(&status_path_clone)
+            let prior_status = read_status_text(&status_path_clone)
                 .await
-                .ok()
                 .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok());
             let prior_progress = prior_status
                 .as_ref()
@@ -748,9 +748,8 @@ impl BackgroundTaskManager {
 
             let status_guard = status_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
-            let prior_status = tokio::fs::read_to_string(&status_path_clone)
+            let prior_status = read_status_text(&status_path_clone)
                 .await
-                .ok()
                 .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok());
             let prior_progress = prior_status
                 .as_ref()
@@ -1187,7 +1186,7 @@ impl BackgroundTaskManager {
             loop {
                 poll.tick().await;
 
-                let Ok(content) = fs::read_to_string(&status_path_clone).await else {
+                let Some(content) = read_status_text(&status_path_clone).await else {
                     break;
                 };
                 let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) else {
@@ -1526,8 +1525,7 @@ impl BackgroundTaskManager {
 
         let mut rows: Vec<RunningBackgroundProgress> = Vec::new();
         for task in tasks.values() {
-            let status = std::fs::read_to_string(&task.status_path)
-                .ok()
+            let status = read_status_text_sync(&task.status_path)
                 .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok());
             let progress = status.as_ref().and_then(|status| status.progress.clone());
             let label = status
@@ -1602,8 +1600,7 @@ impl BackgroundTaskManager {
                     if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                         continue;
                     }
-                    let Some(status) = std::fs::read_to_string(&path)
-                        .ok()
+                    let Some(status) = read_status_text_sync(&path)
                         .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok())
                     else {
                         continue;

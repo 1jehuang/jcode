@@ -39,8 +39,21 @@ pub struct BackgroundTaskProgress {
     pub source: BackgroundTaskProgressSource,
 }
 
+/// Longest progress message persisted; larger payloads are truncated.
+pub const MAX_PROGRESS_MESSAGE_BYTES: usize = 2048;
+
 impl BackgroundTaskProgress {
     pub fn normalize(mut self) -> Self {
+        if let Some(message) = self.message.as_mut()
+            && message.len() > MAX_PROGRESS_MESSAGE_BYTES
+        {
+            let mut end = MAX_PROGRESS_MESSAGE_BYTES;
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            message.truncate(end);
+            message.push('…');
+        }
         if let (Some(current), Some(total)) = (self.current, self.total)
             && total > 0
         {
