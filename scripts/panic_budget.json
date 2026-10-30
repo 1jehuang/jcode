@@ -18,7 +18,7 @@
     "crates/jcode-app-core/src/tool/todo.rs": 1,
     "crates/jcode-base/src/auth/account_store.rs": 1,
     "crates/jcode-base/src/auth/oauth.rs": 3,
-    "crates/jcode-base/src/hooks.rs": 1,
+    "crates/jcode-base/src/hooks/mod.rs": 1,
     "crates/jcode-base/src/mcp/manager.rs": 2,
     "crates/jcode-base/src/memory_jev.rs": 1,
     "crates/jcode-base/src/provider_activity_oauth.rs": 3,
