@@ -50,7 +50,18 @@ metadata. Missing AWS components may be omitted, but at least one must exist.
 
 ## Temporary callback after handoff
 
-A supporting local TUI may grant access for 15 minutes after a session handoff.
+A supporting local TUI may grant scoped access after a session handoff. The
+local machine's `~/.jcode/config.toml` controls the lifetime from handoff:
+
+```toml
+[cloud]
+local_access_seconds = 86400 # Default: 24 hours. Set 0 to disable.
+```
+
+Use `900` for the previous 15-minute limit or `172800` for two days.
+The local setting governs both TUI grants and fulfillment validation. Existing
+grants are not extended by changing this setting. Disconnecting or switching
+sessions still revokes access. Ordinary resumes do not create a new grant.
 This is conditional, not guaranteed availability. The TUI invokes:
 
 ```text

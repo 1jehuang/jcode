@@ -25,6 +25,11 @@ impl Config {
 # Environment variables override these settings.
 # Run `/config` in jcode to see current settings.
 
+[cloud]
+# Scoped local resource access after handoff, in seconds (default: 24 hours).
+# Set to 0 to disable. Disconnecting or switching sessions still revokes access.
+local_access_seconds = 86400
+
 [keybindings]
 # Scroll keys (vim-style by default)
 # Supports: ctrl, alt, shift modifiers + any key
