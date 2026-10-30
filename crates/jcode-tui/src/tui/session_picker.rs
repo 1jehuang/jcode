@@ -1618,31 +1618,7 @@ impl SessionPicker {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         session.id.hash(&mut h);
-        session.short_name.hash(&mut h);
-        session.icon.hash(&mut h);
-        session.title.hash(&mut h);
-        session.server_name.hash(&mut h);
-        session.server_icon.hash(&mut h);
-        session.working_dir.hash(&mut h);
-        session.save_label.hash(&mut h);
-        session.saved.hash(&mut h);
-        std::mem::discriminant(&session.status).hash(&mut h);
-        match &session.status {
-            SessionStatus::Crashed { message } => message.hash(&mut h),
-            SessionStatus::Error { message } => message.hash(&mut h),
-            _ => {}
-        }
-        // The status line shows a relative "… 5m ago" label derived from real
-        // time, so bucket wall-clock into ~15s windows: fresh enough for the
-        // header without rebuilding the cache during a scroll burst.
-        session.last_message_time.timestamp().hash(&mut h);
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        (now_secs / 15).hash(&mut h);
-        self.crashed_session_ids.contains(&session.id).hash(&mut h);
-        self.selected_session_ids.contains(&session.id).hash(&mut h);
+        // Only transcript inputs invalidate this expensive markdown cache.
         let is_loading = session.messages_preview.is_empty()
             && self
                 .pending_preview_load
@@ -1687,8 +1663,6 @@ impl SessionPicker {
         let user_color: Color = theme::user_color();
         let user_text: Color = theme::user_text();
         let dim_color: Color = rgb(80, 80, 80);
-        let header_icon_color: Color = rgb(120, 210, 230);
-        let header_session_color: Color = rgb(255, 255, 255);
 
         let preview_inner_width = area.width.saturating_sub(2);
         let assistant_width = preview_inner_width.saturating_sub(2);
@@ -1696,167 +1670,7 @@ impl SessionPicker {
         // Build preview content
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        // Header matching TUI style
-        lines.push(
-            Line::from(vec![
-                Span::styled(
-                    format!("{} ", session.icon),
-                    Style::default().fg(header_icon_color),
-                ),
-                Span::styled(
-                    session.short_name.clone(),
-                    Style::default()
-                        .fg(header_session_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                {
-                    let ago = format_time_ago(session.last_message_time);
-                    let label = match &session.status {
-                        SessionStatus::Active => "active".to_string(),
-                        SessionStatus::Closed => format!("closed {}", ago),
-                        SessionStatus::Crashed { .. } => format!("crashed {}", ago),
-                        SessionStatus::Reloaded => format!("reloaded {}", ago),
-                        SessionStatus::Compacted => format!("compacted {}", ago),
-                        SessionStatus::RateLimited => format!("rate-limited {}", ago),
-                        SessionStatus::Error { .. } => format!("errored {}", ago),
-                    };
-                    Span::styled(format!("  {}", label), Style::default().fg(dim_color))
-                },
-            ])
-            .alignment(align),
-        );
-
-        // Title
-        lines.push(
-            Line::from(vec![Span::styled(
-                session.title.clone(),
-                Style::default().fg(Color::White),
-            )])
-            .alignment(align),
-        );
-
-        if session.server_icon.as_deref() == Some("☁")
-            && let Some(host) = session.server_name.as_deref()
-        {
-            use unicode_width::UnicodeWidthChar;
-            let label = format!("☁ {host}");
-            let mut remaining = inner.width.saturating_sub(1) as usize;
-            let mut clipped = String::new();
-            for ch in label.chars() {
-                let width = ch.width().unwrap_or(0);
-                if width > remaining {
-                    break;
-                }
-                remaining -= width;
-                clipped.push(ch);
-            }
-            if clipped.len() < label.len() {
-                clipped.push('…');
-            }
-            lines.push(
-                Line::from(Span::styled(
-                    clipped,
-                    Style::default().fg(header_icon_color),
-                ))
-                .alignment(align),
-            );
-        }
-
-        // Saved/bookmark indicator
-        if session.saved {
-            let saved_label = if let Some(ref label) = session.save_label {
-                format!("📌 Saved as \"{}\"", label)
-            } else {
-                "📌 Saved".to_string()
-            };
-            lines.push(
-                Line::from(vec![Span::styled(
-                    saved_label,
-                    Style::default().fg(rgb(255, 180, 100)),
-                )])
-                .alignment(align),
-            );
-        }
-
-        // Working directory
-        if let Some(ref dir) = session.working_dir {
-            lines.push(
-                Line::from(vec![Span::styled(
-                    format!("📁 {}", dir),
-                    Style::default().fg(dim_color),
-                )])
-                .alignment(align),
-            );
-        }
-
-        // Status line with details
-        let (status_icon, status_text, status_color) = match &session.status {
-            SessionStatus::Active => ("▶", "Active".to_string(), rgb(100, 200, 100)),
-            SessionStatus::Closed => ("✓", "Closed normally".to_string(), Color::DarkGray),
-            SessionStatus::Crashed { message } => {
-                let text = match message {
-                    Some(msg) => format!("Crashed: {}", safe_truncate(msg, 80)),
-                    None => "Crashed".to_string(),
-                };
-                ("💥", text, rgb(220, 100, 100))
-            }
-            SessionStatus::Reloaded => ("🔄", "Reloaded".to_string(), rgb(138, 180, 248)),
-            SessionStatus::Compacted => (
-                "📦",
-                "Compacted (context too large)".to_string(),
-                rgb(255, 193, 7),
-            ),
-            SessionStatus::RateLimited => ("⏳", "Rate limited".to_string(), rgb(186, 139, 255)),
-            SessionStatus::Error { message } => {
-                let text = format!("Error: {}", safe_truncate(message, 40));
-                ("❌", text, rgb(220, 100, 100))
-            }
-        };
-        lines.push(
-            Line::from(vec![
-                Span::styled(
-                    format!("{} ", status_icon),
-                    Style::default().fg(status_color),
-                ),
-                Span::styled(status_text, Style::default().fg(status_color)),
-            ])
-            .alignment(align),
-        );
-
-        if self.crashed_session_ids.contains(&session.id) {
-            lines.push(
-                Line::from(vec![Span::styled(
-                    "Included in batch restore",
-                    Style::default()
-                        .fg(rgb(255, 140, 140))
-                        .add_modifier(Modifier::BOLD),
-                )])
-                .alignment(align),
-            );
-        }
-
-        if self.selected_session_ids.contains(&session.id) {
-            lines.push(
-                Line::from(vec![Span::styled(
-                    "✓ Selected for multi-resume",
-                    Style::default()
-                        .fg(rgb(140, 220, 160))
-                        .add_modifier(Modifier::BOLD),
-                )])
-                .alignment(align),
-            );
-        }
-
-        lines.push(Line::from("").alignment(align));
-        lines.push(
-            Line::from(vec![Span::styled(
-                "─".repeat(area.width.saturating_sub(4) as usize),
-                Style::default().fg(rgb(60, 60, 60)),
-            )])
-            .alignment(align),
-        );
-        lines.push(Line::from("").alignment(align));
-
+        // Picker metadata belongs in the session list, not the transcript.
         // Messages preview - styled like the actual TUI
         let extras = self.preview_extras.get(&session.id);
         let hidden_prompts = extras.map_or(0, |extras| extras.hidden_prompts);

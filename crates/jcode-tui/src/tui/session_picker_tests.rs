@@ -2017,6 +2017,45 @@ fn contains_scrollbar_glyph(text: &str) -> bool {
 }
 
 #[test]
+fn test_preview_transcript_omits_picker_metadata() {
+    let mut session = make_session("metadata", "metadata-monkey", false, SessionStatus::Active);
+    session.title = "metadata-video-title".to_string();
+    session.working_dir = Some("/metadata-only-directory".to_string());
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.auto_scroll_preview = false;
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render_preview(frame, frame.area()))
+        .unwrap();
+    let cache = picker.preview_cache.as_ref().expect("rendered transcript");
+    let text = cache
+        .wrapped_lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.starts_with("1› hello"), "{text}");
+    for metadata in [
+        "metadata-monkey",
+        "metadata-video-title",
+        "/metadata-only-directory",
+        "▶ Active",
+        "────",
+    ] {
+        assert!(
+            !text.contains(metadata),
+            "unexpected picker metadata: {text}"
+        );
+    }
+}
+
+#[test]
 fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
     for width in [60, 100] {
         let mut reference = None;
@@ -2041,7 +2080,7 @@ fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
                     let rows: Vec<String> = (1..39)
                         .map(|y| (1..width - 1).map(|x| buffer[(x, y)].symbol()).collect())
                         .collect();
-                    for text in ["Test session", "1› hello", "world"] {
+                    for text in ["1› hello", "world"] {
                         let row = rows.iter().find(|row| row.contains(text)).expect(text);
                         assert!(row.starts_with(text), "preview must be flush left: {row:?}");
                     }
