@@ -2542,7 +2542,7 @@ impl App {
         }
     }
 
-    fn handle_account_picker_selection(&mut self, action: AccountPickerAction) {
+    pub(super) fn handle_account_picker_selection(&mut self, action: AccountPickerAction) {
         if (self.is_remote || crate::tui::is_ssh_remote())
             && matches!(&action, AccountPickerAction::Switch { .. })
         {

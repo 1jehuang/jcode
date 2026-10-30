@@ -2186,6 +2186,12 @@ pub(super) fn handle_navigation_shortcuts(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
+    if modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && matches!(code, KeyCode::Char('j' | 'k'))
+    {
+        app.cycle_account(code == KeyCode::Char('j'));
+        return true;
+    }
     if let Some(amount) = app.scroll_keys.scroll_amount(code, modifiers) {
         if amount < 0 {
             app.scroll_up((-amount) as usize);
@@ -2327,6 +2333,12 @@ pub(super) fn handle_pre_control_shortcuts(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
+    if modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && matches!(code, KeyCode::Char('j' | 'k'))
+    {
+        app.cycle_account(code == KeyCode::Char('j'));
+        return true;
+    }
     // Plain Ctrl+K kills to end of line (emacs habit). Ctrl+Shift+K must fall
     // through to the scroll handler: with the Kitty keyboard protocol enabled,
     // terminals report Ctrl+Shift+K as Char('k') + CONTROL|SHIFT, so without the

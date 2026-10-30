@@ -7,6 +7,83 @@ use super::auth_account_picker_saved_accounts::{
 use super::*;
 
 impl App {
+    /// Cycle only switchable accounts, never login/add/remove management rows.
+    pub(crate) fn cycle_account(&mut self, forward: bool) {
+        use crate::tui::{AccountPickerAction, PickerAction};
+        let remote = self.is_remote || crate::tui::is_ssh_remote();
+        let (accounts, current): (Vec<AccountPickerAction>, Option<usize>) = if remote {
+            let Some((claude, openai)) = crate::usage::remote_account_list() else {
+                self.set_status_notice("Remote account inventory has not arrived yet");
+                return;
+            };
+            let accounts: Vec<_> = [("claude", claude), ("openai", openai)]
+                .into_iter()
+                .flat_map(|(provider, accounts)| {
+                    accounts
+                        .into_iter()
+                        .map(move |account| AccountPickerAction::Switch {
+                            provider_id: provider.to_string(),
+                            label: account.label,
+                        })
+                })
+                .collect();
+            let current = accounts.iter().position(|action| {
+                let AccountPickerAction::Switch { provider_id, label } = action else {
+                    return false;
+                };
+                self.remote_provider_oauth_account_label.as_deref() == Some(label.as_str())
+                    && self.remote_resolved_credential
+                        != Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                    && self
+                        .remote_provider_name
+                        .as_deref()
+                        .and_then(jcode_provider_core::parse_provider_hint)
+                        == jcode_provider_core::parse_provider_hint(provider_id)
+            });
+            (accounts, current)
+        } else {
+            let (entries, _) = self.build_all_inline_account_picker();
+            let provider = self.provider.name();
+            let session_account = self.kv_cache_account();
+            let mut accounts = Vec::new();
+            let mut current = None;
+            for entry in entries {
+                if let PickerAction::Account(action @ AccountPickerAction::Switch { .. }) =
+                    entry.action
+                {
+                    let AccountPickerAction::Switch {
+                        ref provider_id,
+                        ref label,
+                    } = action
+                    else {
+                        unreachable!()
+                    };
+                    if session_account
+                        .as_deref()
+                        .map_or(entry.is_current, |active| active == label)
+                        && jcode_provider_core::parse_provider_hint(provider)
+                            == jcode_provider_core::parse_provider_hint(provider_id)
+                        && self.provider.active_resolved_credential()
+                            != Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                    {
+                        current = Some(accounts.len());
+                    }
+                    accounts.push(action);
+                }
+            }
+            (accounts, current)
+        };
+        let Some(index) = account_cycle_index(accounts.len(), current, forward) else {
+            self.set_status_notice("No saved OAuth accounts to switch");
+            return;
+        };
+        if current == Some(index) {
+            self.set_status_notice("Only one saved OAuth account");
+            return;
+        }
+        self.handle_account_picker_selection(accounts[index].clone());
+    }
+
     pub(crate) fn remote_account_management_notice(&mut self) {
         self.push_display_message(DisplayMessage::system(
             "Remote accounts: only daemon-reported Claude/OpenAI OAuth account inventory and switching are supported here. Account creation/replacement/removal, diagnostics, provider settings and saved defaults must be managed directly on the remote host. For SSH login use /login <provider>. No local credentials or settings were accessed.",
@@ -1441,5 +1518,34 @@ impl App {
                 Ok(Some(command))
             }
         }
+    }
+}
+
+fn account_cycle_index(len: usize, current: Option<usize>, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match current.filter(|index| *index < len) {
+        Some(index) if forward => (index + 1) % len,
+        Some(index) => (index + len - 1) % len,
+        None if forward => 0,
+        None => len - 1,
+    })
+}
+
+#[cfg(test)]
+mod account_cycle_tests {
+    use super::account_cycle_index;
+
+    #[test]
+    fn cycles_in_both_directions_and_wraps() {
+        assert_eq!(account_cycle_index(3, Some(0), true), Some(1));
+        assert_eq!(account_cycle_index(3, Some(2), true), Some(0));
+        assert_eq!(account_cycle_index(3, Some(1), false), Some(0));
+        assert_eq!(account_cycle_index(3, Some(0), false), Some(2));
+        assert_eq!(account_cycle_index(0, None, true), None);
+        assert_eq!(account_cycle_index(1, Some(0), false), Some(0));
+        assert_eq!(account_cycle_index(3, None, true), Some(0));
+        assert_eq!(account_cycle_index(3, None, false), Some(2));
     }
 }
