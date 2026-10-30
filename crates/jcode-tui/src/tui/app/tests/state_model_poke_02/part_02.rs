@@ -376,24 +376,31 @@ fn test_model_command_provider_suggestions_rank_matching_provider_prefix() {
 
 #[test]
 fn test_model_command_provider_suggestions_normalize_bare_openai_model_to_openrouter_catalog_id() {
-    let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
+    // Route catalog reads the ambient named-profile env like the picker
+    // does; keep the window free of it.
+    with_temp_jcode_home(|| {
+        let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
 
-    let suggestions = app.get_suggestions_for("/model gpt-5.4@op");
-    assert_eq!(
-        suggestions.first().map(|(cmd, _)| cmd.as_str()),
-        Some("/model openai/gpt-5.4@OpenAI")
-    );
+        let suggestions = app.get_suggestions_for("/model gpt-5.4@op");
+        assert_eq!(
+            suggestions.first().map(|(cmd, _)| cmd.as_str()),
+            Some("/model openai/gpt-5.4@OpenAI")
+        );
+    });
 }
 
 #[test]
 fn test_model_command_provider_suggestions_include_auto_for_normalized_bare_openai_model() {
-    let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
+    // Same ambient-profile hazard as the normalize test above.
+    with_temp_jcode_home(|| {
+        let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
 
-    let suggestions = app.get_suggestions_for("/model gpt-5.4@");
-    let commands: Vec<&str> = suggestions.iter().map(|(cmd, _)| cmd.as_str()).collect();
+        let suggestions = app.get_suggestions_for("/model gpt-5.4@");
+        let commands: Vec<&str> = suggestions.iter().map(|(cmd, _)| cmd.as_str()).collect();
 
-    assert!(commands.contains(&"/model openai/gpt-5.4@auto"));
-    assert!(commands.contains(&"/model openai/gpt-5.4@OpenAI"));
+        assert!(commands.contains(&"/model openai/gpt-5.4@auto"));
+        assert!(commands.contains(&"/model openai/gpt-5.4@OpenAI"));
+    });
 }
 
 #[test]
@@ -505,4 +512,122 @@ fn test_model_picker_preview_enter_selects_model() {
     assert!(app.inline_interactive_state.is_none());
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);
+}
+
+/// Regression (greptile P1, PR 1706): with a global swarm model configured,
+/// a session-scoped user must still be able to pick "inherit coordinator"
+/// (bypass the global default). The row must exist and save the explicit
+/// "inherit" sentinel both when the picker opens fresh and when a late
+/// catalog load rebuilds it, whether or not a session override is saved.
+#[test]
+fn test_session_scope_keeps_inherit_coordinator_row_with_global_model_set() {
+    with_temp_jcode_home(|| {
+        // Global default is a real model, so "inherit coordinator" differs
+        // from "use global default".
+        let mut cfg = crate::config::Config::load();
+        cfg.agents.swarm_model = Some("gpt-5.2-codex".to_string());
+        cfg.save().expect("save global swarm model");
+
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+        assert!(!app.agent_models_global_scope);
+
+        // Case 1: no session override. The inherit row must exist and save
+        // the sentinel, not clear to the global default.
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+        app.is_remote = false;
+        let picker = app
+            .inline_interactive_state
+            .as_mut()
+            .expect("swarm picker should be open");
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .expect("session picker must offer inherit coordinator with a global model set");
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            app.session
+                .agent_model_overrides
+                .get("swarm")
+                .map(String::as_str),
+            Some("inherit"),
+            "picking inherit coordinator must save the explicit sentinel, not clear to global"
+        );
+        assert_eq!(
+            crate::config::Config::load().agents.swarm_model.as_deref(),
+            Some("gpt-5.2-codex"),
+            "the global default must stay untouched"
+        );
+
+        // Case 2: a saved override that is still in the catalog. The inherit
+        // row must survive next to it.
+        app.is_remote = true;
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+        app.is_remote = false;
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        assert!(
+            picker.entries.iter().any(|entry| entry.name == "inherit coordinator"),
+            "inherit coordinator must stay with a catalog-visible saved override"
+        );
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            app.session
+                .agent_model_overrides
+                .get("swarm")
+                .map(String::as_str),
+            Some("inherit")
+        );
+
+        // Case 3: the retag path after a catalog rebuild must keep the same
+        // configured view (session overrides, not the global default), and
+        // a caller-captured pre-rebuild identity must restore the entry the
+        // user actually highlighted (greptile F6: refresh changed the
+        // selected model).
+        app.is_remote = true;
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+        app.is_remote = false;
+        {
+            let picker = app.inline_interactive_state.as_mut().unwrap();
+            let target_idx = picker
+                .filtered
+                .iter()
+                .position(|&idx| picker.entries[idx].name.starts_with("gpt-5.3-codex"))
+                .expect("test remote models must be listed");
+            picker.selected = target_idx;
+        }
+        let identity = app.selected_model_picker_entry_identity().expect(
+            "a model entry must be highlighted"
+        );
+        // Simulate the rebuild shifting rows: selected now points at a
+        // different entry (the configure step below resets rows anyway).
+        app.retag_picker_for_agent_model_target(
+            crate::tui::AgentModelTarget::Swarm,
+            Some(identity.clone()),
+        );
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        let selected_idx = picker.filtered[picker.selected];
+        assert_eq!(
+            picker.entries[selected_idx].name, identity.0,
+            "retag must restore the pre-rebuild selection by identity"
+        );
+        assert!(
+            picker.entries.iter().any(|entry| entry.name == "inherit coordinator"),
+            "retag must keep the inherit coordinator row"
+        );
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "inherit" && entry.is_current),
+            "retag must mark the saved session sentinel as current, not the global model"
+        );
+    });
 }

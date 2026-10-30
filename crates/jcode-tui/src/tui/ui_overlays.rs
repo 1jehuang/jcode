@@ -617,6 +617,8 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Ctrl+N",
         "Toggle favorite model (in /model picker)",
     ));
+    lines.push(key_entry("Alt+S", "Select swarm model (in /model picker)"));
+    lines.push(key_entry("Alt+M", "Select memory model (in /model picker)"));
 
     lines.push(Line::from(""));
     lines.push(separator());

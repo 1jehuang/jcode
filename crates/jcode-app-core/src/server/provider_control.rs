@@ -338,6 +338,26 @@ async fn apply_auth_route_to_agent(
     }
 }
 
+fn send_effort_after_model_change(
+    agent: &Agent,
+    id: u64,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    // Fan-out send, same shape as client_lifecycle.rs acks: a closed client
+    // channel just drops the notification, but log the drop for debugging.
+    let effort_queued = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
+        id,
+        effort: agent.provider_reasoning_effort(),
+        error: None,
+    });
+    if !effort_queued.is_ok() {
+        crate::logging::event_info(
+            "server_effort_changed_send_dropped",
+            vec![("id", id.to_string())],
+        );
+    }
+}
+
 fn send_model_changed_result(
     id: u64,
     result: anyhow::Result<(
@@ -453,6 +473,10 @@ fn apply_cycle_model(
         })
     };
     send_model_changed_result(id, result, current, agent, client_event_tx);
+    // Cycling lands on a possibly different model with a possibly different
+    // (or absent) reasoning effort; push the new effective effort so clients
+    // never keep a stale effort indicator.
+    send_effort_after_model_change(agent, id, client_event_tx);
 }
 
 pub(super) async fn handle_cycle_model(
@@ -561,6 +585,12 @@ fn apply_set_model(
         })
     };
     send_model_changed_result(id, result, current, agent, client_event_tx);
+    // The switched-to model may have a different (or no) reasoning effort:
+    // e.g. a plain model clears the stored effort while a reasoning model
+    // restores its configured default. Push the new effective effort to
+    // clients so their effort indicator does not keep showing the previous
+    // model's value.
+    send_effort_after_model_change(agent, id, client_event_tx);
 }
 
 pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
@@ -683,6 +713,10 @@ fn apply_set_route(
         })
     };
     send_model_changed_result(id, result, current, agent, client_event_tx);
+    // Route selections land on a possibly different model with a possibly
+    // different (or absent) reasoning effort; mirror the model-switch push so
+    // clients never keep a stale effort indicator.
+    send_effort_after_model_change(agent, id, client_event_tx);
 }
 
 pub(super) async fn handle_set_model(

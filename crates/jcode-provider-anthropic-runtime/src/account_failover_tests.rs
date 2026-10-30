@@ -243,7 +243,10 @@ fn http_retry_decision(
         let first_attempt =
             usize::from(router_case.is_some_and(|case| case.cached_first_rejection));
         for attempt in first_attempt..if through_router { 2 } else { 1 } {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            // Generous under parallel-suite load; the guard only needs to fail
+            // when the request truly never arrives, not when the runner is
+            // starved. A correct request still lands in milliseconds.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let (mut socket, _) = loop {
                 match listener.accept() {
                     Ok(connection) => break connection,
@@ -258,12 +261,29 @@ fn http_retry_decision(
                 }
             };
             socket
-                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
                 .unwrap();
             let mut request = Vec::new();
+            // The listener is nonblocking and, on macOS, accepted sockets
+            // inherit that flag, so `read` returns WouldBlock while the
+            // runtime client is still between connect and write. Retry on
+            // WouldBlock until a deadline instead of panicking on it.
+            let read_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             loop {
                 let mut buffer = [0; 4096];
-                let count = socket.read(&mut buffer).unwrap();
+                let count = loop {
+                    match socket.read(&mut buffer) {
+                        Ok(count) => break count,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < read_deadline,
+                                "request body did not arrive"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("local HTTP read failed: {error}"),
+                    }
+                };
                 assert!(count > 0, "request ended before complete body");
                 request.extend_from_slice(&buffer[..count]);
                 if let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
@@ -384,7 +404,9 @@ fn http_retry_decision(
     };
     let (decision, rolled_back) = runtime.block_on(async {
         if let Some(router) = &router {
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            // Only guards against waiting out the 60s Retry-After backoff;
+            // 10s still catches that with room for a loaded runner.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let case = router_case.unwrap();
                 let initial_result = if case.split {
                     router
@@ -568,7 +590,9 @@ fn http_retry_decision(
                 transport,
                 retry_settings,
             ));
-            let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            // Only guards against waiting out the 60s Retry-After backoff;
+            // 10s still catches that with room for a loaded runner.
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let mut rolled_back = false;
                 while let Some(event) = rx.recv().await {
                     match event {

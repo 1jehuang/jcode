@@ -715,6 +715,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn effort_cmd_arrow_bindings_parse_to_super_and_give_direction() {
+        // The macOS default effort chords: cmd+left decreases, cmd+right
+        // increases. Both must parse to SUPER-modified arrow keys and answer
+        // EffortSwitchKeys::direction_for with the signed direction the
+        // crossterm event loop consumes. format_binding renders the SUPER
+        // label per platform (Cmd on macOS, Super elsewhere).
+        let decrease = parse_keybinding("cmd+left").expect("cmd+left should parse");
+        assert!(decrease.matches(KeyCode::Left, KeyModifiers::SUPER));
+        assert!(!decrease.matches(KeyCode::Left, KeyModifiers::ALT));
+        assert!(!decrease.matches(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(
+            format_binding(&decrease),
+            if cfg!(target_os = "macos") {
+                "Cmd+Left"
+            } else {
+                "Super+Left"
+            }
+        );
+
+        let increase = parse_keybinding("cmd+right").expect("cmd+right should parse");
+        assert!(increase.matches(KeyCode::Right, KeyModifiers::SUPER));
+        assert_eq!(
+            format_binding(&increase),
+            if cfg!(target_os = "macos") {
+                "Cmd+Right"
+            } else {
+                "Super+Right"
+            }
+        );
+
+        let keys = EffortSwitchKeys { increase, decrease };
+        assert_eq!(
+            keys.direction_for(KeyCode::Left, KeyModifiers::SUPER),
+            Some(-1)
+        );
+        assert_eq!(
+            keys.direction_for(KeyCode::Right, KeyModifiers::SUPER),
+            Some(1)
+        );
+        // Bare arrows and wrong modifiers must not trigger the cycle.
+        assert_eq!(
+            keys.direction_for(KeyCode::Left, KeyModifiers::empty()),
+            None
+        );
+        assert_eq!(keys.direction_for(KeyCode::Right, KeyModifiers::ALT), None);
+        assert_eq!(keys.direction_for(KeyCode::Up, KeyModifiers::SUPER), None);
+    }
+
+    #[test]
     fn auto_poke_toggle_can_be_remapped_or_disabled() {
         let default = KeyBinding {
             code: KeyCode::Char('p'),

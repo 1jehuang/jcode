@@ -1331,6 +1331,7 @@ fn populate_context_limits_from_config_ref_seeds_global_cache() {
                 reasoning_effort: None,
                 context_window: Some(1_000_000),
                 input: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         },
@@ -1367,6 +1368,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning_effort: None,
                     context_window: Some(131_072),
                     input: Vec::new(),
+                    ..Default::default()
                 },
                 NamedProviderModelConfig {
                     id: "/opt/models/issue421-ornith-35b-q4.gguf".to_string(),
@@ -1374,6 +1376,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning_effort: None,
                     context_window: Some(131_072),
                     input: Vec::new(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -1789,4 +1792,104 @@ fn tool_auto_background_timeout_configuration() {
             .is_err()
         );
     }
+
+#[test]
+fn named_provider_model_reasoning_map_parses_from_toml() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[providers.gateway]
+type = "openai-compatible"
+base_url = "https://llm.example.com/v1"
+
+[[providers.gateway.models]]
+id = "my-model"
+
+[providers.gateway.models.reasoning_map]
+xhigh = { reasoningEffort = "xhigh" }
+high = { reasoningEffort = "high" }
+none = { reasoningEffort = "none" }
+medium = { disabled = true }
+low = { disabled = true }
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load();
+    let profile = config
+        .providers
+        .get("gateway")
+        .expect("gateway profile parsed");
+    let model = profile
+        .models
+        .iter()
+        .find(|model| model.id == "my-model")
+        .expect("model entry parsed");
+    let map = model.reasoning_map.as_ref().expect("reasoning_map parsed");
+
+    assert_eq!(map.resolve("xhigh").as_deref(), Some("xhigh"));
+    assert_eq!(map.resolve("high").as_deref(), Some("high"));
+    assert_eq!(map.resolve("none").as_deref(), Some("none"));
+    assert_eq!(map.resolve("medium"), None, "disabled rung is rejected");
+    assert_eq!(map.resolve("low"), None, "disabled rung is rejected");
+    assert!(map.is_disabled("medium"));
+    assert!(map.is_disabled("low"));
+
+    // The CLI read-modify-write round-trip must keep the reasoning map.
+    Config::set_default_model(Some("keep-me"), None).expect("save");
+    let config = Config::load();
+    let profile = config
+        .providers
+        .get("gateway")
+        .expect("gateway profile still present after save");
+    let map = profile.models[0]
+        .reasoning_map
+        .as_ref()
+        .expect("reasoning_map survives config save");
+    assert_eq!(map.resolve("xhigh").as_deref(), Some("xhigh"));
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn named_provider_model_reasoning_map_rejects_unknown_rung_keys() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[providers.gateway]
+type = "openai-compatible"
+base_url = "https://llm.example.com/v1"
+
+[[providers.gateway.models]]
+id = "my-model"
+
+[providers.gateway.models.reasoning_map]
+turbo = { reasoningEffort = "ultra" }
+"#,
+    )
+    .unwrap();
+
+    let result = Config::load_strict();
+    assert!(
+        result.is_err(),
+        "unknown reasoning_map rung key must fail config parsing so typos surface"
+    );
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
 }

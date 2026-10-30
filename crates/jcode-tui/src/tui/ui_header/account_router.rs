@@ -124,6 +124,10 @@ pub(super) fn lines(
     provider_name: &str,
     selected_label: Option<&str>,
 ) -> Vec<Line<'static>> {
+    #[cfg(test)]
+    if let Some(inventory) = test_inventory_override() {
+        return inventory_lines(auth, active, &inventory, provider_name, selected_label);
+    }
     inventory_lines(
         auth,
         active,
@@ -185,6 +189,53 @@ fn remote_inventory_lines(
         }
     }
     lines
+}
+
+/// Render tests compare frames against each other, so the background inventory
+/// refresh (which reads whatever `JCODE_HOME` is ambient and flips the account
+/// rows between frames) must be pinned. This override freezes the inventory for
+/// the guard's lifetime. Callers must hold the shared render-state test lock
+/// before creating the guard.
+#[cfg(test)]
+fn test_inventory_override() -> Option<Inventory> {
+    TEST_INVENTORY_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+static TEST_INVENTORY_OVERRIDE: Mutex<Option<Inventory>> = Mutex::new(None);
+
+/// Pin the header account inventory to the given value until the returned
+/// guard drops.
+#[cfg(test)]
+fn scoped_inventory_override_for_tests(inventory: Option<Inventory>) -> InventoryOverrideGuard {
+    *TEST_INVENTORY_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = inventory;
+    InventoryOverrideGuard
+}
+
+/// Pin the header account inventory empty (no account rows) until the
+/// returned guard drops. Render tests that compare frames against each other
+/// use this so the background inventory refresh (which reads whatever
+/// `JCODE_HOME` is ambient) cannot flip account rows between frames.
+#[cfg(test)]
+pub(crate) fn scoped_empty_inventory_for_tests() -> InventoryOverrideGuard {
+    scoped_inventory_override_for_tests(Some(Inventory::default()))
+}
+
+#[cfg(test)]
+pub(crate) struct InventoryOverrideGuard;
+
+#[cfg(test)]
+impl Drop for InventoryOverrideGuard {
+    fn drop(&mut self) {
+        *TEST_INVENTORY_OVERRIDE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
 }
 
 fn inventory_lines(
