@@ -16,7 +16,9 @@ unavailable accounts are skipped while a ready account exists.
 The plan label is read from locally stored account metadata, without a network
 request in the rendering or routing path:
 
-- Claude: the saved `subscription_type`, populated by the existing profile fetch.
+- Claude: the saved `subscription_type`, populated by the profile fetch from
+  `organization.organization_type`. Known Max rate-limit tiers distinguish 5x
+  and 20x. An explicit `organization.subscription_type`, if provided, wins.
 - OpenAI: `chatgpt_plan_type` in the saved ID token, falling back to the access token.
 
 Known Claude Max and OpenAI Pro/ProMax plans default to P1. Standard subscriptions

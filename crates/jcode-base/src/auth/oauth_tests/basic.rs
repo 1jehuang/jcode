@@ -2,6 +2,26 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
+fn claude_profile_live_organization_schema_detects_max_subscription_tiers() {
+    for (kind, rate, expected) in [
+        ("claude_max", "default_claude_max_20x", Some("max_20x")),
+        ("claude_max", "default_claude_max_5x", Some("max_5x")),
+        ("claude_max", "future_rate", Some("max")),
+        ("claude_pro", "default_claude_pro", Some("pro")),
+        ("claude_free", "default", Some("free")),
+        ("future_org", "default_claude_max_20x", None),
+    ] {
+        let profile: ClaudeProfileResponse = serde_json::from_value(serde_json::json!({
+            "account": {},
+            "organization": {"organization_type": kind, "rate_limit_tier": rate,
+                "billing_type": "stripe_subscription", "has_extra_usage_enabled": false}
+        }))
+        .unwrap();
+        assert_eq!(profile.subscription_type().as_deref(), expected);
+    }
+}
+
+#[test]
 fn pkce_verifier_and_challenge_are_different() {
     let (verifier, challenge) = generate_pkce();
     assert_ne!(verifier, challenge);

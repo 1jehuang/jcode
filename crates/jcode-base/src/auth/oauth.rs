@@ -952,12 +952,40 @@ struct ClaudeProfileResponse {
 
 impl ClaudeProfileResponse {
     fn subscription_type(&self) -> Option<String> {
-        self.organization
+        let explicit = self
+            .organization
             .get("subscription_type")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_owned)
+            .map(str::to_owned);
+        if explicit.is_some() {
+            return explicit;
+        }
+        // The live OAuth profile exposes organization_type rather than
+        // subscription_type. Rate-limit tiers refine Max only when the
+        // organization itself confirms that subscription family.
+        match self
+            .organization
+            .get("organization_type")
+            .and_then(serde_json::Value::as_str)?
+        {
+            "claude_max" => Some(
+                match self
+                    .organization
+                    .get("rate_limit_tier")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("default_claude_max_20x") => "max_20x",
+                    Some("default_claude_max_5x") => "max_5x",
+                    _ => "max",
+                }
+                .to_owned(),
+            ),
+            "claude_pro" => Some("pro".to_owned()),
+            "claude_free" => Some("free".to_owned()),
+            _ => None,
+        }
     }
 }
 
