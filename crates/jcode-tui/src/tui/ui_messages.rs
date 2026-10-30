@@ -362,8 +362,10 @@ pub(super) fn is_kv_cache_footer(msg: &DisplayMessage) -> bool {
 /// Keep the same separator policy in full/incremental layout and overflow estimates.
 pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
     // Thinking and tool calls form one compact activity stream.
-    !matches!(msg.effective_role(), "tool" | "meta" | "swarm" | "reasoning")
-        && !is_kv_cache_footer(msg)
+    !matches!(
+        msg.effective_role(),
+        "tool" | "meta" | "swarm" | "reasoning"
+    ) && !is_kv_cache_footer(msg)
 }
 
 pub(crate) fn render_system_message(
@@ -2044,9 +2046,12 @@ fn render_todo_item_line_with_background(
     }
     let mut spans = todo_card_item_spans(todo, false);
     spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
+    let title_width = spans.iter().map(|span| span.content.width()).sum::<usize>();
     let progress = todo_dependency_progress(
         &dependencies,
-        inner_width.saturating_sub(12).min(inner_width / 2),
+        inner_width
+            .saturating_sub(title_width + 2)
+            .max(inner_width.saturating_sub(12).min(inner_width / 2)),
     );
     let progress_width = progress.width();
     if progress_width > 0 {
@@ -2078,14 +2083,19 @@ fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> 
         if remaining < 10 {
             break;
         }
-        let budget = remaining.min(28);
+        let budget = remaining / (tasks.len() - shown).max(1);
         if shown > 0 {
             spans.push(Span::raw("  "));
         }
-        let label_budget = budget.saturating_sub(15).min(10);
+        let label_budget = budget.saturating_sub(15);
         let clean_label = task.label.split_whitespace().collect::<Vec<_>>().join(" ");
-        let label =
-            super::truncate_line_with_ellipsis_to_width(&Line::raw(clean_label), label_budget);
+        let label = super::truncate_line_with_ellipsis_to_width(
+            &Line::from(Span::styled(
+                clean_label,
+                Style::default().fg(todo_meta_color()),
+            )),
+            label_budget,
+        );
         let label_width = label.width();
         if label_width > 0 {
             spans.extend(label.spans);
@@ -2145,8 +2155,8 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
     let text_color = match todo.status.as_str() {
         "completed" => rgb(135, 150, 145),
         "cancelled" => rgb(145, 130, 135),
-        "in_progress" => rgb(225, 232, 240),
-        _ => rgb(195, 202, 212),
+        "in_progress" => rgb(170, 190, 220),
+        _ => rgb(155, 170, 195),
     };
     let mut spans = vec![
         Span::raw("  "),

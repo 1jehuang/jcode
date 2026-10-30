@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn pinned_dependency_label_uses_available_width_and_palette() {
+    let task = TodoCardBackgroundTask {
+        task_id: "resume".into(),
+        label: "Resume lint validation".into(),
+        percent: Some(38.0),
+    };
+    let line = todo_dependency_progress(&[&task], 60);
+    assert!(line.to_string().contains(&task.label));
+    assert_eq!(line.spans[0].style.fg, Some(todo_meta_color()));
+    for width in 0..100 {
+        assert!(todo_dependency_progress(&[&task], width).width() <= width);
+    }
+}
+
+#[test]
 fn expanded_diff_rows_preserve_source_and_align_continuations() {
     let source = "    let result = compute(\"界界 e\u{301}\", argument);";
     let parsed = ParsedDiffLine {
