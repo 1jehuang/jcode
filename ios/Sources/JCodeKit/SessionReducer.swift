@@ -420,6 +420,7 @@ public enum SessionReducer {
         state.serverVersion = payload.serverVersion ?? state.serverVersion
         state.sessionTitle = payload.displayTitle ?? state.sessionTitle
         state.reasoningEffort = payload.reasoningEffort ?? state.reasoningEffort
+        state.isProcessing = payload.isProcessing
         if let title = payload.displayTitle {
             state.sessionTitles[payload.sessionID] = title
         }

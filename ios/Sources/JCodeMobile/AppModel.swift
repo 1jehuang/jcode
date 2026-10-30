@@ -24,6 +24,7 @@ final class AppModel {
     private let store: any CredentialStore
     private var connection: Connection?
     private var pumpTask: Task<Void, Never>?
+    private var unconfirmedWorkspaceFallback: ServerCredential?
 
     init(store: any CredentialStore = KeychainCredentialStore()) {
         self.store = store
@@ -33,6 +34,14 @@ final class AppModel {
 
     var isConnected: Bool {
         session.phase == .connected
+    }
+
+    var activeWorkspace: String? {
+        activeServer?.activeWorkspace
+    }
+
+    var needsWorkspace: Bool {
+        activeServer != nil && activeWorkspace == nil
     }
 
     // MARK: - Pairing
@@ -51,7 +60,7 @@ final class AppModel {
             token: response.token,
             serverName: response.serverName,
             serverVersion: response.serverVersion
-        )
+        ).keepingWorkspaces(from: servers)
         store.save(credential)
         servers = store.loadAll()
         activeServer = credential
@@ -67,10 +76,22 @@ final class AppModel {
         }
     }
 
+    func leaveServer() {
+        unconfirmedWorkspaceFallback = nil
+        disconnect()
+        activeServer = nil
+    }
+
     // MARK: - Connection lifecycle
 
     func connect(to credential: ServerCredential, sessionID: String? = nil) {
+        unconfirmedWorkspaceFallback = nil
         session = SessionState()
+        activeServer = credential
+        guard credential.activeWorkspace != nil || sessionID != nil else {
+            disconnect()
+            return
+        }
         open(credential, sessionID: sessionID)
     }
 
@@ -78,7 +99,51 @@ final class AppModel {
     /// transcript; the history resync replaces it once the socket is back.
     func retryConnection() {
         guard let activeServer else { return }
+        guard activeServer.activeWorkspace != nil || session.sessionID != nil else { return }
         open(activeServer, sessionID: session.sessionID)
+    }
+
+    @discardableResult
+    func selectWorkspace(_ path: String) -> Bool {
+        guard let activeServer, let updated = activeServer.selectingWorkspace(path) else {
+            return false
+        }
+        let fallback = ServerCredential.workspaceFallback(
+            pending: unconfirmedWorkspaceFallback, current: activeServer)
+        connect(to: updated)
+        unconfirmedWorkspaceFallback = fallback
+        return true
+    }
+
+    func forgetWorkspace(_ path: String) {
+        guard let activeServer else { return }
+        let updated = activeServer.forgettingWorkspace(path)
+        persist(updated)
+        if updated.activeWorkspace != activeServer.activeWorkspace {
+            connect(to: updated)
+        }
+    }
+
+    private func observe(_ output: ConnectionOutput) {
+        guard let fallback = unconfirmedWorkspaceFallback else { return }
+        switch output {
+        case .event(.sessionID):
+            unconfirmedWorkspaceFallback = nil
+            if let activeServer {
+                persist(activeServer)
+            }
+        case .phase(.failed):
+            unconfirmedWorkspaceFallback = nil
+            activeServer = fallback
+        default:
+            break
+        }
+    }
+
+    private func persist(_ credential: ServerCredential) {
+        store.save(credential)
+        servers = store.loadAll()
+        activeServer = credential
     }
 
     private func open(_ credential: ServerCredential, sessionID: String?) {
@@ -91,11 +156,16 @@ final class AppModel {
             )
         )
         self.connection = connection
+        let workingDirectory = credential.activeWorkspace
         pumpTask = Task { [weak self] in
-            let stream = await connection.start(resumeSessionID: sessionID)
+            let stream = await connection.start(
+                resumeSessionID: sessionID,
+                workingDirectory: workingDirectory
+            )
             for await output in stream {
                 guard let self else { return }
                 self.session = SessionReducer.reduce(self.session, output)
+                self.observe(output)
             }
         }
     }
