@@ -33,6 +33,15 @@ impl Config {
         config
     }
 
+    /// Load only what the config file itself says, no environment overrides.
+    ///
+    /// Used by views that label values as "saved defaults": `Self::load()`
+    /// already applies env overrides, so showing its values as saved would
+    /// report a temporary override as if it were the persisted default.
+    pub fn load_saved() -> Self {
+        Self::load_from_file().unwrap_or_default()
+    }
+
     /// Load config from file, with environment variable overrides.
     ///
     /// Unlike [`Self::load`], this returns TOML/read errors to callers that need
@@ -268,6 +277,27 @@ impl Config {
         cfg.display.pin_todos = pin;
         cfg.save()?;
         crate::logging::info(&format!("Saved display.pin_todos to config: {}", pin));
+        Ok(())
+    }
+
+    /// Update the persisted decision-chooser preference.
+    pub fn set_decisions_enabled(enabled: bool) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.features.decisions = enabled;
+        cfg.save()?;
+        crate::logging::info(&format!("Saved features.decisions to config: {}", enabled));
+        Ok(())
+    }
+
+    /// Update the persisted decision-chooser timeout (seconds, 0 = wait forever).
+    pub fn set_decision_timeout_secs(secs: u64) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.features.decision_timeout_secs = secs;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved features.decision_timeout_secs to config: {}",
+            secs
+        ));
         Ok(())
     }
 

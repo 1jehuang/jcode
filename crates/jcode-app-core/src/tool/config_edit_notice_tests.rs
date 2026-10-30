@@ -163,6 +163,7 @@ async fn the_write_tool_reports_config_changes_end_to_end() {
         tool_call_id: "test".to_string(),
         working_dir: Some(dir.path().to_path_buf()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     };
@@ -213,6 +214,7 @@ async fn apply_patch_reports_config_changes() {
         tool_call_id: "test".to_string(),
         working_dir: Some(dir.path().to_path_buf()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     };

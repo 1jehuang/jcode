@@ -87,6 +87,7 @@ else:
             tool_call_id: "t".into(),
             working_dir: Some(self.temp.path().canonicalize().unwrap()),
             stdin_request_tx: None,
+            decision_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
         }

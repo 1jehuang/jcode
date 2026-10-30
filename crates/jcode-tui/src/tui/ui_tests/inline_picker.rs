@@ -118,7 +118,7 @@ fn model_suggestions_replace_box_above_input_in_preview_and_focused_modes() {
     for preview in [true, false] {
         let mut state = model_picker_state();
         state.inline_interactive_state.as_mut().unwrap().preview = preview;
-        assert_eq!(crate::tui::ui::inline_ui::inline_ui_height(&state), 0);
+        assert_eq!(crate::tui::ui::inline_ui::inline_ui_height(&state, 100), 0);
         let lines = render_model_suggestions(&state, 120, 20, 12);
         let text = lines.join("\n");
         assert!(text.contains("GPT-5.4"), "{text}");
@@ -182,7 +182,7 @@ fn model_suggestions_show_empty_filter_and_route_notices() {
 fn non_model_pickers_still_reserve_inline_panel_height() {
     let mut state = model_picker_state();
     state.inline_interactive_state.as_mut().unwrap().kind = crate::tui::PickerKind::Login;
-    assert!(crate::tui::ui::inline_ui::inline_ui_height(&state) > 0);
+    assert!(crate::tui::ui::inline_ui::inline_ui_height(&state, 100) > 0);
     assert!(
         render_model_suggestions(&state, 100, 20, 12)
             .iter()

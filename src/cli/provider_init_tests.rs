@@ -51,6 +51,7 @@ fn test_provider_choice_arg_values() {
         "muse-subscription"
     );
     assert_eq!(ProviderChoice::Celeris.as_arg_value(), "celeris");
+    assert_eq!(ProviderChoice::Venice.as_arg_value(), "venice");
     assert_eq!(ProviderChoice::Lmstudio.as_arg_value(), "lmstudio");
     assert_eq!(ProviderChoice::Ollama.as_arg_value(), "ollama");
     assert_eq!(ProviderChoice::Chutes.as_arg_value(), "chutes");

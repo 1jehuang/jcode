@@ -304,6 +304,19 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // The blocking ask_user chooser owns the keyboard while visible: the
+    // main input box is disabled (rendered locked) and free-form answers
+    // are typed into the chooser's "Your answer" row. Keys the chooser
+    // itself does not consume are discarded, never routed to the composer.
+    // Ctrl+C/Ctrl+D still fall through so the user can interrupt the blocked
+    // turn (and quit when idle) exactly like before the chooser existed.
+    if app.pending_decision.is_some()
+        && !(modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'd')))
+    {
+        let _ = app.handle_decision_key(code, modifiers, remote).await;
+        return Ok(());
+    }
+
     if app.prompt_history_search.is_some() {
         app.handle_prompt_history_search_key(code, modifiers);
         return Ok(());

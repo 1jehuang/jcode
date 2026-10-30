@@ -402,6 +402,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         supports_pdf_panels: true,
         supports_user_response: true,
         supports_server_failover: false,
+        supports_decisions: true,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),
@@ -422,6 +423,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         supports_pdf_panels,
         supports_user_response,
         supports_server_failover: _,
+        supports_decisions,
         id,
         working_dir,
         selfdev,
@@ -440,6 +442,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     assert_eq!(id, 89);
     assert!(supports_pdf_panels);
     assert!(supports_user_response);
+    assert!(supports_decisions);
     assert_eq!(working_dir.as_deref(), Some("/tmp/project"));
     assert_eq!(selfdev, Some(true));
     assert_eq!(target_session_id.as_deref(), Some("sess_target"));
@@ -464,6 +467,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         supports_pdf_panels,
         supports_user_response,
         supports_server_failover: _,
+        supports_decisions,
         id,
         working_dir,
         selfdev,
@@ -482,6 +486,9 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     assert_eq!(id, 91);
     assert!(!supports_pdf_panels);
     assert!(!supports_user_response);
+    // Clients that never send the field (older TUIs, desktop, SDK) must
+    // default to no decision requests, never to blocking ask_user hangs.
+    assert!(!supports_decisions);
     assert_eq!(working_dir, None);
     assert_eq!(selfdev, None);
     assert_eq!(target_session_id, None);
@@ -746,5 +753,62 @@ fn context_cap_wire_roundtrip() -> Result<()> {
             }
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn test_decision_request_event_roundtrip() -> Result<()> {
+    let event = ServerEvent::DecisionRequest {
+        request_id: "decision-call_abc".to_string(),
+        question: "Which database engine should we use?".to_string(),
+        options: vec![
+            DecisionOption {
+                label: "Postgres".to_string(),
+                detail: Some("managed, more features".to_string()),
+            },
+            DecisionOption {
+                label: "SQLite".to_string(),
+                detail: None,
+            },
+        ],
+        tool_call_id: "call_abc".to_string(),
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"decision_request\""));
+    assert!(json.contains("\"question\":\"Which database engine should we use?\""));
+
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::DecisionRequest {
+        request_id,
+        question,
+        options,
+        tool_call_id,
+    } = decoded
+    else {
+        return Err(anyhow!("expected DecisionRequest"));
+    };
+    assert_eq!(request_id, "decision-call_abc");
+    assert_eq!(question, "Which database engine should we use?");
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0].label, "Postgres");
+    assert_eq!(
+        options[0].detail.as_deref(),
+        Some("managed, more features")
+    );
+    assert_eq!(options[1].label, "SQLite");
+    assert_eq!(options[1].detail, None);
+    assert_eq!(tool_call_id, "call_abc");
+    Ok(())
+}
+
+#[test]
+fn test_decision_request_detail_defaults_to_none() -> Result<()> {
+    let json = r#"{"type":"decision_request","request_id":"r1","question":"Pick one","options":[{"label":"A"},{"label":"B"}],"tool_call_id":"t1"}"#;
+    let decoded = parse_event_json(json)?;
+    let ServerEvent::DecisionRequest { options, .. } = decoded else {
+        return Err(anyhow!("expected DecisionRequest"));
+    };
+    assert_eq!(options.len(), 2);
+    assert!(options.iter().all(|opt| opt.detail.is_none()));
     Ok(())
 }

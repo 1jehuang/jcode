@@ -3,6 +3,7 @@ pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to 
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
+mod ask_user;
 mod bash;
 mod batch;
 mod bg;
@@ -103,7 +104,10 @@ use std::sync::{LazyLock, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
 pub(crate) use jcode_tool_core::intent_schema_property;
-pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
+pub use jcode_tool_core::{
+    DecisionInputOption, DecisionInputRequest, DecisionInputResponse, StdinInputRequest, Tool,
+    ToolContext, ToolExecutionMode,
+};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 pub(crate) use session_search::spawn_recent_index_warmup;
 
@@ -438,6 +442,7 @@ impl Registry {
                 apply_patch::ApplyPatchTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "ask_user", ask_user::AskUserTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,

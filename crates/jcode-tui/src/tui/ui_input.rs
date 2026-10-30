@@ -2022,6 +2022,46 @@ fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
     };
     Span::styled(format!("{}%", pct), Style::default().fg(fill_color).bold())
 }
+/// Context bar widths in the overscroll status line: full when there is room,
+/// compact when the directory and model need the space.
+const OVERSCROLL_CONTEXT_CELLS_FULL: usize = 10;
+const OVERSCROLL_CONTEXT_CELLS_COMPACT: usize = 4;
+/// Disabled-state rendering of the main input box while the ask_user
+/// chooser is visible: the composer cannot be edited (the chooser's
+/// "Your answer" row takes all typing), so show a dimmed locked hint
+/// instead of the normal editable composer and draw no cursor.
+fn draw_input_locked_for_decision(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    area: Rect,
+    next_prompt: usize,
+) -> Option<Position> {
+    if area.height == 0 || area.width == 0 {
+        return None;
+    }
+    let prompt_len = input_prompt_len(app, next_prompt);
+    if (area.width as usize) <= prompt_len {
+        return None;
+    }
+    let num_str = format!("{}", next_prompt);
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::styled(
+        format!("{} ⏸", num_str),
+        Style::default().fg(dim_color()),
+    ));
+    spans.push(Span::styled(
+        " input locked while a decision is pending",
+        Style::default().fg(dim_color()).italic(),
+    ));
+    let line = Line::from(spans);
+    let paragraph = if app.centered_mode() {
+        Paragraph::new(line.alignment(Alignment::Center)).alignment(Alignment::Center)
+    } else {
+        Paragraph::new(line)
+    };
+    frame.render_widget(paragraph, area);
+    None
+}
 pub(super) fn draw_input(
     frame: &mut Frame,
     app: &dyn TuiState,
@@ -2029,6 +2069,14 @@ pub(super) fn draw_input(
     next_prompt: usize,
     debug_capture: &mut Option<FrameCaptureBuilder>,
 ) -> Option<Position> {
+    // While the blocking ask_user chooser is visible the main input box is
+    // disabled: free-form answers are typed into the chooser's own
+    // "Your answer" row. Render the box dimmed with a locked hint and no
+    // cursor instead of the normal editable composer.
+    if app.pending_decision().is_some() {
+        return draw_input_locked_for_decision(frame, app, area, next_prompt);
+    }
+
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
 

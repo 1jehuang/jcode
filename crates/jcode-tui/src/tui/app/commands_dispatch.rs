@@ -81,6 +81,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
         "/logout"
             | "/auth"
             | "/config"
+            | "/settings"
             | "/permissions"
             | "/permission"
             | "/agents"
@@ -404,6 +405,9 @@ mod tests {
             "/refactor resume",
             "/review",
             "/subagent investigate",
+            "/settings",
+            "/settings decisions off",
+            "/settings decision-timeout 30",
         ] {
             assert!(super::ssh_unsupported_command(command), "{command}");
         }
