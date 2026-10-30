@@ -131,6 +131,12 @@ pub struct DisplayConfig {
     pub resume_recent_close_seconds: u64,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Show the consolidated single Overview panel in the transcript margins
+    /// instead of the separate per-section info widgets (default: true).
+    /// Set false for the classic layout: Swarm, Background, Compaction,
+    /// Runtime, Usage, KV cache, Git and Commits each dock on their own.
+    #[serde(default = "default_true")]
+    pub single_overview: bool,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -172,6 +178,7 @@ impl Default for DisplayConfig {
             resume_project_scope: false,
             resume_recent_close_seconds: 30,
             usage_display: "left".to_string(),
+            single_overview: true,
         }
     }
 }

@@ -27,18 +27,70 @@ pub(super) const COMMITS_MAX_ROWS: usize = 5;
 /// is not worth margin space.
 const COMMITS_FRESH_SECS: i64 = 24 * 3600;
 
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
 
-pub(super) fn commits_has_data(info: &GitInfo) -> bool {
+pub(crate) fn commits_has_data(info: &GitInfo) -> bool {
     commits_has_data_at(info, now_secs())
 }
 
-fn commits_has_data_at(info: &GitInfo, now: i64) -> bool {
+/// Rows the overview Commits section lists before collapsing the rest into an
+/// inline `+N more` row.
+pub(crate) const OVERVIEW_COMMITS_MAX_ROWS: usize = 3;
+
+/// Same-frame callers that measure the section's height must pass their `now`
+/// here so freshness cannot flip between measurement and draw.
+pub(crate) fn render_commits_compact_at(
+    info: &GitInfo,
+    width: usize,
+    now: i64,
+) -> Vec<Line<'static>> {
+    if !commits_has_data_at(info, now) {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+
+    let unpushed = info
+        .recent_commits
+        .iter()
+        .filter(|c| c.unpushed)
+        .count()
+        .max(info.ahead);
+    let mut header = vec![Span::styled(
+        "Commits",
+        Style::default().fg(rgb(180, 180, 190)).bold(),
+    )];
+    if unpushed > 0 {
+        header.push(Span::raw("  "));
+        header.push(Span::styled(
+            format!("↑{unpushed} unpushed"),
+            Style::default().fg(rgb(140, 180, 255)),
+        ));
+    }
+    lines.push(Line::from(header));
+
+    let rows = OVERVIEW_COMMITS_MAX_ROWS.min(info.recent_commits.len());
+    for commit in &info.recent_commits[..rows] {
+        lines.push(commit_line(commit, width, now));
+    }
+
+    let hidden = info.recent_commits.len().saturating_sub(rows);
+    if hidden > 0 {
+        lines.push(Line::from(vec![Span::styled(
+            format!("  +{hidden} more"),
+            Style::default().fg(rgb(110, 110, 125)),
+        )]));
+    }
+
+    lines
+}
+
+pub(crate) fn commits_has_data_at(info: &GitInfo, now: i64) -> bool {
     info.recent_commits.first().is_some_and(|newest| {
         newest.unpushed || now.saturating_sub(newest.timestamp) < COMMITS_FRESH_SECS
     })

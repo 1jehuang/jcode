@@ -202,6 +202,9 @@ impl App {
             "latex" => {
                 "/latex\nShow the current LaTeX math rendering mode.\n\n/latex status\nShow the current mode.\n\n/latex on|off\nEnable image rendering or disable it in favor of Unicode text.\n\n/latex none|unicode|image\nnone keeps the raw $...$ source. unicode converts supported notation to terminal-friendly text math. image typesets each formula to a PNG and shows it with the terminal image protocol (needs latex+dvipng or pdflatex+pdftocairo installed).\n\nAliases: raw for none, text/terminal for unicode, png/images for image. The choice is saved to config.toml and applies to the session immediately. JCODE_LATEX_RENDERING overrides it when set."
             }
+            "overview" => {
+                "/overview\nToggle between the consolidated single Overview panel and the classic separate info widgets, and save the choice to config.toml.\n\n/overview status\nShow the current style.\n\n/overview on\nOne consolidated Overview panel in the transcript margins.\n\n/overview off\nSeparate widgets (Swarm, Background, Compaction, Runtime, Usage, KV cache, Git, Commits) each dock on their own.\n\nThe same choice can be set in config.toml as display.single_overview, or overridden with JCODE_SINGLE_OVERVIEW=0/1."
+            }
             "tool-call-details" => {
                 "/tool-call-details\nShow whether the dimmed technical detail (command, path, args) renders next to the model-provided intent on tool rows.\n\n/tool-call-details on\nShow the technical detail after the intent, e.g. `bash · Run tests · $ cargo test`.\n\n/tool-call-details off\nShow only the intent on tool rows that have one. Rows without an intent still show the technical detail, and error summaries always render."
             }

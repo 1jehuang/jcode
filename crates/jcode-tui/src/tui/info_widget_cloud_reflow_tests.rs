@@ -89,7 +89,7 @@ fn cloud_overview_reflows_when_git_loading_finishes_in_short_viewport() {
     assert_eq!(cloud.rect.height, 16);
     assert!(overview.rect.intersection(cloud.rect).is_empty());
     let inner = Rect::new(0, 0, overview.rect.width - 2, overview.rect.height - 2);
-    let lines = render_sections(&data, inner, None);
+    let lines = render_sections(&data, inner, None, now_secs());
     assert_eq!(lines.len(), inner.height as usize);
     let visible = lines
         .iter()

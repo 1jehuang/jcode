@@ -1,7 +1,9 @@
 use super::info_widget::{
-    AuthMethod, InfoWidgetData, changes_section_height, compact_usage_rows,
-    is_traceworthy_memory_event, model_info_height,
+    AuthMethod, InfoWidgetData, OVERVIEW_COMMITS_MAX_ROWS, changes_section_height,
+    commits_has_data_at, compact_usage_rows, is_traceworthy_memory_event, model_info_height,
+    now_secs,
 };
+use ratatui::layout::Rect;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InfoPageKind {
@@ -20,6 +22,88 @@ pub(crate) struct PageLayout {
     pub max_page_height: u16,
     /// Page dots, drawn on the widget's bottom border (they take no row).
     pub show_dots: bool,
+}
+
+/// Which tail sections of the compact Overview page a placed rect can actually
+/// show. The compact page renders sections in a fixed order (Runtime → Memory
+/// → Background → Usage → KV cache → Compaction → Changes → Commits)
+/// and `render_overview_framed` truncates whatever the inner height cannot
+/// fit. A section that lands entirely in the truncated tail is *not* shown by
+/// that Overview, so its standalone fallback must stay available
+/// (greptile: a 10-row pocket whose front rows filled suppressed the Commits
+/// fallback while the placed Overview truncated the section away, hiding
+/// recent commits everywhere).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SectionVisibility {
+    /// The Runtime (model info) section fits fully in the rect.
+    pub model_info: bool,
+    /// The Background section fits fully in the rect.
+    pub background: bool,
+    /// The Usage section fits fully in the rect.
+    pub usage: bool,
+    /// The Compaction section fits fully in the rect.
+    pub compaction: bool,
+    /// The Changes (dirty files) section fits fully in the rect.
+    pub changes: bool,
+    /// The Commits section fits fully in the rect.
+    pub commits: bool,
+}
+
+/// Which sections a placed Overview rect (outer rect, borders included) can
+/// show. Sections that would only be partially visible count as not shown:
+/// the render truncates at inner height, and a half-drawn section header is
+/// worse than the standalone fallback that shows the content in full.
+/// The rect "shows" a section only when every page it can rotate through
+/// shows it: the strip and fallback suppression span the whole widget, not
+/// one page, so a section truncated on any page must keep its fallback.
+pub(crate) fn section_visibility(data: &InfoWidgetData, rect: Rect) -> SectionVisibility {
+    // Mirror render_overview_framed: memory is the dedicated widget's content,
+    // so the Overview strips it before rendering (and the MemoryExpanded
+    // page therefore never exists here).
+    let mut overview = data.clone();
+    overview.memory_info = None;
+    let inner_height = rect.height.saturating_sub(2);
+    let model_h = model_info_height(&overview);
+    let background_h = compact_background_height(&overview);
+    let usage_h = compact_usage_height(&overview);
+    let compaction_h = compact_compaction_height(&overview);
+    let changes_h = changes_section_height(&overview);
+    let commits_h = compact_commits_height(&overview);
+    let fits = |front: u16, section: u16| {
+        section > 0
+            && front
+                .checked_add(section)
+                .is_some_and(|end| end <= inner_height)
+    };
+    // Sections render front-to-back in a fixed order; a section is shown only
+    // when it and everything before it fits, exactly like the truncating render.
+    // Saturating accumulation matches the render's truncation, and `fits`
+    // refuses overflow the same way the loop above does.
+    let sections = [
+        (model_h, model_h > 0),
+        (background_h, background_h > 0),
+        (usage_h, usage_h > 0),
+        (compaction_h, compaction_h > 0),
+    ];
+    let mut front = 0u16;
+    let mut flags = [false; 4];
+    for (idx, (height, present)) in sections.iter().enumerate() {
+        flags[idx] = *present
+            && front
+                .checked_add(*height)
+                .is_some_and(|end| end <= inner_height);
+        front = front.saturating_add(*height);
+    }
+    let [model_info, background, usage, compaction] = flags;
+    let changes_end = front.saturating_add(changes_h);
+    SectionVisibility {
+        model_info,
+        background,
+        usage,
+        compaction,
+        changes: fits(front, changes_h),
+        commits: fits(changes_end, commits_h),
+    }
 }
 
 pub(crate) fn compute_page_layout(
@@ -142,11 +226,40 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
     if matches!(info.provider, super::info_widget::UsageProvider::CostBased) {
         return 1;
     }
+    if matches!(info.provider, super::info_widget::UsageProvider::Copilot) {
+        return 1;
+    }
     // Mirror render_usage_compact without formatting bars during measurement.
     u16::from(!info.provider.label().is_empty())
         + u16::from(info.primary_limit_label.is_some())
         + u16::from(info.secondary_limit_label.is_some())
         + u16::from(info.spark.is_some())
+}
+
+/// Overview rows used by the Compaction section, mirroring [`render_sections`].
+fn compact_compaction_height(data: &InfoWidgetData) -> u16 {
+    u16::from(data.compaction_info.is_some())
+}
+
+/// Overview rows used by the Commits section, mirroring [`render_sections`].
+/// Must mirror `render_commits_compact_at` exactly: header + shown commits +
+/// overflow row. Callers that also render the section in the same frame must
+/// pass the same `now` they render with, so freshness (`COMMITS_FRESH_SECS`)
+/// cannot flip between measurement and draw.
+fn compact_commits_height_at(data: &InfoWidgetData, now: i64) -> u16 {
+    let Some(info) = data.git_info.as_ref() else {
+        return 0;
+    };
+    if !commits_has_data_at(info, now) || info.recent_commits.is_empty() {
+        return 0;
+    }
+    let rows = OVERVIEW_COMMITS_MAX_ROWS.min(info.recent_commits.len());
+    let overflow = u16::from(info.recent_commits.len() > rows);
+    1 + rows as u16 + overflow
+}
+
+fn compact_commits_height(data: &InfoWidgetData) -> u16 {
+    compact_commits_height_at(data, now_secs())
 }
 
 /// Overview height. Status-line facts (model identity, context %, branch and
@@ -156,7 +269,9 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_memory_height(data)
         + compact_background_height(data)
         + compact_usage_height(data)
+        + compact_compaction_height(data)
         + changes_section_height(data)
+        + compact_commits_height(data)
         + u16::from(data.cloud_info.is_some())
 }
 
@@ -200,6 +315,80 @@ mod tests {
         assert_eq!(layout.pages.len(), 1);
         assert_eq!(layout.pages[0].kind, InfoPageKind::CompactOnly);
         assert!(!layout.show_dots);
+    }
+
+    #[test]
+    fn commits_height_and_render_agree_on_one_clock() {
+        // A commit 24h old is stale (`COMMITS_FRESH_SECS`); 23h old is fresh.
+        // The height mirror and the renderer must agree for the same `now`:
+        // disagreeing either reserves a blank row or truncates a neighbor.
+        // The wall-clock wrapper reads the clock once for both consumers.
+        use crate::tui::info_widget::{GitInfo, RecentCommit};
+
+        let commit = |ago: i64| RecentCommit {
+            hash: "abc1234".into(),
+            subject: "wip".into(),
+            timestamp: 1_700_000_000 - ago,
+            unpushed: false,
+            added: None,
+            removed: None,
+        };
+        let data = |ago: i64| InfoWidgetData {
+            git_info: Some(GitInfo {
+                recent_commits: vec![commit(ago)],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let now = 1_700_000_000;
+        // Fresh commit: height counts the section, render draws it.
+        let fresh = data(23 * 3600);
+        assert_eq!(super::compact_commits_height_at(&fresh, now), 2);
+        let rendered = crate::tui::info_widget::render_commits_compact_at(
+            fresh.git_info.as_ref().expect("git info"),
+            40,
+            now,
+        );
+        assert_eq!(rendered.len(), 2, "header + one commit row");
+
+        // Stale pushed commit: height 0, render empty, same `now`.
+        let stale = data(25 * 3600);
+        assert_eq!(super::compact_commits_height_at(&stale, now), 0);
+        let rendered = crate::tui::info_widget::render_commits_compact_at(
+            stale.git_info.as_ref().expect("git info"),
+            40,
+            now,
+        );
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn copilot_usage_counts_toward_compact_overview_height() {
+        // The height mirror must agree so the layout reserves exactly the
+        // rows the render draws and a Copilot overview fits its anchor.
+        use crate::tui::info_widget::{UsageInfo, UsageProvider};
+        use ratatui::layout::Rect;
+
+        let data = InfoWidgetData {
+            usage_info: Some(UsageInfo {
+                provider: UsageProvider::Copilot,
+                input_tokens: 12_000,
+                output_tokens: 3_400,
+                available: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let layout = compute_page_layout(&data, 40, 8);
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(layout.pages[0].kind, InfoPageKind::CompactOnly);
+        assert_eq!(layout.pages[0].height, 1, "usage row only");
+
+        // A placed overview rect of exactly that height shows the section.
+        let vis = super::section_visibility(&data, Rect::new(0, 0, 40, 3));
+        assert!(vis.usage, "border rows excluded, one body row fits");
     }
 
     #[test]

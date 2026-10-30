@@ -39,9 +39,8 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -70,6 +69,7 @@ mod commands_desktop;
 mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
+mod commands_overview;
 mod commands_plan;
 mod commands_remote;
 mod commands_review;
