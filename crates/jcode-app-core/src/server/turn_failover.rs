@@ -170,11 +170,12 @@ pub(super) async fn process_message_with_server_failover(
         event_tx.clone(),
     )
     .await;
-    if !enabled || result.is_ok() {
+    if !enabled && result.is_err() {
         return result;
     }
     let mut guard = agent.lock().await;
-    retry_turn_with_server_failover(&mut guard, result, reminder, event_tx).await
+    retry_turn_with_server_failover(&mut guard, result, reminder, event_tx.clone()).await?;
+    super::runtime_ssh_loops::run_followups(&mut guard, event_tx).await
 }
 
 /// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
@@ -196,7 +197,8 @@ pub(super) async fn process_locked_message_with_server_failover(
         event_tx.clone(),
     )
     .await;
-    retry_turn_with_server_failover(agent, result, reminder, event_tx).await
+    retry_turn_with_server_failover(agent, result, reminder, event_tx.clone()).await?;
+    super::runtime_ssh_loops::run_followups(agent, event_tx).await
 }
 
 /// [`process_locked_message_with_server_failover`] for callers holding an
