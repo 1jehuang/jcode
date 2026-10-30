@@ -707,6 +707,22 @@ mod ssh_slash_tests {
                 }
                 assert!(!app.pending_turn);
             }
+            let next_id = remote.next_request_id_for_test();
+            let images = vec![("image/png".to_string(), "attachment".to_string())];
+            submit_remote_slash_input(
+                &mut app,
+                &mut remote,
+                input::PreparedInput {
+                    raw_input: "/local".to_string(),
+                    expanded: "/local".to_string(),
+                    images: images.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(app.input, "/local");
+            assert_eq!(app.pending_images, images);
+            assert_eq!(remote.next_request_id_for_test(), next_id);
         });
     }
 

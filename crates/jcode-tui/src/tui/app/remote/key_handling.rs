@@ -1127,6 +1127,24 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
     prepared: input::PreparedInput,
 ) -> Result<()> {
     {
+        if !prepared.images.is_empty()
+            && matches!(
+                app_mod::commands_cloud::parse_cloud_command(prepared.expanded.trim()),
+                Some(
+                    app_mod::commands_cloud::CloudCommand::Move { .. }
+                        | app_mod::commands_cloud::CloudCommand::MoveSelected { .. }
+                        | app_mod::commands_cloud::CloudCommand::Return
+                )
+            )
+        {
+            // Alternate slash submissions already consumed the composer, so
+            // the regular handoff guard cannot see these attachments anymore.
+            super::input_dispatch::restore_prepared_remote_input(app, prepared);
+            app.push_display_message(DisplayMessage::error(
+                "Cloud handoff not queued: attached images would be lost. Send or save them, then retry. Nothing was removed.",
+            ));
+            return Ok(());
+        }
         if !app_mod::commands_cloud::check_cloud_handoff_input(app, prepared.expanded.trim()) {
             super::input_dispatch::restore_prepared_remote_input(app, prepared);
             return Ok(());
