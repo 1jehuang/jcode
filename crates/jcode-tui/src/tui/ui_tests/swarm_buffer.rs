@@ -435,15 +435,15 @@ fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
     let dir = row.find("~/jcode").expect("dir shown");
     let branch = row.find(" main").expect("branch shown");
     let git = row.find("~3 ?2 ↑1").expect("git status shown");
-    let context = row.find("74k/256k").expect("token counts shown when roomy");
+    let context = row.find("29%").expect("context percentage shown when roomy");
     let model = row.find("GPT-5.6 Sol high").expect("model shown");
     assert!(
         dir < branch && branch < git && git < context && context < model,
         "{row}"
     );
     assert!(
-        row.contains("▰▰▰▱▱▱▱▱▱▱ 29%"),
-        "full 10-cell bar when roomy: {row}"
+        !row.contains('▰') && !row.contains('▱') && !row.contains("74k/256k"),
+        "percentage only even when roomy: {row}"
     );
     assert!(row.contains("OAuth") && row.contains("OpenAI"), "{row}");
     assert!(
@@ -484,9 +484,10 @@ fn overscroll_line_compact_steps_at_medium_width() {
     assert!(row.contains("GPT-5.6 Sol"), "{row}");
     assert!(
         !row.contains("74k/256k"),
-        "token counts dropped first: {row}"
+        "context stays percentage only: {row}"
     );
-    assert!(!row.contains("OAuth"), "auth dropped early: {row}");
+    assert!(row.contains("29%"), "{row}");
+    assert!(row.contains("OAuth"), "space saved preserves auth: {row}");
 }
 
 #[test]

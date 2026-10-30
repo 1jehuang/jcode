@@ -1529,7 +1529,6 @@ struct OverscrollLevels {
     dir: u8,
     branch: u8,
     git: u8,
-    context: u8,
     auth: u8,
     provider: u8,
     model: u8,
@@ -1545,10 +1544,8 @@ struct OverscrollLevels {
 const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
     |l| l.auth = 1,     // hide auth ("OAuth"/"API key")
     |l| l.git = 1,      // "~3 +1 ?2 ↑1" -> "±6 ↑1"
-    |l| l.context = 1,  // "74k/256k ▰▰▰▱▱▱▱▱▱▱ 29%" -> "▰▱▱▱ 29%"
     |l| l.branch = 1,   // long branch -> 12 chars
     |l| l.provider = 1, // hide provider
-    |l| l.context = 2,  // "▰▱▱▱ 29%" -> "29%"
     |l| l.git = 2,      // hide git status
     |l| l.branch = 2,   // hide branch
     |l| l.model = 1,    // drop reasoning effort
@@ -1621,40 +1618,7 @@ fn overscroll_fact_spans(
     }
 
     if let Some((used, limit)) = facts.context {
-        match levels.context {
-            // Roomy: token counts plus the full-width bar.
-            0 => {
-                let mut group = vec![Span::styled(
-                    format!(
-                        "{}/{} ",
-                        overscroll_format_tokens(used),
-                        overscroll_format_tokens(limit)
-                    ),
-                    muted,
-                )];
-                group.extend(overscroll_context_bar(
-                    used,
-                    limit,
-                    OVERSCROLL_CONTEXT_CELLS_FULL,
-                ));
-                out.push(group);
-            }
-            // Compact bar plus percentage.
-            1 => out.push(overscroll_context_bar(
-                used,
-                limit,
-                OVERSCROLL_CONTEXT_CELLS_COMPACT,
-            )),
-            // Percentage only (the colored last span of the bar).
-            _ => out.push(
-                overscroll_context_bar(used, limit, 0)
-                    .into_iter()
-                    .last()
-                    .map(|span| Span::styled(span.content.trim_start().to_string(), span.style))
-                    .into_iter()
-                    .collect(),
-            ),
-        }
+        out.push(vec![overscroll_context_percentage(used, limit)]);
     }
 
     if levels.auth == 0
@@ -1929,26 +1893,11 @@ fn overscroll_context_usage(
     Some((used_tokens, limit))
 }
 
-/// Format a token count compactly: 1234 -> "1.2k", 200000 -> "200k", 1_500_000 -> "1.5M".
-fn overscroll_format_tokens(tokens: usize) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    } else if tokens >= 10_000 {
-        format!("{}k", tokens / 1000)
-    } else if tokens >= 1_000 {
-        format!("{:.1}k", tokens as f64 / 1000.0)
-    } else {
-        tokens.to_string()
-    }
-}
-
-/// Render a compact rounded progress bar (◖████░░◗) plus a percentage label.
-fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'static>> {
+/// Render context usage as a percentage, without a bar or token counts.
+fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
     let limit = limit.max(1);
     let ratio = (used as f64 / limit as f64).clamp(0.0, 1.0);
     let pct = (ratio * 100.0).round() as u16;
-    let filled = (ratio * cells as f64).round() as usize;
-    let filled = filled.min(cells);
 
     // Match the info widget usage bar palette (based on remaining context).
     let left_pct = 100u16.saturating_sub(pct);
@@ -1959,29 +1908,11 @@ fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'
     } else {
         rgb(100, 200, 100)
     };
-    let track_color = rgb(50, 50, 60);
-
-    let mut spans = Vec::with_capacity(cells + 2);
-    // Slim segmented pill (▰ filled / ▱ empty) reads thinner than full blocks.
-    spans.push(Span::styled(
-        "▰".repeat(filled),
-        Style::default().fg(fill_color),
-    ));
-    spans.push(Span::styled(
-        "▱".repeat(cells.saturating_sub(filled)),
-        Style::default().fg(track_color),
-    ));
-    spans.push(Span::styled(
-        format!(" {}%", pct),
+    Span::styled(
+        format!("{}%", pct),
         Style::default().fg(fill_color).bold(),
-    ));
-    spans
+    )
 }
-
-/// Context bar widths in the overscroll status line: full when there is room,
-/// compact when the directory and model need the space.
-const OVERSCROLL_CONTEXT_CELLS_FULL: usize = 10;
-const OVERSCROLL_CONTEXT_CELLS_COMPACT: usize = 4;
 pub(super) fn draw_input(
     frame: &mut Frame,
     app: &dyn TuiState,

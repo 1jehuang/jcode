@@ -70,6 +70,39 @@ fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
     assert!(!text(&spans).contains('☁'));
 }
 #[test]
+fn overscroll_context_is_percentage_only_at_every_width() {
+    let facts = OverscrollFacts {
+        machine: None,
+        dir: Some("~/jcode".into()),
+        branch: None,
+        git: None,
+        context: Some((74_000, 256_000)),
+        auth: None,
+        provider: None,
+        model: Some("Opus".into()),
+        effort: None,
+    };
+    for width in [16, 40, 200] {
+        let (spans, fits) = overscroll_fit_facts(&facts, width);
+        let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(fits, "{width}: {text}");
+        assert!(text.contains("29%"), "{width}: {text}");
+        assert!(!text.contains('▰') && !text.contains('▱'));
+        assert!(!text.contains("74k"));
+    }
+    for (used, limit, expected, color) in [
+        (0, 0, "0%", rgb(100, 200, 100)),
+        (50, 100, "50%", rgb(255, 200, 100)),
+        (80, 100, "80%", rgb(255, 100, 100)),
+        (200, 100, "100%", rgb(255, 100, 100)),
+    ] {
+        let span = overscroll_context_percentage(used, limit);
+        assert_eq!(span.content, expected);
+        assert_eq!(span.style.fg, Some(color));
+    }
+}
+
+#[test]
 fn reset_status_hint_requires_openai_oauth_and_fresh_exhausted_account() {
     use crate::tui::info_widget::AuthMethod;
     let mut usage = crate::usage::OpenAIUsageData {
