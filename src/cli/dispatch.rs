@@ -898,18 +898,35 @@ async fn run_default_command(args: Args) -> Result<()> {
         .await;
     }
 
-    if server_running && explicit_provider_or_model {
-        output::stderr_info(
-            "Server already running; provider/model flags only apply when starting a new server.",
-        );
+    // When the user explicitly passes `--provider <non-auto>` (e.g.
+    // `--provider cursor-acp`) and a server is already running with a
+    // different provider, restart the server with the requested provider
+    // instead of silently ignoring the flag. This makes `jcode --provider X`
+    // behave intuitively: the requested provider takes effect immediately.
+    let explicit_non_auto_provider =
+        args.provider != ProviderChoice::Auto && !args.fresh_spawn && !args.resume.is_some();
+    if server_running && explicit_non_auto_provider {
         output::stderr_info(format!(
-            "Current server settings control `/model`. Restart server to apply: --provider {}{}",
-            args.provider.as_arg_value(),
-            args.model
-                .as_ref()
-                .map(|m| format!(" --model {}", m))
-                .unwrap_or_default()
+            "Restarting server with --provider {} (was running with a different provider)...",
+            args.provider.as_arg_value()
         ));
+        if let Err(err) = commands::stop_running_server().await {
+            output::stderr_info(format!(
+                "Could not stop the existing server gracefully ({}); continuing with a fresh spawn.",
+                err
+            ));
+        }
+        server_running = false;
+    } else if server_running && explicit_provider_or_model {
+        output::stderr_info(
+            "Server already running; model flags only apply when starting a new server.",
+        );
+        if args.model.is_some() {
+            output::stderr_info(format!(
+                "Current server settings control `/model`. Restart server to apply: --model {}",
+                args.model.as_deref().unwrap_or("")
+            ));
+        }
     }
 
     if server_running && explicit_tool_options {

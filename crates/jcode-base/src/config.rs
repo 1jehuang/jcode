@@ -128,7 +128,9 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SWARM_STALL_AFTER_SECS",
     "JCODE_SWARM_STALL_NUDGE",
     "JCODE_ACP_PROFILE",
+    "JCODE_ACP_PERMISSION",
     "JCODE_ACP_TOOL_PROFILE",
+    "JCODE_CURSOR_ACP_PERMISSION",
     "JCODE_ACTIVE_SESSIONS_MANAGER",
     "JCODE_EXTERNAL_SESSIONS",
     "JCODE_AMBIENT_ENABLED",
@@ -759,6 +761,14 @@ pub struct AcpConfig {
     pub profile: String,
     /// Tool profile to request when `jcode acp` starts a daemon itself.
     pub tool_profile: String,
+    /// Permission mode for the Cursor ACP subprocess when jcode acts as the ACP
+    /// client. `jcode` (default) applies jcode's safety classification
+    /// (auto-allow read-only/search, cancel destructive). `yolo`/`allow_all`
+    /// auto-approves all permission requests and must be explicitly opted into —
+    /// it bypasses jcode's safety classification. A specific option ID (e.g.
+    /// `allow-always`, `reject-once`) matches only that option. Overridable by
+    /// `JCODE_CURSOR_ACP_PERMISSION`.
+    pub permission_mode: String,
 }
 
 impl Default for AcpConfig {
@@ -766,6 +776,7 @@ impl Default for AcpConfig {
         Self {
             profile: "standard".to_string(),
             tool_profile: "acp".to_string(),
+            permission_mode: "jcode".to_string(),
         }
     }
 }

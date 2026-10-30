@@ -1964,6 +1964,10 @@ impl App {
                     "Model list refreshed: +{} models, +{} routes, ~{} changed",
                     summary.models_added, summary.routes_added, summary.routes_changed
                 ));
+                // Reopen the picker in place if it is open so the freshly
+                // refreshed catalog is shown immediately rather than leaving
+                // stale rows on screen until the user closes and reopens `/model`.
+                self.refresh_open_model_picker_after_catalog_update();
             }
             Err(error) => {
                 self.finish_background_task(
