@@ -1333,6 +1333,7 @@ impl App {
         self.interleave_message.is_some()
             || !self.queued_messages.is_empty()
             || !self.hidden_queued_system_messages.is_empty()
+            || self.has_pending_cloud_recovery()
     }
 
     /// True when the user typed a follow-up prompt while this turn ran, and
@@ -4089,7 +4090,9 @@ impl App {
         event_stream: &mut EventStream,
     ) {
         while !self.cloud_handoff_blocks_work()
-            && (!self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty())
+            && (!self.queued_messages.is_empty()
+                || !self.hidden_queued_system_messages.is_empty()
+                || self.has_pending_cloud_recovery())
         {
             // Combine all currently queued messages into one, treating [SYSTEM: ...]
             // startup continuations as system reminders rather than user turns.

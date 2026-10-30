@@ -166,10 +166,16 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         return true;
     }
     if command == CloudCommand::Cancel {
+        let canceled_recovery = app.has_pending_cloud_recovery();
+        if canceled_recovery {
+            app.cloud_recovery_auto_pending = false;
+        }
         let message = if app.pending_cloud_handoff.take().is_some() {
             "Pending cloud handoff canceled."
         } else if app.cloud_job.is_some() {
             "A cloud command is already running and cannot be canceled here."
+        } else if canceled_recovery {
+            "Pending cloud diagnosis canceled. Diagnostics remain available for your next message."
         } else {
             "No pending cloud handoff."
         };
@@ -198,6 +204,10 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         if !check_cloud_handoff_input(app, trimmed) {
             return true;
         }
+        // Only an explicit TUI command re-arms diagnosis. Agent-side CLI
+        // attempts cannot reset this guard and create an autonomous loop.
+        app.cloud_recovery_auto_attempted
+            .remove(&(session_id.to_string(), trimmed.to_string()));
         app.pending_cloud_handoff = Some(PendingCloudHandoff {
             command,
             trimmed: trimmed.to_string(),
@@ -442,6 +452,10 @@ pub(in crate::tui) struct CloudJob {
 }
 
 impl App {
+    pub(super) fn has_pending_cloud_recovery(&self) -> bool {
+        self.cloud_recovery_auto_pending && self.cloud_recovery_reminder().is_some()
+    }
+
     pub(super) fn cloud_recovery_reminder(&self) -> Option<String> {
         self.cloud_recovery_context
             .as_ref()
@@ -453,6 +467,7 @@ impl App {
         let reminder = self.cloud_recovery_reminder();
         if reminder.is_some() {
             self.cloud_recovery_context = None;
+            self.cloud_recovery_auto_pending = false;
         }
         reminder
     }
@@ -699,6 +714,15 @@ fn show_cloud_failure(
     details: &str,
 ) {
     record_cloud_problem(command, session, exit, details);
+    let already_pending = app.cloud_recovery_auto_pending
+        && app
+            .cloud_recovery_context
+            .as_ref()
+            .is_some_and(|(id, _)| id == session);
+    app.cloud_recovery_auto_pending = app
+        .cloud_recovery_auto_attempted
+        .insert((session.to_string(), command.to_string()))
+        || already_pending;
     app.cloud_recovery_context = Some((
         session.to_string(),
         cloud_recovery_context(command, session, details),
@@ -767,7 +791,7 @@ fn format_cloud_failure(command: &str, stderr: &str) -> String {
     let details = cloud_failure_details(stderr);
     let details = details.trim();
     let mut message = format!(
-        "{command} failed. Reason: {}\nAsk the agent to fix this; the next message includes these diagnostics automatically.\nCheck /cloud status before retrying if the session location is uncertain.",
+        "{command} failed. Reason: {}\nDiagnostics are saved. The agent will investigate when connected and idle, unless this failure was already reported automatically. The handoff will not be retried automatically.\nCheck /cloud status before retrying if the session location is uncertain.",
         cloud_failure_reason(details)
     );
     if details.is_empty() {
@@ -979,6 +1003,7 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
         .is_some_and(|(id, _)| id == session_id)
     {
         app.cloud_recovery_context = None;
+        app.cloud_recovery_auto_pending = false;
     }
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     match command {

@@ -415,7 +415,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         needs_redraw = true;
     }
 
-    if !app.is_processing && !app.hidden_queued_system_messages.is_empty() {
+    if !app.is_processing
+        && (!app.hidden_queued_system_messages.is_empty()
+            || (remote.has_loaded_history() && app.has_pending_cloud_recovery()))
+    {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let combined = reminders.join("\n\n");
         crate::logging::info(&format!(
@@ -438,7 +441,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             crate::logging::error(
                 "Failed to send hidden continuation reminder; restoring it to the queue",
             );
-            app.hidden_queued_system_messages.insert(0, combined);
+            if !combined.is_empty() {
+                app.hidden_queued_system_messages.insert(0, combined);
+            }
         }
         needs_redraw = true;
     }
@@ -1711,7 +1716,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 app.queued_messages.insert(0, combined);
             }
         }
-    } else if !app.hidden_queued_system_messages.is_empty() {
+    } else if !app.hidden_queued_system_messages.is_empty() || app.has_pending_cloud_recovery() {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let combined = reminders.join("\n\n");
         if begin_remote_send(
@@ -1730,7 +1735,9 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             crate::logging::error(
                 "Failed to send hidden continuation reminder; restoring it to the queue",
             );
-            app.hidden_queued_system_messages.insert(0, combined);
+            if !combined.is_empty() {
+                app.hidden_queued_system_messages.insert(0, combined);
+            }
         }
     }
 }

@@ -1230,6 +1230,10 @@ pub struct App {
     cloud_job: Option<commands_cloud::CloudJob>,
     pending_cloud_handoff: Option<commands_cloud::PendingCloudHandoff>,
     cloud_recovery_context: Option<(String, String)>,
+    cloud_recovery_auto_pending: bool,
+    // One autonomous diagnosis per command/session per client lifetime. A
+    // diagnosis must never become an endless failed-handoff/recovery loop.
+    cloud_recovery_auto_attempted: std::collections::HashSet<(String, String)>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
