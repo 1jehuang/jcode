@@ -8,6 +8,12 @@ use super::{accent_color, blend_color, rgb};
 use ratatui::prelude::*;
 
 pub(crate) fn selection_bg_for(base_bg: Option<Color>) -> Color {
+    // A custom theme's explicit selection background wins outright; the
+    // blend below can never match a role default, so the theme layer
+    // consults this directly rather than per-cell substitution.
+    if let Some(themed) = jcode_tui_style::theme::themed_selection_bg() {
+        return themed;
+    }
     let fallback = rgb(32, 38, 48);
     // A selection is an active interaction, not passive decoration. Use a
     // deliberately strong fill so it remains obvious over syntax highlighting,
