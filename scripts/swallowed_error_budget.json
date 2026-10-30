@@ -233,8 +233,13 @@
     },
     "crates/jcode-app-core/src/server/comm_session.rs": {
       "dot_ok": 4,
-      "let_underscore": 12,
+      "let_underscore": 10,
       "unwrap_or_default": 9
+    },
+    "crates/jcode-app-core/src/server/comm_session_startup.rs": {
+      "dot_ok": 0,
+      "let_underscore": 2,
+      "unwrap_or_default": 0
     },
     "crates/jcode-app-core/src/server/comm_sync.rs": {
       "dot_ok": 0,

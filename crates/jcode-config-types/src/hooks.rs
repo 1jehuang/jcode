@@ -114,6 +114,16 @@ pub struct HooksConfig {
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
+    /// Observer fired in the coordinator's context when a swarm worker is
+    /// spawned. Receives a Claude-shaped `SubagentStart` JSON document on
+    /// stdin plus `JCODE_HOOK_AGENT_ID`/`AGENT_TYPE`/`LABEL`/`SPAWN_MODE`.
+    /// Env override: JCODE_HOOK_SWARM_MEMBER_START.
+    pub swarm_member_start: Option<HookCommands>,
+    /// Observer fired once when a swarm worker leaves the running state for
+    /// `ready`, `completed`, `failed`, `stopped` or `crashed`. Receives a
+    /// `SubagentStop` JSON document on stdin. Env override:
+    /// JCODE_HOOK_SWARM_MEMBER_END.
+    pub swarm_member_end: Option<HookCommands>,
 }
 
 impl Default for HooksConfig {
@@ -130,6 +140,8 @@ impl Default for HooksConfig {
             post_tool_feedback: None,
             post_tool_feedback_timeout_ms: 10_000,
             pre_tool_timeout_ms: 5000,
+            swarm_member_start: None,
+            swarm_member_end: None,
         }
     }
 }

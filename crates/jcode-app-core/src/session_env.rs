@@ -54,8 +54,10 @@ pub fn inherit_session_env(parent: &str, child: &str) {
     }
 }
 
-/// Forget a destroyed session. Already-launched jobs retain their snapshots.
+/// Forget a destroyed session (including its swarm hook identity). Already-launched
+/// jobs retain their snapshots.
 pub fn remove_session_env(session_id: &str) {
+    crate::hooks::forget_swarm_identity(session_id);
     SESSION_ENV
         .write()
         .unwrap_or_else(|e| e.into_inner())

@@ -475,6 +475,71 @@ fn observer_dispatch_runs_hook_with_event_env() {
     assert_eq!(recorded, "turn_end|ses_obs|ok|1");
 }
 
+#[cfg(unix)]
+#[test]
+fn observer_with_swarm_identity_gets_env_payload_and_stdin_json() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let record = temp.path().join("identity.txt");
+    let script = write_executable_script(
+        temp.path(),
+        "identity.sh",
+        &format!(
+            "#!/bin/sh\nstdin=$(cat)\nprintf '%s|%s|%s|%s|%s|%s' \"$JCODE_HOOK_SWARM_ID\" \"$JCODE_HOOK_COORDINATOR_SESSION_ID\" \"$JCODE_HOOK_AGENT_ID\" \"$JCODE_HOOK_AGENT_TYPE\" \"$stdin\" \"$JCODE_HOOK_PAYLOAD\" > {}\n",
+            crate::terminal_launch::sh_escape(&record.to_string_lossy())
+        ),
+    );
+    register_swarm_identity(
+        "ses_worker_id",
+        SwarmIdentity {
+            swarm_id: "sw1".into(),
+            coordinator_session_id: "coord1".into(),
+            parent_session_id: "coord1".into(),
+            label: Some("task".into()),
+            agent_type: Some("reviewer".into()),
+        },
+    );
+    let prev = std::env::var_os("JCODE_HOOK_TURN_END");
+    crate::env::set_var("JCODE_HOOK_TURN_END", script.to_string_lossy().to_string());
+    dispatch_observer(
+        HookEvent::new("turn_end")
+            .session_id("ses_worker_id")
+            .stdin_json("{\"hello\":1}"),
+    );
+    let mut recorded = String::new();
+    for _ in 0..100 {
+        if let Ok(data) = std::fs::read_to_string(&record)
+            && !data.is_empty()
+        {
+            recorded = data;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_HOOK_TURN_END", value),
+        None => crate::env::remove_var("JCODE_HOOK_TURN_END"),
+    }
+    forget_swarm_identity("ses_worker_id");
+    assert!(
+        recorded.starts_with("sw1|coord1|ses_worker_id|reviewer|{\"hello\":1}|"),
+        "{recorded}"
+    );
+    assert!(recorded.contains("\"swarm_id\":\"sw1\""), "{recorded}");
+    assert!(
+        recorded.contains("\"agent_type\":\"reviewer\""),
+        "{recorded}"
+    );
+}
+
+#[test]
+fn normal_sessions_get_no_swarm_fields() {
+    let event = HookEvent::new("turn_end").session_id("ses_plain_not_registered");
+    let payload: serde_json::Value = serde_json::from_str(&payload_json(&event)).unwrap();
+    assert!(payload.get("swarm_id").is_none());
+    assert!(payload.get("agent_id").is_none());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn observer_dispatch_reaps_completed_hook() {

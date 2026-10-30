@@ -52,6 +52,9 @@ pub struct HookEvent {
     /// Extra env fields. Keys are suffixes: ("STATUS", "ok") becomes
     /// `JCODE_HOOK_STATUS=ok` and `"status": "ok"` in the JSON payload.
     pub fields: Vec<(&'static str, String)>,
+    /// JSON document written to the stdin of observer hooks (closed after
+    /// writing). Never mirrored into env.
+    pub stdin_json: Option<String>,
 }
 
 impl HookEvent {
@@ -61,7 +64,13 @@ impl HookEvent {
             session_id: None,
             cwd: None,
             fields: Vec::new(),
+            stdin_json: None,
         }
+    }
+
+    pub fn stdin_json(mut self, json: impl Into<String>) -> Self {
+        self.stdin_json = Some(json.into());
+        self
     }
 
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
@@ -105,6 +114,8 @@ pub fn hook_commands(event: &str) -> Vec<String> {
         "pre_tool" => hooks.pre_tool.as_ref(),
         "post_tool" => hooks.post_tool.as_ref(),
         "post_tool_feedback" => hooks.post_tool_feedback.as_ref(),
+        "swarm_member_start" => hooks.swarm_member_start.as_ref(),
+        "swarm_member_end" => hooks.swarm_member_end.as_ref(),
         _ => None,
     };
     raw.into_iter()
@@ -156,6 +167,22 @@ pub fn truncate_tool_input(tool_input_json: &str) -> &str {
     truncate_bytes(tool_input_json, TOOL_INPUT_ENV_LIMIT)
 }
 
+/// Env fields for `event`: its own, plus swarm identity when the session is a
+/// registered worker. Explicit event fields win over identity fields.
+fn effective_fields(event: &HookEvent) -> Vec<(&'static str, String)> {
+    let mut fields = event.fields.clone();
+    if let Some(session_id) = &event.session_id
+        && let Some(identity) = swarm_identity(session_id)
+    {
+        for (key, value) in identity.env_pairs(session_id) {
+            if !fields.iter().any(|(existing, _)| *existing == key) {
+                fields.push((key, value));
+            }
+        }
+    }
+    fields
+}
+
 /// JSON payload mirroring the env fields, exported as `JCODE_HOOK_PAYLOAD`.
 fn payload_json(event: &HookEvent) -> String {
     let mut map = serde_json::Map::new();
@@ -172,7 +199,7 @@ fn payload_json(event: &HookEvent) -> String {
     if let Some(cwd) = &event.cwd {
         map.insert("cwd".to_string(), serde_json::Value::String(cwd.clone()));
     }
-    for (key, value) in &event.fields {
+    for (key, value) in &effective_fields(event) {
         map.insert(
             key.to_ascii_lowercase(),
             serde_json::Value::String(value.clone()),
@@ -191,7 +218,7 @@ fn apply_event_env(cmd: &mut std::process::Command, event: &HookEvent) {
     if let Some(cwd) = &event.cwd {
         cmd.env("JCODE_HOOK_CWD", cwd);
     }
-    for (key, value) in &event.fields {
+    for (key, value) in &effective_fields(event) {
         cmd.env(format!("JCODE_HOOK_{key}"), value);
     }
     cmd.env("JCODE_HOOK_PAYLOAD", payload_json(event));
@@ -245,11 +272,37 @@ pub fn dispatch_observer(event: HookEvent) {
     for command_line in command_lines {
         match build_hook_process(&command_line, &event) {
             Ok(mut cmd) => {
-                cmd.stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
+                cmd.stdin(if event.stdin_json.is_some() {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                })
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
                 match crate::platform::spawn_detached_without_console_window(&mut cmd) {
-                    Ok(child) => {
+                    Ok(mut child) => {
+                        if let (Some(json), Some(mut stdin)) =
+                            (event.stdin_json.clone(), child.stdin.take())
+                        {
+                            // Written off-thread so a hook that never reads
+                            // stdin cannot block the agent. The pipe closes
+                            // when the thread ends or the child exits.
+                            if let Err(error) = std::thread::Builder::new()
+                                .name("jcode-hook-stdin".to_string())
+                                .spawn(move || {
+                                    use std::io::Write;
+                                    if let Err(error) = stdin.write_all(json.as_bytes()) {
+                                        crate::logging::debug(&format!(
+                                            "Hook stdin write failed: {error}"
+                                        ));
+                                    }
+                                })
+                            {
+                                crate::logging::debug(&format!(
+                                    "Hook stdin thread failed: {error}"
+                                ));
+                            }
+                        }
                         crate::platform::reap_detached(child);
                         crate::logging::debug(&format!(
                             "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
@@ -271,6 +324,7 @@ pub fn dispatch_observer(event: HookEvent) {
 mod capabilities;
 mod feedback;
 mod gate;
+mod identity;
 mod json_output;
 mod json_runner;
 mod payload;
@@ -281,6 +335,7 @@ pub use feedback::run_post_tool_feedback;
 #[cfg(test)]
 use gate::{CommandVerdict, parse_gate_stdout};
 pub use gate::{GateDecision, GateOutcome, run_pre_tool_gate, transform_tool_input};
+pub use identity::{SwarmIdentity, forget_swarm_identity, register_swarm_identity, swarm_identity};
 pub use json_output::{CommandResult, Verdict, interpret};
 pub use json_runner::run_json_commands;
 pub use payload::{TEXT_FIELD_LIMIT, common_payload, jcode_object, truncate_marked};
