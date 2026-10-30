@@ -893,6 +893,18 @@ pub(crate) enum CloudCommand {
         session: String,
         #[arg(long)]
         epoch: u64,
+        /// Opt in only when the returning client can acknowledge completion.
+        #[arg(long)]
+        require_completion: bool,
+    },
+
+    /// Internal: acknowledge a durable local return and permanently fence the cloud owner.
+    #[command(hide = true)]
+    CompleteReturn {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
     },
 
     /// Internal: restore cloud ownership after a rejected credential return.
