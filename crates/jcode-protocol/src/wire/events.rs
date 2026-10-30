@@ -70,7 +70,7 @@ mod account_usage_tests {
 pub enum ServerEvent {
     /// Serialized todo card snapshot containing todos, plan, and goals.
     #[serde(rename = "todos")]
-    Todos { payload: String },
+    Todos { session_id: String, payload: String },
     #[serde(rename = "account_usage")]
     AccountUsage {
         id: u64,

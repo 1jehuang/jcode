@@ -58,6 +58,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetModelCatalog", Covered),
     // Create/attach session bootstrap requests state through the API bridge.
     ("GetState", Covered),
+    ("GetTodos", Covered),
     ("InputShell", ClientInternal),
     ("InvalidateAnthropicUsage", Covered),
     ("InvalidateOpenAiUsage", Covered),

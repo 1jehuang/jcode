@@ -1451,6 +1451,7 @@ pub(super) async fn handle_client(
                     "goals": crate::todo::load_goals(&client_session_id).unwrap_or_default(),
                 });
                 let _ = client_event_tx.send(ServerEvent::Todos {
+                    session_id: client_session_id.clone(),
                     payload: payload.to_string(),
                 });
             }

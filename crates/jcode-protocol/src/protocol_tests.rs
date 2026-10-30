@@ -9,12 +9,16 @@ fn todos_request_and_snapshot_roundtrip() {
     assert!(!request.is_lightweight_control_request());
     let payload = serde_json::json!({"todos": [], "plan": {}, "goals": []}).to_string();
     let event = ServerEvent::Todos {
+        session_id: "attached-session".into(),
         payload: payload.clone(),
     };
     let encoded = serde_json::to_value(&event).unwrap();
     assert_eq!(encoded["type"], "todos");
     let decoded: ServerEvent = serde_json::from_value(encoded).unwrap();
-    assert!(matches!(decoded, ServerEvent::Todos { payload: actual } if actual == payload));
+    assert!(
+        matches!(decoded, ServerEvent::Todos { session_id, payload: actual }
+        if session_id == "attached-session" && actual == payload)
+    );
 }
 use anyhow::{Result, anyhow};
 
