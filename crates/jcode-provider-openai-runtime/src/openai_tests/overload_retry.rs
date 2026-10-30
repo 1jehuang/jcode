@@ -1,5 +1,5 @@
 // Exercise real Provider::complete retries, not a reconstructed diagnostic chain.
-async fn overload_public_retry_case(recover: bool) {
+async fn overload_public_retry_case(recover: bool, partial: bool) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let _lock = jcode_base::storage::lock_test_env();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -41,8 +41,13 @@ async fn overload_public_retry_case(recover: bool) {
             assert!(data.starts_with(b"POST /v1/responses "));
             attempts += 1;
             if attempts == 1 {
-                let body = r#"{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}"#;
-                tcp.write_all(format!("HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nRetry-After: 0\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                if partial {
+                    let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"discard me\"}\n\ndata: {\"type\":\"error\",\"error\":{\"type\":\"service_unavailable_error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded.\"}}\n\n";
+                    tcp.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                } else {
+                    let body = r#"{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}"#;
+                    tcp.write_all(format!("HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nRetry-After: 0\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
             } else if recover {
                 let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
                 tcp.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
@@ -70,6 +75,7 @@ async fn overload_public_retry_case(recover: bool) {
         let mut notices = 0;
         let mut errors = Vec::new();
         let mut text = String::new();
+        let mut rolled_back = false;
         while let Some(event) = stream.next().await {
             match event {
                 Ok(StreamEvent::StatusDetail { detail })
@@ -77,9 +83,19 @@ async fn overload_public_retry_case(recover: bool) {
                 {
                     assert!(errors.is_empty(), "notice must precede terminal failure");
                     assert!(detail.contains("server_is_overloaded"));
+                    if partial {
+                        assert!(
+                            rolled_back,
+                            "durable notice must not fence partial output before rollback"
+                        );
+                    }
                     notices += 1;
                 }
                 Ok(StreamEvent::TextDelta(delta)) => text.push_str(&delta),
+                Ok(StreamEvent::RetryRollback { .. }) => {
+                    rolled_back = true;
+                    text.clear();
+                }
                 Err(error) => errors.push(error.to_string()),
                 _ => {}
             }
@@ -103,10 +119,15 @@ async fn overload_public_retry_case(recover: bool) {
 
 #[tokio::test]
 async fn overload_public_retry_retains_report_before_later_timeout() {
-    overload_public_retry_case(false).await;
+    overload_public_retry_case(false, false).await;
 }
 
 #[tokio::test]
 async fn overload_public_retry_notice_survives_successful_recovery() {
-    overload_public_retry_case(true).await;
+    overload_public_retry_case(true, false).await;
+}
+
+#[tokio::test]
+async fn overload_public_retry_rolls_back_partial_output_before_notice() {
+    overload_public_retry_case(true, true).await;
 }
