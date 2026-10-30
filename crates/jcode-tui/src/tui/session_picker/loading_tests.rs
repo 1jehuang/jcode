@@ -306,6 +306,7 @@ fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
     let temp = tempfile::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let _runtime = EnvVarGuard::set_path("JCODE_RUNTIME_DIR", temp.path());
+    let _limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "50");
     let dir = temp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let id = "session_recovered_1770000000000";
@@ -322,6 +323,19 @@ fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
     let stale = parse_jcode_session_info(&dir, id, &catchup).unwrap();
     write_grouped_session_list_disk_cache(&dir, session_scan_limit(), &[], &[stale]);
     write_snapshot("Latest title");
+    // The full historical scan must not displace a just-closed transcript
+    // when newer sessions exhaust its bounded candidate budget.
+    std::thread::sleep(Duration::from_millis(10));
+    let newer = std::fs::read(&path).unwrap();
+    for index in 0..55 {
+        std::fs::write(dir.join(format!("session_newer_{index}.json")), &newer).unwrap();
+    }
+    assert!(
+        !load_sessions_inner(true)
+            .unwrap()
+            .iter()
+            .any(|s| s.id == id)
+    );
     session::record_window_closed(id);
     let (sender, receiver) = std::sync::mpsc::channel();
     send_session_list_updates(sender);
@@ -338,10 +352,17 @@ fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].title, "Latest title");
     }
-    assert!(matches!(
-        receiver.recv().unwrap(),
-        super::super::SessionListUpdate::Fresh(Ok(_))
-    ));
+    let super::super::SessionListUpdate::Fresh(Ok((groups, orphans))) = receiver.recv().unwrap()
+    else {
+        panic!("expected final fresh list");
+    };
+    assert!(
+        orphans
+            .iter()
+            .chain(groups.iter().flat_map(|g| g.sessions.iter()))
+            .any(|s| s.id == id),
+        "bounded history scan must retain recovered session"
+    );
     invalidate_session_list_cache();
 }
 

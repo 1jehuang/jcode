@@ -324,7 +324,7 @@ pub(crate) fn send_session_list_updates(sender: std::sync::mpsc::Sender<super::S
             group.sessions.retain(|s| !ids.contains(s.id.as_str()));
         }
         orphans.retain(|s| !ids.contains(s.id.as_str()));
-        orphans.extend(recent);
+        orphans.extend(recent.iter().cloned());
         if sender
             .send(super::SessionListUpdate::Cached((groups, orphans)))
             .is_err()
@@ -332,7 +332,23 @@ pub(crate) fn send_session_list_updates(sender: std::sync::mpsc::Sender<super::S
             return;
         }
     }
-    let _ = sender.send(super::SessionListUpdate::Fresh(load_sessions_grouped()));
+    let result = load_sessions_grouped().map(|(groups, mut orphans)| {
+        // A long-idle transcript can fall outside the bounded historical scan.
+        // Keep it recoverable after the full refresh too, without replacing a
+        // newer snapshot when that scan did include it.
+        let loaded: HashSet<_> = orphans
+            .iter()
+            .map(|s| s.id.clone())
+            .chain(
+                groups
+                    .iter()
+                    .flat_map(|g| g.sessions.iter().map(|s| s.id.clone())),
+            )
+            .collect();
+        orphans.extend(recent.into_iter().filter(|s| !loaded.contains(&s.id)));
+        (groups, orphans)
+    });
+    let _ = sender.send(super::SessionListUpdate::Fresh(result));
 }
 
 #[path = "loading_search_text.rs"]
