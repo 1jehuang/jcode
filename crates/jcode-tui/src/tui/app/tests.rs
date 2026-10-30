@@ -42,6 +42,7 @@ include!("tests/scroll_copy_03.rs");
 include!("tests/resize_viewport.rs");
 include!("tests/issue_1642_panel_dismiss.rs");
 include!("tests/resize_anchor.rs");
+include!("tests/bookmark_anchor.rs");
 include!("tests/input_copy_selection.rs");
 include!("tests/onboarding_flow.rs");
 include!("tests/onboarding_golden.rs");
