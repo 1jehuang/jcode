@@ -1113,6 +1113,7 @@ impl AcpRuntime {
                     output,
                     cache_read_input,
                     cache_creation_input,
+                    ..
                 } => {
                     turn_usage.observe_snapshot(
                         input,
