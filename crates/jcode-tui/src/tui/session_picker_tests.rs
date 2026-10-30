@@ -2056,6 +2056,22 @@ fn test_preview_transcript_omits_picker_metadata() {
 }
 
 #[test]
+fn preview_transcript_hash_ignores_picker_metadata() {
+    let session = make_session("metadata", "metadata-monkey", false, SessionStatus::Active);
+    let picker = SessionPicker::new(vec![session.clone()]);
+    let mode = crate::config::DiffDisplayMode::Off;
+    let original = picker.preview_content_hash(&session, mode);
+    let mut changed = session;
+    changed.title = "renamed".into();
+    changed.status = SessionStatus::Closed;
+    changed.saved = true;
+    changed.working_dir = Some("/another-directory".into());
+    assert_eq!(original, picker.preview_content_hash(&changed, mode));
+    changed.messages_preview[1].content.push_str(" updated");
+    assert_ne!(original, picker.preview_content_hash(&changed, mode));
+}
+
+#[test]
 fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
     for width in [60, 100] {
         let mut reference = None;
