@@ -242,7 +242,7 @@ impl Agent {
 
     /// Persist a hidden, model-visible `<system-reminder>` message at the tail
     /// of the transcript so it does not disturb the cached prompt prefix.
-    fn append_turn_system_reminder(&mut self, reminder: &str) -> Result<()> {
+    pub(in crate::agent) fn append_turn_system_reminder(&mut self, reminder: &str) -> Result<()> {
         let reminder = reminder.trim();
         if reminder.is_empty() {
             return Ok(());
@@ -1119,6 +1119,8 @@ impl Agent {
     }
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
+        // The model is calling a tool, so any stop-hook streak is over.
+        crate::hooks::reset_stop_continuations(&self.session.id);
         let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
         let name = if crate::tool::sdk::custom(&self.session.id, unqualified_name) {
             unqualified_name
@@ -1615,6 +1617,8 @@ impl Agent {
 
 #[path = "prompt_hooks.rs"]
 mod prompt_hooks;
+#[path = "stop_hook.rs"]
+mod stop_hook;
 #[path = "turn_usage.rs"]
 mod turn_usage;
 use turn_usage::turn_token_usage_after;

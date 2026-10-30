@@ -34,6 +34,9 @@ mod mcp_remote_cache;
 #[path = "agent_tests/prompt_hook.rs"]
 mod prompt_hook;
 
+#[path = "agent_tests/stop_hook.rs"]
+mod stop_hook;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,

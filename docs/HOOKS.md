@@ -181,6 +181,56 @@ Commands run in declaration order and the first block wins. The hook does not
 fire on server failover retries or in-turn soft interrupts. Env overrides:
 `JCODE_HOOK_USER_PROMPT_SUBMIT`, `JCODE_HOOK_USER_PROMPT_SUBMIT_TIMEOUT_MS`.
 
+## Turn gate: `stop`
+
+A blocking hook that can keep a turn going when the model would otherwise
+finish.
+
+```toml
+[hooks]
+stop = "~/bin/stop-hook"
+stop_timeout_ms = 10000         # default 10000, capped at 600000
+stop_max_continuations = 8      # consecutive; reset when the model calls a tool
+```
+
+It fires when the model ends a turn with no tool calls, in interactive chat,
+`jcode run`, and swarm workers (where it plays the role of `SubagentStop`). It
+does not fire on user cancel, shutdown, provider errors or guardrail refusals.
+stdin is a Claude-shaped document:
+
+```json
+{
+  "hook_event_name": "Stop",
+  "session_id": "session_...", "cwd": "/work",
+  "stop_hook_active": false,
+  "last_assistant_message": "final text of the turn (capped 10,000 chars)",
+  "jcode": { "continuations": 0, "prompt_origin": "user", "swarm": null }
+}
+```
+
+Response, Claude compatible:
+
+- `{"decision":"block","reason":"..."}`, exit 2 with stderr, or
+  `hookSpecificOutput.additionalContext`: the text becomes a hidden
+  `[stop hook] ...` reminder and the model answers again **in the same turn**.
+  `turn_end` still fires once, at the real end, and `user_prompt_submit` does
+  not fire for the continuation. A continuation is never delivered as a user
+  message, so it cannot be mistaken for human input.
+- `{"continue":false}` from any command ends the turn and wins.
+- Commands run in declaration order. The first command that decides wins and
+  later commands are skipped for that round.
+- Anything else, a timeout or a crash allows the stop.
+
+`stop_hook_active` is true from the second call of a streak. After
+`stop_max_continuations` consecutive continuations the next request is
+overridden: the turn ends with one log line and a status notice. The streak
+resets whenever the model calls a tool and when a new user message arrives.
+Frameworks should keep their own no-progress guard on top. Auto-poke is
+independent and client-side: the stop hook runs first, on the server, then the
+client's poke policy sees the final transcript. Turn off `/poke` in projects
+whose stop hook drives continuation. Env overrides: `JCODE_HOOK_STOP`,
+`JCODE_HOOK_STOP_TIMEOUT_MS`, `JCODE_HOOK_STOP_MAX_CONTINUATIONS`.
+
 ## Swarm identity and worker events
 
 Inside a swarm worker session every hook (observers, `pre_tool`,

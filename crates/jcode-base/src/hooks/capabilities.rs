@@ -7,6 +7,7 @@
 /// Capability tokens, kept sorted so the output is stable.
 const TOKENS: &[&str] = &[
     "prompt_origin",
+    "stop",
     "swarm_identity",
     "swarm_member_events",
     "user_prompt_submit",

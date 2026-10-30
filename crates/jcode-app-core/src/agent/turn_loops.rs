@@ -1042,6 +1042,9 @@ impl Agent {
                         text_content = format!("[provider guardrail] {}", notice);
                     }
                 }
+                if self.stop_hook_continues(&text_content, |_| {}).await? {
+                    continue;
+                }
                 logging::info("Turn complete - no tool calls, returning");
                 if print_output {
                     println!();

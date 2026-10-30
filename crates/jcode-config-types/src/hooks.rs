@@ -133,6 +133,20 @@ pub struct HooksConfig {
     /// Max milliseconds per user_prompt_submit command (default 5000, capped at
     /// 30000). Env override: JCODE_HOOK_USER_PROMPT_SUBMIT_TIMEOUT_MS.
     pub user_prompt_submit_timeout_ms: u64,
+    /// Blocking hook run when the model ends a turn with no tool calls.
+    /// `decision: "block"` with `reason`, exit 2, or `additionalContext` keeps
+    /// the turn going in place, with the text delivered as a hidden reminder.
+    /// `continue: false` ends the turn and wins. The first command that decides
+    /// wins and later commands are skipped for that round. Env override:
+    /// JCODE_HOOK_STOP.
+    pub stop: Option<HookCommands>,
+    /// Max milliseconds per stop command (default 10000, capped at 600000).
+    /// Env override: JCODE_HOOK_STOP_TIMEOUT_MS.
+    pub stop_timeout_ms: u64,
+    /// Max consecutive stop-hook continuations, reset whenever the model calls
+    /// a tool (default 8). Zero disables continuing. Env override:
+    /// JCODE_HOOK_STOP_MAX_CONTINUATIONS.
+    pub stop_max_continuations: u32,
 }
 
 impl Default for HooksConfig {
@@ -153,6 +167,9 @@ impl Default for HooksConfig {
             swarm_member_end: None,
             user_prompt_submit: None,
             user_prompt_submit_timeout_ms: 5000,
+            stop: None,
+            stop_timeout_ms: 10_000,
+            stop_max_continuations: 8,
         }
     }
 }

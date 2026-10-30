@@ -26,6 +26,7 @@ impl Agent {
         default_origin: PromptOrigin,
         source: &str,
     ) -> Result<PromptHookDecision> {
+        crate::hooks::reset_stop_continuations(&self.session.id);
         let origin = crate::hooks::begin_turn_origin(&self.session.id, default_origin);
         let mut decision = PromptHookDecision { context: None };
         if !crate::hooks::hook_configured("user_prompt_submit") {

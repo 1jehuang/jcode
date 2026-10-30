@@ -548,6 +548,17 @@ impl Config {
         hook_env_override(&mut self.hooks.session_start, "JCODE_HOOK_SESSION_START");
         hook_env_override(&mut self.hooks.session_end, "JCODE_HOOK_SESSION_END");
         hook_env_override(&mut self.hooks.pre_tool, "JCODE_HOOK_PRE_TOOL");
+        hook_env_override(&mut self.hooks.stop, "JCODE_HOOK_STOP");
+        if let Ok(v) = std::env::var("JCODE_HOOK_STOP_TIMEOUT_MS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.hooks.stop_timeout_ms = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_HOOK_STOP_MAX_CONTINUATIONS")
+            && let Ok(parsed) = v.trim().parse::<u32>()
+        {
+            self.hooks.stop_max_continuations = parsed;
+        }
         hook_env_override(
             &mut self.hooks.swarm_member_start,
             "JCODE_HOOK_SWARM_MEMBER_START",
