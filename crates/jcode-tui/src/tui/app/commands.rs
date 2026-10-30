@@ -3450,7 +3450,86 @@ pub(super) fn handle_display_settings_command(app: &mut App, trimmed: &str) -> b
         || handle_tool_call_details_command(app, trimmed)
 }
 
+fn handle_settings_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed != "/settings" && !trimmed.starts_with("/settings ") {
+        return false;
+    }
+
+    let rest = trimmed.strip_prefix("/settings").unwrap_or_default().trim();
+
+    if rest.is_empty() || matches!(rest, "show" | "status") {
+        use crate::config::risk_gate;
+        let saved = crate::config::Config::load().provider.risk_gate_enabled;
+        let env_override = risk_gate::env_override_raw();
+        let effective = match &env_override {
+            Some(raw) => risk_gate::env_allows_gate(raw),
+            None => saved,
+        };
+        let mut msg = format!(
+            "Settings:\n\nRisk Gate ..... {}\n",
+            if effective { "enabled" } else { "disabled" }
+        );
+        msg.push_str(&format!(
+            "Saved default: {}\n",
+            if saved { "enabled" } else { "disabled" }
+        ));
+        if let Some(env) = &env_override {
+            msg.push_str(&format!(
+                "Env override (JCODE_RISK_GATE_ENABLED={}): active\n",
+                env
+            ));
+        }
+        msg.push_str("\nUse /settings risk-gate on or /settings risk-gate off to toggle.");
+        app.push_display_message(DisplayMessage::system(msg));
+        return true;
+    }
+
+    if let Some(value) = rest.strip_prefix("risk-gate ") {
+        let enabled = match value.trim().to_lowercase().as_str() {
+            "on" | "true" | "enable" | "enabled" | "1" => true,
+            "off" | "false" | "disable" | "disabled" | "0" => false,
+            _ => {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: /settings risk-gate on|off".to_string(),
+                ));
+                return true;
+            }
+        };
+        match crate::config::Config::set_risk_gate_enabled(enabled) {
+            Ok(()) => {
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Risk Gate ..... {}\nSaved to config.toml. New sessions will inherit this setting.",
+                    if enabled { "enabled" } else { "disabled" }
+                )));
+                app.set_status_notice(format!("Risk Gate: {}", if enabled { "on" } else { "off" }));
+            }
+            Err(error) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to save risk gate setting: {error}"
+                )));
+            }
+        }
+        return true;
+    }
+
+    if rest == "risk-gate" {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /settings risk-gate on|off".to_string(),
+        ));
+        return true;
+    }
+
+    app.push_display_message(DisplayMessage::error(
+        "Usage: /settings (show), /settings risk-gate on, /settings risk-gate off".to_string(),
+    ));
+    true
+}
+
 pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
+    if handle_settings_command(app, trimmed) {
+        return true;
+    }
+
     if handle_display_settings_command(app, trimmed) {
         return true;
     }
