@@ -589,8 +589,14 @@ mod tests {
         track_process_env_var_override(key);
         jcode_core::env::set_var(key, "saved-key");
 
-        assert_eq!(load_api_key_from_env_or_config(key, file).as_deref(), Some("saved-key"));
-        assert_eq!(load_env_value_from_env_or_config(key, file).as_deref(), Some("saved-key"));
+        assert_eq!(
+            load_api_key_from_env_or_config(key, file).as_deref(),
+            Some("saved-key")
+        );
+        assert_eq!(
+            load_env_value_from_env_or_config(key, file).as_deref(),
+            Some("saved-key")
+        );
 
         // Logout
         save_env_value_to_env_file(key, file, None).expect("logout");
@@ -677,5 +683,44 @@ mod tests {
             Some("replacement-key"),
             "load_api_key_from_env_or_config must return the replacement key after save"
         );
+    }
+
+    /// Regression: indented env-file entries (e.g. `  KEY=old`) must be replaced
+    /// and deleted by the writer just as readers accept them, so that clearing or
+    /// rotating an indented key does not leave the old key readable.
+    #[test]
+    fn indented_key_is_replaced_and_cleared_by_writers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_INDENTED_WRITE_TEST_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let key = "JCODE_INDENTED_WRITE_TEST_KEY";
+        let file = "indented-write-test.env";
+        let config_dir = jcode_storage::app_config_dir().expect("config dir");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let file_path = config_dir.join(file);
+
+        // 1. Initial indented key
+        std::fs::write(&file_path, format!("  {key}=old-key\n")).expect("write indented");
+        assert_eq!(Creds::get(key, file).as_deref(), Some("old-key"));
+        assert_eq!(load_api_key_from_env_or_config(key, file).as_deref(), Some("old-key"));
+        assert_eq!(load_env_value_from_config_file(key, file).as_deref(), Some("old-key"));
+
+        // 2. Replacement must replace the indented key, not append below it
+        Creds::set(key, file, "new-key").expect("set replacement");
+        assert_eq!(Creds::get(key, file).as_deref(), Some("new-key"));
+        assert_eq!(load_api_key_from_env_or_config(key, file).as_deref(), Some("new-key"));
+        assert_eq!(load_env_value_from_config_file(key, file).as_deref(), Some("new-key"));
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read file"),
+            format!("{key}=new-key\n")
+        );
+
+        // 3. Reset to indented key and test clear (logout)
+        std::fs::write(&file_path, format!("  {key}=old-key\n")).expect("reset indented");
+        Creds::clear(key, file).expect("clear indented");
+        assert_eq!(Creds::get(key, file), None);
+        assert_eq!(load_api_key_from_env_or_config(key, file), None);
+        assert_eq!(load_env_value_from_config_file(key, file), None);
     }
 }

@@ -17,7 +17,8 @@ impl ProviderAuth {
                     fallback_token,
                     label,
                 } => {
-                    let token = Self::resolve_key(key_name, env_file, fallback_token.as_deref(), label)?;
+                    let token =
+                        Self::resolve_key(key_name, env_file, fallback_token.as_deref(), label)?;
                     return Ok(
                         jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
                             req, api_base, &token,
@@ -38,7 +39,8 @@ impl ProviderAuth {
                     fallback_token,
                     label,
                 } if header_name.as_str() == "x-api-key" => {
-                    let token = Self::resolve_key(key_name, env_file, fallback_token.as_deref(), label)?;
+                    let token =
+                        Self::resolve_key(key_name, env_file, fallback_token.as_deref(), label)?;
                     return Ok(
                         jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
                             req, api_base, &token,
@@ -71,7 +73,9 @@ impl ProviderAuth {
                     if let Ok(credentials) = jcode_base::auth::muse::load_credentials() {
                         return Ok(
                             jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
-                                req, api_base, &credentials.api_key,
+                                req,
+                                api_base,
+                                &credentials.api_key,
                             ),
                         );
                     }

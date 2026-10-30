@@ -566,12 +566,7 @@ impl ProviderAuth {
                 label,
             } => Ok(req.header(
                 header_name,
-                Self::resolve_key(
-                    key_name,
-                    env_file,
-                    fallback_token.as_deref(),
-                    label,
-                )?,
+                Self::resolve_key(key_name, env_file, fallback_token.as_deref(), label)?,
             )),
             Self::OptionalBearer {
                 key_name,
@@ -1526,54 +1521,51 @@ impl OpenRouterProvider {
         // Enum carries the key *name* (plus the env file and optional inline fallback),
         // not the token; the value is looked up at request time (issue #1389). Inline
         // config keys without an env variable resolve at construction.
-        let auth =
-            match profile.auth {
-                jcode_base::config::NamedProviderAuth::None => ProviderAuth::None {
-                    label: "local endpoint (no auth)".to_string(),
+        let auth = match profile.auth {
+            jcode_base::config::NamedProviderAuth::None => ProviderAuth::None {
+                label: "local endpoint (no auth)".to_string(),
+            },
+            jcode_base::config::NamedProviderAuth::Bearer => match key_env {
+                Some(key_name) => ProviderAuth::AuthorizationBearer {
+                    key_name,
+                    env_file,
+                    fallback_token: inline_fallback,
+                    label: key_label,
                 },
-                jcode_base::config::NamedProviderAuth::Bearer => match key_env {
-                    Some(key_name) => ProviderAuth::AuthorizationBearer {
-                        key_name,
-                        env_file,
-                        fallback_token: inline_fallback,
-                        label: key_label,
-                    },
-                    None => ProviderAuth::InlineBearer {
-                        token: inline_fallback.ok_or_else(|| {
-                            anyhow::anyhow!("{} not found in environment", key_label)
-                        })?,
-                        label: key_label,
-                    },
+                None => ProviderAuth::InlineBearer {
+                    token: inline_fallback
+                        .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
+                    label: key_label,
                 },
-                jcode_base::config::NamedProviderAuth::Header => match key_env {
-                    Some(key_name) => ProviderAuth::HeaderValue {
-                        header_name: HeaderName::from_bytes(
-                            profile
-                                .auth_header
-                                .as_deref()
-                                .unwrap_or("api-key")
-                                .as_bytes(),
-                        )?,
-                        key_name,
-                        env_file,
-                        fallback_token: inline_fallback,
-                        label: key_label,
-                    },
-                    None => ProviderAuth::InlineHeader {
-                        header_name: HeaderName::from_bytes(
-                            profile
-                                .auth_header
-                                .as_deref()
-                                .unwrap_or("api-key")
-                                .as_bytes(),
-                        )?,
-                        token: inline_fallback.ok_or_else(|| {
-                            anyhow::anyhow!("{} not found in environment", key_label)
-                        })?,
-                        label: key_label,
-                    },
+            },
+            jcode_base::config::NamedProviderAuth::Header => match key_env {
+                Some(key_name) => ProviderAuth::HeaderValue {
+                    header_name: HeaderName::from_bytes(
+                        profile
+                            .auth_header
+                            .as_deref()
+                            .unwrap_or("api-key")
+                            .as_bytes(),
+                    )?,
+                    key_name,
+                    env_file,
+                    fallback_token: inline_fallback,
+                    label: key_label,
                 },
-            };
+                None => ProviderAuth::InlineHeader {
+                    header_name: HeaderName::from_bytes(
+                        profile
+                            .auth_header
+                            .as_deref()
+                            .unwrap_or("api-key")
+                            .as_bytes(),
+                    )?,
+                    token: inline_fallback
+                        .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
+                    label: key_label,
+                },
+            },
+        };
         // Fail fast at construction (``/serve` boot still errors on missing
         // keys); the value is discarded, the request-time lookup is live.
         auth.require_all()?;

@@ -831,7 +831,13 @@ async fn optional_bearer_resolves_live_per_request() {
         .apply(reqwest::Client::new().get("http://127.0.0.1:1234/v1/models"))
         .await
         .unwrap();
-    assert!(req.build().unwrap().headers().get("authorization").is_none());
+    assert!(
+        req.build()
+            .unwrap()
+            .headers()
+            .get("authorization")
+            .is_none()
+    );
 
     // 2. Add key to env file later -> next request is authenticated
     jcode_base::provider_catalog::save_env_value_to_env_file(
@@ -868,7 +874,13 @@ async fn optional_bearer_resolves_live_per_request() {
         .apply(reqwest::Client::new().get("http://127.0.0.1:1234/v1/models"))
         .await
         .unwrap();
-    assert!(req3.build().unwrap().headers().get("authorization").is_none());
+    assert!(
+        req3.build()
+            .unwrap()
+            .headers()
+            .get("authorization")
+            .is_none()
+    );
 }
 
 #[tokio::test]
