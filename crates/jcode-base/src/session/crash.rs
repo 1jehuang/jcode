@@ -544,13 +544,12 @@ fn normalize_resume_lookup_text(text: &str) -> String {
         .to_lowercase()
 }
 
-fn session_matches_resume_title(session: &Session, normalized_query: &str) -> bool {
+fn resume_title_matches(title: Option<&str>, normalized_query: &str) -> bool {
     if normalized_query.is_empty() {
         return false;
     }
 
-    session
-        .display_title()
+    title
         .map(normalize_resume_lookup_text)
         .is_some_and(|title| title == normalized_query || title.contains(normalized_query))
 }
@@ -661,6 +660,10 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
 
 // Compatibility fallback for titles and legacy short names not encoded in IDs.
 fn find_session_by_metadata(name_or_id: &str) -> Result<String> {
+    find_session_by_metadata_impl(name_or_id, true)
+}
+
+fn find_session_by_metadata_impl(name_or_id: &str, use_cache: bool) -> Result<String> {
     // Otherwise, search for a session with matching short name or title.
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     if !sessions_dir.exists() {
@@ -670,6 +673,8 @@ fn find_session_by_metadata(name_or_id: &str) -> Result<String> {
     let normalized_query = normalize_resume_lookup_text(name_or_id);
     let mut exact_matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
     let mut title_matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
+    let home = storage::jcode_dir()?;
+    let mut cache = use_cache.then(|| super::resume_cache::Cache::load(&home));
 
     for entry in std::fs::read_dir(&sessions_dir)? {
         let entry = entry?;
@@ -691,14 +696,35 @@ fn find_session_by_metadata(name_or_id: &str) -> Result<String> {
             continue;
         }
 
-        let Ok(session) = Session::load_startup_stub(stem).or_else(|_| Session::load(stem)) else {
-            continue;
-        };
-        if session.short_name.as_deref() == Some(name_or_id) {
-            exact_matches.push((stem.to_string(), session.updated_at));
-        } else if session_matches_resume_title(&session, &normalized_query) {
-            title_matches.push((stem.to_string(), session.updated_at));
+        let (short_name, title, updated_at) =
+            match cache.as_mut().and_then(|cache| cache.get(stem, &path)) {
+                Some(entry) => (
+                    entry.short_name.clone(),
+                    entry.title.clone(),
+                    entry.updated_at,
+                ),
+                None => {
+                    let Ok(session) =
+                        Session::load_startup_stub(stem).or_else(|_| Session::load(stem))
+                    else {
+                        continue;
+                    };
+                    (
+                        session.short_name.clone(),
+                        session.display_title().map(str::to_owned),
+                        session.updated_at,
+                    )
+                }
+            };
+        if short_name.as_deref() == Some(name_or_id) {
+            exact_matches.push((stem.to_string(), updated_at));
+        } else if resume_title_matches(title.as_deref(), &normalized_query) {
+            title_matches.push((stem.to_string(), updated_at));
         }
+    }
+
+    if let Some(cache) = cache {
+        cache.save(&home);
     }
 
     let matches = if exact_matches.is_empty() {
@@ -962,12 +988,12 @@ mod batch_crash_tests {
     }
 
     #[test]
-    #[ignore = "read-only local corpus benchmark, requires JCODE_RESUME_BENCH_NAME"]
+    #[ignore = "local corpus benchmark, writes disposable lookup cache, requires JCODE_RESUME_BENCH_NAME"]
     fn benchmark_short_resume_resolution_real_corpus() -> anyhow::Result<()> {
         let name = std::env::var("JCODE_RESUME_BENCH_NAME")?;
         for _ in 0..5 {
             let start = std::time::Instant::now();
-            let baseline = find_session_by_metadata(&name)?;
+            let baseline = find_session_by_metadata_impl(&name, false)?;
             let baseline_ms = start.elapsed().as_secs_f64() * 1000.0;
             let start = std::time::Instant::now();
             let optimized = find_session_by_name_or_id(&name)?;
@@ -977,6 +1003,82 @@ mod batch_crash_tests {
                 "short_resume baseline_ms={baseline_ms:.3} optimized_ms={optimized_ms:.3} cache=uncontrolled_no_eviction"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn title_resume_cache_tracks_changes_and_recovers_from_corruption() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        let id = "session_cacheprobe_1770000000000_aaaaaaaaaaaaaaaa";
+        let mut session = Session::create_with_id(id.into(), None, Some("Original title".into()));
+        session.save()?;
+        for _ in 0..2 {
+            assert_eq!(find_session_by_name_or_id("original TITLE")?, id);
+        }
+        session.rename_title(Some("Updated title with different length".into()));
+        session.save()?;
+        assert!(find_session_by_name_or_id("Original title").is_err());
+        assert_eq!(find_session_by_name_or_id("updated   TITLE")?, id);
+        let cache_path = temp.path().join("resume-metadata-v1.json");
+        std::fs::write(&cache_path, b"broken cache")?;
+        assert_eq!(find_session_by_name_or_id("Updated title")?, id);
+        std::fs::remove_file(session_path(id)?)?;
+        assert!(find_session_by_name_or_id("Updated title").is_err());
+        let cache: serde_json::Value = serde_json::from_slice(&std::fs::read(cache_path)?)?;
+        assert!(cache.as_object().unwrap().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn title_resume_cache_invalidates_journal_only_updates() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        let id = "session_journalprobe_1770000000000_aaaaaaaaaaaaaaaa";
+        let mut session =
+            Session::create_with_id(id.into(), None, Some("Before journal rename".into()));
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "x".repeat(2 * 1024 * 1024),
+                cache_control: None,
+            }],
+        );
+        session.save()?;
+        assert_eq!(find_session_by_name_or_id("Before journal")?, id);
+        let snapshot = std::fs::read(session_path(id)?)?;
+        session.rename_title(Some("After journal rename".into()));
+        session.save()?;
+        assert_eq!(std::fs::read(session_path(id)?)?, snapshot);
+        assert_eq!(find_session_by_name_or_id("After journal")?, id);
+        assert!(find_session_by_name_or_id("Before journal").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn title_resume_cache_preserves_newest_and_legacy_name_priority() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        let mut older =
+            Session::create_with_id("legacy_older".into(), None, Some("Shared title".into()));
+        older.updated_at = Utc::now() - chrono::Duration::days(1);
+        older.save()?;
+        let mut newer =
+            Session::create_with_id("legacy_newer".into(), None, Some("Shared title".into()));
+        newer.save()?;
+        for _ in 0..2 {
+            assert_eq!(find_session_by_name_or_id("Shared title")?, newer.id);
+            assert_eq!(
+                find_session_by_metadata_impl("Shared title", false)?,
+                newer.id
+            );
+        }
+        older.short_name = Some("Shared title".into());
+        older.save()?;
+        assert_eq!(find_session_by_name_or_id("Shared title")?, older.id);
         Ok(())
     }
 
