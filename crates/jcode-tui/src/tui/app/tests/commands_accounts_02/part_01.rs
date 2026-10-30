@@ -355,6 +355,47 @@ fn test_account_openai_command_opens_account_picker() {
 }
 
 #[test]
+fn test_account_picker_marks_routed_session_login_not_global_last_account() {
+    with_temp_jcode_home(|| {
+        let mut labels = Vec::new();
+        for label in ["personal", "work"] {
+            labels.push(
+                crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                    label: label.into(),
+                    access_token: "acc".into(),
+                    refresh_token: "ref".into(),
+                    id_token: None,
+                    account_id: None,
+                    expires_at: None,
+                    email: None,
+                })
+                .unwrap(),
+            );
+        }
+        crate::auth::codex::set_active_account(&labels[1]).unwrap();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".into());
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+        app.remote_provider_oauth_account_label = Some(labels[0].clone());
+        app.input = "/account openai".into();
+        app.submit_input();
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        let active: Vec<_> = picker
+            .entries
+            .iter()
+            .filter(|entry| entry.is_current)
+            .filter_map(|entry| entry.account_pool_key())
+            .collect();
+        assert_eq!(active, [format!("openai:{}", labels[0])]);
+        assert_eq!(
+            crate::auth::codex::active_account_label().as_deref(),
+            Some(labels[1].as_str())
+        );
+    });
+}
+
+#[test]
 fn test_account_picker_includes_all_configured_credentials_even_excluded_and_manual() {
     with_temp_jcode_home(|| {
         let _env_guard = EnvRestoreGuard::capture([

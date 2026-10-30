@@ -420,6 +420,7 @@ impl App {
             self.provider.active_resolved_credential()
         };
         let pool = crate::auth::account_pool::AccountPool::load();
+        let session_account = self.kv_cache_account();
         for (index, entry) in models.iter_mut().enumerate() {
             if let Some(key) = entry.account_pool_key() {
                 entry.recommendation_rank = pool.priority(&key) as usize;
@@ -432,8 +433,11 @@ impl App {
             match &entry.action {
                 crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     provider_id,
-                    ..
+                    label,
                 }) => {
+                    if let Some(current) = session_account.as_deref() {
+                        entry.is_current = current == label;
+                    }
                     entry.is_current &= jcode_provider_core::parse_provider_hint(&current_name)
                         == jcode_provider_core::parse_provider_hint(provider_id)
                         && credential != Some(jcode_provider_core::ResolvedCredential::ApiKey);
