@@ -196,6 +196,7 @@ impl SessionPicker {
             SessionFilterMode::CurrentDir => self.session_in_current_dir(session),
             SessionFilterMode::CatchUp => session.needs_catchup,
             SessionFilterMode::Saved => session.saved,
+            SessionFilterMode::Cloud => session.server_icon.as_deref() == Some("☁"),
             SessionFilterMode::Active => self.session_is_live(session),
             SessionFilterMode::ClaudeCode => Self::session_is_claude_code(session),
             SessionFilterMode::Codex => Self::session_is_codex(session),
@@ -309,6 +310,11 @@ impl SessionPicker {
 
             let mut grouped_sections: Vec<(String, String, String, Vec<SessionRef>)> = Vec::new();
             for (group_idx, group) in self.all_server_groups.iter().enumerate() {
+                // Cloud lease groups describe storage ownership, not a live
+                // server. Keep them in the chronological history below.
+                if group.icon == "☁" && !group.is_running {
+                    continue;
+                }
                 let visible = std::mem::take(&mut group_buckets[group_idx]);
                 if visible.is_empty() {
                     continue;
@@ -343,14 +349,31 @@ impl SessionPicker {
                         .all_orphan_sessions
                         .get(*idx)
                         .is_some_and(|session| !saved_ids.contains(&session.id)),
+                    SessionRef::Group {
+                        group_idx,
+                        session_idx,
+                    } => self
+                        .all_server_groups
+                        .get(*group_idx)
+                        .filter(|group| group.icon == "☁" && !group.is_running)
+                        .and_then(|group| group.sessions.get(*session_idx))
+                        .is_some_and(|session| !saved_ids.contains(&session.id)),
                     _ => false,
                 })
                 .collect();
             if !visible_orphans.is_empty() {
-                self.items.push(PickerItem::OrphanHeader {
-                    session_count: visible_orphans.len(),
-                });
-                self.item_to_session.push(None);
+                // Only separate history when an actual server section precedes
+                // it. A cloud-only group must not introduce artificial chrome.
+                if self
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, PickerItem::ServerHeader { .. }))
+                {
+                    self.items.push(PickerItem::OrphanHeader {
+                        session_count: visible_orphans.len(),
+                    });
+                    self.item_to_session.push(None);
+                }
 
                 for session_ref in visible_orphans {
                     self.push_visible_session(session_ref);
