@@ -1989,12 +1989,13 @@ impl crate::tui::TuiState for App {
     }
 
     fn startup_oauth_account_label(&self) -> Option<String> {
-        if crate::tui::is_ssh_remote() {
-            return None;
-        }
         if !self.is_remote {
+            if crate::tui::is_ssh_remote() {
+                return None;
+            }
             return self.provider.oauth_account_label();
         }
+        // SSH must avoid host-local credentials, not daemon-reported identity.
         remote_oauth_account_label(
             self.remote_provider_oauth_account_label.as_deref(),
             self.session.route_api_method.as_deref(),

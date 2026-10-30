@@ -1,6 +1,113 @@
 // First-frame session facts seeded from the last launch (`remote_header_hint`).
 
 #[test]
+fn ssh_account_header_uses_daemon_identity() {
+    with_ssh_remote_test_home(|| {
+        let mut app = App::new_for_remote(None);
+        app.remote_provider_name = Some("OpenAI".into());
+        app.remote_provider_model = Some("gpt-6.1-sol".into());
+        app.clear_remote_startup_phase();
+        app.remote_provider_oauth_account_label = Some("remote-work".into());
+        crate::usage::set_remote_account_usage(
+            Vec::new(),
+            vec![remote_account_fixture("remote-work")],
+        );
+        assert_eq!(
+            crate::tui::TuiState::startup_oauth_account_label(&app).as_deref(),
+            Some("remote-work")
+        );
+        let (persistent, secondary) = crate::tui::ui::header::build_header_sections(&app, 120);
+        let text = persistent
+            .iter()
+            .chain(secondary.iter())
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            text.contains("> "),
+            "daemon account must be selected: {text}"
+        );
+        assert!(text.contains("Account router on test-remote"), "{text}");
+        crate::usage::clear_remote_account_usage();
+        // Missing daemon identity must not fall back to host-local credentials.
+        app.remote_provider_oauth_account_label = None;
+        app.session.route_api_method = None;
+        assert!(crate::tui::TuiState::startup_oauth_account_label(&app).is_none());
+    });
+}
+
+#[test]
+fn same_model_account_acknowledgement_redraws_and_replaces_identity() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = provisional_facts_app("gpt-6.1-sol");
+        app.remote_session_facts_provisional = false;
+        app.remote_provider_oauth_account_label = Some("personal".into());
+        app.remote_model_switch_in_flight = true;
+        app.remote_available_service_tiers = Some(vec![]);
+        app.usage_reset.openai_quota_rejected = true;
+        let before = app.display_messages.len();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        for label in [Some("work"), None] {
+            let event = serde_json::from_value(serde_json::json!({
+                "type": "model_changed",
+                "id": 0,
+                "model": "gpt-6.1-sol",
+                "provider_name": "OpenAI",
+                "provider_oauth_account_label": label,
+                "resolved_credential": "oauth"
+            }))
+            .unwrap();
+            assert!(app.handle_server_event(event, &mut remote));
+            assert!(!app.remote_model_switch_in_flight);
+            assert_eq!(app.remote_provider_oauth_account_label.as_deref(), label);
+            assert_eq!(
+                crate::tui::TuiState::startup_oauth_account_label(&app).as_deref(),
+                label
+            );
+            assert_eq!(
+                app.status_notice().as_deref(),
+                Some(if label.is_some() {
+                    "Account → work"
+                } else {
+                    "Account updated"
+                })
+            );
+            assert!(app.remote_available_service_tiers.is_none());
+            assert!(!app.usage_reset.openai_quota_rejected);
+            assert_eq!(app.display_messages.len(), before);
+        }
+    });
+}
+
+#[test]
+fn failed_account_acknowledgement_redraws_without_replacing_identity() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = provisional_facts_app("gpt-6.1-sol");
+        app.remote_provider_oauth_account_label = Some("personal".into());
+        app.remote_model_switch_in_flight = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let event = serde_json::from_value(serde_json::json!({
+            "type": "model_changed",
+            "id": 0,
+            "model": "gpt-6.1-sol",
+            "error": "Account unavailable",
+            "provider_oauth_account_label": "work"
+        }))
+        .unwrap();
+        assert!(app.handle_server_event(event, &mut remote));
+        assert!(!app.remote_model_switch_in_flight);
+        assert_eq!(
+            app.remote_provider_oauth_account_label.as_deref(),
+            Some("personal")
+        );
+    });
+}
+
+#[test]
 fn remote_oauth_identity_is_hydrated_without_a_saved_route_or_shared_email() {
     with_temp_jcode_home(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();

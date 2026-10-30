@@ -2626,7 +2626,13 @@ pub(in crate::tui::app) fn handle_server_event(
                 // ModelChanged predates capability metadata. Fetch the typed
                 // History catalog after a successful model/account switch.
                 app.model_catalog_after_history = true;
+                let account_actually_changed = !app.remote_session_facts_provisional
+                    && app.remote_provider_model.is_some()
+                    && (app.remote_provider_oauth_account_label != provider_oauth_account_label
+                        || app.remote_provider_oauth_email != provider_oauth_email
+                        || app.remote_resolved_credential != resolved_credential);
                 if app.remote_provider_model.as_deref() != Some(model.as_str())
+                    || app.remote_provider_oauth_account_label != provider_oauth_account_label
                     || app.remote_provider_oauth_email != provider_oauth_email
                     || app.remote_resolved_credential != resolved_credential
                     || provider_name
@@ -2682,9 +2688,19 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
                 if model_actually_changed {
                     app.set_status_notice(format!("Model → {}", model));
+                } else if account_actually_changed {
+                    let label = crate::tui::TuiState::startup_oauth_account_label(app);
+                    app.set_status_notice(match label {
+                        Some(label) => format!("Account → {}", label),
+                        None => "Account updated".to_string(),
+                    });
                 }
             }
-            false
+            // Same-model account acknowledgements change header identity too.
+            // Clear cached header preparation and request a frame even when no
+            // transcript announcement was added (including switch failures).
+            crate::tui::ui::prepare::invalidate_header_prep_cache();
+            true
         }
         ServerEvent::AccountUsage {
             anthropic, openai, ..
