@@ -649,6 +649,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     let reasoning_prepared = Arc::new(empty_prepared_messages());
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
     let stream_prefix_blank = has_streaming
+        && !super::messages::starts_with_reasoning(app.streaming_text())
         && (!body_prepared.wrapped_lines.is_empty()
             || !batch_progress_prepared.wrapped_lines.is_empty()
             || !reasoning_prepared.wrapped_lines.is_empty());

@@ -1183,6 +1183,11 @@ fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
 
 #[test]
 fn test_prepare_messages_thinking_and_tools_have_no_blank_rows() {
+    assert_thinking_tool_adjacency(false);
+    assert_thinking_tool_adjacency(true);
+}
+
+fn assert_thinking_tool_adjacency(embedded_assistant: bool) {
     let _guard = crate::storage::lock_test_env();
     clear_test_render_state_for_tests();
     let tool = |id: &str, title: &str| DisplayMessage {
@@ -1202,9 +1207,16 @@ fn test_prepare_messages_thinking_and_tools_have_no_blank_rows() {
     let state = TestState {
         display_messages: vec![
             tool("before", "Before thinking"),
-            DisplayMessage::reasoning(jcode_tui_markdown::reasoning_line_markup(
-                "Thinking compactly",
-            )),
+            if embedded_assistant {
+                DisplayMessage::assistant(format!(
+                    "{}\n",
+                    jcode_tui_markdown::reasoning_line_markup("**Thinking compactly**",)
+                ))
+            } else {
+                DisplayMessage::reasoning(jcode_tui_markdown::reasoning_line_markup(
+                    "Thinking compactly",
+                ))
+            },
             tool("after", "After thinking"),
             DisplayMessage::assistant("Final answer"),
         ],
@@ -1230,6 +1242,45 @@ fn test_prepare_messages_thinking_and_tools_have_no_blank_rows() {
         rows[answer - 1].trim().is_empty(),
         "prose keeps its separator: {rows:?}"
     );
+}
+
+#[test]
+fn test_prepare_messages_streaming_thinking_has_no_blank_prefix() {
+    let _guard = crate::storage::lock_test_env();
+    clear_test_render_state_for_tests();
+    for thinking in [true, false] {
+        let state = TestState {
+            display_messages: vec![DisplayMessage::system("Previous activity")],
+            status: ProcessingStatus::Streaming,
+            streaming_text: if thinking {
+                jcode_tui_markdown::reasoning_partial_markup("**Live thinking**")
+            } else {
+                "Ordinary answer".into()
+            },
+            ..Default::default()
+        };
+        let prepared = prepare::prepare_messages(&state, 100, 30);
+        let rows: Vec<String> = prepared
+            .materialize_all_lines()
+            .iter()
+            .map(extract_line_text)
+            .collect();
+        let previous = rows
+            .iter()
+            .position(|row| row.contains("Previous activity"))
+            .unwrap();
+        let next = rows
+            .iter()
+            .position(|row| {
+                row.contains(if thinking {
+                    "Live thinking"
+                } else {
+                    "Ordinary answer"
+                })
+            })
+            .unwrap();
+        assert_eq!(next - previous, if thinking { 1 } else { 2 }, "{rows:?}");
+    }
 }
 
 #[test]

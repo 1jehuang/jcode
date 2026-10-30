@@ -365,7 +365,15 @@ pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
     !matches!(
         msg.effective_role(),
         "tool" | "meta" | "swarm" | "reasoning"
-    ) && !is_kv_cache_footer(msg)
+    ) && !(msg.effective_role() == "assistant" && starts_with_reasoning(&msg.content))
+        && !is_kv_cache_footer(msg)
+}
+
+/// In `all` mode and restored history, thinking lives in assistant Markdown,
+/// not a dedicated `reasoning` message. Use the explicit renderer sentinel,
+/// never ordinary italic/bold prose, to identify that activity-stream prefix.
+pub(super) fn starts_with_reasoning(content: &str) -> bool {
+    content.trim_start().starts_with("*\u{2063}")
 }
 
 pub(crate) fn render_system_message(
