@@ -121,6 +121,10 @@ pub enum Request {
     #[serde(rename = "state")]
     GetState { id: u64 },
 
+    /// Fetch the attached session's todo card without locking its agent.
+    #[serde(rename = "get_todos")]
+    GetTodos { id: u64 },
+
     /// Execute a debug command (debug socket only)
     #[serde(rename = "debug_command")]
     DebugCommand {

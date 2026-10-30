@@ -68,6 +68,9 @@ mod account_usage_tests {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    /// Serialized todo card snapshot containing todos, plan, and goals.
+    #[serde(rename = "todos")]
+    Todos { payload: String },
     #[serde(rename = "account_usage")]
     AccountUsage {
         id: u64,

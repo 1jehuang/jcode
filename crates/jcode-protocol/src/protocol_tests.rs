@@ -1,4 +1,21 @@
 use super::*;
+
+#[test]
+fn todos_request_and_snapshot_roundtrip() {
+    let request: Request = serde_json::from_str(r#"{"type":"get_todos","id":41}"#).unwrap();
+    assert!(matches!(request, Request::GetTodos { id: 41 }));
+    assert_eq!(request.id(), 41);
+    // A todo snapshot needs an attached session, unlike one-shot control requests.
+    assert!(!request.is_lightweight_control_request());
+    let payload = serde_json::json!({"todos": [], "plan": {}, "goals": []}).to_string();
+    let event = ServerEvent::Todos {
+        payload: payload.clone(),
+    };
+    let encoded = serde_json::to_value(&event).unwrap();
+    assert_eq!(encoded["type"], "todos");
+    let decoded: ServerEvent = serde_json::from_value(encoded).unwrap();
+    assert!(matches!(decoded, ServerEvent::Todos { payload: actual } if actual == payload));
+}
 use anyhow::{Result, anyhow};
 
 fn parse_request_json(json: &str) -> Result<Request> {

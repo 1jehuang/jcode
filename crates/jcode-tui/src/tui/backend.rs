@@ -708,6 +708,14 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Fetch the attached session's current todo card from the daemon.
+    pub async fn request_todos(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetTodos { id }).await?;
+        Ok(id)
+    }
+
     /// Ask the server for the fully route-expanded model catalog.
     ///
     /// The bootstrap `History` payload deliberately ships model *names* only

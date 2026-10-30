@@ -809,6 +809,7 @@ impl Request {
             Request::RewindUndo { id } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
+            Request::GetTodos { id } => *id,
             Request::DebugCommand { id, .. } => *id,
             Request::ClientDebugCommand { id, .. } => *id,
             Request::ClientDebugResponse { id, .. } => *id,

@@ -1444,6 +1444,17 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::GetTodos { .. } => {
+                let payload = serde_json::json!({
+                    "todos": crate::todo::load_todos(&client_session_id).unwrap_or_default(),
+                    "plan": crate::todo::load_plan(&client_session_id).unwrap_or_default(),
+                    "goals": crate::todo::load_goals(&client_session_id).unwrap_or_default(),
+                });
+                let _ = client_event_tx.send(ServerEvent::Todos {
+                    payload: payload.to_string(),
+                });
+            }
+
             Request::GetState { id } => {
                 if handle_get_state(
                     id,
