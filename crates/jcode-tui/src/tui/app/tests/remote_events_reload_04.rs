@@ -994,6 +994,9 @@ fn test_remote_header_keeps_known_model_during_brief_loading_session_phase() {
     // Routine bootstrap: the model is already known (session stub / config
     // hint), so a short LoadingSession phase must not flash "loading session…"
     // over it. That pre-settle churn is exactly what made spawns look unstable.
+    // Pin the env lock: the model falls back to the config default-model
+    // hint, which a parallel home-scoping test can flip mid-body otherwise.
+    let _env_lock = crate::storage::lock_test_env();
     let mut app = App::new_for_remote(None);
     app.session.model = Some("claude-fable-5".to_string());
     app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);

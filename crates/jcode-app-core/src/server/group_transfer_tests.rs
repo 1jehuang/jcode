@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 struct TestHome {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: storage::TestEnvGuard,
     _dir: tempfile::TempDir,
     home: Option<std::ffi::OsString>,
     runtime: Option<std::ffi::OsString>,
