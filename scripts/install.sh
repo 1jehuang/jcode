@@ -32,6 +32,17 @@ sha256_file() {
   fi
 }
 
+sync_manifest_stable() {
+  manifest="$1"
+  stable="$2"
+  [ -f "$manifest" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq --arg stable "$stable" '.stable = $stable' "$manifest" > "$manifest.tmp.$$" \
+    && jq -e . "$manifest.tmp.$$" >/dev/null 2>&1 \
+    && mv -f "$manifest.tmp.$$" "$manifest" \
+    || rm -f "$manifest.tmp.$$"
+}
+
 valid_conversion_id() {
   printf '%s' "${JCODE_INSTALL_CONVERSION_ID:-}" |
     grep -Eiq '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
@@ -331,6 +342,8 @@ EOF
     ln -sfn "$stable_dir/$bin_name" "$launcher_path"
   fi
 fi
+
+sync_manifest_stable "$builds_dir/manifest.json" "$version"
 
 if [ "$(uname -s)" = "Darwin" ]; then
   xattr -d com.apple.quarantine "$dest_version_dir/$bin_name" 2>/dev/null || true

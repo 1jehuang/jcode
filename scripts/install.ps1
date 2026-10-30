@@ -1092,6 +1092,20 @@ Assert-JcodeBinaryCandidate -BinaryPath $DestBin -ExpectedVersion $Version | Out
 $StableBin = Join-Path $StableDir "jcode.exe"
 Copy-Item -Path $DestBin -Destination $StableBin -Force
 Set-Content -Path (Join-Path $BuildsDir "stable-version") -Value $VersionNum
+
+$ManifestPath = Join-Path $BuildsDir "manifest.json"
+if (Test-Path -LiteralPath $ManifestPath) {
+    try {
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        $manifest = [System.IO.File]::ReadAllText($ManifestPath, $utf8)
+        $updated = [regex]::Replace($manifest, '([{,]\s*"stable"\s*:\s*)("[^"]*"|null)', '$1"' + $VersionNum + '"', 1)
+        if ($updated -ne $manifest) {
+            [System.IO.File]::WriteAllText($ManifestPath, $updated, $utf8)
+        }
+    } catch {
+        # Manifest sync is best effort and must not fail installation.
+    }
+}
 Install-JcodeLauncher -SourcePath $StableBin -LauncherPath $LauncherPath | Out-Null
 } finally {
     Get-Item -LiteralPath $TempDir -ErrorAction SilentlyContinue |
