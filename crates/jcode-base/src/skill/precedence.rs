@@ -58,7 +58,11 @@ mod tests {
 
     fn project_description(root: &Path, name: &str) -> String {
         let registry = SkillRegistry::load_project_overlay(Some(root)).expect("overlay");
-        registry.get(name).expect("skill present").description.clone()
+        registry
+            .get(name)
+            .expect("skill present")
+            .description
+            .clone()
     }
 
     #[test]
@@ -111,6 +115,9 @@ mod tests {
         base.load_from_dir(&global.path().join(".jcode/skills"))
             .expect("load");
         let effective = SkillRegistry::effective_for_working_dir(&base, Some(temp.path()));
-        assert_eq!(effective.get("dup").expect("present").description, "project");
+        assert_eq!(
+            effective.get("dup").expect("present").description,
+            "project"
+        );
     }
 }
