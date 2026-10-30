@@ -3000,8 +3000,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let queued_height = pending_count.min(3) as u16;
 
     // Count user messages to show next prompt number
-    let user_count = app.display_user_message_count();
-    let next_prompt = user_count + 1;
+    let next_prompt = input_ui::next_input_prompt_number(app);
+    let user_count = next_prompt.saturating_sub(1);
 
     // Calculate input height based on the same wrapping logic used for rendering
     // (max 10 lines visible, scrolls if more).

@@ -1,4 +1,71 @@
 #[test]
+fn compacted_prompt_marker_hydrates_remote_stub_and_composer_numbering() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    app.is_remote = true;
+    app.remote_session_id = Some("session_compacted_prompt_offset".into());
+    app.session.messages.clear();
+    app.session.compaction = None;
+    for (marker, hidden) in [
+        (
+            "Earlier conversation compacted - 900 older historical messages hidden. Showing 64 of 964 compacted messages. Scroll to the top to load more. Hidden user prompts: 12.",
+            12,
+        ),
+        (
+            "Earlier conversation compacted - 964 historical messages hidden from the UI. Scroll to the top to load older history. Hidden user prompts: 14.",
+            14,
+        ),
+        (
+            "Earlier conversation compacted - showing all 964 compacted historical messages. Redraw may be slower while this view is open. Hidden user prompts: 0.",
+            0,
+        ),
+    ] {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let messages = vec![
+            DisplayMessage::system(marker),
+            DisplayMessage::user("previous prompt"),
+            DisplayMessage::assistant("previous answer"),
+            DisplayMessage::user("latest actual prompt"),
+        ]
+        .into_iter()
+        .map(|message| crate::protocol::HistoryMessage {
+            role: message.role,
+            content: message.content,
+            tool_calls: None,
+            tool_data: None,
+            response_stats: None,
+        })
+        .collect();
+        assert!(app.handle_server_event(
+            delta_history_event("session_compacted_prompt_offset", messages, None),
+            &mut remote,
+        ));
+        assert_eq!(app.compacted_hidden_user_prompts(), hidden);
+        assert_eq!(
+            crate::tui::ui::input_ui::next_input_prompt_number(&app),
+            hidden + 3
+        );
+        assert_eq!(
+            app.display_user_message_count(),
+            2,
+            "cached count stays visible-only"
+        );
+    }
+}
+
+#[test]
+fn ordinary_system_text_cannot_set_compacted_prompt_offset() {
+    let mut app = create_test_app();
+    app.replace_display_messages(vec![
+        DisplayMessage::system("Not a compaction marker. Hidden user prompts: 452."),
+        DisplayMessage::user("latest actual prompt"),
+    ]);
+    assert_eq!(app.compacted_hidden_user_prompts(), 0);
+    assert_eq!(crate::tui::ui::input_ui::next_input_prompt_number(&app), 2);
+}
+
+#[test]
 fn test_metadata_only_history_preserves_fast_restored_startup_state() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");

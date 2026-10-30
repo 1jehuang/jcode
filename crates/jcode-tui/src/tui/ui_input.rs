@@ -333,7 +333,9 @@ pub(crate) fn input_prompt_len(app: &dyn TuiState, next_prompt: usize) -> usize 
 }
 
 pub(crate) fn next_input_prompt_number(app: &dyn TuiState) -> usize {
-    app.display_user_message_count() + 1
+    app.compacted_hidden_user_prompts()
+        .saturating_add(app.display_user_message_count())
+        .saturating_add(1)
 }
 
 pub(super) fn wrapped_input_line_count(

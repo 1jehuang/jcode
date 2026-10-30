@@ -933,11 +933,23 @@ impl App {
             .first()
             .and_then(parse_compacted_history_marker)
             .unwrap_or_default();
-        // The marker text does not encode how many prompts are hidden, so derive
-        // it from the session render info when a compacted window is in effect.
-        // This keeps prompt numbering absolute (the first visible prompt keeps
-        // its real turn number).
-        if lazy.remaining_messages > 0 || lazy.total_messages > 0 {
+        let marker_hidden_prompts = self
+            .display_messages
+            .first()
+            .filter(|message| parse_compacted_history_marker(message).is_some())
+            .and_then(|message| {
+                message
+                    .content
+                    .rsplit_once(" Hidden user prompts: ")
+                    .and_then(|(_, count)| count.strip_suffix('.'))
+                    .and_then(|count| count.parse::<usize>().ok())
+            });
+        // New servers include the authoritative offset. A remote startup stub
+        // has no transcript, and a retained local snapshot may be stale.
+        // Derive it locally only for legacy markers without that metadata.
+        if let Some(hidden) = marker_hidden_prompts {
+            lazy.hidden_user_prompts = hidden;
+        } else if lazy.remaining_messages > 0 || lazy.total_messages > 0 {
             let visible = if lazy.remaining_messages == 0 {
                 usize::MAX
             } else {
