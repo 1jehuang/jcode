@@ -40,6 +40,7 @@ mod loading;
 mod memory;
 mod navigation;
 mod preview_chrome;
+mod preview_refresh;
 mod render;
 mod saved_placement;
 mod transcript_search;
@@ -672,8 +673,8 @@ impl SessionPicker {
     /// async load completed a second or two after opening).
     pub fn reseed_grouped(
         &mut self,
-        server_groups: Vec<ServerGroup>,
-        orphan_sessions: Vec<SessionInfo>,
+        mut server_groups: Vec<ServerGroup>,
+        mut orphan_sessions: Vec<SessionInfo>,
     ) {
         // Remember what the user was looking at so we can restore it after the
         // data swap + item rebuild.
@@ -681,6 +682,8 @@ impl SessionPicker {
         let preview_scroll = self.scroll_offset;
         let auto_scroll_preview = self.auto_scroll_preview;
         let list_offset = self.list_state.offset();
+
+        self.reconcile_refreshed_previews(&mut server_groups, &mut orphan_sessions);
 
         let hidden_test_count: usize = server_groups
             .iter()
