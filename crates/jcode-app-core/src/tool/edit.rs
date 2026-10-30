@@ -157,7 +157,7 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by exact replacement using a nonempty edits array. All edits apply or none do."
+        "Atomically edit a file using a nonempty array of exact replacements."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -172,7 +172,7 @@ impl Tool for EditTool {
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Required nonempty array of replacements applied in order. Each edit requires old_string and new_string. Each old_string must match exactly once unless replace_all is set.",
+                    "description": "Required replacements in order. Each old_string must match once unless replace_all is set.",
                     "minItems": 1,
                     "items": {
                         "type": "object",
