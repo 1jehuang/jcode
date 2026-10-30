@@ -329,6 +329,9 @@ auto_poke = true
 # Optional aggregate weak-point follow-up, once per completed todo cycle.
 # Requires auto-poke. Does not control the display-only completion report.
 todo_gate_digest = false
+# Show which disabled end-of-turn gates would have fired in completion reports.
+# Display only. Does not enable gates or follow-up turns.
+todo_gate_diagnostics = false
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
 # Persist memory injections into session history instead of sending them as request-only ephemeral context

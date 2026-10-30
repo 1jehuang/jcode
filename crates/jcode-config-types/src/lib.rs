@@ -1182,6 +1182,9 @@ pub struct FeatureConfig {
     /// Requires auto-poke; independent of the display-only completion report.
     /// Disabled by default for every user.
     pub todo_gate_digest: bool,
+    /// Show hypothetical disabled-gate findings in todo completion reports (default: false).
+    /// Display only: does not enable gates or follow-up turns.
+    pub todo_gate_diagnostics: bool,
     /// Inject timestamps into user messages and tool results sent to the model (default: true)
     pub message_timestamps: bool,
     /// Persist auto-recalled memory injections into normal session history instead of sending
@@ -1206,6 +1209,7 @@ impl Default for FeatureConfig {
             mermaid: true,
             auto_poke: true,
             todo_gate_digest: false,
+            todo_gate_diagnostics: false,
             message_timestamps: true,
             persist_memory_injections: false,
             kv_cache_miss_notices: true,

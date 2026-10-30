@@ -219,6 +219,18 @@ fn auto_poke_feature_defaults_on_and_parses_false() {
 }
 
 #[test]
+fn todo_gate_diagnostics_defaults_off_and_requires_explicit_opt_in() {
+    assert!(!Config::default().features.todo_gate_diagnostics);
+    let omitted: Config = toml::from_str("[features]\nauto_poke = true\n").unwrap();
+    assert!(!omitted.features.todo_gate_diagnostics);
+    for enabled in [true, false] {
+        let cfg: Config =
+            toml::from_str(&format!("[features]\ntodo_gate_diagnostics = {enabled}\n")).unwrap();
+        assert_eq!(cfg.features.todo_gate_diagnostics, enabled);
+    }
+}
+
+#[test]
 fn todo_gate_digest_defaults_off_and_requires_explicit_opt_in() {
     assert!(!Config::default().features.todo_gate_digest);
     let omitted: Config = toml::from_str("[features]\nauto_poke = true\n").unwrap();
