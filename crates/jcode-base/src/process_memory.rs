@@ -228,7 +228,7 @@ fn windows_memory_snapshot(rss: u64, peak_rss: u64, private_commit: u64) -> Proc
     }
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
     let source = source.into();
     logging::debug(&format!(
@@ -237,6 +237,127 @@ pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot 
     let snapshot = ProcessMemorySnapshot::default();
     record_snapshot(source, snapshot.clone());
     snapshot
+}
+
+#[cfg(target_os = "macos")]
+pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
+    let source = source.into();
+    // One task_info reading fills resident/peak/virtual together; reusing it
+    // keeps the three fields from the same instant and skips two extra
+    // syscalls per snapshot.
+    let basic = mach_task_basic_info();
+    let snapshot = ProcessMemorySnapshot {
+        rss_bytes: basic.as_ref().map(|b| b.resident_size),
+        peak_rss_bytes: basic.as_ref().map(|b| b.resident_size_max),
+        virtual_bytes: basic.as_ref().map(|b| b.virtual_size),
+        thread_count: None,
+        main_stack_bytes: None,
+        os: mach_task_vm_info().map(|b| OsProcessMemoryInfo {
+            // phys_footprint is what the kernel charges for dirty +
+            // compressed anonymous memory, the closest analog of Linux
+            // Pss_Anon for the hibernation notice; `internal` is the
+            // resident dirty part of it (Linux RssAnon analog).
+            pss_anon_bytes: Some(b.phys_footprint),
+            rss_anon_bytes: Some(b.internal),
+            ..OsProcessMemoryInfo::default()
+        }),
+        allocator: allocator_info(),
+    };
+    logging::debug(&format!(
+        "process memory snapshot source={source} rss={:?} private={:?} allocator={}",
+        snapshot.rss_bytes,
+        snapshot.os.as_ref().and_then(|os| os.pss_anon_bytes),
+        snapshot.allocator.name
+    ));
+    record_snapshot(source, snapshot.clone());
+    snapshot
+}
+
+/// `mach_task_basic_info_data_t`: filled through a raw call so the struct
+/// never has to be spelled out against a specific SDK layout.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct TaskBasicInfo {
+    virtual_size: u64,
+    resident_size: u64,
+    resident_size_max: u64,
+}
+
+/// `task_vm_info` head: everything up to `phys_footprint` (rev1) plus the
+/// two fields the snapshot reads. The full struct keeps growing with new
+/// ledger tags, so pass a buffer big enough for rev2/rev3 and read only
+/// these fields by offset.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct TaskVmInfo {
+    internal: u64,
+    phys_footprint: u64,
+}
+
+// task_info() count is in natural_t (u32) words, so a 1024-word buffer
+// covers every task_vm_info revision shipped so far (~60 words).
+#[cfg(target_os = "macos")]
+const TASK_INFO_BUFFER_WORDS: usize = 1024;
+
+#[cfg(target_os = "macos")]
+fn mach_task_basic_info() -> Option<TaskBasicInfo> {
+    unsafe extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(target: u32, flavor: u32, info: *mut u32, count: *mut u32) -> i32;
+    }
+    const MACH_TASK_BASIC_INFO: u32 = 20;
+    let mut buffer = [0u32; TASK_INFO_BUFFER_WORDS];
+    let mut count = buffer.len() as u32;
+    let kr = unsafe {
+        task_info(
+            mach_task_self(),
+            MACH_TASK_BASIC_INFO,
+            buffer.as_mut_ptr(),
+            &mut count,
+        )
+    };
+    (kr == 0).then(|| TaskBasicInfo {
+        // mach_task_basic_info_data_t as the kernel packs it for flavor 20:
+        // virtual_size (u64@0), resident_size (u64@8), resident_size_max
+        // (u64@16). Verified against ps(1) rss/vsz on arm64.
+        virtual_size: read_u64(&buffer, 0),
+        resident_size: read_u64(&buffer, 8),
+        resident_size_max: read_u64(&buffer, 16),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn mach_task_vm_info() -> Option<TaskVmInfo> {
+    unsafe extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(target: u32, flavor: u32, info: *mut u32, count: *mut u32) -> i32;
+    }
+    const TASK_VM_INFO: u32 = 22;
+    let mut buffer = [0u32; TASK_INFO_BUFFER_WORDS];
+    let mut count = buffer.len() as u32;
+    let kr = unsafe {
+        task_info(
+            mach_task_self(),
+            TASK_VM_INFO,
+            buffer.as_mut_ptr(),
+            &mut count,
+        )
+    };
+    (kr == 0).then(|| TaskVmInfo {
+        // task_vm_info head: virtual_size, region_count, page_size,
+        // resident, resident_peak, device, device_peak, then `internal`
+        // at word 12. phys_footprint is the rev1 tail at word 36.
+        internal: read_u64(&buffer, 48),
+        phys_footprint: read_u64(&buffer, 144),
+    })
+}
+
+/// Read a u64 from a packed buffer at a byte offset.
+#[cfg(target_os = "macos")]
+fn read_u64(words: &[u32; TASK_INFO_BUFFER_WORDS], offset: usize) -> u64 {
+    let lo = words[offset / 4] as u64;
+    let hi = words[offset / 4 + 1] as u64;
+    lo | (hi << 32)
 }
 
 pub fn history(limit: usize) -> Vec<ProcessMemoryHistoryEntry> {

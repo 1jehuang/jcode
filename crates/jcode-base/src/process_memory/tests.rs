@@ -301,3 +301,28 @@ fn snapshot_populates_thread_and_stack_and_pss_split_fields() {
         "pss split should be consistent"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_snapshot_reports_rss_and_private_memory() {
+    let snapshot = snapshot();
+    let rss = snapshot.rss_bytes.expect("task_info resident_size");
+    assert!(rss > 0, "resident_size must be positive, got {rss}");
+    let os = snapshot.os.expect("task_info TASK_VM_INFO");
+    let footprint = os.pss_anon_bytes.expect("phys_footprint");
+    assert!(
+        footprint > 0,
+        "phys_footprint must be positive, got {footprint}"
+    );
+    // Presence checks only: rss counts resident pages (shared libraries
+    // included) while phys_footprint counts dirty + compressed memory, so
+    // memory pressure can push them arbitrarily far apart with both
+    // fields still correct. Decoding is checked separately instead: the
+    // three basic-info fields come from one reading, and the address
+    // space always covers whatever is resident in it.
+    let virtual_bytes = snapshot.virtual_bytes.expect("task_info virtual_size");
+    assert!(
+        virtual_bytes >= rss,
+        "virtual_size {virtual_bytes} must cover resident {rss} from the same reading"
+    );
+}

@@ -157,6 +157,15 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
 
     let provider = OpenAIProvider::new(prewarm_test_credentials());
     *provider.credentials.write().await = prewarm_test_credentials();
+    // Mark the model available so request setup never schedules a background
+    // `/models` fetch: that GET would land on the fixture's single accept and
+    // break the handshake. `prewarm_test_credentials` is an API key, so the
+    // provider reads the key's own `api-key::` catalog, not the OAuth account
+    // scope: seed the scope this provider actually queries.
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
     provider
         .set_transport("websocket")
         .expect("force local websocket transport");

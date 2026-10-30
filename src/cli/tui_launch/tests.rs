@@ -69,7 +69,10 @@ fn write_fake_handterm(temp: &tempfile::TempDir, output_path: &Path) {
 
 #[cfg(unix)]
 fn wait_for_lines(path: &Path, min_lines: usize) -> Vec<String> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // Hang guard, not latency budget: the launcher spawns a shell that must
+    // start, exec handterm, and write. Under full-suite load that spawn chain
+    // can take seconds; a real hang still misses a 30s deadline by far.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if let Ok(content) = fs::read_to_string(path) {
             let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();

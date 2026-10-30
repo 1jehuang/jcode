@@ -33,6 +33,45 @@ impl Drop for IsolatedRuntimeDir {
     }
 }
 
+// `derive_session_provider_key` folds ambient runtime env (JCODE_RUNTIME_PROVIDER,
+// JCODE_ACTIVE_PROVIDER, JCODE_OPENROUTER_CACHE_NAMESPACE) into a new session's
+// provider_key, and session-model restore then turns `test-model-a` into
+// `openai:test-model-a`. Tests asserting raw model strings must run without
+// whatever provider env the surrounding process happened to export.
+struct IsolatedProviderEnv {
+    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl IsolatedProviderEnv {
+    fn new() -> Self {
+        let prev = [
+            "JCODE_RUNTIME_PROVIDER",
+            "JCODE_ACTIVE_PROVIDER",
+            "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        ]
+        .iter()
+        .map(|&key| {
+            let prev = std::env::var_os(key);
+            if prev.is_some() {
+                crate::env::remove_var(key);
+            }
+            (key, prev)
+        })
+        .collect();
+        Self { prev }
+    }
+}
+
+impl Drop for IsolatedProviderEnv {
+    fn drop(&mut self) {
+        for (key, prev) in self.prev.drain(..) {
+            if let Some(prev) = prev {
+                crate::env::set_var(key, prev);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct TestEffortProvider {
     model: StdMutex<Option<String>>,
@@ -263,6 +302,7 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
 async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
     let _guard = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
+    let _provider_env = IsolatedProviderEnv::new();
     let (provider, agent, tx, mut rx) = test_agent("session_rejected_auto_route").await;
     let selection = crate::provider::RouteSelection {
         model: "gpt-6.1-sol".to_string(),
@@ -352,6 +392,7 @@ async fn automatic_failover_source_respects_current_api_pool_membership() {
 async fn set_model_does_not_wait_for_busy_agent_lock() {
     let _guard = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
+    let _provider_env = IsolatedProviderEnv::new();
 
     let (provider, agent, client_event_tx, mut client_event_rx) =
         test_agent("session_busy_set_model").await;

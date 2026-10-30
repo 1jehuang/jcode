@@ -112,7 +112,11 @@ async fn tool_transformers_compose_json_replacements() {
         second.to_string_lossy().into_owned(),
     ])
     .expect("serialize transformer commands");
-    let _env = transform_test_config(&commands, 500);
+    // 500ms (the prod default) is plenty on an idle host, but a parallel
+    // test run can starve the child shells past it and the chain fails
+    // open. Composition order is under test here, not the timeout, which
+    // the fails-open tests below pin with short deadlines.
+    let _env = transform_test_config(&commands, 10_000);
 
     let output = transform_tool_input(
         "ses_transform",
