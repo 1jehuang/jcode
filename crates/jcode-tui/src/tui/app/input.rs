@@ -2434,6 +2434,9 @@ pub(super) fn handle_pre_control_shortcuts(
     if app.open_resume_key_matches(code, modifiers) {
         app.record_keybinding_fast(super::shortcut_hints::LearnableAction::Resume);
         app.open_session_picker();
+        if let Some(picker) = app.session_picker_overlay.as_ref() {
+            picker.borrow_mut().activate_search();
+        }
         return true;
     }
     if let Some(direction) = app.model_switch_keys.direction_for(code, modifiers) {

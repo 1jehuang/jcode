@@ -520,6 +520,10 @@ impl SessionPicker {
         picker
     }
 
+    pub fn activate_search(&mut self) {
+        self.search_active = true;
+    }
+
     pub fn activate_catchup_filter(&mut self) {
         self.filter_mode = SessionFilterMode::CatchUp;
         self.rebuild_items();

@@ -298,6 +298,20 @@ fn standalone_resume_renders_before_list_load_finishes() {
 }
 
 #[test]
+fn shortcut_search_accepts_typing_before_sessions_arrive() {
+    let mut picker = SessionPicker::loading();
+    picker.activate_search();
+    picker
+        .handle_overlay_key(KeyCode::Char('b'), KeyModifiers::empty())
+        .expect("search input");
+    assert!(picker.search_active);
+    assert_eq!(picker.search_query, "b");
+    picker.reseed_grouped(Vec::new(), Vec::new());
+    assert!(picker.search_active);
+    assert_eq!(picker.search_query, "b");
+}
+
+#[test]
 fn loading_picker_accepts_and_renders_search_before_sessions_arrive() {
     let mut picker = SessionPicker::loading();
     let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
