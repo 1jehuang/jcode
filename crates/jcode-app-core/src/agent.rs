@@ -1028,6 +1028,19 @@ impl Agent {
                                 }
                                 crate::compaction::CompactionAction::None => {}
                             }
+                        } else if self.provider.native_compaction_mode().as_deref() == Some("auto")
+                            && manager.should_compact_with(all_messages)
+                        {
+                            // Auto mode lets the provider compact a request, but
+                            // that does not persist jcode's compacted-prefix state.
+                            // Start the existing safe background summarizer when
+                            // the local context estimate reaches the same policy
+                            // threshold. Avoid ensure_context_fits here: its 95%
+                            // emergency path drops messages synchronously.
+                            manager.maybe_start_compaction_with(
+                                all_messages,
+                                self.provider.clone(),
+                            );
                         }
                         manager.messages_for_api_with(all_messages)
                     };
