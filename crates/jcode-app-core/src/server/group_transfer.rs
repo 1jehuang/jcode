@@ -234,7 +234,10 @@ fn validate_bundle(bundle: &GroupTransferBundle) -> Result<()> {
     Ok(())
 }
 
-/// All state-changing operations use an exclusive global admission reservation.
+/// All operations, including inspect, use an exclusive global admission reservation.
+/// Inspect reads a cross-map swarm snapshot and durable epochs used by prepare,
+/// so selected-agent locks alone cannot exclude detached callbacks changing group
+/// membership or ownership. Keep this global until activity is scoped by session.
 /// This intentionally rejects even unrelated busy turns rather than guessing
 /// whether detached tool callbacks can still mutate the selected state.
 pub async fn handle(
@@ -260,8 +263,11 @@ async fn handle_with_gate(
     let (action, json) = rest
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("group_transfer requires action:JSON"))?;
-    let _idle = gate.try_idle()
-        .ok_or_else(|| anyhow::anyhow!("daemon is busy; wait for all turns and background tasks to finish before group transfer"))?;
+    let _idle = gate.try_idle().ok_or_else(|| {
+        anyhow::anyhow!(
+            "group_transfer action={action} phase=idle_admission: daemon is busy; wait for all turns and background tasks to finish before group transfer"
+        )
+    })?;
     match action {
         "inspect" | "prepare" => {
             let (selection, host, expected) = if action == "prepare" {
