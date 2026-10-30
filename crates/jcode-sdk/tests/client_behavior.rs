@@ -609,6 +609,7 @@ fn run_collects_one_turn() {
                     output: 5,
                     cache_read_input: Some(2),
                     cache_creation_input: Some(3),
+                    effective_budget: None,
                 },
                 writer,
             );
@@ -652,6 +653,7 @@ fn run_usage_is_latest_call_and_does_not_retain_previous_cache_counters() {
                         output: 5,
                         cache_read_input,
                         cache_creation_input,
+                        effective_budget: None,
                     },
                     writer,
                 );
@@ -1281,13 +1283,18 @@ fn set_session_env_sends_replacement_and_clear() {
             reader.read_line(&mut line).expect("read frame");
             let frame: ClientFrame = serde_json::from_str(&line).expect("client frame");
             if index == 0 {
-                reply(&frame, ApiEvent::HelloOk {
-                    version: API_VERSION_MAJOR,
-                    server: "fake-harness/1.0".into(),
-                    capabilities: vec!["sessions".into()],
-                }, &mut writer);
+                reply(
+                    &frame,
+                    ApiEvent::HelloOk {
+                        version: API_VERSION_MAJOR,
+                        server: "fake-harness/1.0".into(),
+                        capabilities: vec!["sessions".into()],
+                    },
+                    &mut writer,
+                );
             } else {
-                tx.send(serde_json::from_str::<serde_json::Value>(&line).unwrap()).unwrap();
+                tx.send(serde_json::from_str::<serde_json::Value>(&line).unwrap())
+                    .unwrap();
                 reply(&frame, ApiEvent::Ok, &mut writer);
             }
         }
@@ -1299,12 +1306,18 @@ fn set_session_env_sends_replacement_and_clear() {
             ensure_runtime: false,
             ..Default::default()
         },
-    ).expect("connect");
-    for env in [std::collections::HashMap::from([
-        ("TOKEN".to_string(), "private-secret".to_string()),
-        ("EMPTY".to_string(), String::new()),
-    ]), std::collections::HashMap::new()] {
-        client.set_session_env("session-1", env.clone()).expect("set env");
+    )
+    .expect("connect");
+    for env in [
+        std::collections::HashMap::from([
+            ("TOKEN".to_string(), "private-secret".to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ]),
+        std::collections::HashMap::new(),
+    ] {
+        client
+            .set_session_env("session-1", env.clone())
+            .expect("set env");
         let wire = rx.recv_timeout(Duration::from_secs(5)).expect("wire");
         assert_eq!(wire["req"], "set_session_env");
         assert_eq!(wire["session_id"], "session-1");
