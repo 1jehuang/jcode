@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 mod invocation;
+mod precedence;
 pub use invocation::SkillInvocation;
 
 /// A skill definition from SKILL.md
@@ -269,19 +270,18 @@ impl SkillRegistry {
             registry.load_plugin_skills_from_root(&plugins_root);
         }
 
-        // Load from ~/.jcode/skills/ (jcode's own global skills)
+        // Later loads win: ~/.agents/skills/ first, ~/.jcode/skills/ last.
+        if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
+            && agents_skills.exists()
+        {
+            registry.load_from_dir(&agents_skills)?;
+        }
+
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_skills = jcode_dir.join("skills");
             if jcode_skills.exists() {
                 registry.load_from_dir(&jcode_skills)?;
             }
-        }
-
-        // Load from ~/.agents/skills/ (shared cross-tool `.agents` convention)
-        if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
-            && agents_skills.exists()
-        {
-            registry.load_from_dir(&agents_skills)?;
         }
 
         Ok(registry)
@@ -331,22 +331,20 @@ impl SkillRegistry {
     }
 
     fn load_project_local_dirs(&mut self, working_dir: Option<&Path>) -> Result<()> {
-        // Load from ./.jcode/skills/ (project-local jcode skills)
-        let local_jcode = Self::project_local_dir(working_dir, ".jcode");
-        if local_jcode.exists() {
-            self.load_from_dir(&local_jcode)?;
+        // Later loads win: .claude, then .agents, then .jcode.
+        let local_claude = Self::project_local_dir(working_dir, ".claude");
+        if local_claude.exists() {
+            self.load_from_dir(&local_claude)?;
         }
 
-        // Load from ./.agents/skills/ (shared cross-tool `.agents` convention)
         let local_agents = Self::project_local_dir(working_dir, ".agents");
         if local_agents.exists() {
             self.load_from_dir(&local_agents)?;
         }
 
-        // Fallback: ./.claude/skills/ (project-local Claude skills for compatibility)
-        let local_claude = Self::project_local_dir(working_dir, ".claude");
-        if local_claude.exists() {
-            self.load_from_dir(&local_claude)?;
+        let local_jcode = Self::project_local_dir(working_dir, ".jcode");
+        if local_jcode.exists() {
+            self.load_from_dir(&local_jcode)?;
         }
 
         Ok(())
@@ -494,7 +492,7 @@ impl SkillRegistry {
                 if skill_file.exists()
                     && let Ok(skill) = Self::parse_skill(&skill_file)
                 {
-                    self.skills.insert(skill.name.clone(), skill);
+                    precedence::insert_skill(&mut self.skills, skill);
                 }
             }
         }
