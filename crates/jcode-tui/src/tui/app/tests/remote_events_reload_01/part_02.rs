@@ -35,6 +35,7 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 123,
             output: 45,
             cache_read_input: None,

@@ -9,6 +9,7 @@ fn test_handle_server_event_token_usage_uses_per_call_deltas() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 100,
             output: 10,
             cache_read_input: None,
@@ -18,6 +19,7 @@ fn test_handle_server_event_token_usage_uses_per_call_deltas() {
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 100,
             output: 30,
             cache_read_input: None,
@@ -27,6 +29,7 @@ fn test_handle_server_event_token_usage_uses_per_call_deltas() {
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 100,
             output: 30,
             cache_read_input: None,
@@ -77,6 +80,7 @@ fn test_handle_server_event_tool_exec_pauses_tps_but_collects_final_tool_usage()
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 100,
             output: 25,
             cache_read_input: None,
@@ -110,6 +114,7 @@ fn test_handle_server_event_kv_cache_request_resets_tps_output_watermark_for_nex
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 100,
             output: 40,
             cache_read_input: None,
@@ -149,6 +154,7 @@ fn test_handle_server_event_kv_cache_request_resets_tps_output_watermark_for_nex
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 120,
             output: 15,
             cache_read_input: None,
@@ -346,6 +352,7 @@ fn test_handle_server_event_tps_message_end_counts_late_usage_without_timer_runn
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 100,
             output: 20,
             cache_read_input: None,
@@ -377,6 +384,7 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 100,
             output: 10,
             cache_read_input: None,
@@ -390,6 +398,7 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 100,
             output: 30,
             cache_read_input: None,
@@ -399,6 +408,7 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 100,
             output: 30,
             cache_read_input: None,

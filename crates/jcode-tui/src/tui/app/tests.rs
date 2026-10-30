@@ -914,6 +914,7 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 63_762,
             output: 153,
             cache_read_input: Some(0),
@@ -937,6 +938,7 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 63_762,
             output: 153,
             cache_read_input: Some(0),
