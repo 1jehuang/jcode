@@ -260,7 +260,7 @@ class CloudCredentials(unittest.TestCase):
         local_where = json.loads(self.invoke("where", "--session", "cloud-auth-test", "--json").stdout)
         self.assertEqual(local_where[0]["location"], "local")
         remote_lease = json.loads((self.remote / "session_leases" / "cloud-auth-test.json").read_text())
-        self.assertEqual(remote_lease["away_host"], "returned")
+        self.assertEqual(remote_lease["away_host"], "returned-complete")
 
     def seed_router(self):
         config = self.local / "config" / "jcode"
