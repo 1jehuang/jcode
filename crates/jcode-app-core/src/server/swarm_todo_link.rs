@@ -34,7 +34,9 @@ fn is_lane_task(task_id: &str) -> bool {
 /// order, and inside a stage each group is a lane. A whole lane is one plan
 /// item, so one agent owns it end to end and keeps its context; that agent's
 /// own todo list is the lane. Every lane waits for every lane of the previous
-/// stage. The model never writes ids (no cycles, no dangling references).
+/// stage unless it declares `lane_after` item prerequisites. Explicit
+/// prerequisites replace the phase barrier, and their lane edges disappear
+/// as soon as the specific items complete, not when their whole lanes finish.
 /// Completed and cancelled todos are skipped; a lane with nothing open is
 /// skipped and never blocks.
 pub(crate) fn plan_items_from_todos(todos: &[TodoItem]) -> Vec<PlanItem> {
@@ -47,6 +49,34 @@ pub(crate) fn plan_items_from_todos(todos: &[TodoItem]) -> Vec<PlanItem> {
             let lane_todos: Vec<&TodoItem> = lane.items.iter().map(|&i| open[i]).collect();
             let first = lane_todos[0];
             let id = lane_id(first);
+            // Use all members, including completed ones: completing the first
+            // item must not lose the lane's prerequisite configuration.
+            let prerequisites = todos
+                .iter()
+                .find(|todo| lane_id(todo) == id)
+                .and_then(|todo| todo.lane_after.as_ref());
+            let blocked_by = match prerequisites {
+                None => previous_stage.clone(),
+                Some(dependencies) => {
+                    let mut blockers = Vec::new();
+                    for dependency in dependencies {
+                        let source = todos.iter().find(|todo| &todo.id == dependency);
+                        if source.is_some_and(|todo| todo.status == "completed") {
+                            continue;
+                        }
+                        // Missing/deleted prerequisites fail closed. A cancelled
+                        // prerequisite is not successful completion either.
+                        let blocker = source
+                            .filter(|todo| is_open(todo))
+                            .map(lane_id)
+                            .unwrap_or_else(|| format!("todo:{dependency}"));
+                        if !blockers.contains(&blocker) {
+                            blockers.push(blocker);
+                        }
+                    }
+                    blockers
+                }
+            };
             let content = match &lane.group {
                 Some(group) => format!(
                     "{group}: {}",
@@ -65,7 +95,7 @@ pub(crate) fn plan_items_from_todos(todos: &[TodoItem]) -> Vec<PlanItem> {
                 id: id.clone(),
                 subsystem: lane.group.clone(),
                 file_scope: Vec::new(),
-                blocked_by: previous_stage.clone(),
+                blocked_by,
                 assigned_to: None,
             });
             this_stage.push(id);
@@ -416,6 +446,71 @@ mod tests {
             .iter()
             .map(|item| (item.id.clone(), item.blocked_by.clone()))
             .collect()
+    }
+
+    #[test]
+    fn explicit_item_completion_releases_lane_before_source_lane_or_phase() {
+        let mut early = laned("consumer", 2, "consumer");
+        early.lane_after = Some(vec!["contract".into()]);
+        let mut todos = vec![
+            laned("contract", 1, "api"),
+            laned("implementation", 1, "api"),
+            laned("unrelated", 1, "docs"),
+            early,
+            laned("default", 2, "default"),
+        ];
+        let before = plan_items_from_todos(&todos);
+        let consumer = before
+            .iter()
+            .find(|item| item.id == "lane:2:consumer")
+            .unwrap();
+        assert_eq!(consumer.blocked_by, vec!["lane:1:api"]);
+        assert!(
+            !crate::plan::summarize_plan_graph(&before)
+                .ready_ids
+                .contains(&consumer.id)
+        );
+        todos[0].status = "completed".into();
+        let after = resync_lane_plan(&todos, &before).unwrap();
+        assert_eq!(
+            crate::plan::newly_ready_item_ids(&before, &after),
+            vec!["lane:2:consumer"]
+        );
+        let default = after
+            .iter()
+            .find(|item| item.id == "lane:2:default")
+            .unwrap();
+        assert_eq!(default.blocked_by, vec!["lane:1:api", "lane:1:docs"]);
+        assert_eq!(todos[1].status, "pending");
+    }
+
+    #[test]
+    fn explicit_dependencies_require_all_items_and_fail_closed_on_removal_or_cancel() {
+        let mut consumer = laned("consumer", 3, "consumer");
+        consumer.lane_after = Some(vec!["a".into(), "b".into()]);
+        let mut todos = vec![laned("a", 1, "source"), laned("b", 1, "source"), consumer];
+        assert_eq!(
+            plan_items_from_todos(&todos)[1].blocked_by,
+            vec!["lane:1:source"]
+        );
+        todos[0].status = "completed".into();
+        assert_eq!(
+            plan_items_from_todos(&todos)[1].blocked_by,
+            vec!["lane:1:source"]
+        );
+        todos[1].status = "cancelled".into();
+        let cancelled = plan_items_from_todos(&todos);
+        assert!(
+            crate::plan::summarize_plan_graph(&cancelled)
+                .ready_ids
+                .is_empty()
+        );
+        todos.remove(1);
+        assert!(
+            crate::plan::summarize_plan_graph(&plan_items_from_todos(&todos))
+                .ready_ids
+                .is_empty()
+        );
     }
 
     #[test]
