@@ -409,9 +409,7 @@ pub(super) fn todos_view_status_message(app: &App) -> String {
 }
 
 pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
-    let arg = if trimmed == "/todo" {
-        ""
-    } else if trimmed == "/todos" {
+    let arg = if trimmed == "/todo" || trimmed == "/todos" {
         ""
     } else if let Some(rest) = trimmed.strip_prefix("/todos ") {
         rest.trim()
