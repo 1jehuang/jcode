@@ -170,20 +170,55 @@ fn configured_swarm_root_effort_covers_all_wire_formats() {
                 assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
             }
             let mut request = serde_json::json!({});
-            assert_eq!(
-                provider.apply_resolved_reasoning_effort(&mut request, "none", strict),
-                field == "reasoning"
-            );
+            // `none` must be sent explicitly (not omitted): gateways like
+            // LiteLLM default DeepSeek-V3+ thinking to ON when the field is
+            // absent, so dropping it would leave thinking on.
+            assert!(provider.apply_resolved_reasoning_effort(&mut request, "none", strict));
             if field == "reasoning" {
                 assert_eq!(request[field]["effort"], "none");
             } else {
-                assert!(request.get(field).is_none());
+                assert_eq!(request[field], "none");
             }
         }
     }
     for (effort, expected) in [("minimal", "low"), ("xhigh", "high")] {
         let mut request = serde_json::json!({});
         assert!(deepseek.apply_resolved_reasoning_effort(&mut request, effort, false));
+        assert_eq!(request["reasoning_effort"], expected);
+    }
+}
+
+/// LiteLLM/DeepSeek-V3+ regression: a named OpenAI-compatible profile with
+/// `supports-reasoning-effort = true` (which sets
+/// `reasoning_effort_support = Some(true)`) serving a `deepseek-reasoner`
+/// model must send `reasoning_effort: "none"` on the wire when the user picks
+/// the `none` effort — NOT omit the field. Omitting it leaves the gateway's
+/// default thinking ON, so `none` silently failed to disable thinking.
+#[test]
+fn litellm_profile_deepseek_reasoner_none_sends_explicit_field() {
+    let mut provider = make_custom_compatible_provider();
+    // Mimic `[providers.litellm] supports-reasoning-effort = true`.
+    provider.reasoning_effort_support = Some(true);
+    provider.model = Arc::new(RwLock::new("deepseek-reasoner".to_string()));
+
+    assert!(
+        provider.supports_deepseek_reasoning_effort(),
+        "litellm-style profile + deepseek model must take the DeepSeek-style path"
+    );
+
+    let mut request = serde_json::json!({});
+    // `none` must be applied (true) and written explicitly.
+    assert!(provider.apply_resolved_reasoning_effort(&mut request, "none", false));
+    assert_eq!(
+        request.get("reasoning_effort"),
+        Some(&serde_json::json!("none")),
+        "reasoning_effort must be `none`, not omitted"
+    );
+
+    // Non-none efforts still map through the DeepSeek alias table.
+    for (effort, expected) in [("minimal", "low"), ("xhigh", "high"), ("low", "low")] {
+        let mut request = serde_json::json!({});
+        assert!(provider.apply_resolved_reasoning_effort(&mut request, effort, false));
         assert_eq!(request["reasoning_effort"], expected);
     }
 }
