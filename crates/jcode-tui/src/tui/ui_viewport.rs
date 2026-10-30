@@ -427,21 +427,27 @@ pub(super) fn draw_messages(
     } else {
         0u16
     };
-    let pinned_todo_lines = pinned_todo_band.len() as u16;
-    set_pinned_todo_more_area(pinned_todo_more_line.map(|line| {
-        Rect {
-            x: text_render_area.x,
-            y: render_area
-                .y
-                .saturating_add(prompt_preview_lines)
-                .saturating_add(line as u16),
-            width: text_render_area.width,
-            height: 1,
-        }
-    }));
+    let pinned_todo_area = super::viewport_pinned_todo::clipped_band_area(
+        render_area,
+        text_render_area,
+        prompt_preview_lines,
+        pinned_todo_band.len(),
+    );
+    set_pinned_todo_more_area(
+        pinned_todo_more_line
+            .filter(|&line| line < pinned_todo_area.height as usize)
+            .map(|line| Rect {
+                y: pinned_todo_area.y.saturating_add(line as u16),
+                height: 1,
+                ..pinned_todo_area
+            }),
+    );
+    set_pinned_todo_card_area((!pinned_todo_area.is_empty()).then_some(pinned_todo_area));
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
     // preview first, then the todo band, then transcript content).
-    let top_band_lines = pinned_todo_lines + prompt_preview_lines;
+    let top_band_lines = prompt_preview_lines
+        .saturating_add(pinned_todo_area.height)
+        .min(render_area.height);
 
     let content_area = Rect {
         x: text_render_area.x,
@@ -1230,15 +1236,9 @@ pub(super) fn draw_messages(
         );
     }
 
-    if pinned_todo_lines > 0 {
-        let band_area = Rect {
-            x: content_area.x,
-            y: render_area.y.saturating_add(prompt_preview_lines),
-            width: content_area.width,
-            height: pinned_todo_lines.min(render_area.height),
-        };
-        clear_area(frame, band_area);
-        frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
+    if !pinned_todo_area.is_empty() {
+        clear_area(frame, pinned_todo_area);
+        frame.render_widget(Paragraph::new(pinned_todo_band), pinned_todo_area);
     }
 
     if crate::config::config().display.prompt_preview && scroll > 0 && prompt_history_expanded() {
@@ -1511,6 +1511,7 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
             Style::default().fg(dim_color()),
         )));
     } else {
+        lines.extend(card_lines);
         if expanded {
             more_line = Some(lines.len());
             lines.push(Line::from(Span::styled(
@@ -1518,12 +1519,12 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
                 Style::default().fg(dim_color()),
             )));
         }
-        lines.extend(card_lines);
     }
     (lines, more_line)
 }
 
 static PINNED_TODO_MORE_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
+static PINNED_TODO_CARD_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
 
 fn set_pinned_todo_more_area(area: Option<Rect>) {
     if let Ok(mut current) = PINNED_TODO_MORE_AREA.lock() {
@@ -1537,7 +1538,31 @@ pub(crate) fn set_pinned_todo_more_area_for_test(area: Option<Rect>) {
 }
 
 pub(crate) fn pinned_todo_more_area() -> Option<Rect> {
-    PINNED_TODO_MORE_AREA.lock().ok().and_then(|area| *area)
+    *PINNED_TODO_MORE_AREA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn set_pinned_todo_card_area(area: Option<Rect>) {
+    if let Ok(mut current) = PINNED_TODO_CARD_AREA.lock() {
+        *current = area;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_pinned_todo_card_area_for_test(area: Option<Rect>) {
+    set_pinned_todo_card_area(area);
+}
+
+pub(crate) fn clear_pinned_todo_click_areas() {
+    set_pinned_todo_more_area(None);
+    set_pinned_todo_card_area(None);
+}
+
+pub(crate) fn pinned_todo_card_area() -> Option<Rect> {
+    *PINNED_TODO_CARD_AREA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn compute_prompt_preview_line_count(

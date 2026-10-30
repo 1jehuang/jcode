@@ -756,6 +756,252 @@ fn clicking_pinned_todo_more_row_expands_the_band() {
 }
 
 #[test]
+fn clicking_anywhere_on_pinned_todo_card_toggles_full_list() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    app.session.short_name = Some("test".to_string());
+    let todos: Vec<_> = (0..12)
+        .map(|i| pinned_band_todo(&format!("t{i}"), &format!("many item {i}"), "pending"))
+        .collect();
+    app.pinned_todos_payload = Some(serde_json::json!({"todos": todos}).to_string());
+    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
+
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 40)).unwrap();
+    let compact = render_and_snap(&app, &mut terminal);
+    assert!(compact.contains("many item 0"), "first TODO item missing:\n{compact}");
+    let compact_card = crate::tui::ui::viewport::pinned_todo_card_area()
+        .expect("compact TODO band should publish card bounds");
+    let compact_control = crate::tui::ui::viewport::pinned_todo_more_area()
+        .expect("long compact band should publish +more control bounds");
+    let first_item_row = compact
+        .lines()
+        .position(|line| line.contains("many item 0"))
+        .expect("first TODO row") as u16;
+    assert_ne!(first_item_row, compact_control.y, "test click must miss +more row");
+    assert!(
+        first_item_row >= compact_card.y
+            && first_item_row < compact_card.y.saturating_add(compact_card.height),
+        "first TODO row {first_item_row} outside compact card {compact_card:?}"
+    );
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: compact_card.x.saturating_add(7),
+        row: first_item_row,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.pinned_todos_expanded, "clicking an item in the compact card should expand it");
+
+    let expanded = render_and_snap(&app, &mut terminal);
+    assert!(expanded.contains("many item 11"), "last TODO row missing:\n{expanded}");
+    let last_item_row = expanded
+        .lines()
+        .position(|line| line.contains("many item 11"))
+        .expect("last TODO row");
+    let collapse_row = expanded
+        .lines()
+        .position(|line| line.contains("Collapse todos"))
+        .expect("collapse control row");
+    assert!(collapse_row > last_item_row, "collapse control must be below the last item:\n{expanded}");
+
+    let expanded_card = crate::tui::ui::viewport::pinned_todo_card_area()
+        .expect("expanded TODO band should publish card bounds");
+    let middle_item_row = expanded
+        .lines()
+        .position(|line| line.contains("many item 5"))
+        .expect("middle TODO row") as u16;
+    assert_ne!(middle_item_row as usize, collapse_row, "test click must miss collapse label");
+    assert!(
+        middle_item_row >= expanded_card.y
+            && middle_item_row < expanded_card.y.saturating_add(expanded_card.height),
+        "middle TODO row {middle_item_row} outside expanded card {expanded_card:?}"
+    );
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: expanded_card.x.saturating_add(7),
+        row: middle_item_row,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(!app.pinned_todos_expanded, "clicking an item in the expanded card should collapse it");
+
+    crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
+    crate::tui::ui::viewport::set_pinned_todo_card_area_for_test(None);
+}
+
+#[test]
+fn fullscreen_panel_selection_ignores_hidden_pinned_todo_card() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    for expanded in [false, true] {
+        let mut app = create_test_app();
+        app.session.short_name = Some("test".to_string());
+        app.diagram_mode = crate::config::DiagramDisplayMode::None;
+        app.diagram_pane_enabled = false;
+        app.pinned_todos_expanded = expanded;
+        let todos: Vec<_> = (0..12)
+            .map(|i| pinned_band_todo(&format!("t{i}"), &format!("many item {i}"), "pending"))
+            .collect();
+        app.pinned_todos_payload = Some(serde_json::json!({"todos": todos}).to_string());
+        app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 40)).unwrap();
+        render_and_snap(&app, &mut terminal);
+        let old_card = crate::tui::ui::viewport::pinned_todo_card_area().unwrap();
+        assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_some());
+
+        app.side_panel = test_side_panel_snapshot("plan", "Selection regression");
+        app.side_panel.pages[0].content = "hello panel selection text".to_string();
+        app.side_panel_fullscreen = true;
+        let panel = render_and_snap(&app, &mut terminal);
+        let (row, column) = panel
+            .lines()
+            .enumerate()
+            .find_map(|(row, line)| {
+                line.find("hello panel")
+                    .map(|column| (row as u16, column as u16))
+            })
+            .expect("fixture panel text should be visible");
+        assert!(old_card.contains(ratatui::layout::Position::new(column, row)));
+        for (kind, x) in [
+            (MouseEventKind::Down(MouseButton::Left), column),
+            (MouseEventKind::Drag(MouseButton::Left), column + 5),
+        ] {
+            app.handle_mouse_event(MouseEvent {
+                kind,
+                column: x,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        assert_eq!(app.pinned_todos_expanded, expanded, "hidden card toggled");
+        assert_eq!(
+            app.current_copy_selection_pane(),
+            Some(crate::tui::CopySelectionPane::SidePane)
+        );
+        let selected = app.current_copy_selection_text();
+        assert!(
+            selected.as_deref().is_some_and(|text| {
+                text.len() >= 4 && "hello panel selection text".contains(text)
+            }),
+            "selected={selected:?}"
+        );
+        assert!(crate::tui::ui::viewport::pinned_todo_card_area().is_none());
+        assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_none());
+
+        app.exit_copy_selection_mode();
+        app.side_panel_fullscreen = false;
+        app.side_panel = crate::side_panel::SidePanelSnapshot::default();
+        render_and_snap(&app, &mut terminal);
+        let card = crate::tui::ui::viewport::pinned_todo_card_area().unwrap();
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: card.x + 1,
+            row: card.y + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.pinned_todos_expanded, !expanded);
+    }
+}
+
+#[test]
+fn clipped_pinned_todo_card_does_not_toggle_below_chat_viewport() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    app.session.short_name = Some("test".to_string());
+    let todos: Vec<_> = (0..40)
+        .map(|i| pinned_band_todo(&format!("clip{i}"), &format!("clipped task {i}"), "pending"))
+        .collect();
+    app.pinned_todos_payload = Some(serde_json::json!({"todos": todos}).to_string());
+    app.display_messages = vec![
+        DisplayMessage {
+            role: "user".to_string(),
+            content: "sticky clipping prompt".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        },
+        DisplayMessage::assistant(App::build_scroll_test_content(0, 40, None)),
+    ];
+    app.bump_display_messages_version();
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.input = "composer stays editable".to_string();
+
+    for height in [12, 16, 24] {
+        for expanded in [false, true] {
+            app.pinned_todos_expanded = expanded;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, height)).unwrap();
+            let rendered = render_and_snap(&app, &mut terminal);
+            assert!(rendered.contains("sticky clipping prompt"), "{rendered}");
+            let layout = crate::tui::ui::last_layout_snapshot().unwrap();
+            let chat = layout.messages_area;
+            let card = crate::tui::ui::viewport::pinned_todo_card_area().unwrap();
+            assert!(card.y > chat.y, "sticky preview must precede the card");
+            assert_eq!(
+                card.intersection(chat),
+                card,
+                "card outside chat: {card:?} {chat:?}"
+            );
+            if expanded {
+                let remaining_chat_height = chat.bottom().saturating_sub(card.y);
+                let (band_lines, _) = crate::tui::ui::viewport::pinned_todo_band_lines(
+                    &app,
+                    chat.width,
+                    chat.height,
+                );
+                assert!(
+                    band_lines.len() > remaining_chat_height as usize,
+                    "expanded band should exceed the space below the sticky preview: {} lines vs {remaining_chat_height} rows ({chat:?}, {card:?})",
+                    band_lines.len()
+                );
+            }
+            if let Some(control) = crate::tui::ui::viewport::pinned_todo_more_area() {
+                assert_eq!(control.intersection(card), control, "control outside card");
+            } else {
+                assert!(expanded, "compact +more control should remain visible");
+            }
+            if expanded {
+                assert_eq!(
+                    card.bottom(),
+                    chat.bottom(),
+                    "expanded card should fill chat"
+                );
+                assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_none());
+            }
+            for row in chat.bottom()..height {
+                app.handle_mouse_event(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: card.x.saturating_add(7),
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                });
+                assert_eq!(
+                    app.pinned_todos_expanded, expanded,
+                    "click below chat at row {row}"
+                );
+            }
+            assert!(rendered.contains("composer stays editable"), "{rendered}");
+        }
+    }
+    crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
+    crate::tui::ui::viewport::set_pinned_todo_card_area_for_test(None);
+}
+
+#[test]
 fn pinned_todo_card_shows_tasks_without_expanding() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
