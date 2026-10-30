@@ -12,6 +12,7 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -61,6 +62,7 @@ fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
             crate::todo::save_todos(
                 &app.session.id,
                 &[crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2338,6 +2340,7 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2376,6 +2379,7 @@ fn test_poke_status_reports_current_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2435,6 +2439,7 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2489,6 +2494,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2530,6 +2536,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2547,6 +2554,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2605,6 +2613,7 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2642,6 +2651,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2661,6 +2671,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2944,6 +2955,7 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2984,6 +2996,7 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,

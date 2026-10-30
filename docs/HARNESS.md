@@ -119,6 +119,23 @@ Define plans as **phases → lanes → items**, including plans with only one ph
 
 Phases execute in declared order. Lanes within a phase can run in parallel, while items within a lane run in order. Items inherit phase and lane membership from their enclosing containers. Update existing items by `id` rather than resending the hierarchy. Flat saved todo lists remain compatible internally with storage, swarm coordination, and rendering.
 
+A lane can optionally replace the default whole-prior-phase barrier with specific
+prerequisite todo IDs from strictly earlier phases. For example, add this phase
+after the phase above:
+
+```json
+{"phase": 2, "lanes": [{"lane": "tests", "after": ["implement"], "items": [
+  {"id": "test", "content": "Test the change", "status": "pending", "priority": "high"}
+]}]}
+```
+
+The tests lane can start as soon as `implement` is completed or cancelled, even
+if an unrelated lane in phase 1 is still running. Omit `after` to retain the
+phase barrier. When present, `after` must contain unique, existing todo IDs and
+must not be empty. Saved items
+carry this setting as `lane_after`. The TUI shows concise `after 1/1 · ready`
+progress and does not dim a ready lane merely because its phase is later.
+
 ## Completely blocked
 
 No way forward.

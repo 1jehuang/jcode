@@ -795,6 +795,7 @@ fn hash_todos_payload(
         todo.status.hash(&mut hasher);
         todo.priority.hash(&mut hasher);
         todo.group.hash(&mut hasher);
+        todo.lane_after.hash(&mut hasher);
         todo.confidence.hash(&mut hasher);
         todo.completion_confidence.hash(&mut hasher);
         todo.blocked_by.hash(&mut hasher);
@@ -920,6 +921,7 @@ mod tests {
             status: status.to_string(),
             priority: priority.to_string(),
             group: None,
+            lane_after: None,
             confidence: confidence.map(crate::todo::ConfidenceState::from_legacy_score),
             completion_confidence: completion_confidence
                 .map(crate::todo::ConfidenceState::from_legacy_score),

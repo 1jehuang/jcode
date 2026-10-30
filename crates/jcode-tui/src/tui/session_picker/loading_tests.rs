@@ -676,6 +676,7 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
     crate::todo::save_todos(
         session_id,
         &[crate::todo::TodoItem {
+            lane_after: None,
             content: "Wire todo title into picker".to_string(),
             status: "in_progress".to_string(),
             priority: "high".to_string(),
@@ -734,6 +735,7 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
     crate::todo::save_todos(
         session_id,
         &[crate::todo::TodoItem {
+            lane_after: None,
             content: "Wire todo title into picker".to_string(),
             status: "in_progress".to_string(),
             priority: "high".to_string(),

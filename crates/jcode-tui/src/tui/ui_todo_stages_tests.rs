@@ -2,6 +2,59 @@ use super::*;
 use crate::todo::TodoItem;
 
 #[test]
+fn explicit_lane_prerequisites_replace_phase_dimming_and_fit_cells() {
+    let mut dependency = todo("dependency", "Dependency", "completed", Some(1));
+    let unrelated = todo("other", "Unrelated work", "in_progress", Some(1));
+    let mut lane = todo("consumer", "界面 tests", "pending", Some(2));
+    lane.group = Some("验证".into());
+    lane.lane_after = Some(vec!["dependency".into()]);
+    for status in ["completed", "cancelled", "pending"] {
+        dependency.status = status.into();
+        let refs = [&dependency, &unrelated, &lane];
+        let ready = status != "pending";
+        assert_eq!(
+            lane_prerequisite_progress(&[&lane], &refs),
+            Some((usize::from(ready), 1))
+        );
+        let mut lines = Vec::new();
+        push_stage_lines(&mut lines, &refs, &[], &[], "", 100);
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(if ready {
+                "after 1/1 · ready"
+            } else {
+                "after 0/1 · waiting"
+            }),
+            "{text}"
+        );
+        let name = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content.contains("验证"))
+            .unwrap();
+        assert_eq!(name.style.fg == Some(later_phase_color()), !ready);
+        for width in 0..80 {
+            let mut lines = Vec::new();
+            push_stage_lines(&mut lines, &refs, &[], &[], "", width);
+            assert!(
+                lines.iter().all(|line| line.width() <= width),
+                "width {width}: {lines:?}"
+            );
+        }
+    }
+    lane.lane_after = Some(vec![]);
+    assert_eq!(lane_prerequisite_progress(&[&lane], &[&lane]), Some((0, 0)));
+    lane.lane_after = Some(vec!["missing".into(), "missing".into()]);
+    assert_eq!(lane_prerequisite_progress(&[&lane], &[&lane]), Some((0, 1)));
+    lane.lane_after = None;
+    assert_eq!(lane_prerequisite_progress(&[&lane], &[&lane]), None);
+}
+
+#[test]
 fn self_owned_todos_have_amber_pips_and_you_badges() {
     let local = assigned(todo("local", "Local task", "in_progress", Some(1)), "@self");
     let unknown = todo("unknown", "Unknown task", "in_progress", Some(1));

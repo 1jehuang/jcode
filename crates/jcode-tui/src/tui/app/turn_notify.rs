@@ -416,6 +416,7 @@ mod tests {
 
     fn todo_named(content: &str, status: &str, blocked_by: &[&str]) -> TodoItem {
         TodoItem {
+            lane_after: None,
             content: content.to_string(),
             status: status.to_string(),
             priority: "medium".to_string(),
