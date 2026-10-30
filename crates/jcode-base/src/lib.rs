@@ -20,8 +20,6 @@
 
 pub mod account_login;
 pub mod agent_profile;
-mod plugin_components;
-pub mod instruction_sources;
 pub mod applets;
 pub mod auth;
 pub mod background;
@@ -58,6 +56,7 @@ pub mod hooks;
 pub mod id;
 pub mod image_normalize;
 pub mod import;
+pub mod instruction_sources;
 pub mod jev;
 pub mod kv_cache_monitor;
 pub mod live_tests;
@@ -77,8 +76,9 @@ pub mod model_usage;
 pub mod opencode_db;
 pub mod output_style;
 pub mod plan;
-pub mod plugin;
 pub mod platform;
+pub mod plugin;
+mod plugin_components;
 pub mod power_inhibit;
 pub mod process_memory;
 pub mod process_title;

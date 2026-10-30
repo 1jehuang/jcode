@@ -928,7 +928,7 @@ impl OpenRouterProvider {
     }
 
     fn profile_supports_openai_reasoning_effort(profile_id: Option<&str>) -> bool {
-        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("zai"))
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("zai") || id.eq_ignore_ascii_case("vsllm"))
     }
 
     /// DeepSeek-family models accept the DeepSeek-style top-level
@@ -947,7 +947,10 @@ impl OpenRouterProvider {
         if self.configured_reasoning_efforts().is_some() {
             return false;
         }
-        if self.profile_id.as_deref().is_some_and(|id| id.eq_ignore_ascii_case("a6api"))
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("a6api"))
             && self.model_config(&self.model_snapshot()).is_some()
         {
             return false;
@@ -991,7 +994,10 @@ impl OpenRouterProvider {
         if self.configured_reasoning_efforts().is_some() {
             return true;
         }
-        if self.profile_id.as_deref().is_some_and(|id| id.eq_ignore_ascii_case("a6api"))
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("a6api"))
             && self.model_config(&self.model_snapshot()).is_some()
         {
             return false;
@@ -1111,7 +1117,7 @@ impl OpenRouterProvider {
     }
 
     fn profile_rejects_image_input(profile_id: Option<&str>) -> bool {
-        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek") || id.eq_ignore_ascii_case("zai"))
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek") || id.eq_ignore_ascii_case("zai") || id.eq_ignore_ascii_case("vsllm"))
     }
 
     fn profile_supports_unified_reasoning(

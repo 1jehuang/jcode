@@ -135,12 +135,18 @@ fn configured_swarm_root_effort_covers_all_wire_formats() {
         profile_id: Some("zai".into()),
         ..make_custom_compatible_provider()
     };
+    let vsllm = OpenRouterProvider {
+        profile_id: Some("vsllm".into()),
+        ..make_custom_compatible_provider()
+    };
     for mode in ["swarm", "swarm-deep"] {
         for (provider, strict, field, max) in [
             (&unified, false, "reasoning", "xhigh"),
             (&deepseek, false, "reasoning_effort", "max"),
             (&openai, false, "reasoning_effort", "max"),
             (&openai, true, "reasoning_effort", "xhigh"),
+            (&vsllm, false, "reasoning_effort", "max"),
+            (&vsllm, true, "reasoning_effort", "xhigh"),
         ] {
             provider.set_reasoning_effort(mode).unwrap();
             for (resolved, expected) in [("low", "low"), ("medium", "medium"), ("max", max)] {

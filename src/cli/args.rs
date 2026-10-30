@@ -78,7 +78,12 @@ pub(crate) struct Args {
     pub(crate) resume: Option<String>,
 
     /// Named session instruction profile (Markdown/YAML frontmatter; model, tools and permissions unchanged)
-    #[arg(long = "agent", global = true, value_name = "NAME", conflicts_with = "resume")]
+    #[arg(
+        long = "agent",
+        global = true,
+        value_name = "NAME",
+        conflicts_with = "resume"
+    )]
     pub(crate) agent_profile_name: Option<String>,
 
     /// Internal: launched as a freshly spawned window, so skip heavy local resume bootstrap.

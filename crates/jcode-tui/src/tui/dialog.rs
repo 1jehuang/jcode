@@ -741,7 +741,9 @@ impl Dialog {
     /// are in the subtitle.
     fn hint(&self, view: &View) -> Option<String> {
         if matches!(view.route, Route::Plugin(_)) {
-            return Some("←/→ tabs · Type to search · ↑/↓ navigate · Enter select · Esc back".into());
+            return Some(
+                "←/→ tabs · Type to search · ↑/↓ navigate · Enter select · Esc back".into(),
+            );
         }
         if view.route == Route::PluginAddMarketplace {
             return Some("Type a marketplace source · Enter to add · Esc to cancel".into());

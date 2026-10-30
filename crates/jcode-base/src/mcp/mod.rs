@@ -8,8 +8,8 @@
 pub mod budget;
 mod client;
 mod manager;
-mod plugin_source;
 pub mod oauth;
+mod plugin_source;
 pub mod pool;
 mod protocol;
 mod remote;

@@ -858,7 +858,9 @@ impl App {
                 &mut remote_state,
                 session_to_resume.as_deref(),
                 remote_working_dir.as_deref(),
-                agent_profile_name.as_deref().filter(|_| session_to_resume.is_none()),
+                agent_profile_name
+                    .as_deref()
+                    .filter(|_| session_to_resume.is_none()),
             )
             .await?
             {

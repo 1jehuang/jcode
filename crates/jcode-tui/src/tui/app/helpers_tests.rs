@@ -207,8 +207,14 @@ fn a6api_model_catalog_exposes_model_specific_effort_ladders() {
             models: [
                 ("grok-4.7", &["low", "medium", "high", "xhigh"][..]),
                 ("grok-4.5", &["low", "medium", "high"][..]),
-                ("claude-fable-5.1", &["low", "medium", "high", "xhigh", "max"][..]),
-                ("claude-haiku-5-5", &["low", "medium", "high", "xhigh", "max"][..]),
+                (
+                    "claude-fable-5.1",
+                    &["low", "medium", "high", "xhigh", "max"][..],
+                ),
+                (
+                    "claude-haiku-5-5",
+                    &["low", "medium", "high", "xhigh", "max"][..],
+                ),
                 ("gemini-3.5-flash", &["low", "medium", "high"][..]),
             ]
             .into_iter()
@@ -224,8 +230,14 @@ fn a6api_model_catalog_exposes_model_specific_effort_ladders() {
     for (model, mut expected) in [
         ("grok-4.7", vec!["low", "medium", "high", "xhigh"]),
         ("grok-4.5", vec!["low", "medium", "high"]),
-        ("claude-fable-5.1", vec!["low", "medium", "high", "xhigh", "max"]),
-        ("claude-haiku-5-5", vec!["low", "medium", "high", "xhigh", "max"]),
+        (
+            "claude-fable-5.1",
+            vec!["low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            "claude-haiku-5-5",
+            vec!["low", "medium", "high", "xhigh", "max"],
+        ),
         ("gemini-3.5-flash", vec!["low", "medium", "high"]),
     ] {
         expected.extend(["swarm", "swarm-deep"]);

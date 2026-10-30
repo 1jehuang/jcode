@@ -72,6 +72,26 @@ fn catalog_without_image_modality_keeps_legacy_behaviour() {
     );
 }
 
+#[test]
+fn vsllm_does_not_infer_image_input_without_catalog_declaration() {
+    let _lock = ENV_LOCK.lock();
+    let _key = EnvVarGuard::set("VSLLM_API_KEY", "test-key");
+
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://vsllm.cc/v1".to_string(),
+        api_key_env: Some("VSLLM_API_KEY".to_string()),
+        model_catalog: true,
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("vsllm", &profile)
+        .expect("VSLLM profile should initialize");
+    provider
+        .set_model("claude-sonnet-4-6")
+        .expect("VSLLM accepts catalog model ids");
+
+    assert!(!provider.supports_image_input());
+}
+
 /// A model absent from the catalog keeps the provider-level fallback.
 #[test]
 fn absent_catalog_entry_keeps_provider_fallback() {

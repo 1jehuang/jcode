@@ -58,7 +58,10 @@ async fn immediately_cancelled_prompts_remain_visible_in_rewind_history() {
     let mut agent = Agent::new(Arc::new(PendingProvider), Registry::empty());
     let (tx, _rx) = tokio_mpsc::unbounded_channel();
 
-    for prompt in ["first promptly interrupted prompt", "second promptly interrupted prompt"] {
+    for prompt in [
+        "first promptly interrupted prompt",
+        "second promptly interrupted prompt",
+    ] {
         {
             let turn = agent.run_once_streaming_mpsc(prompt, vec![], None, tx.clone());
             tokio::pin!(turn);
