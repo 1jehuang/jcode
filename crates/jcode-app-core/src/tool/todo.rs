@@ -1226,6 +1226,10 @@ impl Tool for TodoTool {
          Mark work in_progress before starting and completed as soon as it is done. \
          Keep the live list current after meaningful steps. Use short titles, with \
          longer context in details. Organize parallel lanes within sequential phases. \
+         A lane may set `after` to prerequisite todo IDs in earlier phases, replacing \
+         the whole-phase barrier so it can start once all those items are completed. \
+         Omit `after` for normal phase ordering. Incremental `lane_after` edits on one \
+         item update its entire lane; null restores normal ordering. \
          Set waiting_on to existing background task IDs or swarm await_members dependency IDs from this session when work \
          must wait. They block only while running, never after completion. Saving \
          enables completion notify/wake. Use [] or null to clear waiting_on. \
@@ -1466,7 +1470,7 @@ impl Tool for TodoTool {
         item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Replace plan: sequential phases, parallel lanes, ordered items. [] clears.",
+            "description": "Replace plan: sequential phases, parallel lanes, ordered items. A lane's optional after todo IDs replace its phase barrier for early start. [] clears.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,

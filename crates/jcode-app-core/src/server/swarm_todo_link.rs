@@ -5,7 +5,8 @@
 //!
 //! * Todos -> plan: [`plan_items_from_todos`] turns each lane of open todos
 //!   into one plan item (`lane:<stage>:<group>`), so one agent owns a lane.
-//!   Stages become dependencies, so the model never writes `blocked_by` ids.
+//!   Stages become default dependencies. Optional lane prerequisites name
+//!   individual todo IDs, without requiring model-written plan `blocked_by` ids.
 //! * Assignment: [`link_assignment`] tags the lane's todos with the worker and
 //!   seeds the worker's own todo list with the lane. From then on every save
 //!   on either side mirrors into the other (see `todo::link_worker_lane`).
