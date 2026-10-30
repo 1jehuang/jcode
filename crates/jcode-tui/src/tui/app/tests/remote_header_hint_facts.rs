@@ -50,6 +50,12 @@ fn same_model_account_acknowledgement_redraws_and_replaces_identity() {
         let before = app.display_messages.len();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         for label in [Some("work"), None] {
+            if let Some(label) = label {
+                app.pending_account_switch_target = Some(crate::tui::AccountPickerAction::Switch {
+                    provider_id: "openai".into(),
+                    label: label.into(),
+                });
+            }
             let event = serde_json::from_value(serde_json::json!({
                 "type": "model_changed",
                 "id": 0,
@@ -61,6 +67,15 @@ fn same_model_account_acknowledgement_redraws_and_replaces_identity() {
             .unwrap();
             assert!(app.handle_server_event(event, &mut remote));
             assert!(!app.remote_model_switch_in_flight);
+            assert!(app.pending_account_switch_target.is_none());
+            assert_eq!(
+                app.session.route_api_method.as_deref(),
+                Some(if label.is_some() {
+                    "openai-oauth@work"
+                } else {
+                    "openai-oauth"
+                })
+            );
             assert_eq!(app.remote_provider_oauth_account_label.as_deref(), label);
             assert_eq!(
                 crate::tui::TuiState::startup_oauth_account_label(&app).as_deref(),
@@ -89,6 +104,11 @@ fn failed_account_acknowledgement_redraws_without_replacing_identity() {
         let mut app = provisional_facts_app("gpt-6.1-sol");
         app.remote_provider_oauth_account_label = Some("personal".into());
         app.remote_model_switch_in_flight = true;
+        app.session.route_api_method = Some("openai-oauth@personal".into());
+        app.pending_account_switch_target = Some(crate::tui::AccountPickerAction::Switch {
+            provider_id: "openai".into(),
+            label: "work".into(),
+        });
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         let event = serde_json::from_value(serde_json::json!({
             "type": "model_changed",
@@ -100,10 +120,70 @@ fn failed_account_acknowledgement_redraws_without_replacing_identity() {
         .unwrap();
         assert!(app.handle_server_event(event, &mut remote));
         assert!(!app.remote_model_switch_in_flight);
+        assert!(app.pending_account_switch_target.is_none());
+        assert_eq!(
+            app.session.route_api_method.as_deref(),
+            Some("openai-oauth@personal")
+        );
+        assert_eq!(
+            app.status_notice().as_deref(),
+            Some("Account switch failed")
+        );
         assert_eq!(
             app.remote_provider_oauth_account_label.as_deref(),
             Some("personal")
         );
+    });
+}
+
+#[test]
+fn queued_account_acknowledgement_preserves_newer_target_and_syncs_route() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for (provider, method) in [("OpenAI", "openai-oauth"), ("Claude", "claude-oauth")] {
+            let mut app = provisional_facts_app("same-model");
+            app.remote_session_facts_provisional = false;
+            app.remote_provider_name = Some(provider.into());
+            app.remote_provider_oauth_account_label = Some("personal".into());
+            app.session.route_api_method = Some(format!("{method}@personal"));
+            let target = crate::tui::AccountPickerAction::Switch {
+                provider_id: provider.to_lowercase(),
+                label: "latest".into(),
+            };
+            app.pending_account_switch_target = Some(target.clone());
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            for label in ["earlier", "latest", "latest"] {
+                app.set_status_notice("Account switch requested");
+                let event = serde_json::from_value(serde_json::json!({
+                    "type": "model_changed",
+                    "id": 0,
+                    "model": "same-model",
+                    "provider_name": provider,
+                    "provider_oauth_account_label": label,
+                    "resolved_credential": "oauth"
+                }))
+                .unwrap();
+                // Repeating an already-active target still acknowledges success.
+                if label == "latest" && app.pending_account_switch_target.is_none() {
+                    app.pending_account_switch_target = Some(target.clone());
+                }
+                assert!(app.handle_server_event(event, &mut remote));
+                assert_eq!(
+                    app.session.route_api_method,
+                    Some(format!("{method}@{label}"))
+                );
+                assert_eq!(
+                    app.pending_account_switch_target.as_ref(),
+                    if label == "earlier" {
+                        Some(&target)
+                    } else {
+                        None
+                    }
+                );
+                assert_eq!(app.status_notice(), Some(format!("Account → {label}")));
+            }
+        }
     });
 }
 
