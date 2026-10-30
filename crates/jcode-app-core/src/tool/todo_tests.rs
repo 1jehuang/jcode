@@ -174,6 +174,77 @@ fn tool_is_named_todo() {
 }
 
 #[test]
+fn new_in_progress_todo_claims_self_but_other_new_statuses_do_not() {
+    for status in ["pending", "in_progress", "completed", "cancelled"] {
+        let mut item = todo_in_group(None, "new");
+        item.status = status.into();
+        let mut incoming = vec![item];
+
+        merge_confidence_history(&[], &mut incoming);
+
+        let expected = (status == "in_progress").then_some("@self");
+        assert_eq!(incoming[0].assigned_to.as_deref(), expected, "{status}");
+    }
+}
+
+#[test]
+fn transition_into_in_progress_claims_self() {
+    for status in ["pending", "completed", "cancelled"] {
+        let mut previous = todo_in_group(None, "existing");
+        previous.status = status.into();
+        let mut incoming = vec![previous.clone()];
+        incoming[0].status = "in_progress".into();
+
+        merge_confidence_history(&[previous], &mut incoming);
+
+        assert_eq!(incoming[0].assigned_to.as_deref(), Some("@self"), "{status}");
+    }
+}
+
+#[test]
+fn rewriting_legacy_unassigned_in_progress_todo_does_not_claim_self() {
+    let mut previous = todo_in_group(None, "legacy");
+    previous.status = "in_progress".into();
+    let mut incoming = vec![previous.clone()];
+    incoming[0].content = "updated description".into();
+    incoming[0].confidence = Some(crate::todo::ConfidenceState::Validated);
+
+    merge_confidence_history(&[previous], &mut incoming);
+
+    assert_eq!(incoming[0].assigned_to, None);
+}
+
+#[test]
+fn starting_or_rewriting_todo_preserves_previous_worker_assignment() {
+    for status in ["pending", "in_progress", "completed", "cancelled"] {
+        let mut previous = todo_in_group(None, "worker-owned");
+        previous.status = status.into();
+        previous.assigned_to = Some("session_worker".into());
+        let mut incoming = vec![todo_in_group(None, "worker-owned")];
+        incoming[0].status = "in_progress".into();
+
+        merge_confidence_history(&[previous], &mut incoming);
+
+        assert_eq!(
+            incoming[0].assigned_to.as_deref(),
+            Some("session_worker"),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn new_in_progress_todo_preserves_explicit_worker_assignment() {
+    let mut incoming = vec![todo_in_group(None, "new-worker-owned")];
+    incoming[0].status = "in_progress".into();
+    incoming[0].assigned_to = Some("session_worker".into());
+
+    merge_confidence_history(&[], &mut incoming);
+
+    assert_eq!(incoming[0].assigned_to.as_deref(), Some("session_worker"));
+}
+
+#[test]
 fn add_schema_declares_all_todo_fields_and_conforms_to_gemini() {
     let schema = TodoTool::new().parameters_schema();
     let add = &schema["properties"]["add"]["items"];

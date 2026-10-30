@@ -560,6 +560,53 @@ mod tests {
     }
 
     #[test]
+    fn flat_plan_hands_self_or_previous_worker_assignment_to_exact_worker() {
+        for owner in ["@self", "session_previous_worker"] {
+            let mut todos = vec![todo("a", "in_progress", None)];
+            todos[0].assigned_to = Some(owner.into());
+            let item = PlanItem {
+                id: "a".into(),
+                content: "task a".into(),
+                status: "running".into(),
+                priority: "high".into(),
+                subsystem: None,
+                file_scope: vec![],
+                blocked_by: vec![],
+                assigned_to: Some("session_next_worker".into()),
+            };
+
+            assert!(apply_plan(&mut todos, std::slice::from_ref(&item)), "{owner}");
+            assert_eq!(todos[0].assigned_to.as_deref(), Some("session_next_worker"));
+            assert_eq!(todos[0].status, "in_progress");
+            assert!(
+                !apply_plan(&mut todos, &[item]),
+                "an exact worker match must be a no-op"
+            );
+        }
+    }
+
+    #[test]
+    fn lane_plan_hands_self_assignment_to_worker_without_changing_statuses() {
+        let mut todos = vec![laned("p1", 1, "parser"), laned("p2", 1, "parser")];
+        todos[0].status = "in_progress".into();
+        todos[0].assigned_to = Some("@self".into());
+        todos[1].assigned_to = Some("session_worker".into());
+        let mut items = plan_items_from_todos(&todos);
+        items[0].assigned_to = Some("session_worker".into());
+        items[0].status = "running".into();
+
+        assert!(apply_plan(&mut todos, &items));
+        assert!(
+            todos
+                .iter()
+                .all(|todo| todo.assigned_to.as_deref() == Some("session_worker"))
+        );
+        assert_eq!(todos[0].status, "in_progress");
+        assert_eq!(todos[1].status, "pending");
+        assert!(!apply_plan(&mut todos, &items));
+    }
+
+    #[test]
     fn lane_plan_resyncs_from_todos_keeping_running_state() {
         let mut todos = vec![laned("p1", 1, "parser"), laned("u1", 1, "ui")];
         let mut plan = plan_items_from_todos(&todos);
