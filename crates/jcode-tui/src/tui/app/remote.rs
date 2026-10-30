@@ -588,66 +588,19 @@ async fn apply_terminal_event<B: Backend>(
                     }
                 }
                 if let Some(selection) = app.pending_account_picker_action.take() {
-                    match selection {
-                        crate::tui::AccountPickerAction::Switch { provider_id, label } => {
-                            match provider_id.as_str() {
-                                "claude" => {
-                                    if let Err(e) = crate::auth::claude::set_active_account(&label)
-                                    {
-                                        app.push_display_message(DisplayMessage::error(format!(
-                                            "Failed to switch account: {}",
-                                            e
-                                        )));
-                                    } else {
-                                        crate::auth::AuthStatus::invalidate_cache();
-                                        app.set_context_limit_and_sync_budget(
-                                            app.provider.context_window(),
-                                        );
-                                        let _ = remote.switch_anthropic_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(
-                                            crate::tui::app::helpers::account_switch_notice(
-                                                "Anthropic",
-                                                &label,
-                                            ),
-                                        ));
-                                        app.set_status_notice(format!(
-                                            "Account: switched to {}",
-                                            label
-                                        ));
-                                    }
-                                }
-                                "openai" => {
-                                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                                        app.push_display_message(DisplayMessage::error(format!(
-                                            "Failed to switch OpenAI account: {}",
-                                            e
-                                        )));
-                                    } else {
-                                        crate::auth::AuthStatus::invalidate_cache();
-                                        app.set_context_limit_and_sync_budget(
-                                            app.provider.context_window(),
-                                        );
-                                        let _ = remote.switch_openai_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(
-                                            crate::tui::app::helpers::account_switch_notice(
-                                                "OpenAI", &label,
-                                            ),
-                                        ));
-                                        app.set_status_notice(format!(
-                                            "OpenAI account: switched to {}",
-                                            label
-                                        ));
-                                    }
-                                }
-                                _ => app.push_display_message(DisplayMessage::error(format!(
-                                    "Provider `{}` does not support account switching.",
-                                    provider_id
-                                ))),
-                            }
+                    if let crate::tui::AccountPickerAction::Switch { provider_id, label } =
+                        selection
+                    {
+                        let command = super::auth::AccountCommand::Switch { provider_id, label };
+                        if let Err(error) =
+                            super::auth::execute_account_command_remote(app, command, remote).await
+                        {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to request remote account switch: {error}"
+                            )));
                         }
-                        crate::tui::AccountPickerAction::Add { .. }
-                        | crate::tui::AccountPickerAction::Replace { .. }
-                        | crate::tui::AccountPickerAction::OpenCenter { .. } => {}
+                    } else {
+                        app.remote_account_management_notice();
                     }
                 }
             }

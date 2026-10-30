@@ -7,7 +7,93 @@ use super::auth_account_picker_saved_accounts::{
 use super::*;
 
 impl App {
+    pub(crate) fn remote_account_management_notice(&mut self) {
+        self.push_display_message(DisplayMessage::system(
+            "Remote accounts: only daemon-reported Claude/OpenAI OAuth account inventory and switching are supported here. Account creation/replacement/removal, diagnostics, provider settings and saved defaults must be managed directly on the remote host. For SSH login use /login <provider>. No local credentials or settings were accessed.",
+        ));
+    }
+
+    /// AccountUsage contains named OAuth inventory, not a complete auth catalog.
+    /// Never fill missing/pending remote data from the client's auth store.
+    pub(crate) fn open_remote_account_picker(&mut self, provider_filter: Option<&str>) {
+        self.account_picker_overlay = None;
+        self.inline_interactive_state = None;
+        let Some(scope) = self.inline_account_picker_scope_key(provider_filter) else {
+            self.remote_account_management_notice();
+            return;
+        };
+        let Some((claude, openai)) = crate::usage::remote_account_list() else {
+            self.push_display_message(DisplayMessage::system(
+                "Remote account inventory has not arrived. Retry /accounts after the daemon responds. No local accounts were read.",
+            ));
+            return;
+        };
+        let mut entries = Vec::new();
+        for (provider_id, display, accounts) in
+            [("claude", "Claude", claude), ("openai", "OpenAI", openai)]
+        {
+            if scope != "all" && scope != provider_id {
+                continue;
+            }
+            for account in accounts {
+                let mut entry = Self::account_credential_entry(
+                    account_picker_display_name(
+                        display,
+                        &account.label,
+                        2,
+                        account.email.as_deref(),
+                    ),
+                    display.to_string(),
+                    "remote OAuth".to_string(),
+                    "Daemon-reported account. Enter requests a switch on the remote host."
+                        .to_string(),
+                    crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                        provider_id: provider_id.to_string(),
+                        label: account.label.clone(),
+                    }),
+                );
+                entry.is_current = self.remote_provider_oauth_account_label.as_deref()
+                    == Some(account.label.as_str())
+                    && self.remote_resolved_credential
+                        != Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                    && self
+                        .remote_provider_name
+                        .as_deref()
+                        .and_then(jcode_provider_core::parse_provider_hint)
+                        == jcode_provider_core::parse_provider_hint(provider_id);
+                entries.push(entry);
+            }
+        }
+        if entries.is_empty() {
+            self.push_display_message(DisplayMessage::system(
+                "The remote daemon reports no named OAuth accounts in this scope. API-key and other provider credentials are not included in this inventory. Manage accounts on the remote host, or use /login <provider> for SSH login.",
+            ));
+            return;
+        }
+        let selected = entries
+            .iter()
+            .position(|entry| entry.is_current)
+            .unwrap_or(0);
+        self.inline_view_state = None;
+        self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
+            kind: crate::tui::PickerKind::Account,
+            filtered: (0..entries.len()).collect(),
+            entries,
+            selected,
+            column: 0,
+            filter: String::new(),
+            preview: false,
+        });
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.set_status_notice("Remote OAuth accounts: Enter requests switch, Esc closes. Management requires the remote host.");
+    }
+
     pub(crate) fn edit_selected_account_priority(&mut self, code: KeyCode) -> Result<()> {
+        if self.is_remote {
+            self.remote_account_management_notice();
+            return Ok(());
+        }
         if super::commands_dispatch::ssh_local_action_blocked(self, "Saving account priorities") {
             return Ok(());
         }
@@ -45,6 +131,10 @@ impl App {
     }
 
     pub(crate) fn open_account_center(&mut self, provider_filter: Option<&str>) {
+        if self.is_remote || crate::tui::is_ssh_remote() {
+            self.open_remote_account_picker(provider_filter);
+            return;
+        }
         use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
 
         crate::telemetry::record_setup_step_once("account_center_opened");
@@ -365,6 +455,10 @@ impl App {
     }
 
     pub(crate) fn open_account_picker(&mut self, provider_filter: Option<&str>) {
+        if self.is_remote || crate::tui::is_ssh_remote() {
+            self.open_remote_account_picker(provider_filter);
+            return;
+        }
         let Some(scope_key) = self.inline_account_picker_scope_key(provider_filter) else {
             if let Some(provider_id) = provider_filter {
                 self.push_display_message(DisplayMessage::system(format!(

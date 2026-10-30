@@ -2543,29 +2543,31 @@ impl App {
     }
 
     fn handle_account_picker_selection(&mut self, action: AccountPickerAction) {
+        if self.is_remote || crate::tui::is_ssh_remote() {
+            if let AccountPickerAction::Switch { provider_id, label } = action {
+                self.set_status_notice(format!(
+                    "Account switch queued: {} ({})",
+                    label, provider_id
+                ));
+                self.pending_account_picker_action =
+                    Some(AccountPickerAction::Switch { provider_id, label });
+            } else {
+                self.remote_account_management_notice();
+            }
+            return;
+        }
         if super::commands_dispatch::ssh_local_action_blocked(self, "Local account selection") {
             return;
         }
         match action {
-            AccountPickerAction::Switch { provider_id, label } => {
-                if self.is_remote {
-                    self.pending_account_picker_action = Some(AccountPickerAction::Switch {
-                        provider_id: provider_id.clone(),
-                        label: label.clone(),
-                    });
-                    self.set_status_notice(format!("Account → {} ({})", label, provider_id));
-                    return;
-                }
-
-                match provider_id.as_str() {
-                    "claude" => self.switch_account(&label),
-                    "openai" => self.switch_openai_account(&label),
-                    _ => self.push_display_message(DisplayMessage::error(format!(
-                        "Provider `{}` does not support account switching.",
-                        provider_id
-                    ))),
-                }
-            }
+            AccountPickerAction::Switch { provider_id, label } => match provider_id.as_str() {
+                "claude" => self.switch_account(&label),
+                "openai" => self.switch_openai_account(&label),
+                _ => self.push_display_message(DisplayMessage::error(format!(
+                    "Provider `{}` does not support account switching.",
+                    provider_id
+                ))),
+            },
             AccountPickerAction::Add { provider_id } => match provider_id.as_str() {
                 "claude" => match crate::auth::claude::next_account_label() {
                     Ok(label) => self.start_claude_login_for_account(&label),

@@ -372,6 +372,15 @@ pub(crate) fn account_command_from_picker(
 }
 
 pub(crate) fn execute_account_command_local(app: &mut App, command: AccountCommand) {
+    if app.is_remote || crate::tui::is_ssh_remote() {
+        match command {
+            AccountCommand::OpenOverlay { provider_filter } => {
+                app.open_remote_account_picker(provider_filter.as_deref())
+            }
+            _ => app.remote_account_management_notice(),
+        }
+        return;
+    }
     match command {
         AccountCommand::OpenOverlay { provider_filter } => {
             if app.should_open_inline_account_picker(provider_filter.as_deref()) {
@@ -447,6 +456,9 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
     }
 }
 
+/// Remote account commands must never fall through to laptop auth or config.
+/// The wire protocol supports switching named OAuth accounts, but has no
+/// account removal, doctor, settings persistence, or account creation request.
 pub(crate) async fn execute_account_command_remote(
     app: &mut App,
     command: AccountCommand,
@@ -454,114 +466,52 @@ pub(crate) async fn execute_account_command_remote(
 ) -> anyhow::Result<()> {
     match command {
         AccountCommand::OpenOverlay { provider_filter } => {
-            if app.should_open_inline_account_picker(provider_filter.as_deref()) {
-                app.open_account_picker(provider_filter.as_deref());
-            } else {
-                app.open_account_center(provider_filter.as_deref());
-            }
+            app.open_remote_account_picker(provider_filter.as_deref());
+            remote.poll_account_usage().await?;
         }
-        AccountCommand::Doctor { provider_id } => {
-            execute_account_command_local(app, AccountCommand::Doctor { provider_id })
-        }
-        AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
-            "claude" => {
-                if let Err(e) = crate::auth::claude::set_active_account(&label) {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to switch account: {}",
-                        e
-                    )));
+        AccountCommand::Switch { provider_id, label } => {
+            match provider_id.as_str() {
+                "claude" => remote.switch_anthropic_account(&label).await?,
+                "openai" => remote.switch_openai_account(&label).await?,
+                _ => {
+                    app.remote_account_management_notice();
                     return Ok(());
                 }
-                crate::auth::AuthStatus::invalidate_cache();
-                app.set_context_limit_and_sync_budget(app.provider.context_window());
-                remote.switch_anthropic_account(&label).await?;
-                app.push_display_message(DisplayMessage::system(
-                    crate::tui::app::helpers::account_switch_notice("Anthropic", &label),
-                ));
-                app.set_status_notice(format!("Account: switched to {}", label));
             }
-            "openai" => {
-                if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to switch OpenAI account: {}",
-                        e
-                    )));
-                    return Ok(());
-                }
-                crate::auth::AuthStatus::invalidate_cache();
-                app.set_context_limit_and_sync_budget(app.provider.context_window());
-                remote.switch_openai_account(&label).await?;
-                app.push_display_message(DisplayMessage::system(
-                    crate::tui::app::helpers::account_switch_notice("OpenAI", &label),
-                ));
-                app.set_status_notice(format!("OpenAI account: switched to {}", label));
-            }
-            _ => execute_account_command_local(app, AccountCommand::Switch { provider_id, label }),
-        },
+            // Sending is not acknowledgement. The daemon publishes the actual
+            // account/provider state or an error asynchronously.
+            app.set_status_notice(format!("Account switch requested: {label}"));
+        }
         AccountCommand::SwitchShorthand { label } => {
-            let has_anthropic = crate::auth::claude::list_accounts()
-                .unwrap_or_default()
-                .iter()
-                .any(|account| account.label == label);
-            let has_openai = crate::auth::codex::list_accounts()
-                .unwrap_or_default()
-                .iter()
-                .any(|account| account.label == label);
-            match (has_anthropic, has_openai) {
-                (true, false) => {
-                    if let Err(e) = crate::auth::claude::set_active_account(&label) {
-                        app.push_display_message(DisplayMessage::error(format!(
-                            "Failed to switch account: {}",
-                            e
-                        )));
-                        return Ok(());
-                    }
-                    crate::auth::AuthStatus::invalidate_cache();
-                    app.set_context_limit_and_sync_budget(app.provider.context_window());
-                    remote.switch_anthropic_account(&label).await?;
-                    app.push_display_message(DisplayMessage::system(
-                        crate::tui::app::helpers::account_switch_notice("Anthropic", &label),
+            let Some((claude, openai)) = crate::usage::remote_account_list() else {
+                app.push_display_message(DisplayMessage::system(
+                    "Remote account inventory is not available yet. Retry /accounts, or use /account claude switch <label> or /account openai switch <label>.",
+                ));
+                remote.poll_account_usage().await?;
+                return Ok(());
+            };
+            let has_claude = claude.iter().any(|account| account.label == label);
+            let has_openai = openai.iter().any(|account| account.label == label);
+            match (has_claude, has_openai) {
+                (true, false) => remote.switch_anthropic_account(&label).await?,
+                (false, true) => remote.switch_openai_account(&label).await?,
+                _ => {
+                    app.push_display_message(DisplayMessage::error(
+                        "Remote account label is missing or ambiguous. Use /account claude switch <label> or /account openai switch <label>.",
                     ));
-                    app.set_status_notice(format!("Account: switched to {}", label));
+                    return Ok(());
                 }
-                (false, true) => {
-                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                        app.push_display_message(DisplayMessage::error(format!(
-                            "Failed to switch OpenAI account: {}",
-                            e
-                        )));
-                        return Ok(());
-                    }
-                    crate::auth::AuthStatus::invalidate_cache();
-                    app.set_context_limit_and_sync_budget(app.provider.context_window());
-                    remote.switch_openai_account(&label).await?;
-                    app.push_display_message(DisplayMessage::system(
-                        crate::tui::app::helpers::account_switch_notice("OpenAI", &label),
-                    ));
-                    app.set_status_notice(format!("OpenAI account: switched to {}", label));
-                }
-                _ => execute_account_command_local(app, AccountCommand::SwitchShorthand { label }),
             }
+            app.set_status_notice(format!("Account switch requested: {label}"));
         }
-        AccountCommand::SetOpenAiTransport(value) => {
-            save_openai_transport_setting_local(app, value.as_deref());
-            remote
-                .set_transport(value.as_deref().unwrap_or("auto"))
-                .await?;
+        AccountCommand::Login { provider_id }
+        | AccountCommand::Add {
+            provider_id,
+            label: None,
+        } if crate::tui::is_ssh_remote() => {
+            app.handle_ssh_login_command(&format!("/login {provider_id}"));
         }
-        AccountCommand::SetOpenAiEffort(value) => {
-            save_openai_effort_setting_local(app, value.as_deref());
-            if let Some(value) = value.as_deref() {
-                remote.set_reasoning_effort(value).await?;
-            }
-        }
-        AccountCommand::SetOpenAiFast(enabled) => {
-            save_openai_fast_setting_local(app, enabled);
-            remote
-                .set_service_tier(if enabled { "priority" } else { "off" })
-                .await?;
-        }
-        other => execute_account_command_local(app, other),
+        _ => app.remote_account_management_notice(),
     }
     Ok(())
 }
