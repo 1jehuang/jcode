@@ -349,18 +349,17 @@ fn priority_row(mut row: Line<'static>, priority: u32, tiers: &[u32]) -> Line<'s
     };
     // Only decorate the identity span. Arrows, status dots and the info widget's
     // usage-limit bars retain their established glyphs and colors.
-    if let Some(identity) = row.spans.get_mut(2) {
-        if dimming > 0
-            && let Some(base) = identity.style.fg
-        {
-            let (r, g, b) = match base {
-                Color::Rgb(r, g, b) => (r, g, b),
-                Color::Indexed(index) => jcode_tui_style::indexed_to_rgb(index),
-                _ => return row,
-            };
-            let scale = |value: u8| (usize::from(value) * (100 - dimming) / 100) as u8;
-            identity.style = identity.style.fg(Color::Rgb(scale(r), scale(g), scale(b)));
-        }
+    if let Some(identity) = row.spans.get_mut(2)
+        && dimming > 0
+        && let Some(base) = identity.style.fg
+    {
+        let (r, g, b) = match base {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Indexed(index) => jcode_tui_style::indexed_to_rgb(index),
+            _ => return row,
+        };
+        let scale = |value: u8| (usize::from(value) * (100 - dimming) / 100) as u8;
+        identity.style = identity.style.fg(Color::Rgb(scale(r), scale(g), scale(b)));
     }
     row
 }
