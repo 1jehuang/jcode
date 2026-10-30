@@ -2,6 +2,48 @@ use super::*;
 use ratatui::style::Modifier;
 
 #[test]
+fn image_tags_are_colored_without_changing_input_geometry() {
+    for width in [3, 8, 80] {
+        let input = "界 [image 1] hi [image 22]";
+        let (lines, cursor_line, cursor_col) =
+            wrap_input_text(input, input.len(), width, "1", "> ", Color::White, 3);
+        let segments = wrap_input_segments(input, width);
+        let mut highlighted = String::new();
+        for (index, line) in lines.iter().enumerate() {
+            let prefix = if index == 0 { 2 } else { 1 };
+            let spans = &line.spans[prefix..];
+            assert_eq!(
+                spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>(),
+                segments[index].text
+            );
+            for span in spans {
+                if span.style.fg == Some(rgb(102, 204, 221)) {
+                    assert!(span.style.add_modifier.contains(Modifier::BOLD));
+                    highlighted.push_str(&span.content);
+                }
+            }
+        }
+        assert_eq!(highlighted, "[image 1][image 22]");
+        assert_eq!(cursor_line, segments.len() - 1);
+        assert_eq!(cursor_col, segments.last().unwrap().display_width);
+    }
+}
+
+#[test]
+fn malformed_image_tags_remain_plain_text() {
+    let input = "[image ] [image x] [image 1 [image ２]";
+    let (lines, _, _) = wrap_input_text(input, 0, 80, "1", "> ", Color::White, 3);
+    assert!(
+        lines[0].spans[2..]
+            .iter()
+            .all(|span| span.style == Style::default())
+    );
+}
+
+#[test]
 fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
     let mut status = crate::protocol::SwarmLiveStatus {
         phase: "running_tool".into(),

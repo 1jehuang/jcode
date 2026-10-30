@@ -2490,6 +2490,18 @@ pub(crate) fn wrap_input_text<'a>(
     caret_color: Color,
     prompt_len: usize,
 ) -> (Vec<Line<'a>>, usize, usize) {
+    let image_ranges: Vec<std::ops::Range<usize>> = input
+        .match_indices("[image ")
+        .filter_map(|(start, _)| {
+            let suffix = &input[start + 7..];
+            let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 || !suffix[digits..].starts_with(']') {
+                return None;
+            }
+            let char_start = input[..start].chars().count();
+            Some(char_start..char_start + 8 + digits)
+        })
+        .collect();
     let cursor_char_pos = crate::tui::core::byte_offset_to_char_index(input, cursor_pos);
     let wrapped_segments = wrap_input_segments(input, line_width);
     let mut lines: Vec<Line> = Vec::new();
@@ -2507,19 +2519,36 @@ pub(crate) fn wrap_input_text<'a>(
             found_cursor = true;
         }
 
-        if idx == 0 {
+        let mut spans = if idx == 0 {
             let num_color = rainbow_prompt_color(0);
-            lines.push(Line::from(vec![
+            vec![
                 Span::styled(num_str.to_string(), Style::default().fg(num_color)),
                 Span::styled(prompt_char.to_string(), Style::default().fg(caret_color)),
-                Span::raw(segment.text.clone()),
-            ]));
+            ]
         } else {
-            lines.push(Line::from(vec![
-                Span::raw(" ".repeat(prompt_len)),
-                Span::raw(segment.text.clone()),
-            ]));
+            vec![Span::raw(" ".repeat(prompt_len))]
+        };
+        // Apply styling after wrapping, preserving cursor and click geometry
+        // even when an attachment tag crosses a terminal row boundary.
+        let mut text = String::new();
+        let mut previous_style = Style::default();
+        for (offset, ch) in segment.text.chars().enumerate() {
+            let position = segment.start_char + offset;
+            let style = if image_ranges.iter().any(|range| range.contains(&position)) {
+                Style::default().fg(rgb(102, 204, 221)).bold()
+            } else {
+                Style::default()
+            };
+            if style != previous_style && !text.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut text), previous_style));
+            }
+            previous_style = style;
+            text.push(ch);
         }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, previous_style));
+        }
+        lines.push(Line::from(spans));
     }
 
     if !found_cursor {
