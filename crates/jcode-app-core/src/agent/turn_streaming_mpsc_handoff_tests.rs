@@ -117,3 +117,52 @@ async fn manual_background_and_shutdown_do_not_wait_for_budget() {
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn ask_user_waits_past_budget_and_returns_its_answer() {
+    let registry = Registry::empty();
+    registry
+        .register("ask_user".into(), Arc::new(WaitProbe))
+        .await;
+    let ctx = ToolContext {
+        session_id: "foreground-ask-user-probe".into(),
+        message_id: "message".into(),
+        tool_call_id: "ask-user-probe".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+    let start = tokio::time::Instant::now();
+    let result = execute_with_background(
+        registry,
+        "ask_user".into(),
+        serde_json::json!({"question": "Continue?"}),
+        ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(start.elapsed(), Duration::from_secs(8));
+    assert_eq!(result.output, "wait finished");
+}
+
+#[tokio::test(start_paused = true)]
+async fn streaming_ask_user_wait_is_not_automatically_backgrounded() {
+    for input in [
+        serde_json::json!({}),
+        serde_json::json!({"action": "choose"}),
+    ] {
+        assert!(!auto_background_allowed("ask_user", &input));
+        let bg = InterruptSignal::new();
+        let shutdown = InterruptSignal::new();
+        tokio::select! {
+            biased;
+            _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("ask_user", &input)) => {
+                panic!("human decision was automatically backgrounded");
+            }
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+        }
+        shutdown.fire();
+        assert!(!wait_for_tool_handoff(&bg, &shutdown, false).await);
+    }
+}

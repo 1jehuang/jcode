@@ -2089,7 +2089,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         }
         history.push_str("\nUse /rewind N to rewind to message N (removes all messages after). After rewinding, use /rewind undo to restore the removed messages.");
 
-        app.push_display_message(DisplayMessage::system(history));
+        app.push_display_message(DisplayMessage::system(history).with_title("Rewind"));
         return true;
     }
 

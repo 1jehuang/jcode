@@ -76,7 +76,7 @@ fn render_single_line_system_notice(
     // readable. Markdown or a newline alone is not a reason to expand a notice.
     if matches!(
         msg.title.as_deref(),
-        Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion")
+        Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion" | "Rewind")
     ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
@@ -362,8 +362,10 @@ pub(super) fn is_kv_cache_footer(msg: &DisplayMessage) -> bool {
 /// Keep the same separator policy in full/incremental layout and overflow estimates.
 pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
     // Thinking and tool calls form one compact activity stream.
-    !matches!(msg.effective_role(), "tool" | "meta" | "swarm" | "reasoning")
-        && !is_kv_cache_footer(msg)
+    !matches!(
+        msg.effective_role(),
+        "tool" | "meta" | "swarm" | "reasoning"
+    ) && !is_kv_cache_footer(msg)
 }
 
 pub(crate) fn render_system_message(

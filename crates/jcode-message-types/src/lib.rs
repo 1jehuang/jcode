@@ -559,8 +559,8 @@ fn dynamic_system_context_message(system_dynamic: &str) -> Option<Message> {
     )))
 }
 
-/// Insert dynamic system context after the latest fresh user prompt without
-/// disturbing the stable cached history prefix.
+/// Insert dynamic system context after the latest user turn or compaction boundary
+/// without disturbing the stable cached history prefix or moving on tool rounds.
 pub fn messages_with_dynamic_system_context(
     messages: &[Message],
     system_dynamic: &str,
@@ -572,9 +572,15 @@ pub fn messages_with_dynamic_system_context(
     let mut out = messages.to_vec();
     let insert_at = out
         .iter()
-        .rposition(is_fresh_user_text_message)
+        .rposition(|message| {
+            is_fresh_user_text_message(message)
+                || message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
+        })
         .map(|idx| idx + 1)
-        .unwrap_or(out.len());
+        .unwrap_or(0);
     out.insert(insert_at, dynamic_message);
     out
 }
@@ -949,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_context_appends_when_no_fresh_user_prompt_exists() {
+    fn dynamic_context_prepends_when_no_turn_boundary_exists() {
         let messages = vec![
             Message::assistant_text("assistant"),
             Message::user("<system-reminder>\ninternal\n</system-reminder>"),
@@ -958,13 +964,49 @@ mod tests {
         let out = messages_with_dynamic_system_context(&messages, "Time: 10:00:00 UTC");
 
         assert_eq!(out.len(), 3);
-        assert_role_text(&out[0], Role::Assistant, "assistant");
+        assert!(text_of(&out[0]).contains("Time: 10:00:00 UTC"));
+        assert_role_text(&out[1], Role::Assistant, "assistant");
         assert_role_text(
-            &out[1],
+            &out[2],
             Role::User,
             "<system-reminder>\ninternal\n</system-reminder>",
         );
-        assert!(text_of(&out[2]).contains("Time: 10:00:00 UTC"));
+    }
+
+    #[test]
+    fn dynamic_context_stays_anchored_across_tool_rounds() {
+        for boundary in [
+            Message::user("prompt"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::OpenAICompaction {
+                    encrypted_content: "compact".into(),
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ] {
+            let mut messages = vec![Message::user("older prompt"), boundary];
+            let before = messages_with_dynamic_system_context(&messages, "wake");
+            messages.push(Message::assistant_text("tool round"));
+            let mut result = Message::tool_result("call", "output", false);
+            result.content.push(ContentBlock::Text {
+                text: "tool-associated text is not a prompt".into(),
+                cache_control: None,
+            });
+            messages.push(result);
+            messages.push(Message::user("<system-reminder>internal</system-reminder>"));
+            let after = messages_with_dynamic_system_context(&messages, "wake");
+            assert_eq!(
+                cache_relevant_messages(&before),
+                cache_relevant_messages(&after[..before.len()])
+            );
+            assert!(text_of(&after[2]).contains("wake"));
+
+            messages.push(Message::user("fresh prompt"));
+            let fresh = messages_with_dynamic_system_context(&messages, "new turn");
+            assert!(text_of(fresh.last().unwrap()).contains("new turn"));
+        }
     }
 
     #[test]
