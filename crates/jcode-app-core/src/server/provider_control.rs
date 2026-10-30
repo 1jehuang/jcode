@@ -1447,6 +1447,84 @@ pub(super) async fn handle_invalidate_anthropic_usage(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
+fn account_switch_selection(
+    agent: &Agent,
+    provider_kind: &str,
+    account_label: &str,
+) -> anyhow::Result<RouteSelection> {
+    use jcode_provider_core::{ActiveProvider, RuntimeKey};
+    let (target, runtime_key, method, provider_label, provider_id) = match provider_kind {
+        "anthropic" => (
+            ActiveProvider::Claude,
+            RuntimeKey::ClaudeOAuth,
+            "claude-oauth",
+            "Claude",
+            "claude",
+        ),
+        "openai" => (
+            ActiveProvider::OpenAI,
+            RuntimeKey::OpenAIOAuth,
+            "openai-oauth",
+            "OpenAI",
+            "openai",
+        ),
+        _ => anyhow::bail!("Unsupported account provider: {provider_kind}"),
+    };
+    let provider = agent.provider_handle();
+    let model = if jcode_provider_core::parse_provider_hint(provider.name()) == Some(target) {
+        // A same-provider account switch must not silently select another model.
+        provider.model()
+    } else {
+        let routes = provider.model_routes();
+        let models: Vec<_> = routes
+            .iter()
+            .filter(|route| {
+                route.available
+                    && RouteSelection::from_model_route(route).runtime_key == runtime_key
+            })
+            .map(|route| route.model.as_str())
+            .collect();
+        crate::auth::lifecycle::preferred_model_for_provider(provider_id, &models)
+            .or_else(|| models.first().map(|model| (*model).to_string()))
+            .or_else(|| {
+                crate::auth::lifecycle::default_model_for_provider(provider_id).map(str::to_owned)
+            })
+            .ok_or_else(|| anyhow::anyhow!("No OAuth model is available for {provider_label}"))?
+    };
+    Ok(RouteSelection {
+        model,
+        runtime_key,
+        api_method: format!("{method}@{account_label}"),
+        provider_label: provider_label.to_string(),
+        detail: String::new(),
+    })
+}
+
+fn apply_account_switch(
+    id: u64,
+    provider_kind: &str,
+    account_label: &str,
+    agent: &mut Agent,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let current = agent.provider_model();
+    let result = account_switch_selection(agent, provider_kind, account_label)
+        .and_then(|selection| agent.set_route_selection(&selection))
+        .map(|_| {
+            agent.reset_provider_session();
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
+            )
+        });
+    // A global login preference is not this session's credential. The explicit
+    // route binds a replacement runtime to the requested account and persists
+    // that pin. Acknowledge it even when the model itself did not change.
+    send_model_changed_result(id, result, current, agent, client_event_tx);
+}
+
 fn spawn_account_switch_refresh(
     id: u64,
     provider_kind: &'static str,
@@ -1480,20 +1558,27 @@ fn spawn_account_switch_refresh(
                 ("request_id", id.to_string()),
             ],
         );
-        let provider = if let Ok(mut agent_guard) = agent.try_lock() {
-            let provider = agent_guard.provider_handle();
-            agent_guard.reset_provider_session();
-            provider
+        if let Ok(mut agent_guard) = agent.try_lock() {
+            apply_account_switch(
+                id,
+                provider_kind,
+                &account_label,
+                &mut agent_guard,
+                &client_event_tx,
+            );
         } else {
             let queued_at = log_provider_control_deferred("account_switch_refresh", id);
             let mut agent_guard = agent.lock().await;
             log_provider_control_lock_acquired("account_switch_refresh", id, queued_at);
-            let provider = agent_guard.provider_handle();
-            agent_guard.reset_provider_session();
+            apply_account_switch(
+                id,
+                provider_kind,
+                &account_label,
+                &mut agent_guard,
+                &client_event_tx,
+            );
             log_provider_control_completed("account_switch_refresh", id, queued_at);
-            provider
-        };
-        provider.invalidate_credentials().await;
+        }
 
         match provider_kind {
             "anthropic" => {

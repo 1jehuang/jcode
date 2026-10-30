@@ -19,6 +19,75 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[tokio::test]
+async fn provider_matrix_account_switch_rebinds_real_runtime_without_changing_model() -> Result<()>
+{
+    use jcode::auth::codex::{JcodeOpenAiAuthFile, OpenAiAccount};
+    use jcode::provider::{RouteSelection, RuntimeKey};
+    let env = TestEnv::new()?;
+    env.clear_profile_keys();
+    let previous_override = jcode::auth::codex::get_active_account_override();
+    struct RestoreOverride(Option<String>);
+    impl Drop for RestoreOverride {
+        fn drop(&mut self) {
+            jcode::auth::codex::set_active_account_override(self.0.take());
+        }
+    }
+    let _restore = RestoreOverride(previous_override);
+    jcode::auth::codex::set_active_account_override(None);
+    jcode::auth::codex::save_auth_file(&JcodeOpenAiAuthFile {
+        openai_accounts: ["first", "second", "third"]
+            .into_iter()
+            .map(|label| OpenAiAccount {
+                label: label.into(),
+                access_token: format!("test-access-{label}"),
+                refresh_token: format!("test-refresh-{label}"),
+                id_token: None,
+                account_id: Some(format!("test-account-{label}")),
+                expires_at: Some(4_000_000_000_000),
+                email: Some(format!("{label}@example.test")),
+            })
+            .collect(),
+        active_openai_account: Some("first".into()),
+    })?;
+    AuthStatus::invalidate_cache();
+    jcode::cli::startup::register_external_provider_runtimes();
+    let runtime: std::sync::Arc<dyn Provider> =
+        std::sync::Arc::new(jcode::provider::MultiProvider::with_preference_fast(true));
+    let mut agent = jcode::agent::Agent::new(runtime, jcode::tool::Registry::empty());
+    agent.persist_session_now()?;
+    let model = agent.provider_handle().model();
+    for label in ["second", "third", "first"] {
+        agent.set_route_selection(&RouteSelection {
+            model: model.clone(),
+            runtime_key: RuntimeKey::OpenAIOAuth,
+            api_method: format!("openai-oauth@{label}"),
+            provider_label: "OpenAI".into(),
+            detail: String::new(),
+        })?;
+        let runtime = agent.provider_handle();
+        assert_eq!(runtime.model(), model);
+        assert_eq!(
+            runtime.serving_oauth_account_label().as_deref(),
+            Some(label)
+        );
+        assert_eq!(
+            runtime.active_oauth_account_email().as_deref(),
+            Some(format!("{label}@example.test").as_str())
+        );
+        let saved = jcode::session::Session::load(agent.session_id())?;
+        assert_eq!(
+            saved.route_api_method.as_deref(),
+            Some(format!("openai-oauth@{label}").as_str())
+        );
+        assert_eq!(
+            jcode::auth::codex::active_account_label().as_deref(),
+            Some("first")
+        );
+    }
+    Ok(())
+}
+
 fn lock_env() -> MutexGuard<'static, ()> {
     let mutex = ENV_LOCK.get_or_init(|| Mutex::new(()));
     match mutex.lock() {

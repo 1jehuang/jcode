@@ -73,6 +73,13 @@ impl App {
             }
             (accounts, current)
         };
+        // Keep repeated presses moving while a busy daemon is still applying
+        // earlier requests. The visible header remains on confirmed identity.
+        let current = self
+            .pending_account_switch_target
+            .as_ref()
+            .and_then(|target| accounts.iter().position(|account| account == target))
+            .or(current);
         let Some(index) = account_cycle_index(accounts.len(), current, forward) else {
             self.set_status_notice("No saved OAuth accounts to switch");
             return;

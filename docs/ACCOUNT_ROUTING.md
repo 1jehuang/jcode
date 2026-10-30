@@ -22,6 +22,12 @@ immediately using the normal account-switch path. They skip API keys and
 management actions such as add, replace, and remove. Remote sessions use only
 the daemon-reported account inventory, never local credentials.
 
+The header's active-account marker follows the daemon's confirmed session
+credential, not the global preferred login or an unacknowledged request. A
+same-provider account switch preserves the selected model. If a response is
+still running, the switch waits until the session is idle. Repeated presses
+continue from the latest requested account while that switch is pending.
+
 ### Plan-based priorities
 
 The plan label is read from locally stored account metadata, without a network

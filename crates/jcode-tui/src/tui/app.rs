@@ -1651,6 +1651,8 @@ pub struct App {
     pending_startup_prompt_echo: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
+    /// Last sent account switch, used only as the cycle cursor until acknowledged.
+    pending_account_switch_target: Option<crate::tui::AccountPickerAction>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching
