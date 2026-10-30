@@ -1432,6 +1432,11 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
+        // SSH workflow state and todo reads belong to the remote daemon.
+        // Even the guardrail/report checks below consult laptop session files.
+        if crate::tui::is_ssh_remote() {
+            return false;
+        }
         if self.guardrail_stops_exhausted_at_turn_end() {
             self.stop_auto_continuation_after_guardrail();
             return false;
@@ -1465,6 +1470,9 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
+        if crate::tui::is_ssh_remote() {
+            return false;
+        }
         // Completion is visible even with /poke off, and never needs another
         // model turn merely to show the plan's remaining weaknesses.
         self.refresh_completed_todo_report(true);
@@ -4292,3 +4300,6 @@ impl App {
 
 #[cfg(test)]
 mod terminal_control_sequence_tests;
+
+#[cfg(test)]
+mod ssh_loop_followup_tests;
