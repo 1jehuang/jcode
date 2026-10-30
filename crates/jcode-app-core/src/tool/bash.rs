@@ -1444,6 +1444,7 @@ impl BashTool {
         let working_dir = ctx.working_dir.clone();
         let cloud_environment = cloud_command_environment(working_dir.as_deref())?;
         let session_id_env = ctx.session_id.clone();
+        let session_environment = crate::session_env::session_env(&session_id_env);
         // Capture before spawning: task-locals do not follow tokio::spawn.
         let client_env_pairs = crate::hooks::client_env_for_tools();
         let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));

@@ -502,6 +502,7 @@ async fn live_agents_are_reserved_together_then_only_selected_agents_evicted() {
 }
 
 #[tokio::test]
+#[allow(clippy::async_yields_async)] // This test intentionally returns a child JoinHandle.
 async fn scoped_admission_allows_unrelated_turn_but_rejects_any_selected_swarm_callback() {
     let _home = TestHome::new();
     let sessions = agents();

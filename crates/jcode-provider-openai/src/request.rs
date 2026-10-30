@@ -723,7 +723,7 @@ mod tests {
                 .filter(|msg| msg.role == Role::Assistant)
                 .count();
             assert_eq!(items.len(), calls * 2);
-            for pair in items.chunks_exact(2) {
+            for pair in items.as_chunks::<2>().0 {
                 assert_eq!(pair[0]["type"], "function_call");
                 assert_eq!(pair[1]["type"], "function_call_output");
                 assert_eq!(pair[0]["call_id"], pair[1]["call_id"]);

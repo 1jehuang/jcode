@@ -415,10 +415,7 @@ async fn shared_server_bash_tool_uses_each_clients_identity_and_cwd() -> Result<
     provider.queue_response(bash_turn("beta"));
     provider.queue_response(final_turn());
 
-    let base = std::env::temp_dir().join(format!(
-        "jcode-seat-identity-{}",
-        std::process::id()
-    ));
+    let base = std::env::temp_dir().join(format!("jcode-seat-identity-{}", std::process::id()));
     let cwd_a = base.join("alpha");
     let cwd_b = base.join("beta");
     std::fs::create_dir_all(&cwd_a)?;

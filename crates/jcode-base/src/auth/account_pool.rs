@@ -495,13 +495,15 @@ mod tests {
 
     #[test]
     fn priority_tiers_precede_order_and_never_enroll_manual_accounts() {
-        let mut pool = AccountPool::default();
-        pool.members = vec![
-            "openai-api".into(),
-            "work".into(),
-            "personal".into(),
-            "claude".into(),
-        ];
+        let mut pool = AccountPool {
+            members: vec![
+                "openai-api".into(),
+                "work".into(),
+                "personal".into(),
+                "claude".into(),
+            ],
+            ..Default::default()
+        };
         for (key, priority) in [
             ("openai-api", 2),
             ("work", 1),
@@ -532,8 +534,10 @@ mod tests {
 
     #[test]
     fn rotation_stays_with_highest_available_tier_before_lower_tiers() {
-        let mut pool = AccountPool::default();
-        pool.members = vec!["openai:a".into(), "openai:work".into(), "openai:b".into()];
+        let mut pool = AccountPool {
+            members: vec!["openai:a".into(), "openai:work".into(), "openai:b".into()],
+            ..Default::default()
+        };
         pool.set_priority("openai:a", 0);
         pool.set_priority("openai:b", 0);
         pool.set_priority("openai:work", 1);

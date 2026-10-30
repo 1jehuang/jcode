@@ -288,44 +288,9 @@ impl Tool for McpSearchTool {
                                 .to_string(),
                             input_schema: tool.input_schema.clone(),
                         },
-                        |r| {
-                            r.mcp_dispatch_is_allowed(
-                                &ctx.session_id,
-                                &server,
-                                &tool.name,
-                                &name,
-                                "mcp_search",
-                            )
-                        },
-                    );
-                if !allowed {
-                    return None;
-                }
-                let description = tool.description.as_deref().unwrap_or_default();
-                let rank = match_rank(
-                    &query_terms,
-                    &name,
-                    &server,
-                    &tool.name,
-                    description,
-                    any_word,
-                )?;
-                Some((
-                    rank,
-                    McpSearchResult {
-                        name,
-                        server,
-                        tool: tool.name,
-                        description: tool
-                            .description
-                            .unwrap_or_else(|| "MCP tool".to_string())
-                            .trim()
-                            .to_string(),
-                        input_schema: tool.input_schema,
-                    },
-                ))
-            })
-            .collect()
+                    ))
+                })
+                .collect()
         };
 
         // Fallback: when no tool matches every word, retry matching any single

@@ -258,7 +258,10 @@ mod ctrl_m_tests {
         assert_eq!((code, mods), (KeyCode::Enter, KeyModifiers::NONE));
 
         // Ctrl+Shift+M keeps its own meaning, and Ctrl+J stays untouched.
-        let (mut code, mut mods) = (KeyCode::Char('m'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let (mut code, mut mods) = (
+            KeyCode::Char('m'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         ctrl_m_to_enter(&mut code, &mut mods);
         assert_eq!(code, KeyCode::Char('m'));
 

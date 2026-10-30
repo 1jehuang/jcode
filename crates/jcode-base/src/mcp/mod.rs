@@ -5,10 +5,12 @@
 //! Supports shared server pools so multiple sessions reuse the same
 //! MCP server processes instead of spawning duplicates.
 
+pub mod broker;
 pub mod budget;
 mod client;
 mod manager;
 pub mod oauth;
+mod pending;
 pub mod pool;
 mod protocol;
 mod remote;

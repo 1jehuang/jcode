@@ -1182,6 +1182,9 @@ pub struct FeatureConfig {
     /// Requires auto-poke; independent of the display-only completion report.
     /// Disabled by default for every user.
     pub todo_gate_digest: bool,
+    /// Show hypothetical disabled-gate findings in todo completion reports (default: false).
+    /// Display only: does not enable gates or follow-up turns.
+    pub todo_gate_diagnostics: bool,
     /// Opt in to the todo quality review: reframe observations and nudges recorded
     /// when the todo list is written. Off by default for every user; the
     /// `JCODE_TODO_QUALITY_REVIEW` env var (1 or 0) overrides this setting.
@@ -1210,6 +1213,7 @@ impl Default for FeatureConfig {
             mermaid: true,
             auto_poke: true,
             todo_gate_digest: false,
+            todo_gate_diagnostics: false,
             todo_quality_review: false,
             message_timestamps: true,
             persist_memory_injections: false,

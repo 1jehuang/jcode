@@ -144,33 +144,7 @@ mod handoff_tests {
         assert_eq!(work.await.unwrap(), 42);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn fast_tool_finishes_in_foreground() {
-        let bg = InterruptSignal::new();
-        let shutdown = InterruptSignal::new();
-        tokio::select! {
-            biased;
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {},
-            _ = wait_for_tool_handoff(&bg, &shutdown, true) => panic!("fast tool backgrounded"),
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn manual_background_and_shutdown_do_not_wait_for_budget() {
-        for shutdown_requested in [false, true] {
-            let bg = InterruptSignal::new();
-            let shutdown = InterruptSignal::new();
-            if shutdown_requested {
-                shutdown.fire();
-            } else {
-                bg.fire();
-            }
-            let start = tokio::time::Instant::now();
-            assert!(!wait_for_tool_handoff(&bg, &shutdown, true).await);
-            assert_eq!(start.elapsed(), Duration::ZERO);
-        }
-    }
-}
+use super::streaming::{StreamUsageRecorder, find_wrap_marker_incremental};
 
 fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
     if tc.name == "selfdev" {

@@ -176,9 +176,7 @@ fn parse_frame_header(buf: &[u8]) -> io::Result<Option<FrameHeader>> {
         .ok()
         .filter(|len| *len <= MAX_INFLATED_MESSAGE)
         .ok_or_else(|| {
-            jcode_logging::warn(&oversized_frame_message(
-                payload_len, b0, masked, offset,
-            ));
+            jcode_logging::warn(&oversized_frame_message(payload_len, b0, masked, offset));
             io::Error::new(io::ErrorKind::InvalidData, "websocket frame too large")
         })?;
     let mask = if masked {

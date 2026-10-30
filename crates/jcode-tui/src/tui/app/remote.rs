@@ -3,8 +3,8 @@
 use super::{
     App, DisplayMessage, MAX_TURN_HOLD_SECS, PendingReloadReconnectStatus, ProcessingStatus,
     RemoteResumeActivity, SendAction, auth::auth_muse_helpers, ctrl_bracket_fallback_to_esc,
-    ctrl_m_to_enter, input, parse_rate_limit_error, remote_notifications::present_swarm_notification,
-    spawn_in_new_terminal,
+    ctrl_m_to_enter, input, parse_rate_limit_error,
+    remote_notifications::present_swarm_notification, spawn_in_new_terminal,
 };
 use crate::bus::BusEvent;
 use crate::message::ToolCall;
