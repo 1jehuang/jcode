@@ -88,19 +88,7 @@ pub(super) fn save_agent_model_override(
     target: AgentModelTarget,
     model: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mut cfg = crate::config::Config::load();
-    let value = model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    match target {
-        AgentModelTarget::Swarm => cfg.agents.swarm_model = value,
-        AgentModelTarget::Review => cfg.autoreview.model = value,
-        AgentModelTarget::Judge => cfg.autojudge.model = value,
-        AgentModelTarget::Memory => cfg.agents.memory_model = value,
-        AgentModelTarget::Ambient => cfg.ambient.model = value,
-    }
-    cfg.save()
+    crate::config::Config::set_agent_model_default(agent_model_target_slug(target), model)
 }
 
 /// The model id of a model row. Rows no longer carry an effort suffix (the

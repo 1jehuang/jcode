@@ -244,6 +244,9 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         // auto-installer off in those too. The shared runtime still updates.
         .env("JCODE_NO_AUTO_UPDATE", "1")
         .envs(options.env.iter())
+        // Global agent defaults belong to the user's home even when callers
+        // provide other per-instance environment overrides.
+        .env("JCODE_GLOBAL_HOME", user_jcode_home())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(if options.inherit_stderr {
@@ -833,7 +836,7 @@ mod tests {
         let captured = sandbox.path().join("swarm-model.txt");
         fs::write(
             &binary,
-            "#!/bin/sh\nprintf '%s' \"$JCODE_SWARM_MODEL\" > \"$CAPTURE_PATH\"\nexit 1\n",
+            "#!/bin/sh\nprintf '%s|%s' \"$JCODE_SWARM_MODEL\" \"$JCODE_GLOBAL_HOME\" > \"$CAPTURE_PATH\"\nexit 1\n",
         )
         .expect("write fake runtime");
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
@@ -855,6 +858,10 @@ mod tests {
             OsString::from("JCODE_SWARM_MODEL"),
             OsString::from("unwanted-model"),
         );
+        options.env.insert(
+            OsString::from("JCODE_GLOBAL_HOME"),
+            OsString::from("unwanted-home"),
+        );
 
         assert!(
             launch_instance(&options).is_err(),
@@ -862,7 +869,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(captured).expect("captured model"),
-            "inherit"
+            format!("inherit|{}", user_jcode_home().display())
         );
     }
 
