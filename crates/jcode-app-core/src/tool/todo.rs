@@ -183,6 +183,14 @@ fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
         if todo.assigned_to.is_none() {
             todo.assigned_to = previous_todo.and_then(|prev| prev.assigned_to.clone());
         }
+        // Only a new start claims local ownership. Merely rewriting an old
+        // unassigned in-progress item does not establish who is working on it.
+        if todo.assigned_to.is_none()
+            && todo.status == "in_progress"
+            && previous_todo.is_none_or(|prev| prev.status != "in_progress")
+        {
+            todo.assigned_to = Some("@self".to_string());
+        }
     }
 }
 

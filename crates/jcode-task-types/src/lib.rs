@@ -501,6 +501,8 @@ pub struct TodoItem {
     /// No way forward.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completely_blocked: Option<TodoCompleteBlocker>,
+    /// Worker session ID, or reserved `@self` for an explicit start by this
+    /// todo list's agent. Absence means ownership is unknown, not local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
     /// Optional execution stage. Stages run in order: stage 2 starts only

@@ -2114,6 +2114,9 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
     } else {
         match todo.status.as_str() {
             "completed" => ("✓", rgb(105, 190, 125)),
+            "in_progress" if todo.assigned_to.as_deref() == Some("@self") => {
+                ("●", rgb(255, 200, 100))
+            }
             "in_progress" => ("●", asap_color()),
             "cancelled" => ("✗", rgb(190, 105, 115)),
             _ => ("○", rgb(135, 145, 160)),

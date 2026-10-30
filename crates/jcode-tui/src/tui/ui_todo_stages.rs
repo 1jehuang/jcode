@@ -163,6 +163,9 @@ pub(crate) fn agent_roster_spans(
         let Some(assigned) = todo.assigned_to.as_deref() else {
             continue;
         };
+        if assigned == "@self" {
+            continue;
+        }
         // Lane headings carry ownership. Plain lists retain only owners not
         // already represented by an active task row.
         if todos.iter().any(|item| item.stage.is_some())
@@ -298,6 +301,8 @@ fn todo_pip_status(todo: &crate::todo::TodoItem) -> &str {
         && (crate::todo::todo_has_external_blocker(todo) || !todo.blocked_by.is_empty())
     {
         "blocked"
+    } else if todo.status == "in_progress" && todo.assigned_to.as_deref() == Some("@self") {
+        "self_in_progress"
     } else {
         &todo.status
     }
@@ -313,6 +318,7 @@ fn status_pip_span(status: &str) -> Span<'static> {
         "blocked" => ("⊘", rgb(225, 165, 90)),
         "completed" => ("●", rgb(100, 180, 100)),
         "in_progress" => ("●", asap_color()),
+        "self_in_progress" => ("●", rgb(255, 200, 100)),
         _ => ("○", rgb(90, 90, 105)),
     };
     Span::styled(glyph, Style::default().fg(color))
@@ -438,6 +444,14 @@ fn lane_agent_chip(
         else {
             continue;
         };
+        if assigned == "@self" {
+            if todo_pip_status(todo) == "self_in_progress" && !seen.iter().any(|key| key == "@self")
+            {
+                seen.push("@self".to_string());
+                spans.push(Span::styled("you", Style::default().fg(rgb(255, 200, 100))));
+            }
+            continue;
+        }
         let agent = agents.iter().find(|agent| agent.matches(assigned));
         let key = agent
             .map(|agent| agent.session_id.clone())
@@ -563,7 +577,7 @@ fn lane_item_statuses<'a>(
             }
         } else {
             statuses.push((
-                todo.status.as_str(),
+                todo_pip_status(todo),
                 lane_live_agent(&[todo], agents).is_some(),
             ));
         }
@@ -1127,10 +1141,16 @@ pub(crate) fn render_todo_item_line(
     // useful signal in a width-constrained row.
     let mut spans = todo_card_item_spans(todo, false);
     let agent = agents.iter().find(|agent| agent.matches(assigned));
-    let icon = agent
-        .map(TodoCardAgent::icon)
-        .unwrap_or_else(|| fallback_icon(assigned));
-    let mut chip = vec![Span::raw("  "), Span::raw(icon)];
+    let owner = if assigned == "@self" {
+        Span::styled("you", Style::default().fg(rgb(255, 200, 100)))
+    } else {
+        Span::raw(
+            agent
+                .map(TodoCardAgent::icon)
+                .unwrap_or_else(|| fallback_icon(assigned)),
+        )
+    };
+    let mut chip = vec![Span::raw("  "), owner];
     let mut note = String::new();
     if let Some(agent) = agent {
         if let Some((mark, color)) = agent_state_mark(&agent.status) {
