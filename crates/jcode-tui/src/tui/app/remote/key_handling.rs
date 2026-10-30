@@ -2027,7 +2027,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             }
             // Attached images belong to the forked prompt, not the
             // parent's next message.
-            let images = std::mem::take(&mut app.pending_images);
+            let images = app.take_pending_image_payloads();
             let prepared = input::PreparedInput {
                 raw_input: prompt.to_string(),
                 expanded: prompt.to_string(),

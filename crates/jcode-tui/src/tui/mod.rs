@@ -758,6 +758,11 @@ pub trait TuiState {
         None
     }
     fn input(&self) -> &str;
+    /// Whether the one-based composer image tag has a pending payload.
+    /// This does not acknowledge delivery to a provider.
+    fn input_image_attached(&self, _number: usize) -> bool {
+        false
+    }
     fn cursor_pos(&self) -> usize;
     fn is_processing(&self) -> bool;
     fn queued_messages(&self) -> &[String];

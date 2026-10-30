@@ -629,7 +629,7 @@ pub(in crate::tui::app) fn stage_turn_for_remote_tick_loop(app: &mut App, input:
         return false;
     }
     if app.is_processing && !app.queue_mode {
-        let images = std::mem::take(&mut app.pending_images);
+        let images = app.take_pending_image_payloads();
         input::stage_local_interleave(app, input.to_string(), images);
         return true;
     }

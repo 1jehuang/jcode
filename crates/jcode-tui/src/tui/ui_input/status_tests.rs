@@ -5,8 +5,16 @@ use ratatui::style::Modifier;
 fn image_tags_are_colored_without_changing_input_geometry() {
     for width in [3, 8, 80] {
         let input = "界 [image 1] hi [image 22]";
-        let (lines, cursor_line, cursor_col) =
-            wrap_input_text(input, input.len(), width, "1", "> ", Color::White, 3);
+        let (lines, cursor_line, cursor_col) = wrap_input_text_with_images(
+            input,
+            input.len(),
+            width,
+            "1",
+            "> ",
+            Color::White,
+            3,
+            &|_| true,
+        );
         let segments = wrap_input_segments(input, width);
         let mut highlighted = String::new();
         for (index, line) in lines.iter().enumerate() {
@@ -41,6 +49,31 @@ fn malformed_image_tags_remain_plain_text() {
             .iter()
             .all(|span| span.style == Style::default())
     );
+}
+
+#[test]
+fn image_tags_warn_when_payload_is_missing() {
+    let input = "[image 1] [image 2] [image 0] [image 999999999999999999999999999999]";
+    let (lines, _, _) =
+        wrap_input_text_with_images(input, 0, 100, "1", "> ", Color::White, 3, &|number| {
+            number == 2
+        });
+    let tags: Vec<_> = lines[0]
+        .spans
+        .iter()
+        .filter(|span| span.content.starts_with("[image"))
+        .collect();
+    assert_eq!(tags.len(), 4);
+    for (index, tag) in tags.iter().enumerate() {
+        assert_eq!(
+            tag.style.fg,
+            Some(if index == 1 {
+                rgb(102, 204, 221)
+            } else {
+                rgb(255, 193, 7)
+            })
+        );
+    }
 }
 
 #[test]

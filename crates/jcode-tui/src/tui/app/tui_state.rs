@@ -849,6 +849,13 @@ impl crate::tui::TuiState for App {
         &self.input
     }
 
+    fn input_image_attached(&self, number: usize) -> bool {
+        number
+            .checked_sub(1)
+            .and_then(|index| self.pending_images.get(index))
+            .is_some_and(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
+    }
+
     fn cursor_pos(&self) -> usize {
         self.cursor_pos
     }

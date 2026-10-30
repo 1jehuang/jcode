@@ -352,7 +352,7 @@ pub(super) fn wrapped_input_line_count(
 
     let num_str = next_prompt.to_string();
     let (prompt_char, caret_color) = input_prompt(app);
-    let (lines, _, _) = wrap_input_text(
+    let (lines, _, _) = wrap_input_text_with_images(
         app.input(),
         app.cursor_pos(),
         line_width,
@@ -360,6 +360,7 @@ pub(super) fn wrapped_input_line_count(
         prompt_char,
         caret_color,
         prompt_len,
+        &|number| app.input_image_attached(number),
     );
     lines.len().max(1)
 }
@@ -2048,7 +2049,7 @@ pub(super) fn draw_input(
         return None;
     }
 
-    let (all_lines, cursor_line, cursor_col) = wrap_input_text(
+    let (all_lines, cursor_line, cursor_col) = wrap_input_text_with_images(
         input_text,
         cursor_pos,
         line_width,
@@ -2056,6 +2057,7 @@ pub(super) fn draw_input(
         prompt_char,
         caret_color,
         prompt_len,
+        &|number| app.input_image_attached(number),
     );
 
     let mut lines: Vec<Line> = Vec::new();
@@ -2481,6 +2483,7 @@ pub(crate) fn input_cursor_pos_from_screen(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn wrap_input_text<'a>(
     input: &str,
     cursor_pos: usize,
@@ -2490,7 +2493,30 @@ pub(crate) fn wrap_input_text<'a>(
     caret_color: Color,
     prompt_len: usize,
 ) -> (Vec<Line<'a>>, usize, usize) {
-    let image_ranges: Vec<std::ops::Range<usize>> = input
+    wrap_input_text_with_images(
+        input,
+        cursor_pos,
+        line_width,
+        num_str,
+        prompt_char,
+        caret_color,
+        prompt_len,
+        &|_| false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wrap_input_text_with_images<'a>(
+    input: &str,
+    cursor_pos: usize,
+    line_width: usize,
+    num_str: &str,
+    prompt_char: &'a str,
+    caret_color: Color,
+    prompt_len: usize,
+    attached: &dyn Fn(usize) -> bool,
+) -> (Vec<Line<'a>>, usize, usize) {
+    let image_ranges: Vec<(std::ops::Range<usize>, bool)> = input
         .match_indices("[image ")
         .filter_map(|(start, _)| {
             let suffix = &input[start + 7..];
@@ -2499,7 +2525,8 @@ pub(crate) fn wrap_input_text<'a>(
                 return None;
             }
             let char_start = input[..start].chars().count();
-            Some(char_start..char_start + 8 + digits)
+            let present = suffix[..digits].parse::<usize>().ok().is_some_and(attached);
+            Some((char_start..char_start + 8 + digits, present))
         })
         .collect();
     let cursor_char_pos = crate::tui::core::byte_offset_to_char_index(input, cursor_pos);
@@ -2534,8 +2561,16 @@ pub(crate) fn wrap_input_text<'a>(
         let mut previous_style = Style::default();
         for (offset, ch) in segment.text.chars().enumerate() {
             let position = segment.start_char + offset;
-            let style = if image_ranges.iter().any(|range| range.contains(&position)) {
-                Style::default().fg(rgb(102, 204, 221)).bold()
+            let style = if let Some((_, present)) = image_ranges
+                .iter()
+                .find(|(range, _)| range.contains(&position))
+            {
+                let color = if *present {
+                    rgb(102, 204, 221)
+                } else {
+                    rgb(255, 193, 7)
+                };
+                Style::default().fg(color).bold()
             } else {
                 Style::default()
             };

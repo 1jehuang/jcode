@@ -2757,9 +2757,21 @@ pub(super) fn handle_global_control_shortcuts(
             } else if !app.input.is_empty() {
                 // First Ctrl+C: clear the input box
                 app.input.clear();
+                let detached = app
+                    .pending_images
+                    .iter()
+                    .filter(|(_, data)| !data.is_empty())
+                    .count();
                 app.pending_images.clear();
                 app.cursor_pos = 0;
-                app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
+                if detached > 0 {
+                    app.set_status_notice(format!(
+                        "Input cleared · Detached {detached} image{} · 0 attached. Press Ctrl+C again to quit",
+                        if detached == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
+                }
             } else {
                 // Second Ctrl+C (input already empty): proceed with quit
                 app.handle_quit_request();
@@ -2949,7 +2961,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
     app.pasted_contents.clear();
-    let images = std::mem::take(&mut app.pending_images);
+    let images = app.take_pending_image_payloads();
     app.cursor_pos = 0;
     app.clear_input_undo_history();
     PreparedInput {
@@ -2978,6 +2990,40 @@ fn attach_image(app: &mut App, media_type: String, base64_data: String) {
     app.cursor_pos += placeholder.len();
     app.sync_model_picker_preview_from_input();
     app.set_status_notice(format!("Pasted {} ({} KB)", media_type, size_kb));
+}
+
+impl App {
+    /// Removing an attachment marker detaches its payload. Keep empty slots so
+    /// surviving image numbers remain stable and restored text cannot silently
+    /// refer to a different image.
+    pub(super) fn sync_input_image_attachments(&mut self) {
+        let mut removed = 0;
+        for (index, (media_type, data)) in self.pending_images.iter_mut().enumerate() {
+            if !data.is_empty() && !self.input.contains(&format!("[image {}]", index + 1)) {
+                media_type.clear();
+                data.clear();
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            let remaining = self
+                .pending_images
+                .iter()
+                .filter(|(_, data)| !data.is_empty())
+                .count();
+            self.set_status_notice(format!(
+                "Detached {removed} image{} · {remaining} attached",
+                if removed == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    pub(super) fn take_pending_image_payloads(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.pending_images)
+            .into_iter()
+            .filter(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
+            .collect()
+    }
 }
 
 fn paste_placeholder(content: &str) -> String {
@@ -4024,7 +4070,7 @@ impl App {
             tool_data: None,
         });
         // Send expanded content (with actual pasted text) to model
-        let images = std::mem::take(&mut self.pending_images);
+        let images = self.take_pending_image_payloads();
         if !images.is_empty() {
             crate::logging::info(&format!(
                 "Submitting with {} image(s): {}",
