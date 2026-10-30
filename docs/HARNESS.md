@@ -129,12 +129,15 @@ after the phase above:
 ]}]}
 ```
 
-The tests lane can start as soon as `implement` is completed or cancelled, even
+The tests lane can start as soon as `implement` is successfully completed, even
 if an unrelated lane in phase 1 is still running. Omit `after` to retain the
 phase barrier. When present, `after` must contain unique, existing todo IDs and
 must not be empty. Saved items
-carry this setting as `lane_after`. The TUI shows concise `after 1/1 · ready`
-progress and does not dim a ready lane merely because its phase is later.
+carry this setting as `lane_after`. Cancelled or deleted prerequisites do not
+satisfy the dependency. The TUI shows concise `tests: after 1/1 · met`
+progress and does not dim a prerequisite-ready lane merely because its phase is
+later. This note describes the prerequisite gate, not the lane's lifecycle or
+other blockers.
 
 ## Completely blocked
 

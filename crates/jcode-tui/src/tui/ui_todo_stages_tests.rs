@@ -11,7 +11,7 @@ fn explicit_lane_prerequisites_replace_phase_dimming_and_fit_cells() {
     for status in ["completed", "cancelled", "pending"] {
         dependency.status = status.into();
         let refs = [&dependency, &unrelated, &lane];
-        let ready = status != "pending";
+        let ready = status == "completed";
         assert_eq!(
             lane_prerequisite_progress(&[&lane], &refs),
             Some((usize::from(ready), 1))
@@ -25,7 +25,7 @@ fn explicit_lane_prerequisites_replace_phase_dimming_and_fit_cells() {
             .join("\n");
         assert!(
             text.contains(if ready {
-                "after 1/1 · ready"
+                "验证: after 1/1 · met"
             } else {
                 "after 0/1 · waiting"
             }),
@@ -34,7 +34,7 @@ fn explicit_lane_prerequisites_replace_phase_dimming_and_fit_cells() {
         let name = lines
             .iter()
             .flat_map(|line| &line.spans)
-            .find(|span| span.content.contains("验证"))
+            .find(|span| span.content.contains("验证") && !span.content.contains("after"))
             .unwrap();
         assert_eq!(name.style.fg == Some(later_phase_color()), !ready);
         for width in 0..80 {

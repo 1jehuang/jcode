@@ -851,7 +851,11 @@ fn lane_prerequisite_progress(
     explicit.then(|| {
         let complete = ids
             .iter()
-            .filter(|id| todos.iter().any(|todo| todo.id == **id && is_done(todo)))
+            .filter(|id| {
+                todos
+                    .iter()
+                    .any(|todo| todo.id == **id && todo.status == "completed")
+            })
             .count();
         (complete, ids.len())
     })
@@ -923,12 +927,13 @@ pub(crate) fn push_stage_lines(
         };
         if let Some((complete, total)) = prerequisites {
             let state = if complete == total {
-                "ready"
+                "met"
             } else {
                 "waiting"
             };
+            let name = lane.group.as_deref().unwrap_or_else(|| items[0].id.as_str());
             let note = Span::styled(
-                format!("  after {complete}/{total} · {state}"),
+                format!("  {name}: after {complete}/{total} · {state}"),
                 Style::default().fg(todo_meta_color()),
             );
             lines.push(todo_card_line(vec![note], base_indent, inner_width));
