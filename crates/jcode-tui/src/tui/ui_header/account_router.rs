@@ -74,9 +74,29 @@ fn load_inventory() -> Inventory {
             expired.push(("openai", account.label));
         }
     }
+    let logins = crate::auth::account_pool::oauth_logins();
+    let mut pool = AccountPool::load();
+    let keys: std::collections::BTreeSet<_> = logins
+        .iter()
+        .map(|login| account_key(login.provider, Some(&login.label)))
+        .chain(
+            crate::provider_catalog::login_providers()
+                .iter()
+                .map(|provider| provider.id.to_string()),
+        )
+        .chain(pool.members.iter().cloned())
+        .chain(pool.excluded.iter().cloned())
+        .chain(["openai-compatible".to_string()])
+        .collect();
+    // This is an in-memory render snapshot, not saved overrides. Resolve local
+    // subscription metadata on this background worker, never on each frame.
+    for key in keys {
+        let priority = pool.priority(&key);
+        pool.priorities.insert(key, priority);
+    }
     Inventory {
-        logins: crate::auth::account_pool::oauth_logins(),
-        pool: AccountPool::load(),
+        logins,
+        pool,
         expired,
     }
 }
@@ -295,13 +315,21 @@ fn inventory_lines(
         .map(|(key, default, _)| (key.clone(), *default))
         .collect();
     let (ordered, _) = inventory.pool.partition(&keys);
+    let mut tiers: Vec<_> = ordered
+        .iter()
+        .map(|key| inventory.pool.priority(key))
+        .collect();
+    tiers.sort_unstable();
+    tiers.dedup();
     let mut lines: Vec<_> = ordered
         .into_iter()
         .filter_map(|key| {
             entries
                 .iter()
                 .find(|(candidate, _, _)| candidate == key)
-                .map(|(_, _, line)| line.clone())
+                .map(|(_, _, line)| {
+                    priority_row(line.clone(), inventory.pool.priority(key), &tiers)
+                })
         })
         .collect();
     if lines.is_empty() {
@@ -310,6 +338,30 @@ fn inventory_lines(
         ));
     }
     lines
+}
+
+fn priority_row(mut row: Line<'static>, priority: u32, tiers: &[u32]) -> Line<'static> {
+    let selected = row.spans.first().is_some_and(|span| span.content == "> ");
+    let rank = tiers.binary_search(&priority).unwrap_or(0);
+    let dimming = if tiers.len() < 2 {
+        0
+    } else {
+        rank * 60 / (tiers.len() - 1)
+    };
+    let value = if selected {
+        225
+    } else {
+        195u8.saturating_sub(dimming as u8)
+    };
+    // Only decorate the identity span. Arrows, status dots and the info widget's
+    // usage-limit bars retain their established glyphs and colors.
+    if let Some(identity) = row.spans.get_mut(2) {
+        identity.content = format!(" P{}{}", u64::from(priority) + 1, identity.content).into();
+        identity.style = identity
+            .style
+            .fg(rgb(value, value, value.saturating_add(10)));
+    }
+    row
 }
 
 /// Explain missing bars without exposing raw endpoint errors or implying zero usage.
@@ -519,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn router_inventory_follows_global_pool_order_without_promoting_active() {
+    fn router_inventory_follows_pool_order_within_priority_without_promoting_active() {
         let inventory = Inventory {
             logins: vec![
                 login("claude", "a", "alice@example.com"),
@@ -534,6 +586,8 @@ mod tests {
                     "openai:a".into(),
                 ],
                 excluded: vec![],
+                priorities: [("openai-api".into(), 1)].into_iter().collect(),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -589,6 +643,7 @@ mod tests {
             pool: AccountPool {
                 members: vec!["openrouter".into()],
                 excluded: vec!["openai:excluded".into()],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -661,6 +716,48 @@ mod tests {
                 assert_eq!(row.spans[1].content, auth_dot_char(state));
                 assert_eq!(row.spans[1].style.fg, Some(auth_dot_color(state)));
                 assert_eq!(row.width(), 14);
+            }
+        }
+    }
+
+    #[test]
+    fn router_priority_badges_dim_identity_only_and_fit_narrow_headers() {
+        let usage = crate::usage::AccountUsageSnapshot {
+            label: "one".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5h".into()),
+            five_hour_ratio: Some(0.48),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        for selected in [false, true] {
+            let mut row = detail(
+                AuthState::Available,
+                "openai 界界@example.com".into(),
+                selected,
+            );
+            row.spans
+                .extend(remaining_bar(&usage, false).unwrap().spans);
+            let high = priority_row(row.clone(), 20, &[20, 30, 90]);
+            let low = priority_row(row.clone(), 90, &[20, 30, 90]);
+            assert!(low.spans[2].content.starts_with(" P91 "));
+            assert_eq!(low.spans[..2], row.spans[..2]);
+            assert_eq!(low.spans[3..], row.spans[3..]);
+            assert_eq!(high.spans[2].style.fg == low.spans[2].style.fg, selected);
+            assert_eq!(
+                high.spans[2].style.fg,
+                priority_row(row.clone(), 0, &[0, 1, 2]).spans[2].style.fg
+            );
+            assert_eq!(
+                high.spans[2].style.fg,
+                priority_row(row.clone(), 90, &[90]).spans[2].style.fg
+            );
+            for width in [0, 1, 4, 12, 24, 40, 80] {
+                let fitted = fit_header_lines(vec![low.clone()], width);
+                assert!(fitted[0].width() <= usize::from(width.saturating_sub(1)));
             }
         }
     }

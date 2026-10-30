@@ -200,6 +200,9 @@ fn selected_route_notice_text(
 }
 
 fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<&'static str> {
+    if picker.kind == crate::tui::PickerKind::Account {
+        return Some(" [ higher priority · ] lower priority · Ctrl+R automatic · Enter select");
+    }
     let is_swarm_agent_model_picker = picker.kind == crate::tui::PickerKind::Model
         && picker.entries.iter().any(|entry| {
             matches!(
@@ -306,8 +309,31 @@ fn account_picker_entry_title(
     } else {
         String::new()
     };
-    let prefix_chars = provider_prefix.chars().count();
-    (format!("{}{}", provider_prefix, display_name), prefix_chars)
+    let priority_prefix = entry
+        .account_priority()
+        .map(|priority| format!("P{} · ", u64::from(priority) + 1))
+        .unwrap_or_default();
+    let prefix_chars = priority_prefix.chars().count() + provider_prefix.chars().count();
+    (
+        format!("{}{}{}", priority_prefix, provider_prefix, display_name),
+        prefix_chars,
+    )
+}
+
+/// Normalize over the visible effective tiers, not their absolute values. A
+/// picker containing only a single tier always gets full brightness.
+fn account_priority_color(priority: u32, priorities: impl Iterator<Item = u32>) -> Color {
+    let mut tiers: Vec<_> = priorities.collect();
+    tiers.sort_unstable();
+    tiers.dedup();
+    let rank = tiers.binary_search(&priority).unwrap_or(0);
+    let dimming = if tiers.len() < 2 {
+        0
+    } else {
+        rank * 100 / (tiers.len() - 1)
+    };
+    let value = 220u8.saturating_sub(dimming as u8);
+    rgb(value, value, value.saturating_add(15))
 }
 
 fn account_inline_interactive_state_label(entry: &crate::tui::PickerEntry) -> &'static str {
@@ -346,7 +372,7 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
             .min(title_cap)
             .min(budget.max(min_title_width.min(budget)));
 
-        return marker_width + title_width + state_width;
+        return (marker_width + title_width + state_width).min(max_width);
     }
 
     let mut max_model_len = display_width(picker.primary_label());
@@ -858,7 +884,22 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
             }) => Some(rgb(150, 190, 255)),
             _ => None,
         };
-        let primary_style = if unavailable {
+        let primary_style = if is_row_selected && is_account_picker {
+            Style::default().fg(Color::White).bg(rgb(60, 60, 80)).bold()
+        } else if is_account_picker && entry.account_priority().is_some() {
+            let style = Style::default().fg(account_priority_color(
+                entry.account_priority().unwrap(),
+                picker
+                    .filtered
+                    .iter()
+                    .filter_map(|&index| picker.entries[index].account_priority()),
+            ));
+            if unavailable {
+                style.add_modifier(Modifier::DIM)
+            } else {
+                style
+            }
+        } else if unavailable {
             Style::default().fg(rgb(80, 80, 80))
         } else if is_row_selected && col == 0 {
             Style::default().fg(Color::White).bg(rgb(60, 60, 80)).bold()

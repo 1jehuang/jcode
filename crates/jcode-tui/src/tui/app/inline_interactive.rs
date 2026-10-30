@@ -3505,6 +3505,17 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| picker.kind == PickerKind::Account)
+            && (matches!(code, KeyCode::Char('[' | ']'))
+                || (modifiers.contains(KeyModifiers::CONTROL)
+                    && key_char_eq_ignore_ascii_case(code, 'r')))
+        {
+            self.edit_selected_account_priority(code)?;
+            return Ok(());
+        }
         // `/agents` pickers: Ctrl+G switches between editing this session and
         // the global default, then reopens the same view in the other scope.
         if modifiers.contains(KeyModifiers::CONTROL)

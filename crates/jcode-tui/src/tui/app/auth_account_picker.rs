@@ -7,6 +7,45 @@ use super::auth_account_picker_saved_accounts::{
 use super::*;
 
 impl App {
+    pub(crate) fn edit_selected_account_priority(&mut self, code: KeyCode) -> Result<()> {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Saving account priorities") {
+            return Ok(());
+        }
+        let Some(key) = self.inline_interactive_state.as_ref().and_then(|picker| {
+            let index = *picker.filtered.get(picker.selected)?;
+            picker.entries.get(index)?.account_pool_key()
+        }) else {
+            self.set_status_notice("Select a credential to edit its priority");
+            return Ok(());
+        };
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        let automatic = !matches!(code, KeyCode::Char('[' | ']'));
+        match code {
+            KeyCode::Char('[') => pool.set_priority(&key, pool.priority(&key).saturating_sub(1)),
+            KeyCode::Char(']') => pool.set_priority(&key, pool.priority(&key).saturating_add(1)),
+            _ => pool.clear_priority(&key),
+        }
+        if let Err(error) = pool.save() {
+            self.set_status_notice(format!("Could not save account priority: {error}"));
+            return Ok(());
+        }
+        let priority = pool.priority(&key);
+        if let Some(picker) = self.inline_interactive_state.as_mut() {
+            for entry in &mut picker.entries {
+                if let Some(key) = entry.account_pool_key() {
+                    entry.recommendation_rank = pool.priority(&key) as usize;
+                }
+            }
+        }
+        self.set_status_notice(format!(
+            "{} → P{}{} (lower number first; auto-switch membership unchanged)",
+            key,
+            u64::from(priority) + 1,
+            if automatic { " (automatic)" } else { "" },
+        ));
+        Ok(())
+    }
+
     pub(crate) fn open_account_center(&mut self, provider_filter: Option<&str>) {
         use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
 
@@ -380,7 +419,16 @@ impl App {
         } else {
             self.provider.active_resolved_credential()
         };
+        let pool = crate::auth::account_pool::AccountPool::load();
         for (index, entry) in models.iter_mut().enumerate() {
+            if let Some(key) = entry.account_pool_key() {
+                entry.recommendation_rank = pool.priority(&key) as usize;
+                if let Some(plan) = crate::auth::account_pool::subscription_label(&key) {
+                    entry.name.push_str(&format!(" · {}", plan));
+                } else if key.contains(':') || matches!(key.as_str(), "claude" | "openai") {
+                    entry.name.push_str(" · unknown plan");
+                }
+            }
             match &entry.action {
                 crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     provider_id,
@@ -437,7 +485,7 @@ impl App {
         self.input.clear();
         self.cursor_pos = 0;
         self.set_status_notice(format!(
-            "Account → {} (↑↓ or j/k, Enter to select)",
+            "Account → {} (↑↓ or j/k, Enter select, [/] priority, Ctrl+R auto)",
             provider_label
         ));
     }

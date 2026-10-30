@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn account_priority_titles_and_normalized_colors_are_width_safe() {
+    let mut picker = sample_account_picker(false);
+    let entry = &mut picker.entries[0];
+    entry.recommendation_rank = 0;
+    entry.name = "界界 very.long.account@example.com · Pro".into();
+    let (title, prefix) = account_picker_entry_title(entry, false);
+    assert!(title.starts_with("P1 · "));
+    assert_eq!(prefix, "P1 · ".chars().count());
+    entry.recommendation_rank = u32::MAX as usize;
+    assert!(
+        account_picker_entry_title(entry, false)
+            .0
+            .starts_with("P4294967296 · ")
+    );
+    for available in [0, 1, 4, 8, 12, 16, 24, 40, 80, 160] {
+        assert!(picker_render_width(&picker, available) <= available);
+        assert!(display_width(&pad_left_display(&title, available)) <= available);
+    }
+    let bright = account_priority_color(40, [40, 50, 90].into_iter());
+    let middle = account_priority_color(50, [40, 50, 90].into_iter());
+    let dim = account_priority_color(90, [40, 50, 90].into_iter());
+    assert_ne!(bright, middle);
+    assert_ne!(middle, dim);
+    assert_eq!(bright, account_priority_color(0, [0, 1, 2].into_iter()));
+    assert_eq!(bright, account_priority_color(90, [90, 90].into_iter()));
+    assert!(model_picker_top_hint(&picker).unwrap().contains("Ctrl+R"));
+}
+
+#[test]
 fn format_elapsed_uses_whole_seconds_below_one_minute() {
     assert_eq!(format_elapsed(0.0), "0s");
     assert_eq!(format_elapsed(1.2), "1s");

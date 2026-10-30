@@ -396,6 +396,7 @@ fn test_account_picker_includes_all_configured_credentials_even_excluded_and_man
                 "google".into(),
                 "groq".into(),
             ],
+            ..Default::default()
         }
         .save()
         .unwrap();
@@ -512,6 +513,112 @@ fn test_account_picker_includes_all_configured_credentials_even_excluded_and_man
 }
 
 #[test]
+fn test_account_priority_keys_persist_reset_and_preserve_membership() {
+    with_temp_jcode_home(|| {
+        let _env_guard = EnvRestoreGuard::capture(["OPENAI_API_KEY"]);
+        crate::env::set_var("OPENAI_API_KEY", "test-priority-api-key");
+        crate::auth::AuthStatus::invalidate_cache();
+        let mut pool = crate::auth::account_pool::AccountPool {
+            members: vec!["claude:work".into()],
+            excluded: vec!["openai-api".into()],
+            ..Default::default()
+        };
+        pool.set_priority("openai-api", 0);
+        pool.save().unwrap();
+        let mut app = create_test_app();
+        app.open_account_picker(None);
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        let selected = picker
+            .filtered
+            .iter()
+            .position(|&index| {
+                picker.entries[index].account_pool_key().as_deref() == Some("openai-api")
+            })
+            .unwrap();
+        picker.selected = selected;
+        assert_eq!(
+            picker.entries[picker.filtered[selected]].account_priority(),
+            Some(0)
+        );
+
+        for (key, expected) in [(']', 1), ('[', 0), ('[', 0)] {
+            app.handle_inline_interactive_key(KeyCode::Char(key), KeyModifiers::NONE)
+                .unwrap();
+            let saved = crate::auth::account_pool::AccountPool::load();
+            assert_eq!(saved.priority("openai-api"), expected);
+            assert_eq!(saved.members, pool.members);
+            assert_eq!(saved.excluded, pool.excluded);
+            let picker = app.inline_interactive_state.as_ref().unwrap();
+            assert_eq!(picker.selected, selected);
+            assert_eq!(
+                picker.entries[picker.filtered[selected]].account_priority(),
+                Some(expected)
+            );
+        }
+        pool.set_priority("openai-api", u32::MAX);
+        pool.save().unwrap();
+        app.handle_inline_interactive_key(KeyCode::Char(']'), KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            crate::auth::account_pool::AccountPool::load().priority("openai-api"),
+            u32::MAX
+        );
+        app.handle_inline_interactive_key(KeyCode::Char('r'), KeyModifiers::CONTROL)
+            .unwrap();
+        let saved = crate::auth::account_pool::AccountPool::load();
+        assert!(!saved.priorities.contains_key("openai-api"));
+        assert_eq!(
+            saved.priority("openai-api"),
+            crate::auth::account_pool::AccountPool::default().priority("openai-api")
+        );
+        assert_eq!(saved.members, pool.members);
+        assert_eq!(saved.excluded, pool.excluded);
+
+        app.open_account_picker(None);
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        let entry = picker
+            .entries
+            .iter()
+            .find(|entry| entry.account_pool_key().as_deref() == Some("openai-api"))
+            .unwrap();
+        assert_eq!(entry.account_priority(), Some(saved.priority("openai-api")));
+
+        // Address the filtered credential, not the unfiltered row index.
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        let index = picker
+            .entries
+            .iter()
+            .position(|entry| entry.account_pool_key().as_deref() == Some("openai-api"))
+            .unwrap();
+        picker.filtered = vec![index];
+        picker.selected = 0;
+        picker.filter = "OpenAI".into();
+        app.handle_inline_interactive_key(KeyCode::Char(']'), KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            app.inline_interactive_state.as_ref().unwrap().filter,
+            "OpenAI"
+        );
+        assert_eq!(
+            crate::auth::account_pool::AccountPool::load().priority("openai-api"),
+            saved.priority("openai-api") + 1
+        );
+
+        app.open_account_picker(None);
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|&index| picker.entries[index].account_pool_key().is_none())
+            .unwrap();
+        let before = crate::auth::account_pool::AccountPool::load();
+        app.handle_inline_interactive_key(KeyCode::Char(']'), KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(crate::auth::account_pool::AccountPool::load(), before);
+    });
+}
+
+#[test]
 fn test_account_command_opens_account_picker() {
     with_temp_jcode_home(|| {
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -560,13 +667,14 @@ fn test_account_command_opens_account_picker() {
             picker
                 .entries
                 .iter()
-                .any(|entry| entry.name == "Claude · claude@example.com")
+                .any(|entry| entry.name == "Claude · claude@example.com · pro"
+                    && entry.account_priority() == Some(1))
         );
         assert!(
             picker
                 .entries
                 .iter()
-                .any(|entry| entry.name == "OpenAI · user@example.com")
+                .any(|entry| entry.name == "OpenAI · user@example.com · unknown plan")
         );
         assert!(picker.entries.iter().any(|entry| {
             matches!(
@@ -638,13 +746,13 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
             picker
                 .entries
                 .iter()
-                .any(|entry| entry.name == "OpenAI Otter · first@example.com")
+                .any(|entry| entry.name == "OpenAI Otter · first@example.com · unknown plan")
         );
         assert!(
             picker
                 .entries
                 .iter()
-                .any(|entry| entry.name == "OpenAI Fox · second@example.com")
+                .any(|entry| entry.name == "OpenAI Fox · second@example.com · unknown plan")
         );
 
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
