@@ -1365,6 +1365,14 @@ fn push_todo_status_pips<'a>(
     max_pips: usize,
 ) {
     let todos: Vec<_> = todos.into_iter().collect();
+    let self_active = todos
+        .iter()
+        .filter(|todo| {
+            todo.status == "in_progress"
+                && todo.assigned_to.as_deref() == Some("@self")
+                && !crate::todo::todo_completely_blocked(todo)
+        })
+        .count();
     let mut max_pips = max_pips;
     // The two-cell hand takes priority over ordinary progress at narrow widths.
     for _ in todos
@@ -1419,7 +1427,17 @@ fn push_todo_status_pips<'a>(
     for _ in 0..done_pips {
         spans.push(Span::styled("●", Style::default().fg(rgb(100, 180, 100))));
     }
-    for _ in 0..active_pips {
+    let self_pips = if self_active == 0 || in_progress == 0 {
+        0
+    } else {
+        (self_active * active_pips)
+            .div_ceil(in_progress)
+            .min(active_pips)
+    };
+    for _ in 0..self_pips {
+        spans.push(Span::styled("●", Style::default().fg(rgb(255, 200, 100))));
+    }
+    for _ in self_pips..active_pips {
         spans.push(Span::styled("●", Style::default().fg(asap_color())));
     }
     for _ in 0..open_pips {

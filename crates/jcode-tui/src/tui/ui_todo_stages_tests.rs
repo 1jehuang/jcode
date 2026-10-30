@@ -41,6 +41,9 @@ fn self_owned_todos_have_amber_pips_and_you_badges() {
     let mut flat = local.clone();
     flat.stage = None;
     flat.group = None;
+    let mut overview = Vec::new();
+    push_stage_pips(&mut overview, &[&flat], 1);
+    assert_eq!(overview[0].style.fg, amber);
     let line = render_todo_item_line(&flat, &[], "", 100);
     assert!(line.to_string().contains("you"));
     assert!(
