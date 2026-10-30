@@ -143,6 +143,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/dictate", "Run configured external dictation command"),
     RegisteredCommand::public("/dictation", "Alias for /dictate"),
     RegisteredCommand::public("/memory", "Toggle memory feature"),
+    RegisteredCommand::public("/mcp", "Show or toggle MCP servers"),
     RegisteredCommand::public("/test", "Verify a claim/current changes with layered tests"),
     RegisteredCommand::public(
         "/initiatives",
@@ -1083,6 +1084,28 @@ impl App {
                     ),
                 ],
             );
+        }
+
+        if prefix.starts_with("/mcp ") {
+            // Dynamic: list server names from the cached config snapshot. The
+            // snapshot is loaded at startup and refreshed when `/mcp` mutates the
+            // config, so autocomplete does not read/parse config on every keypress.
+            let config = &self.mcp_config;
+            let mut suggestions: Vec<(String, &'static str)> = vec![
+                ("/mcp status".into(), "Show MCP server status"),
+                ("/mcp enable ".into(), "Enable an MCP server"),
+                ("/mcp disable ".into(), "Disable an MCP server"),
+            ];
+            let mut sorted: Vec<_> = config.servers.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(b.0));
+            for (name, sc) in sorted {
+                if sc.is_enabled() {
+                    suggestions.push((format!("/mcp disable {name}"), "Disable this server"));
+                } else {
+                    suggestions.push((format!("/mcp enable {name}"), "Enable this server"));
+                }
+            }
+            return self.rank_suggestions(input, suggestions);
         }
 
         if prefix.starts_with("/compact-notifications ") {

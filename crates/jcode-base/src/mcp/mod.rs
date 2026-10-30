@@ -8,6 +8,7 @@
 pub mod budget;
 mod client;
 mod manager;
+pub mod mcp_toggle;
 pub mod oauth;
 pub mod pool;
 mod protocol;
@@ -21,6 +22,6 @@ pub use pool::{SharedMcpPool, get_shared_pool, init_shared_pool};
 pub use protocol::*;
 pub use schema_cache::{McpSchemaCache, fingerprint_config};
 pub use tool::{
-    McpTool, create_mcp_tools, create_mcp_tools_from_cached, create_mcp_tools_from_cached_many,
-    dispatch_name, dispatch_names, take_accept_large_output,
+    McpTool, create_mcp_tools, create_mcp_tools_for_server, create_mcp_tools_from_cached,
+    create_mcp_tools_from_cached_many, dispatch_name, dispatch_names, take_accept_large_output,
 };
