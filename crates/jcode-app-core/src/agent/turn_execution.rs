@@ -1,4 +1,5 @@
 use super::*;
+use crate::hooks::PromptOrigin;
 use crate::{terminal_eprintln as eprintln, terminal_println as println};
 
 impl Agent {
@@ -38,6 +39,9 @@ impl Agent {
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
+        let prompt_hook = self
+            .run_user_prompt_submit_hook(user_message, PromptOrigin::User, "run")
+            .await?;
         let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -50,6 +54,9 @@ impl Agent {
         );
         if !user_message.trim().is_empty() {
             self.begin_model_usage_turn(&input_id);
+        }
+        if let Some(context) = prompt_hook.context {
+            self.append_turn_system_reminder(&context)?;
         }
         self.session.save()?;
         if trace_enabled() {
@@ -79,6 +86,14 @@ impl Agent {
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
+        let default_origin = if display_role.is_some() {
+            PromptOrigin::System
+        } else {
+            PromptOrigin::User
+        };
+        let prompt_hook = self
+            .run_user_prompt_submit_hook(user_message, default_origin, "capture")
+            .await?;
         let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
@@ -92,6 +107,9 @@ impl Agent {
         );
         if !user_message.trim().is_empty() {
             self.begin_model_usage_turn(&input_id);
+        }
+        if let Some(context) = prompt_hook.context {
+            self.append_turn_system_reminder(&context)?;
         }
         self.session.save()?;
         if trace_enabled() {
@@ -165,12 +183,23 @@ impl Agent {
         };
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
+        let default_origin = if continues_turn {
+            PromptOrigin::Reminder
+        } else {
+            PromptOrigin::User
+        };
+        let prompt_hook = self
+            .run_user_prompt_submit_hook(&user_message, default_origin, "chat")
+            .await?;
         self.append_user_context_message_with_display_role(
             &user_message,
             images,
             display_role,
             continues_turn,
         )?;
+        if let Some(context) = prompt_hook.context {
+            self.append_turn_system_reminder(&context)?;
+        }
         // The per-turn reminder (swarm DM wake, mission continuation, ...) goes
         // into the transcript after the prompt, never into the system prompt.
         // The system prompt precedes every message, so changing it for one turn
@@ -1574,6 +1603,8 @@ impl Agent {
     }
 }
 
+#[path = "prompt_hooks.rs"]
+mod prompt_hooks;
 #[path = "turn_usage.rs"]
 mod turn_usage;
 use turn_usage::turn_token_usage_after;

@@ -669,7 +669,8 @@ fn spawn_assigned_task_run(
             let agent = agent_arc.lock().await;
             agent.message_count()
         };
-        let result = super::turn_failover::process_server_initiated_message(
+        let result = super::turn_failover::process_server_initiated_message_as(
+            crate::hooks::PromptOrigin::SwarmMessage,
             Arc::clone(&agent_arc),
             &assignment_text,
             vec![],
@@ -2482,6 +2483,7 @@ async fn wake_session_without_plan(
         &session_id,
         &wake_message,
         None,
+        crate::hooks::PromptOrigin::SwarmMessage,
         sessions,
         super::live_turn::LiveTurnSwarmContext::new(
             swarm_members,

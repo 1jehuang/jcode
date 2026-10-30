@@ -469,6 +469,7 @@ pub(super) async fn handle_comm_message(
                             session_id,
                             &notification_msg,
                             reminder,
+                            crate::hooks::PromptOrigin::SwarmMessage,
                             sessions,
                             LiveTurnSwarmContext::new(
                                 swarm_members,

@@ -124,6 +124,15 @@ pub struct HooksConfig {
     /// `SubagentStop` JSON document on stdin. Env override:
     /// JCODE_HOOK_SWARM_MEMBER_END.
     pub swarm_member_end: Option<HookCommands>,
+    /// Synchronous hook run for every new user message, before it is added to
+    /// the transcript. The prompt arrives as Claude-shaped JSON on stdin with
+    /// an `origin`. Plain stdout or `additionalContext` is added as hidden
+    /// context after the message; `decision: "block"`, exit 2 or
+    /// `continue: false` rejects it. Env override: JCODE_HOOK_USER_PROMPT_SUBMIT.
+    pub user_prompt_submit: Option<HookCommands>,
+    /// Max milliseconds per user_prompt_submit command (default 5000, capped at
+    /// 30000). Env override: JCODE_HOOK_USER_PROMPT_SUBMIT_TIMEOUT_MS.
+    pub user_prompt_submit_timeout_ms: u64,
 }
 
 impl Default for HooksConfig {
@@ -142,6 +151,8 @@ impl Default for HooksConfig {
             pre_tool_timeout_ms: 5000,
             swarm_member_start: None,
             swarm_member_end: None,
+            user_prompt_submit: None,
+            user_prompt_submit_timeout_ms: 5000,
         }
     }
 }

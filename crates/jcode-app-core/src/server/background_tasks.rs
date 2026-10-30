@@ -121,6 +121,7 @@ pub(super) async fn dispatch_background_task_completion(
                 "A background task for this session just finished. Review the completion message and continue if useful."
                     .to_string(),
             ),
+            crate::hooks::PromptOrigin::BackgroundTask,
             sessions,
             LiveTurnSwarmContext::new(
                 swarm_members,
@@ -208,6 +209,7 @@ pub(super) async fn dispatch_background_task_stalled(
                 "A background task for this session has produced no output or progress for its stall window. Inspect it and decide whether to keep waiting, fix it, or cancel it."
                     .to_string(),
             ),
+            crate::hooks::PromptOrigin::BackgroundTask,
             sessions,
             LiveTurnSwarmContext::new(
                 swarm_members,
@@ -299,6 +301,7 @@ pub(super) async fn dispatch_swarm_await_completion(
             "A swarm await you started just resolved. Review the result and continue if useful."
                 .to_string(),
         ),
+        crate::hooks::PromptOrigin::BackgroundTask,
         sessions,
         LiveTurnSwarmContext::new(
             swarm_members,

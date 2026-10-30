@@ -636,6 +636,7 @@ async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
         &session_id,
         "first wake",
         None,
+        crate::hooks::PromptOrigin::SwarmMessage,
         &sessions,
         ctx.clone(),
     )
@@ -709,6 +710,7 @@ async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
         &session_id,
         "DM from coordinator: please respond",
         Some("You received a direct swarm message.".to_string()),
+        crate::hooks::PromptOrigin::SwarmMessage,
         &sessions,
         super::live_turn::LiveTurnSwarmContext::new(
             &swarm_members,

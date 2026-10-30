@@ -116,6 +116,7 @@ pub fn hook_commands(event: &str) -> Vec<String> {
         "post_tool_feedback" => hooks.post_tool_feedback.as_ref(),
         "swarm_member_start" => hooks.swarm_member_start.as_ref(),
         "swarm_member_end" => hooks.swarm_member_end.as_ref(),
+        "user_prompt_submit" => hooks.user_prompt_submit.as_ref(),
         _ => None,
     };
     raw.into_iter()
@@ -327,7 +328,9 @@ mod gate;
 mod identity;
 mod json_output;
 mod json_runner;
+mod origin;
 mod payload;
+mod prompt_submit;
 mod sync_runner;
 
 pub use capabilities::hook_capabilities;
@@ -338,7 +341,15 @@ pub use gate::{GateDecision, GateOutcome, run_pre_tool_gate, transform_tool_inpu
 pub use identity::{SwarmIdentity, forget_swarm_identity, register_swarm_identity, swarm_identity};
 pub use json_output::{CommandResult, Verdict, interpret};
 pub use json_runner::run_json_commands;
+pub use origin::{
+    PromptOrigin, begin_turn_origin, current_prompt_origin, forget_prompt_origin,
+    set_pending_prompt_origin, set_pending_prompt_origin_named,
+};
 pub use payload::{TEXT_FIELD_LIMIT, common_payload, jcode_object, truncate_marked};
+pub use prompt_submit::{
+    PromptSubmit, PromptSubmitOutcome, combine as combine_prompt_verdicts, prompt_payload,
+    run_user_prompt_submit,
+};
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]

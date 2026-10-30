@@ -59,6 +59,11 @@ pub enum Request {
         /// daemon resolves the name against its own skill registry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_skill: Option<String>,
+        /// Who wrote this message: `user`, `auto`, `reminder`, `sdk`, ... See
+        /// `hooks::PromptOrigin`. Absent means `user`. Unknown values are
+        /// ignored by the daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
         /// Append the user message as context only. The daemon persists it and
         /// acknowledges it without starting a model turn.
         #[serde(default, skip_serializing_if = "is_false")]

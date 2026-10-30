@@ -221,6 +221,28 @@ pub(super) async fn process_server_initiated_message(
     .await
 }
 
+/// [`process_server_initiated_message`] declaring who wrote the message, for
+/// `user_prompt_submit` hooks.
+pub(super) async fn process_server_initiated_message_as(
+    origin: crate::hooks::PromptOrigin,
+    agent: Arc<Mutex<Agent>>,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    let mut guard = agent.lock().await;
+    crate::hooks::set_pending_prompt_origin(guard.session_id(), origin);
+    process_locked_message_with_server_failover(
+        &mut guard,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+    )
+    .await
+}
+
 /// Given the result of a turn attempt, switch to the next pool-approved
 /// account and re-run the same turn while it keeps failing with a
 /// usage/rate-limit error.

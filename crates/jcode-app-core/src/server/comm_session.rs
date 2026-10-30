@@ -3,7 +3,7 @@ use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
 };
-use super::turn_failover::process_server_initiated_message;
+use super::turn_failover::process_server_initiated_message_as;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     broadcast_swarm_plan, broadcast_swarm_status, create_headless_session, fanout_session_event,
@@ -825,7 +825,8 @@ pub(super) async fn spawn_swarm_agent(
                     let agent = agent_arc.lock().await;
                     agent.message_count()
                 };
-                let result = process_server_initiated_message(
+                let result = process_server_initiated_message_as(
+                    crate::hooks::PromptOrigin::SwarmSpawn,
                     Arc::clone(&agent_arc),
                     &initial_msg,
                     vec![],

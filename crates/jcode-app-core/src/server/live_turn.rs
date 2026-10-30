@@ -99,12 +99,17 @@ pub(super) async fn idle_live_agent(
 /// `failed` when it finishes. A synthetic terminal `Done { id: 0 }` (or
 /// `Error { id: 0, .. }`) is fanned out to attached clients so their UI can
 /// finish rendering the externally started turn.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a tracked live turn needs the session, message, hook origin and swarm handles together"
+)]
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,
     message: String,
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
+    origin: crate::hooks::PromptOrigin,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
@@ -137,6 +142,7 @@ pub(super) async fn spawn_tracked_live_turn(
     crate::runtime_activity::spawn_session(&session_id.clone(), async move {
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
+        crate::hooks::set_pending_prompt_origin(&session_id, origin);
         let (result, stop_reason) = catch_live_turn_panic(async {
             if let Some(display_role) = display_role {
                 agent
@@ -234,6 +240,7 @@ pub(super) async fn run_live_turn_if_idle(
     session_id: &str,
     message: &str,
     system_reminder: Option<String>,
+    origin: crate::hooks::PromptOrigin,
     sessions: &SessionAgents,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
@@ -247,6 +254,7 @@ pub(super) async fn run_live_turn_if_idle(
         message.to_string(),
         system_reminder,
         None,
+        origin,
         detail,
         swarm,
     )
@@ -269,6 +277,7 @@ pub(super) async fn run_live_system_turn_if_idle(
         message.to_string(),
         None,
         Some(crate::session::StoredDisplayRole::System),
+        crate::hooks::PromptOrigin::System,
         detail,
         swarm,
     )
@@ -425,6 +434,7 @@ mod durable_error_tests {
                 "wake worker".into(),
                 None,
                 None,
+                crate::hooks::PromptOrigin::SwarmMessage,
                 None,
                 swarm,
             )
