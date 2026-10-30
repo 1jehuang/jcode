@@ -1610,6 +1610,7 @@ impl JcodeClient {
                     output,
                     cache_read_input,
                     cache_creation_input,
+                    effective_budget,
                     ..
                 } => {
                     result.usage = Some(Usage {
@@ -1617,13 +1618,13 @@ impl JcodeClient {
                         output,
                         cache_read_input,
                         cache_creation_input,
+                        effective_budget,
                     })
                 }
                 ApiEvent::PermissionRequest { request_id, .. } if options.auto_approve => {
                     self.respond_to_permission(session_id, &request_id, PermissionDecision::Allow)?;
                 }
                 ApiEvent::TurnStopped {
-                    effective_budget,
                     reason, message, ..
                 } => {
                     result.stop_reason = Some(reason);
@@ -1631,7 +1632,6 @@ impl JcodeClient {
                 }
                 ApiEvent::TurnDone { .. } => {
                     text_stream.finish(&mut result);
-                        effective_budget,
                     return Ok(result);
                 }
                 ApiEvent::Error { code, message } => {
@@ -1925,6 +1925,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | Tools { session_id, .. }
         | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
+        | ContextCapChanged { session_id, .. }
         | KvCacheMiss { session_id, .. }
         | TurnDone { session_id, .. }
         | SoftInterruptInjected { session_id, .. }
@@ -1938,7 +1939,6 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | RuntimeInfo { session_id, .. }
         | ConnectionPhase { session_id, .. }
         | Models { session_id, .. }
-        | ContextCapChanged { session_id, .. }
         | Compacted { session_id, .. }
         | SessionRenamed { session_id, .. }
         | History { session_id, .. } => Some(session_id.as_str()),

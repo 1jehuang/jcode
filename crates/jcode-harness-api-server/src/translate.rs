@@ -314,8 +314,8 @@ enum SimpleKind {
     Ok,
     /// Awaiting `model_changed`, which carries its own error field.
     Model,
-    /// Awaiting `reasoning_effort_changed`.
     ContextCap,
+    /// Awaiting `reasoning_effort_changed`.
     ReasoningEffort,
     /// Awaiting `compacted_history`.
     Compact,
@@ -1165,7 +1165,6 @@ impl BridgeState {
                     Err((code, message)) => Self::error_reply(api_id, code, &message),
                 }
             }
-            "set_model" => {
             "set_context_cap" => {
                 let cap = &request["max_context_tokens"];
                 if !cap.is_null() && cap.as_u64().and_then(|n| usize::try_from(n).ok()).is_none() {
@@ -1184,6 +1183,7 @@ impl BridgeState {
                     "max_context_tokens": cap,
                 }))]
             }
+            "set_model" => {
                 let model = request["model"].as_str().unwrap_or("");
                 if model.is_empty() {
                     return vec![Outbound::Reply(ServerFrame::reply(
@@ -1944,6 +1944,9 @@ impl BridgeState {
                 output: event["output"].as_u64().unwrap_or(0),
                 cache_read_input: event["cache_read_input"].as_u64(),
                 cache_creation_input: event["cache_creation_input"].as_u64(),
+                effective_budget: event["effective_budget"]
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok()),
             })],
             "kv_cache_miss" => vec![ServerFrame::event(ApiEvent::KvCacheMiss {
                 session_id: session(self),
@@ -1963,9 +1966,6 @@ impl BridgeState {
                 if let Some(api_id) = self.take_simple(id, SimpleKind::Detach) {
                     self.pending_control_done_ids.remove(&id);
                     self.session_id = None;
-                effective_budget: event["effective_budget"]
-                    .as_u64()
-                    .and_then(|n| usize::try_from(n).ok()),
                     self.turn_stop_reported = false;
                     self.observed_turn_active = false;
                     self.text_message_id = None;
@@ -2240,25 +2240,6 @@ impl BridgeState {
             }
             // The model can change mid-session (`/model`, a cycle, or an auth
             // change re-resolving the route), so both pushes are forwarded.
-            "model_changed" => {
-                let id = event["id"].as_u64().unwrap_or(0);
-                let reply_to = self.take_simple(id, SimpleKind::Model);
-                // The daemon reports a rejected switch in-band, as an `error`
-                // field on the success event rather than as an error frame.
-                // Relayed as a real error so a client sees a failed request
-                // instead of a silent no-op that leaves the picker wrong.
-                if let Some(error) = event["error"].as_str() {
-                    let frame = ApiEvent::Error {
-                        code: ErrorCode::InvalidRequest,
-                        message: error.to_string(),
-                    };
-                    return match reply_to {
-                        Some(api_id) => vec![ServerFrame::reply(api_id, frame)],
-                        None => vec![],
-                    };
-                }
-                if let Some(model) = event["model"].as_str() {
-                    self.current_model = Some(model.to_string());
             "context_cap_changed" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 let reply_to = self.take_simple(id, SimpleKind::ContextCap);
@@ -2282,6 +2263,25 @@ impl BridgeState {
                 }
                 frames
             }
+            "model_changed" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let reply_to = self.take_simple(id, SimpleKind::Model);
+                // The daemon reports a rejected switch in-band, as an `error`
+                // field on the success event rather than as an error frame.
+                // Relayed as a real error so a client sees a failed request
+                // instead of a silent no-op that leaves the picker wrong.
+                if let Some(error) = event["error"].as_str() {
+                    let frame = ApiEvent::Error {
+                        code: ErrorCode::InvalidRequest,
+                        message: error.to_string(),
+                    };
+                    return match reply_to {
+                        Some(api_id) => vec![ServerFrame::reply(api_id, frame)],
+                        None => vec![],
+                    };
+                }
+                if let Some(model) = event["model"].as_str() {
+                    self.current_model = Some(model.to_string());
                 }
                 if let Some(provider) = event["provider_name"].as_str() {
                     self.note_provider(provider);

@@ -320,10 +320,10 @@ export type ApiEvent =
       output: number;
       cache_read_input?: number;
       cache_creation_input?: number;
-    }
       effective_budget?: number;
-  | {
+    }
   | { ev: "context_cap_changed"; session_id: string; max_context_tokens: number | null; effective_budget: number }
+  | {
       ev: "kv_cache_miss";
       session_id: string;
       reason: string;
@@ -485,8 +485,8 @@ export const KNOWN_EVENT_KINDS = [
   "tool_exec",
   "tool_done",
   "token_usage",
-  "kv_cache_miss",
   "context_cap_changed",
+  "kv_cache_miss",
   "turn_done",
   "soft_interrupt_injected",
   "soft_interrupts_cancelled",
@@ -549,8 +549,8 @@ export const KNOWN_REQUEST_KINDS = [
   "get_todo_state",
   "ack_todo_follow_up",
   "set_model",
-  "set_reasoning_effort",
   "set_context_cap",
+  "set_reasoning_effort",
   "compact",
   "rename_session",
   "set_session_env",

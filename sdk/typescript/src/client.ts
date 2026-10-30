@@ -1423,12 +1423,12 @@ export class JcodeClient extends EventEmitter {
             input: event.input,
             output: event.output,
             cacheReadInput: event.cache_read_input,
+            effectiveBudget: event.effective_budget,
           };
           break;
         case "permission_request":
           if (options.autoApprove) {
             await this.respondToPermission(sessionId, event.request_id, "allow");
-            effectiveBudget: event.effective_budget,
           }
           break;
         case "turn_stopped":
