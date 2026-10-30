@@ -660,11 +660,11 @@ mod ssh_slash_tests {
         ) {
             return;
         }
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             use tokio::io::AsyncBufReadExt;
-            let mut app = app_mod::tests::create_test_app();
-            app.is_remote = true;
             let mut remote = RemoteConnection::dummy();
             remote.mark_history_loaded();
             let mut peer = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
@@ -733,10 +733,10 @@ mod ssh_slash_tests {
         ) {
             return;
         }
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut app = app_mod::tests::create_test_app();
-            app.is_remote = true;
             let mut remote = RemoteConnection::dummy();
             // No history makes normal remote prompts queue without a wire
             // send, providing a direct distinction from rejected commands.
