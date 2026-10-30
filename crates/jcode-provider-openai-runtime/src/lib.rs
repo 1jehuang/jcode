@@ -43,6 +43,7 @@ mod model_selection;
 mod openai_ws_connect;
 use openai_ws_connect::connect_ws;
 mod native_compaction;
+mod openai_retry_diagnostics;
 mod openai_stream_cancellation;
 mod openai_stream_diagnostics;
 

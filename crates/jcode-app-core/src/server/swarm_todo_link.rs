@@ -707,7 +707,10 @@ mod tests {
                 assigned_to: Some("session_next_worker".into()),
             };
 
-            assert!(apply_plan(&mut todos, std::slice::from_ref(&item)), "{owner}");
+            assert!(
+                apply_plan(&mut todos, std::slice::from_ref(&item)),
+                "{owner}"
+            );
             assert_eq!(todos[0].assigned_to.as_deref(), Some("session_next_worker"));
             assert_eq!(todos[0].status, "in_progress");
             assert!(

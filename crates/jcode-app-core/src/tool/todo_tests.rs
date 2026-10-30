@@ -197,7 +197,11 @@ fn transition_into_in_progress_claims_self() {
 
         merge_confidence_history(&[previous], &mut incoming);
 
-        assert_eq!(incoming[0].assigned_to.as_deref(), Some("@self"), "{status}");
+        assert_eq!(
+            incoming[0].assigned_to.as_deref(),
+            Some("@self"),
+            "{status}"
+        );
     }
 }
 

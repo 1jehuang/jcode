@@ -50,6 +50,16 @@ fn test_overload_status_detail_is_durable_and_deduplicated() {
     assert_eq!(app.status_detail.as_deref(), Some("connected"));
     assert_eq!(app.display_messages.last().unwrap().content, detail);
 
+    // A later failed retry with no committed assistant output must not roll
+    // back the overload notice. Both stream paths use this rollback helper.
+    app.rollback_streaming_attempt();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::RetryRollback { attempt: 2, max: 3 },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages.len(), initial_len + 1);
+    assert_eq!(app.display_messages.last().unwrap().content, detail);
+
     // A later user turn can report a fresh overload without losing old history.
     app.push_display_message(DisplayMessage::user("next turn"));
     app.apply_status_detail(detail.into());

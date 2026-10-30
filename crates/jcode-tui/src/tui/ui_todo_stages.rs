@@ -926,12 +926,11 @@ pub(crate) fn push_stage_lines(
             phase_style(phase, current)
         };
         if let Some((complete, total)) = prerequisites {
-            let state = if complete == total {
-                "met"
-            } else {
-                "waiting"
-            };
-            let name = lane.group.as_deref().unwrap_or_else(|| items[0].id.as_str());
+            let state = if complete == total { "met" } else { "waiting" };
+            let name = lane
+                .group
+                .as_deref()
+                .unwrap_or_else(|| items[0].id.as_str());
             let note = Span::styled(
                 format!("  {name}: after {complete}/{total} · {state}"),
                 Style::default().fg(todo_meta_color()),
