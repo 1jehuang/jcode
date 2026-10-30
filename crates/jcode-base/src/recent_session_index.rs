@@ -10,6 +10,7 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::session::Session;
+use crate::session::resume_cache::{Entry as ResumeEntry, SessionFingerprint};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecentSessionMetadata {
@@ -102,6 +103,16 @@ fn open_at(path: &std::path::Path) -> Result<Connection> {
         [],
     );
     let _ = connection.execute("ALTER TABLE recent_sessions ADD COLUMN save_label TEXT", []);
+    for column in [
+        "resume_short_name",
+        "resume_fingerprint",
+        "resume_updated_at",
+    ] {
+        let _ = connection.execute(
+            &format!("ALTER TABLE recent_sessions ADD COLUMN {column} TEXT"),
+            [],
+        );
+    }
     Ok(connection)
 }
 
@@ -137,7 +148,27 @@ fn recent_with(connection: &Connection, limit: usize) -> Result<Vec<RecentSessio
 
 /// Update the index after a successful session persistence operation.
 pub fn upsert_session(session: &Session) -> Result<()> {
-    upsert(&RecentSessionMetadata {
+    let fingerprint = crate::session::session_path(&session.id)
+        .ok()
+        .and_then(|path| SessionFingerprint::read(&path));
+    index_session(session, fingerprint.as_ref(), false)
+}
+
+// A backfill must not overwrite a newer concurrent save. Its supplied
+// fingerprint is the one captured around the authoritative metadata read.
+pub(crate) fn backfill_resume_session(
+    session: &Session,
+    fingerprint: &SessionFingerprint,
+) -> Result<()> {
+    index_session(session, Some(fingerprint), true)
+}
+
+fn index_session(
+    session: &Session,
+    fingerprint: Option<&SessionFingerprint>,
+    backfill: bool,
+) -> Result<()> {
+    let entry = RecentSessionMetadata {
         session_id: session.id.clone(),
         working_dir: session.working_dir.clone(),
         generated_title: session.title.clone(),
@@ -147,6 +178,40 @@ pub fn upsert_session(session: &Session) -> Result<()> {
         save_label: session.save_label.clone(),
         updated_at_ms: session.updated_at.timestamp_millis(),
         last_active_at_ms: session.last_active_at.map(|time| time.timestamp_millis()),
+    };
+    let encoded_fingerprint = fingerprint.map(serde_json::to_string).transpose()?;
+    with_connection(|connection| {
+        // Acquire the SQLite write lock before validating the read. A newer
+        // save either already changed the files (we skip it) or publishes its
+        // own index row after this short transaction commits.
+        let transaction = backfill
+            .then(|| {
+                rusqlite::Transaction::new_unchecked(
+                    connection,
+                    rusqlite::TransactionBehavior::Immediate,
+                )
+            })
+            .transpose()?;
+        if backfill
+            && crate::session::session_path(&session.id)
+                .ok()
+                .and_then(|path| SessionFingerprint::read(&path))
+                .as_ref()
+                != fingerprint
+        {
+            return Ok(());
+        }
+        upsert_with_resume(
+            connection,
+            &entry,
+            session.short_name.as_deref(),
+            encoded_fingerprint.as_deref(),
+            Some(&session.updated_at.to_rfc3339()),
+        )?;
+        if let Some(transaction) = transaction {
+            transaction.commit()?;
+        }
+        Ok(())
     })
 }
 
@@ -155,11 +220,22 @@ pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
 }
 
 fn upsert_with(connection: &Connection, entry: &RecentSessionMetadata) -> Result<()> {
+    upsert_with_resume(connection, entry, None, None, None)
+}
+
+fn upsert_with_resume(
+    connection: &Connection,
+    entry: &RecentSessionMetadata,
+    short_name: Option<&str>,
+    fingerprint: Option<&str>,
+    updated_at: Option<&str>,
+) -> Result<()> {
     connection.execute(
         "INSERT INTO recent_sessions (
              session_id, working_dir, generated_title, custom_title, todo_title,
-             saved, updated_at_ms, last_active_at_ms, save_label
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             saved, updated_at_ms, last_active_at_ms, save_label,
+             resume_short_name, resume_fingerprint, resume_updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(session_id) DO UPDATE SET
              working_dir = excluded.working_dir,
              generated_title = excluded.generated_title,
@@ -168,7 +244,10 @@ fn upsert_with(connection: &Connection, entry: &RecentSessionMetadata) -> Result
              saved = excluded.saved,
              updated_at_ms = excluded.updated_at_ms,
              last_active_at_ms = excluded.last_active_at_ms,
-             save_label = excluded.save_label",
+             save_label = excluded.save_label,
+             resume_short_name = excluded.resume_short_name,
+             resume_fingerprint = excluded.resume_fingerprint,
+             resume_updated_at = excluded.resume_updated_at",
         params![
             entry.session_id,
             entry.working_dir,
@@ -179,9 +258,102 @@ fn upsert_with(connection: &Connection, entry: &RecentSessionMetadata) -> Result
             entry.updated_at_ms,
             entry.last_active_at_ms,
             entry.save_label,
+            short_name,
+            fingerprint,
+            updated_at,
         ],
     )?;
     Ok(())
+}
+
+/// All fingerprint-bearing rows, with no recency cutoff. Resume intentionally
+/// ignores todo-derived titles, matching Session::display_title rather than
+/// the broader recent-session picker's display-title policy.
+pub(crate) fn resume_entries() -> Result<std::collections::HashMap<String, ResumeEntry>> {
+    with_connection(|connection| {
+        let mut statement = connection.prepare(
+            "SELECT session_id, resume_short_name, generated_title, custom_title,
+                    saved, save_label, resume_updated_at, resume_fingerprint
+             FROM recent_sessions WHERE resume_fingerprint IS NOT NULL",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, bool>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+        let mut entries = std::collections::HashMap::new();
+        for row in rows {
+            let (id, short_name, generated, custom, saved, label, updated, fingerprint) = row?;
+            let Some(updated_at) = updated.and_then(|value| value.parse().ok()) else {
+                continue;
+            };
+            let Ok(fingerprint) = serde_json::from_str(&fingerprint) else {
+                continue;
+            };
+            let title = custom
+                .as_deref()
+                .and_then(non_empty)
+                .or_else(|| {
+                    saved
+                        .then(|| label.as_deref().and_then(non_empty))
+                        .flatten()
+                })
+                .or_else(|| generated.as_deref().and_then(non_empty))
+                .map(str::to_owned);
+            entries.insert(
+                id,
+                ResumeEntry {
+                    fingerprint,
+                    short_name,
+                    title,
+                    updated_at,
+                },
+            );
+        }
+        Ok(entries)
+    })
+}
+
+pub(crate) fn invalidate_resume_entries(ids: &[&str]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    with_connection(|connection| {
+        let transaction = connection.unchecked_transaction()?;
+        {
+            let mut statement = transaction.prepare(
+                "UPDATE recent_sessions SET resume_fingerprint = NULL,
+                    resume_short_name = NULL, resume_updated_at = NULL WHERE session_id = ?1",
+            )?;
+            for id in ids {
+                statement.execute([id])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    })
+}
+
+/// Populate older snapshots in the daemon, never on its startup critical path.
+pub fn backfill_resume_metadata_in_background() {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("resume-index-backfill".into())
+        .spawn(|| {
+            if let Err(error) = crate::session::resume_cache::backfill() {
+                crate::logging::warn(&format!("Resume metadata backfill failed: {error}"));
+            }
+        });
 }
 
 /// Refresh only the derived title after the todo or plan file changes.
@@ -206,6 +378,9 @@ fn refresh_todo_title_with(connection: &Connection, session_id: &str) -> Result<
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod resume_tests;
 
 #[cfg(test)]
 mod tests {

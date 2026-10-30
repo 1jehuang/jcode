@@ -673,8 +673,7 @@ fn find_session_by_metadata_impl(name_or_id: &str, use_cache: bool) -> Result<St
     let normalized_query = normalize_resume_lookup_text(name_or_id);
     let mut exact_matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
     let mut title_matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
-    let home = storage::jcode_dir()?;
-    let mut cache = use_cache.then(|| super::resume_cache::Cache::load(&home));
+    let mut cache = use_cache.then(super::resume_cache::Cache::load);
 
     for entry in std::fs::read_dir(&sessions_dir)? {
         let entry = entry?;
@@ -689,13 +688,6 @@ fn find_session_by_metadata_impl(name_or_id: &str, use_cache: bool) -> Result<St
 
         let short_name_matches =
             extract_session_name(stem).is_some_and(|short| short == name_or_id);
-        if short_name_matches {
-            if let Ok(session) = Session::load_startup_stub(stem).or_else(|_| Session::load(stem)) {
-                exact_matches.push((stem.to_string(), session.updated_at));
-            }
-            continue;
-        }
-
         let (short_name, title, updated_at) =
             match cache.as_mut().and_then(|cache| cache.get(stem, &path)) {
                 Some(entry) => (
@@ -716,7 +708,7 @@ fn find_session_by_metadata_impl(name_or_id: &str, use_cache: bool) -> Result<St
                     )
                 }
             };
-        if short_name.as_deref() == Some(name_or_id) {
+        if short_name_matches || short_name.as_deref() == Some(name_or_id) {
             exact_matches.push((stem.to_string(), updated_at));
         } else if resume_title_matches(title.as_deref(), &normalized_query) {
             title_matches.push((stem.to_string(), updated_at));
@@ -724,7 +716,7 @@ fn find_session_by_metadata_impl(name_or_id: &str, use_cache: bool) -> Result<St
     }
 
     if let Some(cache) = cache {
-        cache.save(&home);
+        cache.finish();
     }
 
     let matches = if exact_matches.is_empty() {
@@ -1021,13 +1013,63 @@ mod batch_crash_tests {
         session.save()?;
         assert!(find_session_by_name_or_id("Original title").is_err());
         assert_eq!(find_session_by_name_or_id("updated   TITLE")?, id);
-        let cache_path = temp.path().join("resume-metadata-v1.json");
-        std::fs::write(&cache_path, b"broken cache")?;
+        let index = rusqlite::Connection::open(temp.path().join("session-metadata-v1.sqlite3"))?;
+        index.execute(
+            "UPDATE recent_sessions SET resume_fingerprint = 'broken cache'",
+            [],
+        )?;
         assert_eq!(find_session_by_name_or_id("Updated title")?, id);
         std::fs::remove_file(session_path(id)?)?;
         assert!(find_session_by_name_or_id("Updated title").is_err());
-        let cache: serde_json::Value = serde_json::from_slice(&std::fs::read(cache_path)?)?;
-        assert!(cache.as_object().unwrap().is_empty());
+        assert!(crate::recent_session_index::resume_entries()?.is_empty());
+        assert!(!temp.path().join("resume-metadata-v1.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn title_resume_works_when_sqlite_is_unavailable() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        std::fs::create_dir(temp.path().join("session-metadata-v1.sqlite3"))?;
+        let id = "session_unavailable_1770000000000_aaaaaaaaaaaaaaaa";
+        let mut session =
+            Session::create_with_id(id.into(), None, Some("Unavailable index title".into()));
+        session.save()?;
+        assert_eq!(find_session_by_name_or_id("Unavailable index")?, id);
+        assert!(!temp.path().join("resume-metadata-v1.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn title_resume_backfills_old_files_and_checks_partial_indexes() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        let mut older = Session::create_with_id(
+            "legacy_indexed".into(),
+            None,
+            Some("Shared legacy title".into()),
+        );
+        older.save()?;
+        let mut newest = Session::create_with_id(
+            "legacy_unindexed".into(),
+            None,
+            Some("Shared legacy title".into()),
+        );
+        newest.save()?;
+        let index = rusqlite::Connection::open(temp.path().join("session-metadata-v1.sqlite3"))?;
+        index.execute(
+            "DELETE FROM recent_sessions WHERE session_id = ?1",
+            [&newest.id],
+        )?;
+        // A matching indexed row cannot hide a newer unindexed match.
+        assert_eq!(find_session_by_name_or_id("Shared legacy")?, newest.id);
+        assert!(crate::recent_session_index::resume_entries()?.contains_key(&newest.id));
+        index.execute("UPDATE recent_sessions SET resume_fingerprint = NULL", [])?;
+        super::super::resume_cache::backfill()?;
+        assert_eq!(crate::recent_session_index::resume_entries()?.len(), 2);
+        assert_eq!(find_session_by_name_or_id("Shared legacy")?, newest.id);
         Ok(())
     }
 

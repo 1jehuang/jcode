@@ -70,7 +70,7 @@ pub use render::{
     summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
-mod resume_cache;
+pub(crate) mod resume_cache;
 #[cfg(test)]
 pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};

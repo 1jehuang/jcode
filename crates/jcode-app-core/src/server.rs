@@ -1280,6 +1280,10 @@ impl Server {
         publish_reload_socket_ready(reload_marker_policy(&self.socket_path));
         signal_ready_fd();
 
+        // Older snapshots predate the resume index. Backfill off the first-frame
+        // path. Lookups retain an authoritative fallback until it completes.
+        crate::recent_session_index::backfill_resume_metadata_in_background();
+
         // Persist auxiliary discovery metadata after the server is already live.
         self.spawn_registry_metadata_publisher(registry_info);
 
