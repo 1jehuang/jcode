@@ -571,6 +571,14 @@ impl Session {
         session.decay_old_tool_images();
         session.mark_memory_profile_dirty();
         let finalize_ms = finalize_start.elapsed().as_millis();
+        // Parsing a large snapshot allocates several times its size transiently;
+        // hand those pages back so a burst of seat loads doesn't pin GBs.
+        if snapshot_bytes > 8 * 1024 * 1024 {
+            crate::process_memory::release_retained_heap_debounced(
+                "large_session_load",
+                std::time::Duration::from_secs(2),
+            );
+        }
         crate::logging::info(&format!(
             "[TIMING] remote_startup_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, snapshot_bytes={}, journal_bytes={}, journal_entries={}, messages={}, total={}ms",
             session.id,
