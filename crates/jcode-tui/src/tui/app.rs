@@ -1004,6 +1004,8 @@ pub struct App {
     /// Pauses auto-scroll when user scrolls up during streaming
     auto_scroll_paused: bool,
     active_skill: Option<String>,
+    /// Words typed after `/skill`, delivered with the next remote message.
+    pending_skill_arguments: Option<String>,
     is_processing: bool,
     // Live streaming/turn progress (text, per-turn tokens, TPS tracking).
     streaming: StreamingProgress,

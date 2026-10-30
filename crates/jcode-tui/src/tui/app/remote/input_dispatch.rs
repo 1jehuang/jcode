@@ -29,6 +29,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
             images.clone(),
             system_reminder.clone(),
             app.active_skill.clone(),
+            app.pending_skill_arguments.take(),
         )
         .await?;
     if recovery.is_some() {
@@ -250,6 +251,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     app.pending_images.clear();
     app.submit_input();
 
+    app.pending_skill_arguments = Some(trailing_prompt.to_string());
     let expanded_prompt = app
         .current_skills_snapshot()
         .resolve_invocation(&prepared.expanded)

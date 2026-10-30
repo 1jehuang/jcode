@@ -4008,7 +4008,15 @@ impl App {
                 if !self.is_remote {
                     self.append_turn_system_reminder(Some(format!(
                         "# Active Skill\n\n{}",
-                        skill.get_prompt().trim()
+                        skill
+                            .render_prompt(
+                                trailing_prompt.as_deref().unwrap_or_default(),
+                                self.session
+                                    .working_dir
+                                    .as_deref()
+                                    .map(std::path::Path::new),
+                            )
+                            .trim()
                     )));
                 }
                 self.push_display_message(DisplayMessage {

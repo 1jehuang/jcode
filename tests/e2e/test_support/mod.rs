@@ -22,8 +22,7 @@ use std::os::fd::FromRawFd;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 pub(crate) use std::process::{Child, Command, Stdio};
-pub(crate) use std::sync::Arc;
-pub(crate) use std::sync::Mutex;
+pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::time::{Duration, Instant};
 pub(crate) use tokio::net::TcpStream;
 pub(crate) use tokio::time::timeout;
@@ -398,6 +397,7 @@ impl WsTestClient {
             images: vec![],
             system_reminder: None,
             active_skill: None,
+            skill_arguments: None,
             no_reply: false,
         })
         .await

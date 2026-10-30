@@ -1042,11 +1042,13 @@ impl AcpRuntime {
         // against the session's registry. Unknown or path-like slash text is
         // passed through to the model unchanged.
         let mut text = text;
+        let mut skill_arguments = None;
         let skills = session.skills();
         let selected_skill = match explicit_skill {
             Some(name) => Some(name),
             None => match resolve_acp_skill_invocation(&skills, &text) {
                 Some((name, prompt)) => {
+                    skill_arguments = prompt.clone();
                     text = prompt.unwrap_or_default();
                     Some(name)
                 }
@@ -1097,6 +1099,7 @@ impl AcpRuntime {
                 images,
                 system_reminder: None,
                 active_skill,
+                skill_arguments,
                 no_reply: false,
             })
             .await;
