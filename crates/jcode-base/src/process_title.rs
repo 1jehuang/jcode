@@ -237,6 +237,7 @@ mod tests {
                 priority: "high".to_string(),
                 id: "window-title".to_string(),
                 group: Some("resume title sync".to_string()),
+                lane_after: None,
                 confidence: Some(crate::todo::ConfidenceState::Plausible),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
