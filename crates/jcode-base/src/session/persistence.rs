@@ -26,6 +26,10 @@ impl JournalReplayStats {
 /// Held (shared) for the duration of every session save. Shutdown takes it
 /// exclusively so `process::exit` cannot land between a checkpoint's snapshot
 /// write and its journal delete (#1632).
+/// Serializes parsing of big snapshots so a burst of seat loads does not hold
+/// several multi-hundred-MB transient parse trees at once.
+static LARGE_LOAD_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 static SAVES_IN_FLIGHT: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// Block until no session save is in progress (or `timeout` elapses), then
@@ -537,6 +541,11 @@ impl Session {
         let load_start = Instant::now();
         let snapshot_bytes = file_len_or_zero(&path);
         let snapshot_start = Instant::now();
+        let _large_gate = (snapshot_bytes > 8 * 1024 * 1024).then(|| {
+            LARGE_LOAD_GATE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        });
         let bytes = std::fs::read(&path)?;
         let snapshot: RemoteStartupSessionSnapshot = serde_json::from_slice(&bytes)?;
         drop(bytes);
