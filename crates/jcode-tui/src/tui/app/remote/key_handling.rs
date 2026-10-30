@@ -1207,9 +1207,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if app_mod::auth_account_commands::handle_ssh_usage_command_remote(app, trimmed, remote)
-            .await?
-        {
+        if app_mod::auth::handle_ssh_usage_command_remote(app, trimmed, remote).await? {
             return Ok(());
         }
         if super::ssh_sessions::handle_command(app, remote, trimmed).await? {
