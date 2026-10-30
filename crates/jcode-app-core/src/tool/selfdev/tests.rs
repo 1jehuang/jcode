@@ -378,6 +378,9 @@ fn test_recovery_directive_returns_none_when_no_reload_recovery_needed() {
     assert!(ReloadContext::recovery_directive(None, false, "", None).is_none());
 }
 
+#[path = "reload_manifest_tests.rs"]
+mod reload_manifest;
+
 #[path = "reload_timeout_tests.rs"]
 mod reload_timeout;
 
