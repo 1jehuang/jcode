@@ -6,9 +6,16 @@ use jcode::side_panel::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
 };
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Parser, Debug)]
 #[command(about = "Benchmark heavy-session memory attribution and process footprint")]
 struct Args {
+    /// Measure remote server startup and history assembly in an isolated JCODE_HOME.
+    #[arg(long)]
+    remote_breakdown: bool,
     /// Scenario source
     #[arg(long, value_enum, default_value = "synthetic")]
     scenario: Scenario,
@@ -58,6 +65,10 @@ enum BenchMode {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    if args.remote_breakdown {
+        return remote_breakdown(&args);
+    }
 
     let process_before = process_memory::snapshot_with_source("bench:session-memory:before");
     let session = load_or_build_session(&args)?;
@@ -130,6 +141,93 @@ fn main() -> anyhow::Result<()> {
     });
 
     println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+#[derive(Clone)]
+struct BenchProvider;
+
+#[async_trait::async_trait]
+impl jcode::provider::Provider for BenchProvider {
+    async fn complete(
+        &self,
+        _: &[jcode::message::Message],
+        _: &[jcode::message::ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<jcode::provider::EventStream> {
+        anyhow::bail!("benchmark provider does not make requests")
+    }
+    fn name(&self) -> &str {
+        "benchmark"
+    }
+    fn model(&self) -> String {
+        "benchmark".into()
+    }
+    fn fork(&self) -> std::sync::Arc<dyn jcode::provider::Provider> {
+        std::sync::Arc::new(self.clone())
+    }
+}
+
+fn allocated() -> anyhow::Result<u64> {
+    process_memory::snapshot()
+        .allocator
+        .stats
+        .and_then(|stats| stats.allocated_bytes)
+        .ok_or_else(|| anyhow::anyhow!("run with --features dev-bins,jemalloc"))
+}
+
+fn remote_breakdown(args: &Args) -> anyhow::Result<()> {
+    let id = args
+        .session
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--session ID required"))?;
+    if std::env::var_os("JCODE_HOME").is_none() {
+        anyhow::bail!("set JCODE_HOME to an isolated copy of the session before running");
+    }
+    let runtime = tokio::runtime::Runtime::new()?;
+    let provider: std::sync::Arc<dyn jcode::provider::Provider> =
+        std::sync::Arc::new(BenchProvider);
+    let registry = runtime.block_on(jcode::tool::Registry::new(provider.clone()));
+    let before = allocated()?;
+    let mut session = Session::load_for_remote_startup(id)?;
+    let loaded = allocated()?;
+    let json_bytes = serde_json::to_vec(&session)?.len();
+    let message_count = session.messages.len();
+    let replay_count = session.replay_events.len();
+    let replay_before = allocated()?;
+    let replay = session.replay_events.clone();
+    let replay_cloned = allocated()?;
+    drop(replay);
+    let cache_before = allocated()?;
+    std::hint::black_box(session.provider_messages());
+    let cache_after = allocated()?;
+    session.release_provider_messages_cache();
+    let cache_released = allocated()?;
+    let agent_before = allocated()?;
+    let agent = runtime.block_on(async {
+        jcode::agent::Agent::new_with_session(provider, registry, session, None)
+    });
+    let agent_after = allocated()?;
+    let history_before = allocated()?;
+    let (history, images) = agent.get_history_and_rendered_images();
+    let history_after = allocated()?;
+    let wire = serde_json::to_vec(&history)?;
+    let wire_after = allocated()?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "session_id": id, "session_json_bytes": json_bytes, "messages": message_count,
+            "replay_events": replay_count, "history_messages": history.len(), "images": images.len(),
+            "allocated_bytes": {"baseline": before, "remote_load": loaded,
+                "replay_before": replay_before, "replay_cloned": replay_cloned, "cache_before": cache_before,
+                "cache_after": cache_after, "cache_released": cache_released,
+                "agent_before": agent_before, "agent_after": agent_after,
+                "history_before": history_before, "history_after": history_after,
+                "history_wire_after": wire_after, "history_wire_len": wire.len()}
+        })
+    );
+    std::hint::black_box((agent, history, images, wire));
     Ok(())
 }
 

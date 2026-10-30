@@ -2,6 +2,77 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
+fn compacted_prefix_releases_discarded_string_capacity() {
+    let mut session = Session::create_with_id("session_trim_capacity".into(), None, None);
+    session.append_stored_message(StoredMessage {
+        id: "message".into(),
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "tool".into(),
+                content: "x".repeat(100_000),
+                is_error: None,
+            },
+            ContentBlock::Reasoning {
+                text: "r".repeat(100_000),
+            },
+            ContentBlock::ReasoningTrace {
+                text: "r".repeat(100_000),
+            },
+            ContentBlock::AnthropicThinking {
+                thinking: "t".repeat(100_000),
+                signature: "sig".into(),
+            },
+            ContentBlock::OpenAIReasoning {
+                id: "id".into(),
+                summary: vec!["s".repeat(100_000)],
+                encrypted_content: Some("e".repeat(100_000)),
+                status: None,
+            },
+        ],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.compaction = Some(StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 1,
+        original_turn_count: 1,
+        compacted_count: 1,
+    });
+    assert_eq!(session.trim_compacted_prefix(), 5);
+    match &session.messages[0].content[..] {
+        [
+            ContentBlock::ToolResult { content, .. },
+            ContentBlock::Reasoning { text: reasoning },
+            ContentBlock::ReasoningTrace { text: trace },
+            ContentBlock::AnthropicThinking { thinking, .. },
+            ContentBlock::OpenAIReasoning {
+                summary,
+                encrypted_content,
+                ..
+            },
+        ] => {
+            assert!(content.starts_with(&"x".repeat(2048)));
+            assert!(content.contains("original 100000 bytes"));
+            assert!(
+                content.capacity() < 4096,
+                "tool result retains {} bytes",
+                content.capacity()
+            );
+            assert_eq!(reasoning.capacity(), 0);
+            assert_eq!(trace.capacity(), 0);
+            assert_eq!(thinking.capacity(), 0);
+            assert_eq!(summary.capacity(), 0);
+            assert!(encrypted_content.is_none());
+        }
+        _ => panic!("unexpected block layout"),
+    }
+}
+
+#[test]
 fn test_session_exists_roundtrip() -> Result<()> {
     let tmp_dir = std::env::temp_dir().join(format!(
         "jcode-session-test-{}",

@@ -1539,6 +1539,7 @@ request in this new forked session, using the inherited conversation only as con
                         content.push_str(&format!(
                             "\n[... trimmed from compacted history, original {original} bytes]"
                         ));
+                        content.shrink_to_fit();
                         shrunk += 1;
                     }
                     ContentBlock::OpenAIReasoning {
@@ -1546,14 +1547,14 @@ request in this new forked session, using the inherited conversation only as con
                         encrypted_content,
                         ..
                     } if encrypted_content.is_some() || !summary.is_empty() => {
-                        summary.clear();
+                        *summary = Vec::new();
                         *encrypted_content = None;
                         shrunk += 1;
                     }
                     ContentBlock::Reasoning { text } | ContentBlock::ReasoningTrace { text }
                         if !text.is_empty() =>
                     {
-                        text.clear();
+                        *text = String::new();
                         shrunk += 1;
                     }
                     ContentBlock::ToolUse { input, .. }
@@ -1566,7 +1567,7 @@ request in this new forked session, using the inherited conversation only as con
                         shrunk += 1;
                     }
                     ContentBlock::AnthropicThinking { thinking, .. } if !thinking.is_empty() => {
-                        thinking.clear();
+                        *thinking = String::new();
                         shrunk += 1;
                     }
                     _ => {}
