@@ -17,8 +17,11 @@ resolution belongs to the daemon, not the laptop's installed skill catalog.
 Enter and alternate slash submissions (including transcript send) share the same
 prepared-input dispatcher. Existing wire methods are reused, with no new protocol
 messages for existing handlers. **Runtime** uses the daemon's structured runtime
-command API and renders its result without starting a conversation turn. Local daemon mode is distinct from SSH mode and retains its existing
-behavior. Command sequences are not an atomic remote-command API.
+command API. Results do not start a conversation turn, except explicit workflow
+launch/continue actions such as `/improve` that deliberately start daemon-owned
+work. Command failures do not trigger provider fallback or clear an active chat.
+Local daemon mode is distinct from SSH mode and retains its existing behavior.
+Command sequences are not an atomic remote-command API.
 
 ## Capability matrix
 
@@ -112,5 +115,26 @@ A blocked command must not silently execute against the laptop.
 - Prompt commands can perform meaningful git/release work on the VM and retain
   the normal agent permission and approval behavior. They do not guarantee that
   the VM has the required software, authentication or a supported target OS.
-- Host-isolation regressions are tested with an isolated child process and fake
-  transport. This does not replace a real SSH VM integration test.
+
+## Workflow acceptance
+
+Run `JCODE_BIN=/path/to/rebuilt/jcode scripts/test_ssh_slash_workflows.sh` on Linux
+with OpenSSH server/client, tmux and Python 3.11 or newer. It uses a private,
+loopback-only SSH server, generated host/client keys, separate client and daemon
+homes, and a temporary workspace. The actual native `--ssh` transport, TUI,
+daemon and persistence are exercised. Only model responses are deterministic
+fixtures, with an in-flight request gate for stop/continuation checks.
+
+The suite checks host file viewing and refusal, config/default-model/service-tier
+persistence, project swarm prompts and log markers, account settings and removal
+review/reset cancellation, bookmarks, fork/back identity, recovery, daemon-owned
+workflow launch/stop while inference is active, client presentation and client
+reload with the original remote identity. Client config must remain unchanged,
+and remote sessions must never appear in client session storage. Terminal frames
+and fixture state are retained at the printed artifact path for diagnosis.
+
+This is real SSH over loopback, not a deployed cloud VM or external-provider
+OAuth test. It does not consume a real account reset, remove an actual account,
+exercise microphone hardware, perform installation/rebuilds, or validate
+cross-machine platform/network differences. Those limits remain explicit rather
+than claiming universal slash-command parity.
