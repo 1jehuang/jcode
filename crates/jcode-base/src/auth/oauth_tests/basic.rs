@@ -235,11 +235,7 @@ async fn claude_profile_subscription_metadata_merges_without_clobbering_tokens()
     // A refresh completed while the profile request was in flight.
     claude_auth::update_account_tokens(&label, "new_access", "new_refresh", 2)?;
     let subscription_type = profile.subscription_type();
-    claude_auth::update_account_profile_metadata(
-        &label,
-        profile.account.email,
-        subscription_type,
-    )?;
+    claude_auth::update_account_profile_metadata(&label, profile.account.email, subscription_type)?;
 
     for organization in [
         serde_json::Value::Null,
@@ -271,6 +267,56 @@ async fn claude_profile_subscription_metadata_merges_without_clobbering_tokens()
     assert_eq!(account.expires, 2);
     assert_eq!(account.scopes, vec!["user:profile"]);
     Ok(())
+}
+
+#[test]
+fn claude_profile_prefetch_throttles_per_home_and_label() {
+    let mut attempts = ClaudeProfilePrefetchAttempts::new();
+    let home = std::path::Path::new("/auth/home-one");
+    let other_home = std::path::Path::new("/auth/home-two");
+    let now = std::time::Instant::now();
+    assert!(reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-otter",
+        now
+    ));
+    assert!(!reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-otter",
+        now
+    ));
+    assert!(reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-fox",
+        now
+    ));
+    assert!(reserve_claude_profile_prefetch(
+        &mut attempts,
+        other_home,
+        "claude-otter",
+        now
+    ));
+    assert!(!reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-otter",
+        now + CLAUDE_PROFILE_PREFETCH_INTERVAL - Duration::from_secs(1)
+    ));
+    assert!(reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-otter",
+        now + CLAUDE_PROFILE_PREFETCH_INTERVAL
+    ));
+    assert_eq!(attempts.len(), 1, "expired homes and labels are pruned");
+}
+
+#[test]
+fn claude_profile_prefetch_without_runtime_is_safe() {
+    prefetch_missing_claude_subscription_metadata();
 }
 
 #[tokio::test]

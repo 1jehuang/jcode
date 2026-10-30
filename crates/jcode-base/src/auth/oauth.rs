@@ -1004,6 +1004,89 @@ pub async fn update_claude_account_profile(
     Ok(email)
 }
 
+const CLAUDE_PROFILE_PREFETCH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+type ClaudeProfilePrefetchAttempts =
+    std::collections::HashMap<(std::path::PathBuf, String), std::time::Instant>;
+
+fn reserve_claude_profile_prefetch(
+    attempts: &mut ClaudeProfilePrefetchAttempts,
+    home: &std::path::Path,
+    label: &str,
+    now: std::time::Instant,
+) -> bool {
+    attempts
+        .retain(|_, attempted| now.duration_since(*attempted) < CLAUDE_PROFILE_PREFETCH_INTERVAL);
+    match attempts.entry((home.to_path_buf(), label.to_owned())) {
+        std::collections::hash_map::Entry::Occupied(_) => false,
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(now);
+            true
+        }
+    }
+}
+
+/// Opportunistically backfill unknown plans outside the render path. Failed or
+/// incomplete profiles are also throttled, so new-session bursts cannot retry
+/// every account repeatedly. Reuses the normal login profile update path.
+#[cfg(test)]
+pub(crate) fn prefetch_missing_claude_subscription_metadata() {}
+
+#[cfg(not(test))]
+pub(crate) fn prefetch_missing_claude_subscription_metadata() {
+    use futures::StreamExt;
+    static ATTEMPTS: std::sync::OnceLock<std::sync::Mutex<ClaudeProfilePrefetchAttempts>> =
+        std::sync::OnceLock::new();
+    static REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let Ok(home) = crate::storage::jcode_dir() else {
+        return;
+    };
+    let home = home.canonicalize().unwrap_or(home);
+    let Ok(accounts) = claude_auth::list_accounts() else {
+        return;
+    };
+    let Ok(mut attempts) = ATTEMPTS.get_or_init(Default::default).lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let accounts: Vec<_> = accounts
+        .into_iter()
+        .filter(|account| {
+            account
+                .subscription_type
+                .as_deref()
+                .is_none_or(|plan| plan.trim().is_empty())
+        })
+        .filter(|account| !account.access.is_empty())
+        .filter(|account| {
+            reserve_claude_profile_prefetch(&mut attempts, &home, &account.label, now)
+        })
+        .collect();
+    drop(attempts);
+    if accounts.is_empty() {
+        return;
+    }
+    runtime.spawn(async move {
+        futures::stream::iter(accounts)
+            .for_each_concurrent(2, |account| async move {
+                let Ok(_permit) = REQUESTS.acquire().await else {
+                    return;
+                };
+                // Never log a profile error body: it is untrusted and could
+                // contain sensitive account information or reflected tokens.
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(CLAUDE_TOKEN_TIMEOUT_SECS),
+                    update_claude_account_profile(&account.label, &account.access),
+                )
+                .await;
+            })
+            .await;
+    });
+}
+
 /// Load Claude tokens from jcode's credentials file (active account).
 pub fn load_claude_tokens() -> Result<OAuthTokens> {
     if let Ok(creds) = claude_auth::load_credentials() {
