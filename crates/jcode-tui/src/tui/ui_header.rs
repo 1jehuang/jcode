@@ -79,7 +79,7 @@ pub(crate) fn build_preview_header(
     if !session.short_name.is_empty() {
         let icon = crate::id::session_icon(&session.short_name);
         lines.push(Line::from(Span::styled(
-            client_header_text(&session.short_name, &icon, None),
+            client_header_text(&session.short_name, icon, None),
             Style::default().fg(dim_color()),
         )));
     }
@@ -713,7 +713,7 @@ fn build_persistent_header_with_auth(
     }
 
     if !session_name.is_empty() {
-        let client_text = client_header_text(&session_name, &icon, connection_icon);
+        let client_text = client_header_text(&session_name, icon, connection_icon);
         let mut spans = vec![Span::styled(
             client_text.clone(),
             Style::default().fg(dim_color()),

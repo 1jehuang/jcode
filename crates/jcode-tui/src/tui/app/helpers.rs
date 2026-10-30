@@ -692,6 +692,7 @@ pub(crate) fn switched_model_account_suffix(
 /// Notice after switching the active saved account. The switch rebinds this
 /// session and becomes the default for new sessions, but other sessions that
 /// are already running keep the credentials they loaded.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn account_switch_notice(provider: &str, label: &str) -> String {
     format!(
         "Switched {provider} account to `{label}` for this session and new sessions. \
