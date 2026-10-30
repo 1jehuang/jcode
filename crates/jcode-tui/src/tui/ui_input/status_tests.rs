@@ -71,7 +71,7 @@ fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
     assert!(!text(&spans).contains('☁'));
 }
 #[test]
-fn overscroll_context_shows_counts_without_bar_and_compacts_when_narrow() {
+fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
     let facts = OverscrollFacts {
         machine: None,
         dir: Some("~/jcode".into()),
@@ -89,11 +89,11 @@ fn overscroll_context_shows_counts_without_bar_and_compacts_when_narrow() {
         let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
         assert!(fits, "{width}: {text}");
         assert!(text.contains("29%"), "{width}: {text}");
-        assert!(!text.contains('▰') && !text.contains('▱'));
         if width >= 40 {
-            assert!(text.contains("74k/256k 29%"), "{width}: {text}");
+            assert!(text.contains("74k/256k ▰▱▱▱ 29% used"), "{width}: {text}");
         } else {
             assert!(!text.contains("74k"), "{width}: {text}");
+            assert!(!text.contains('▰') && !text.contains('▱'));
         }
     }
     for (used, limit, expected, color) in [

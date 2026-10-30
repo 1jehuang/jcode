@@ -1565,6 +1565,8 @@ struct OverscrollLevels {
     branch: u8,
     git: u8,
     context: u8,
+    account_bar: u8,
+    context_bar: u8,
     auth: u8,
     provider: u8,
     model: u8,
@@ -1578,16 +1580,18 @@ struct OverscrollLevels {
 /// only shortened, so the line always answers "where am I, what am I running,
 /// how full is the context".
 const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
-    |l| l.auth = 1,     // hide auth ("OAuth"/"API key")
-    |l| l.git = 1,      // "~3 +1 ?2 ↑1" -> "±6 ↑1"
-    |l| l.branch = 1,   // long branch -> 12 chars
-    |l| l.provider = 1, // hide provider
-    |l| l.context = 1,  // "74k/256k 29%" -> "29%"
-    |l| l.git = 2,      // hide git status
-    |l| l.branch = 2,   // hide branch
-    |l| l.model = 1,    // drop reasoning effort
-    |l| l.machine = 1,  // "☁ jcode-cloud:" -> "☁ "
-    |l| l.dir = 1,      // "~/…/jcode" -> "jcode"
+    |l| l.account_bar = 1, // drop account bar before shortening other facts
+    |l| l.context_bar = 1, // keep token counts when the context bar cannot fit
+    |l| l.auth = 1,        // hide auth ("OAuth"/"API key")
+    |l| l.git = 1,         // "~3 +1 ?2 ↑1" -> "±6 ↑1"
+    |l| l.branch = 1,      // long branch -> 12 chars
+    |l| l.provider = 1,    // hide provider
+    |l| l.context = 1,     // "74k/256k 29%" -> "29%"
+    |l| l.git = 2,         // hide git status
+    |l| l.branch = 2,      // hide branch
+    |l| l.model = 1,       // drop reasoning effort
+    |l| l.machine = 1,     // "☁ jcode-cloud:" -> "☁ "
+    |l| l.dir = 1,         // "~/…/jcode" -> "jcode"
 ];
 
 fn overscroll_fact_spans(
@@ -1666,7 +1670,16 @@ fn overscroll_fact_spans(
                 muted,
             ));
         }
-        spans.push(overscroll_context_percentage(used, limit));
+        if levels.context == 0 && levels.context_bar == 0 {
+            let pct = ((used as f64 / limit.max(1) as f64).clamp(0.0, 1.0) * 100.0).round() as u8;
+            spans.extend(crate::tui::info_widget::render_inline_limit_bar(
+                100 - pct,
+                4,
+                true,
+            ));
+        } else {
+            spans.push(overscroll_context_percentage(used, limit));
+        }
         out.push(spans);
     }
 
@@ -1684,7 +1697,13 @@ fn overscroll_fact_spans(
     {
         let mut group = vec![Span::styled(provider.clone(), muted)];
         if let Some(remaining) = facts.account_remaining {
-            group.push(Span::styled(format!(" {remaining}% left"), muted));
+            let cells = if levels.account_bar == 0 { 4 } else { 0 };
+            if cells > 0 {
+                group.push(Span::raw(" "));
+            }
+            group.extend(crate::tui::info_widget::render_inline_limit_bar(
+                remaining, cells, false,
+            ));
         }
         out.push(group);
     }

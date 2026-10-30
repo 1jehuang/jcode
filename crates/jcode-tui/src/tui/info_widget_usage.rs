@@ -281,6 +281,34 @@ pub(super) fn render_usage_compact(
     lines
 }
 
+const LABEL_WIDTH: usize = 7;
+
+/// The same limit bar and percentage as the widget, without its label column.
+pub(crate) fn render_inline_limit_bar(
+    left_pct: u8,
+    cells: u16,
+    display_used: bool,
+) -> Vec<Span<'static>> {
+    let left_pct = left_pct.min(100);
+    let suffix_width = if display_used {
+        format!(" {}% used", 100 - left_pct).len()
+    } else {
+        format!(" {left_pct}% left").len()
+    } as u16;
+    render_labeled_bar(
+        "",
+        100 - left_pct,
+        left_pct,
+        None,
+        LABEL_WIDTH as u16 + cells.min(12) + suffix_width,
+        display_used,
+    )
+    .spans
+    .into_iter()
+    .skip(1)
+    .collect()
+}
+
 pub(crate) fn render_labeled_bar(
     label: &str,
     used_pct: u8,
@@ -297,7 +325,6 @@ pub(crate) fn render_labeled_bar(
         rgb(100, 200, 100)
     };
 
-    const LABEL_WIDTH: usize = 7;
     const MIN_BAR_WIDTH: usize = 4;
 
     let (display_pct, display_word) = if usage_display_used {
@@ -350,6 +377,31 @@ pub(crate) fn render_labeled_bar(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_limit_bar_reuses_widget_colors_and_compacts_without_bar() {
+        for (left, expected_color) in [
+            (100, rgb(100, 200, 100)),
+            (51, rgb(100, 200, 100)),
+            (50, rgb(255, 200, 100)),
+            (21, rgb(255, 200, 100)),
+            (20, rgb(255, 100, 100)),
+            (0, rgb(255, 100, 100)),
+        ] {
+            for used in [false, true] {
+                let spans = render_inline_limit_bar(left, 4, used);
+                assert_eq!(
+                    spans[0].content.chars().count() + spans[1].content.chars().count(),
+                    4
+                );
+                assert_eq!(spans[0].style.fg, Some(expected_color));
+                assert_eq!(spans[2].style.fg, Some(expected_color));
+                let compact = render_inline_limit_bar(left, 0, used);
+                assert!(compact[0].content.is_empty() && compact[1].content.is_empty());
+                assert_eq!(compact[2], spans[2]);
+            }
+        }
+    }
 
     #[test]
     fn usage_footer_metadata_covers_provider_paths() {

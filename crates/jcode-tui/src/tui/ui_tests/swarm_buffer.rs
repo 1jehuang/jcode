@@ -435,15 +435,17 @@ fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
     let dir = row.find("~/jcode").expect("dir shown");
     let branch = row.find(" main").expect("branch shown");
     let git = row.find("~3 ?2 ↑1").expect("git status shown");
-    let context = row.find("29%").expect("context percentage shown when roomy");
+    let context = row
+        .find("29%")
+        .expect("context percentage shown when roomy");
     let model = row.find("GPT-5.6 Sol high").expect("model shown");
     assert!(
         dir < branch && branch < git && git < context && context < model,
         "{row}"
     );
     assert!(
-        !row.contains('▰') && !row.contains('▱') && row.contains("74k/256k 29%"),
-        "token counts and percentage without bar: {row}"
+        row.contains("74k/256k ▰▱▱▱ 29% used"),
+        "token counts and small context bar: {row}"
     );
     assert!(row.contains("OAuth") && row.contains("OpenAI"), "{row}");
     assert!(
@@ -498,9 +500,14 @@ fn overscroll_line_shows_remaining_account_allowance_after_provider() {
         ..Default::default()
     });
     let row = overscroll_line_row(&state, 200);
-    assert!(row.contains("OpenAI 40% left"), "{row}");
-    assert!(row.contains("74k/256k 29%"), "{row}");
-    state.info_widget_data.usage_info.as_mut().unwrap().available = false;
+    assert!(row.contains("OpenAI ▰▰▱▱ 40% left"), "{row}");
+    assert!(row.contains("74k/256k ▰▱▱▱ 29% used"), "{row}");
+    state
+        .info_widget_data
+        .usage_info
+        .as_mut()
+        .unwrap()
+        .available = false;
     let row = overscroll_line_row(&state, 200);
     assert!(row.contains("OpenAI"), "{row}");
     assert!(!row.contains("% left"), "{row}");
