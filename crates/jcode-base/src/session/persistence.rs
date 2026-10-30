@@ -564,6 +564,11 @@ impl Session {
         session.backfill_prompt_title();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
+        // Same bounds as load_from_path: the shared server resumes seats through
+        // this path, so without them every old image and compacted tool output
+        // stays resident (GBs across a fleet).
+        session.trim_compacted_prefix();
+        session.decay_old_tool_images();
         session.mark_memory_profile_dirty();
         let finalize_ms = finalize_start.elapsed().as_millis();
         crate::logging::info(&format!(
