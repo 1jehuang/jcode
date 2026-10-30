@@ -136,8 +136,14 @@ fn transcript_paths(session: &SessionInfo) -> Vec<PathBuf> {
             if session_id.contains(['/', '\\', '\0']) {
                 return Vec::new();
             }
-            let Ok(home) = crate::storage::jcode_dir() else {
-                return Vec::new();
+            let home = match crate::storage::jcode_dir() {
+                Ok(home) => home,
+                Err(error) => {
+                    crate::logging::debug(&format!(
+                        "Cannot locate transcripts for session {session_id}: {error}"
+                    ));
+                    return Vec::new();
+                }
             };
             let dir = home.join("sessions");
             vec![
@@ -261,8 +267,17 @@ fn paths_match(paths: &[PathBuf], tokens: &[String], cancel: &AtomicBool) -> boo
 }
 
 fn scan_file(path: &Path, scan: &mut Scan<'_>) {
-    let Ok(file) = std::fs::File::open(path) else {
-        return;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        // Snapshot and journal paths are alternatives and may not both exist.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Cannot open transcript {}: {error}",
+                path.display()
+            ));
+            return;
+        }
     };
     let mut reader = BufReader::with_capacity(
         64 * 1024,
@@ -276,13 +291,27 @@ fn scan_file(path: &Path, scan: &mut Scan<'_>) {
         // hide later valid messages. from_slice is also much faster here than
         // serde's byte-at-a-time reader adapter.
         let mut line = Vec::new();
+        let mut record = 0;
         while !scan.cancel.load(Ordering::Relaxed) {
             line.clear();
             match reader.read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(error) => {
+                    if !scan.cancel.load(Ordering::Relaxed) {
+                        crate::logging::debug(&format!(
+                            "Cannot read transcript {}: {error}",
+                            path.display()
+                        ));
+                    }
+                    break;
+                }
                 Ok(_) => {
-                    let _ =
-                        (&mut *scan).deserialize(&mut serde_json::Deserializer::from_slice(&line));
+                    record += 1;
+                    if let Err(error) =
+                        (&mut *scan).deserialize(&mut serde_json::Deserializer::from_slice(&line))
+                    {
+                        log_scan_error(path, Some(record), scan, &error);
+                    }
                     if scan.complete() {
                         break;
                     }
@@ -296,9 +325,26 @@ fn scan_file(path: &Path, scan: &mut Scan<'_>) {
     loop {
         match (&mut *scan).deserialize(&mut deserializer) {
             Ok(()) => {}
-            Err(_) => break,
+            Err(error) => {
+                // EOF is normal between values or in a live, partially written record.
+                if !error.is_eof() {
+                    log_scan_error(path, None, scan, &error);
+                }
+                break;
+            }
         }
     }
+}
+
+fn log_scan_error(path: &Path, record: Option<usize>, scan: &Scan<'_>, error: &serde_json::Error) {
+    // The visitor uses errors for successful early exit and cancellation.
+    if scan.complete() || scan.cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    crate::logging::debug(&format!(
+        "Cannot decode transcript {} (record {record:?}): {error}",
+        path.display()
+    ));
 }
 
 #[cfg(test)]

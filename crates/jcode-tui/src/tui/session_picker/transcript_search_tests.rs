@@ -191,6 +191,26 @@ fn journal_search_skips_corrupt_records_and_missing_files() {
 }
 
 #[test]
+fn failed_snapshot_scan_preserves_matches_and_continues_to_journal() {
+    let temp = tempfile::tempdir().unwrap();
+    let snapshot = temp.path().join("snapshot.json");
+    let journal = temp.path().join("journal.jsonl");
+    std::fs::write(&snapshot, r#"{"text":"snapshotneedle", broken}"#).unwrap();
+    std::fs::write(&journal, "{\"text\":\"journalneedle\"}\n").unwrap();
+    assert!(paths_match(
+        &[snapshot, journal.clone()],
+        &search_query_tokens("snapshotneedle journalneedle"),
+        &AtomicBool::new(false),
+    ));
+    // Opening a directory either fails immediately or fails on read, depending on OS.
+    assert!(paths_match(
+        &[temp.path().to_path_buf(), journal],
+        &search_query_tokens("journalneedle"),
+        &AtomicBool::new(false),
+    ));
+}
+
+#[test]
 fn native_picker_finds_middle_omitted_from_real_list_index() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().unwrap();
