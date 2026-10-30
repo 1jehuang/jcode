@@ -104,6 +104,26 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
 }
 
 impl App {
+    /// Keep explicit provider overload notices in chat, while transport details
+    /// remain transient. Check the current turn to deduplicate replayed notices
+    /// even after another detail has replaced the status label.
+    pub(super) fn apply_status_detail(&mut self, detail: String) {
+        const OVERLOAD_PREFIX: &str = "OpenAI reported server overload";
+        if detail.starts_with(OVERLOAD_PREFIX)
+            && !self
+                .display_messages
+                .iter()
+                .rev()
+                .take_while(|message| message.role != "user")
+                .any(|message| {
+                    message.role == "system" && message.content.starts_with(OVERLOAD_PREFIX)
+                })
+        {
+            self.push_display_message(DisplayMessage::system(detail.clone()));
+        }
+        self.status_detail = Some(detail);
+    }
+
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
         if is_background_task_lifecycle_message(&message.content) {
             return;

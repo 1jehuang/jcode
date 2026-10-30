@@ -964,7 +964,7 @@ pub(in crate::tui::app) fn handle_server_event(
             eager_stream_redraw
         }
         ServerEvent::StatusDetail { detail } => {
-            app.status_detail = Some(detail);
+            app.apply_status_detail(detail);
             eager_stream_redraw
         }
         ServerEvent::ServiceTierReported { requested, tier } => {
@@ -3362,8 +3362,10 @@ mod runtime_command_tests {
 
     #[test]
     fn runtime_command_result_renders_without_starting_or_disrupting_turn() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
         for active in [false, true] {
             let mut app = create_test_app();
+            let _runtime_guard = runtime.enter();
             let mut remote = RemoteConnection::dummy();
             app.input = "draft prompt".into();
             app.is_processing = active;
