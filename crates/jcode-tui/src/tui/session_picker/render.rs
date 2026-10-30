@@ -558,7 +558,11 @@ impl SessionPicker {
         let mut title_parts: Vec<Span> = Vec::new();
         if self.loading_message.is_some() {
             title_parts.push(Span::styled(
-                " loading sessions ",
+                if self.search_active {
+                    " loading "
+                } else {
+                    " loading sessions "
+                },
                 Style::default()
                     .fg(rgb(255, 200, 100))
                     .add_modifier(Modifier::BOLD),
@@ -609,12 +613,16 @@ impl SessionPicker {
             format!("  {}", filter_label),
             Style::default().fg(rgb(255, 180, 100)),
         ));
-        title_parts.push(Span::styled(
-            " (s/S filter)",
-            Style::default().fg(rgb(80, 80, 80)),
-        ));
+        // These shortcuts insert search text while editing, so do not advertise
+        // them there or let their hint push the query out of a narrow header.
+        if !self.search_active {
+            title_parts.push(Span::styled(
+                " (s/S filter)",
+                Style::default().fg(rgb(80, 80, 80)),
+            ));
+        }
 
-        if self.hidden_test_count > 0 {
+        if self.hidden_test_count > 0 && !self.search_active {
             title_parts.push(Span::styled(
                 format!(" (+{} hidden)", self.hidden_test_count),
                 Style::default().fg(rgb(80, 80, 80)),
@@ -637,8 +645,10 @@ impl SessionPicker {
 
         title_parts.push(Span::styled(" ", Style::default()));
 
-        let mut help = if self.loading_message.is_some() {
-            " Esc cancel ".to_string()
+        let mut help = if self.search_active && self.loading_message.is_some() {
+            " type to filter · loading… · Esc clear · Ctrl+C cancel ".to_string()
+        } else if self.loading_message.is_some() {
+            " / search · s/S filter · Esc cancel ".to_string()
         } else if self.search_active {
             " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel ".to_string()
         } else {

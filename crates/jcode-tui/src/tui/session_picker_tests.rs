@@ -159,6 +159,195 @@ fn standalone_resume_renders_before_list_load_finishes() {
 }
 
 #[test]
+fn loading_picker_accepts_and_renders_search_before_sessions_arrive() {
+    let mut picker = SessionPicker::loading();
+    let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
+    for code in
+        std::iter::once(KeyCode::Char('/')).chain("query-before-data".chars().map(KeyCode::Char))
+    {
+        assert!(matches!(
+            picker
+                .handle_overlay_key(code, KeyModifiers::empty())
+                .expect("loading search input"),
+            OverlayAction::Continue
+        ));
+    }
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    assert!(picker.loading_message.is_some());
+    assert!(picker.search_active);
+    assert_eq!(picker.search_query, "query-before-data");
+
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("loading search frame");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Loading sessions"));
+    assert!(text.contains("query-before-data"));
+}
+
+#[test]
+fn loading_picker_search_is_editable_and_escape_clears_without_closing() {
+    let mut picker = SessionPicker::loading();
+    for code in [
+        KeyCode::Char('/'),
+        KeyCode::Char('q'),
+        KeyCode::Char('x'),
+        KeyCode::Backspace,
+        KeyCode::Char('z'),
+    ] {
+        assert!(matches!(
+            picker
+                .handle_overlay_key(code, KeyModifiers::empty())
+                .expect("edit loading search"),
+            OverlayAction::Continue
+        ));
+    }
+    assert_eq!(picker.search_query, "qz");
+    assert!(picker.search_active);
+    assert!(picker.loading_message.is_some());
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+            .expect("leave search"),
+        OverlayAction::Continue
+    ));
+    assert!(!picker.search_active);
+    assert!(picker.search_query.is_empty());
+    assert!(picker.loading_message.is_some());
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+            .expect("close after leaving search"),
+        OverlayAction::Close
+    ));
+}
+
+#[test]
+fn loading_picker_without_search_keeps_escape_and_ctrl_c_cancellation() {
+    for (code, modifiers) in [
+        (KeyCode::Esc, KeyModifiers::empty()),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ] {
+        let mut picker = SessionPicker::loading();
+        assert!(!picker.search_active);
+        assert!(matches!(
+            picker
+                .handle_overlay_key(code, modifiers)
+                .expect("cancel loading picker"),
+            OverlayAction::Close
+        ));
+    }
+}
+
+#[test]
+fn loading_picker_search_survives_cached_and_fresh_updates_and_filters_both() {
+    let mut picker = SessionPicker::loading();
+    for code in std::iter::once(KeyCode::Char('/')).chain("needle".chars().map(KeyCode::Char)) {
+        assert!(matches!(
+            picker
+                .handle_overlay_key(code, KeyModifiers::empty())
+                .expect("search before list arrives"),
+            OverlayAction::Continue
+        ));
+    }
+    let matching = make_session("matching", "needle", false, SessionStatus::Closed);
+    let other = make_session("other", "unrelated", false, SessionStatus::Closed);
+    assert!(
+        !picker
+            .apply_session_list_update(SessionListUpdate::Cached((
+                Vec::new(),
+                vec![other.clone(), matching.clone()],
+            )))
+            .expect("cached list")
+    );
+    assert_eq!(picker.search_query, "needle");
+    assert!(picker.search_active);
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("matching")
+    );
+
+    assert!(
+        picker
+            .apply_session_list_update(SessionListUpdate::Fresh(Ok((
+                Vec::new(),
+                vec![matching, other],
+            ))))
+            .expect("fresh list")
+    );
+    assert_eq!(picker.search_query, "needle");
+    assert!(picker.search_active);
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("matching")
+    );
+}
+
+#[test]
+fn loading_picker_enter_preserves_search_without_queuing_resume() {
+    let mut picker = SessionPicker::loading();
+    for code in [KeyCode::Char('/'), KeyCode::Char('q'), KeyCode::Enter] {
+        assert!(matches!(
+            picker
+                .handle_overlay_key(code, KeyModifiers::empty())
+                .unwrap(),
+            OverlayAction::Continue
+        ));
+    }
+    assert_eq!(picker.search_query, "q");
+    assert!(picker.search_active);
+    picker
+        .apply_session_list_update(SessionListUpdate::Cached((
+            Vec::new(),
+            vec![make_session("matching", "q", false, SessionStatus::Closed)],
+        )))
+        .unwrap();
+    assert_eq!(picker.search_query, "q");
+    assert!(picker.search_active);
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("matching")
+    );
+}
+
+#[test]
+fn loading_picker_filter_choice_survives_refresh() {
+    let mut picker = SessionPicker::loading();
+    picker
+        .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
+        .unwrap();
+    let chosen = picker.filter_mode;
+    assert!(picker.filter_mode_user_chosen);
+    assert_eq!(chosen, SessionFilterMode::CurrentDir);
+    picker
+        .apply_session_list_update(SessionListUpdate::Cached((
+            Vec::new(),
+            vec![make_session("first", "first", false, SessionStatus::Closed)],
+        )))
+        .unwrap();
+    assert_eq!(picker.filter_mode, chosen);
+    assert!(picker.filter_mode_user_chosen);
+    picker
+        .apply_session_list_update(SessionListUpdate::Fresh(Ok((Vec::new(), Vec::new()))))
+        .unwrap();
+    assert_eq!(picker.filter_mode, chosen);
+    assert!(picker.filter_mode_user_chosen);
+}
+
+#[test]
 fn standalone_resume_refresh_preserves_cached_selection_and_search() {
     let mut picker = SessionPicker::loading();
     let first = make_session("first", "first", false, SessionStatus::Closed);

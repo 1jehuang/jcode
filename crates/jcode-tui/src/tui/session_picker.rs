@@ -1145,6 +1145,10 @@ impl SessionPicker {
                 self.search_query.clear();
                 self.rebuild_items();
             }
+            // Do not submit or erase a query before any sessions are available.
+            // In particular, never queue Enter to unexpectedly resume a session
+            // when the background load eventually completes.
+            KeyCode::Enter if self.loading_message.is_some() => {}
             KeyCode::Enter => {
                 self.search_active = false;
                 if self.visible_sessions.is_empty() {
@@ -1218,18 +1222,25 @@ impl SessionPicker {
         if let Some(action) = self.handle_claude_takeover_confirmation_key(code, modifiers) {
             return Ok(action);
         }
-        if self.loading_message.is_some() {
-            return match code {
-                KeyCode::Esc | KeyCode::Char('q') => Ok(OverlayAction::Close),
-                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    Ok(OverlayAction::Close)
-                }
-                _ => Ok(OverlayAction::Continue),
-            };
-        }
-
+        // Search editing must work even before the first cached list arrives.
+        // Keep the query in picker state so reseeding applies it to new entries.
         if self.search_active {
             return self.handle_search_key(code, modifiers);
+        }
+
+        if self.loading_message.is_some() {
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') => return Ok(OverlayAction::Close),
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(OverlayAction::Close);
+                }
+                KeyCode::Char('/') => self.search_active = true,
+                KeyCode::Char('s') => self.cycle_filter_mode(),
+                KeyCode::Char('S') => self.cycle_filter_mode_backwards(),
+                KeyCode::Char('d') => self.toggle_test_sessions(),
+                _ => {}
+            }
+            return Ok(OverlayAction::Continue);
         }
 
         // The first-run choice is deliberately simpler than the full session
@@ -2557,6 +2568,7 @@ impl SessionPicker {
             // Always paint before polling, including on a cold cache. Neither
             // disk-cache parsing nor the full transcript scan may hold up the
             // first frame or prevent Escape from cancelling the picker.
+            let mut input_poll_timeout = Duration::from_millis(100);
             if let Some(receiver) = updates.as_ref() {
                 match receiver.try_recv() {
                     Ok(update) => match self.apply_session_list_update(update) {
@@ -2571,7 +2583,9 @@ impl SessionPicker {
                                     break 'picker Ok(None);
                                 }
                             }
-                            continue;
+                            // Give queued keys a turn between cached and fresh
+                            // updates, then repaint immediately without idling.
+                            input_poll_timeout = Duration::ZERO;
                         }
                         Err(err) => break 'picker Err(err),
                     },
@@ -2583,7 +2597,7 @@ impl SessionPicker {
                     }
                 }
             }
-            if event::poll(Duration::from_millis(100))? {
+            if event::poll(input_poll_timeout)? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         let key = jcode_tui_core::korean_input::normalize_key_event(key);
