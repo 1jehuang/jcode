@@ -30,6 +30,11 @@ impl Config {
 # Set to 0 to disable. Disconnecting or switching sessions still revokes access.
 local_access_seconds = 86400
 
+# Emit OSC 9 terminal status side-channel updates for integrations such as herdr.
+# Set to false to disable all `jcode:working`, `jcode:blocked`, and `jcode:idle`
+# escape sequences. Env override: JCODE_TERMINAL_STATUS_OSC9.
+terminal_status_osc9 = true
+
 [keybindings]
 # Scroll keys (vim-style by default)
 # Supports: ctrl, alt, shift modifiers + any key

@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use jcode_base::safety::{self, PermissionRequest, Urgency};
+use jcode_core::console::emit_osc9_status_ignored;
 use jcode_core::util::truncate_str;
 use jcode_tui_style::rgb;
 use ratatui::{
@@ -511,6 +512,16 @@ impl PermissionsApp {
             anyhow::bail!("permissions viewer requires an interactive terminal");
         }
 
+        // Emit OSC 9 progress with "jcode:blocked" so terminal multiplexers
+        // (herdr) detect that the user needs to act on a permission request.
+        // The main jcode TUI is paused while this viewer runs, so it cannot
+        // emit its own status. A single emission on entry is sufficient
+        // because herdr reads the OSC 9 side-channel persistently.
+        let terminal_status_osc9 = jcode_base::config::config().terminal_status_osc9;
+        if terminal_status_osc9 {
+            emit_osc9_status_ignored("blocked");
+        }
+
         let mut terminal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init))
             .map_err(|payload| {
                 let msg = if let Some(s) = payload.downcast_ref::<&str>() {
@@ -584,6 +595,11 @@ impl PermissionsApp {
         };
 
         jcode_tui_style::restore_terminal_quietly();
+        // Restore idle status when leaving the permissions viewer so herdr
+        // does not stay stuck in "blocked" after the user has acted.
+        if terminal_status_osc9 {
+            emit_osc9_status_ignored("idle");
+        }
         result
     }
 }
