@@ -675,6 +675,7 @@ mod ssh_slash_tests {
                 ("/model refresh", "refresh_models"),
                 ("/git status", "input_shell"),
                 ("/auth", "runtime_command"),
+                ("/refresh-model-list", "runtime_command"),
                 ("/logout openai", "runtime_command"),
                 ("/context", "runtime_command"),
                 ("/overnight status", "runtime_command"),
@@ -723,7 +724,14 @@ mod ssh_slash_tests {
             let mut remote = RemoteConnection::dummy();
             // No history makes normal remote prompts queue without a wire
             // send, providing a direct distinction from rejected commands.
-            for command in ["/subscribe", "/terminal-setup", "/screenshot-mode"] {
+            for command in [
+                "/subscribe",
+                "/terminal-setup",
+                "/screenshot-mode",
+                "/poke",
+                "/improve resume",
+                "/refactor stop",
+            ] {
                 let next_id = remote.next_request_id_for_test();
                 submit_remote_slash_input(
                     &mut app,

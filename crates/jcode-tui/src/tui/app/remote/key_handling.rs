@@ -15,6 +15,7 @@ fn ssh_runtime_command(input: &str) -> Option<(&'static str, Vec<String>)> {
     let token = words.next()?;
     let command = match token {
         "/skills" => "skills",
+        "/refresh-model-list" => "refresh_model_list",
         "/context" => "context",
         "/info" => "info",
         "/cache" => "cache",
@@ -1127,13 +1128,13 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 ) -> Result<()> {
     {
         if !app_mod::commands_cloud::check_cloud_handoff_input(app, prepared.expanded.trim()) {
-            restore_prepared_remote_input(app, prepared);
+            super::input_dispatch::restore_prepared_remote_input(app, prepared);
             return Ok(());
         }
         if app.cloud_handoff_blocks_work()
             && app_mod::commands_cloud::parse_cloud_command(prepared.expanded.trim()).is_none()
         {
-            restore_prepared_remote_input(app, prepared);
+            super::input_dispatch::restore_prepared_remote_input(app, prepared);
             app.set_status_notice(
                 "Cloud handoff pending. Use /cloud cancel before submitting more work.",
             );
