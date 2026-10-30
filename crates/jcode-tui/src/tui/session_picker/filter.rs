@@ -76,17 +76,28 @@ impl SessionPicker {
         // Keep literal matches immediate. Expensive typo-tolerant matching is
         // debounced in the worker alongside transcript search, not performed
         // on every keypress. Reconsider all sessions for new worker results.
+        //
+        // A qualifier token switches the match mode: the query is no longer
+        // plain free text, so it must go through the structured matcher
+        // (`debug:yes` matches sessions whose index never contains that raw
+        // text, and a bare half-typed `model:` imposes no constraint yet).
+        // Pure free-text queries keep master's literal-token fast path, so
+        // they defer metadata matching for large histories exactly like
+        // master.
         let candidates = self.all_session_refs();
+        let qualifier_mode = !query_is_pure_free_text(&normalized);
         let tokens = loading::search_query_tokens(&normalized);
 
         let matches = candidates
             .into_iter()
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
-                    (!self.transcript_search.defers_metadata()
+                    (!qualifier_mode
+                        && !self.transcript_search.defers_metadata()
                         && tokens
                             .iter()
                             .all(|token| session.search_index.contains(token)))
+                        || (qualifier_mode && Self::session_matches_search(session, &normalized))
                         || self.transcript_search.contains(&session.id)
                 })
             })

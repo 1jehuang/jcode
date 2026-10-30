@@ -3284,6 +3284,7 @@ fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards(
         "pinned_preview".to_string(),
         PreviewExtras {
             hidden_prompts: 100,
+            info_data: None,
             todos_payload: Some(
                 serde_json::json!({
                     "todos": [{
@@ -3306,7 +3307,11 @@ fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards(
     assert!(!text.contains("DUPLICATE_TODO_TOOL_CARD"), "{text}");
     // 60 visible prompts after 100 hidden ones: the last is numbered 160.
     assert!(text.contains("160›"), "{text}");
-    // Pinned todos sit at the top of the preview content, under the sticky prompt.
+    // Pinned todos render as a fixed band near the top of the preview pane,
+    // under master's floating info chrome and the sticky previous-prompt
+    // header, and stay there regardless of scroll. The band is Clear-painted
+    // over the topmost prompt rows, so it must sit above the last numbered
+    // prompt and within the first rows of the pane.
     let rows: Vec<String> = text
         .chars()
         .collect::<Vec<_>>()
@@ -3317,9 +3322,13 @@ fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards(
         .iter()
         .position(|row| row.contains("PINNED_PREVIEW_TASK"))
         .expect("todo row");
+    let last_prompt_row = rows
+        .iter()
+        .position(|row| row.contains("160›"))
+        .expect("last visible prompt row");
     assert!(
-        todo_row <= 4,
-        "todo band should be pinned at top, row {todo_row}:\n{text}"
+        todo_row < last_prompt_row && todo_row <= 6,
+        "todo band should be pinned near the top of the preview, row {todo_row} vs last prompt {last_prompt_row}:\n{text}"
     );
 }
 
