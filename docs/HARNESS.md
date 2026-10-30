@@ -37,6 +37,44 @@ Subprocesses inherit ordinary daemon environment variables unless overridden,
 and OS process inspection or another program running as the same user may expose
 secrets. Only supply credentials to trusted commands and trusted child agents.
 
+## Session context ceilings
+
+The harness API supports a persistent compaction ceiling for each session:
+
+```json
+{"v":1,"id":42,"req":"set_context_cap","session_id":"session-id","max_context_tokens":600000}
+```
+
+The reply reports both the normalized override and the effective budget:
+
+```json
+{"v":1,"reply_to":42,"ev":"context_cap_changed","session_id":"session-id","max_context_tokens":600000,"effective_budget":600000}
+```
+
+The effective budget is the smaller of the model's context window and the session
+ceiling. If no session ceiling is set, `[compaction] max_context_tokens` supplies
+the ceiling instead. A global value of `0` means the model window is uncapped.
+A session override replaces the global ceiling, so it can raise or lower it, but
+can never exceed the model window.
+
+Pass `0` or `null` to clear an override and return to the current global default.
+Overrides are isolated between sessions, saved with the session, and restored on
+resume after a daemon restart. Older sessions without this field inherit the
+global default. Model changes recalculate the budget without discarding the
+override.
+
+Changes requested during a running turn wait for the session lock without blocking
+the connection's request reader. Lowering the ceiling does not interrupt the
+active request or immediately rewrite the transcript. Existing compaction
+thresholds apply to subsequent requests. Use `compact` to request compaction
+explicitly. The ceiling is a compaction budget, not an exact outbound token limit.
+
+Rust SDK: `client.set_context_cap(session_id, Some(600_000))`.
+TypeScript SDK: `await client.setContextCap(sessionId, 600_000)`.
+Both return the effective budget. Live `token_usage` events also carry an optional
+`effective_budget` from the daemon, allowing clients to render a context meter
+without treating the model's full window as the active compaction budget.
+
 ## Token optimization
 
 `agentgrep` is jcode's grep tool, built for agents. Matches include file structure, such as functions and their locations, so an agent can understand the surrounding code without reading an entire file. Results are adaptively trimmed based on what the agent has already seen to reduce repeated context.
