@@ -2181,7 +2181,7 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
     }
 }
 
-pub(super) fn handle_navigation_shortcuts(
+pub(super) fn handle_account_shortcut(
     app: &mut App,
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -2190,6 +2190,17 @@ pub(super) fn handle_navigation_shortcuts(
         && matches!(code, KeyCode::Char('j' | 'k'))
     {
         app.cycle_account(code == KeyCode::Char('j'));
+        return true;
+    }
+    false
+}
+
+pub(super) fn handle_navigation_shortcuts(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
+    if handle_account_shortcut(app, code, modifiers) {
         return true;
     }
     if let Some(amount) = app.scroll_keys.scroll_amount(code, modifiers) {
@@ -2333,10 +2344,7 @@ pub(super) fn handle_pre_control_shortcuts(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
-    if modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
-        && matches!(code, KeyCode::Char('j' | 'k'))
-    {
-        app.cycle_account(code == KeyCode::Char('j'));
+    if handle_account_shortcut(app, code, modifiers) {
         return true;
     }
     // Plain Ctrl+K kills to end of line (emacs habit). Ctrl+Shift+K must fall

@@ -2056,6 +2056,10 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
+    if input::handle_account_shortcut(app, code, modifiers) {
+        return Ok(());
+    }
+
     if handle_ctrl_kill_to_end(app, code, modifiers) {
         return Ok(());
     }

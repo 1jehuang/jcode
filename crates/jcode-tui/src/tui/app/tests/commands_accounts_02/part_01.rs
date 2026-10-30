@@ -13,6 +13,40 @@ fn remote_account_fixture(label: &str) -> crate::protocol::AccountUsageSnapshot 
 }
 
 #[test]
+fn test_account_hotkeys_connected_remote_queue_switch_and_preserve_draft() {
+    with_ssh_remote_test_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openai".into());
+        app.remote_provider_oauth_account_label = Some("first".into());
+        crate::usage::set_remote_account_usage(
+            Vec::new(),
+            vec![remote_account_fixture("first"), remote_account_fixture("second")],
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for key in ['j', 'k'] {
+            app.input = "keep this draft".into();
+            app.cursor_pos = 4;
+            runtime.block_on(async {
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                app.handle_remote_key(
+                    KeyCode::Char(key),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    &mut remote,
+                ).await.unwrap();
+            });
+            assert_eq!(app.input, "keep this draft");
+            assert_eq!(app.cursor_pos, 4);
+            assert!(matches!(app.pending_account_picker_action.take(),
+                Some(crate::tui::AccountPickerAction::Switch { provider_id, label })
+                    if provider_id == "openai" && label == "second"
+            ));
+        }
+        crate::usage::clear_remote_account_usage();
+    });
+}
+
+#[test]
 fn test_account_local_shared_daemon_retains_inventory_center_and_saved_defaults() {
     with_temp_jcode_home(|| {
         let _env_guard = EnvRestoreGuard::capture(["JCODE_SSH_REMOTE", "GROQ_API_KEY"]);
