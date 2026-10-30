@@ -2,6 +2,9 @@ use super::*;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
 
+#[path = "../session_picker/live_chrome_parity_tests.rs"]
+mod picker_chrome_parity;
+
 /// Delegates to the single shared render-state lock so viewport-snapshot tests
 /// serialize against every other rendering test, not just each other (#593).
 fn viewport_snapshot_test_lock() -> crate::tui::ui::RenderStateTestGuard {

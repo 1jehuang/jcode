@@ -1505,6 +1505,39 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
     frame.render_widget(Paragraph::new(line), area);
 }
 
+/// Render only the supplied session facts. Unlike the live adapter this never
+/// falls back to the current App, process directory, SSH host or credentials.
+pub(crate) fn preview_overscroll_line(
+    data: &crate::tui::info_widget::InfoWidgetData,
+    width: u16,
+) -> Line<'static> {
+    let facts = OverscrollFacts {
+        machine: None,
+        dir: data.working_dir.as_deref().and_then(overscroll_dir_label),
+        branch: overscroll_git_branch(data),
+        git: data.git_info.clone(),
+        context: overscroll_context_usage(data),
+        account_remaining: overscroll_account_remaining(data),
+        auth: overscroll_auth_label(data.auth_method),
+        provider: data
+            .provider_name
+            .as_ref()
+            .filter(|name| !name.is_empty() && !overscroll_is_runtime_placeholder(name))
+            .map(|name| overscroll_provider_display(name)),
+        model: data
+            .model
+            .as_ref()
+            .filter(|name| !name.is_empty() && !overscroll_is_placeholder(name))
+            .map(|name| session_facts::pretty_model(name)),
+        effort: data
+            .reasoning_effort
+            .as_deref()
+            .and_then(overscroll_short_reasoning)
+            .map(str::to_string),
+    };
+    Line::from(overscroll_fit_facts(&facts, width as usize).0).alignment(Alignment::Right)
+}
+
 /// Model name color on the overscroll status line.
 const OVERSCROLL_MODEL_PINK: Color = Color::Rgb(255, 135, 200);
 

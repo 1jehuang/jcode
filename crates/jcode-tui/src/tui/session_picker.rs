@@ -39,6 +39,7 @@ mod filter;
 mod loading;
 mod memory;
 mod navigation;
+mod preview_chrome;
 mod render;
 mod saved_placement;
 mod transcript_search;
@@ -191,6 +192,8 @@ struct PreviewExtras {
     hidden_prompts: usize,
     /// Pinned todo band payload (same JSON the live chat renders).
     todos_payload: Option<String>,
+    /// Durable selected-session widget facts, never the current App snapshot.
+    info_data: Option<super::info_widget::InfoWidgetData>,
 }
 
 struct LoadedSessionPreview {
@@ -954,6 +957,7 @@ impl SessionPicker {
                 extras: PreviewExtras {
                     hidden_prompts,
                     todos_payload: crate::tui::app::pinned_todos_payload_for_session(session_id),
+                    info_data: Some(preview_chrome::persisted_info(&session)),
                 },
             });
         }
@@ -1442,6 +1446,13 @@ impl SessionPicker {
             return;
         }
 
+        let inner = preview_chrome::draw(
+            frame,
+            inner,
+            &session,
+            self.preview_extras.get(&session.id),
+        );
+
         // Build (or reuse) the fully-wrapped preview content. The expensive
         // markdown render + wrap only runs on a cache miss; scrolling, focus
         // changes, and idle redraws reuse the cached wrapped lines. This mirrors
@@ -1572,7 +1583,14 @@ impl SessionPicker {
                 Vec::new()
             }
         };
-        frame.render_widget(Paragraph::new(visible_lines), content_area);
+        frame.render_widget(Paragraph::new(visible_lines.clone()), content_area);
+        preview_chrome::draw_widgets(
+            frame,
+            content_area,
+            &visible_lines,
+            &session,
+            self.preview_extras.get(&session.id),
+        );
 
         if todo_lines > 0 && header_height < text_area.height {
             let band_area = Rect {
