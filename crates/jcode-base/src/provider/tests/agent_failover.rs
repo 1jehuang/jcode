@@ -24,6 +24,7 @@ fn agent_failover_fixture(models: &[&str]) -> MultiProvider {
     crate::auth::account_pool::AccountPool {
         members: vec!["claude:claude-otter".into(), "openai-api".into()],
         excluded: vec![],
+        ..Default::default()
     }
     .save()
     .unwrap();
@@ -285,6 +286,7 @@ fn agent_failover_pool_order_beats_global_model_quality_and_configured_identity(
                 "openai-api".into(),
             ],
             excluded: vec![],
+            ..Default::default()
         }
         .save()
         .unwrap();
@@ -400,6 +402,7 @@ fn agent_failover_bedrock_without_tools_is_rejected_at_countdown_recheck() {
         crate::auth::account_pool::AccountPool {
             members: vec!["bedrock".into()],
             excluded: vec![],
+            ..Default::default()
         }
         .save()
         .unwrap();
