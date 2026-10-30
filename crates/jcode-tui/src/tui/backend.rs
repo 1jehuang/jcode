@@ -594,6 +594,19 @@ impl RemoteConnection {
             .await
     }
 
+    /// Execute a daemon-owned command without submitting a conversation turn.
+    pub async fn runtime_command(&mut self, command: &str, args: Vec<String>) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RuntimeCommand {
+            id,
+            command: command.to_string(),
+            args,
+        })
+        .await?;
+        Ok(id)
+    }
+
     /// Clear the server-side conversation and replace it with a fresh session.
     pub async fn clear(&mut self) -> Result<u64> {
         let had_cloud_authority = self.cloud_authority.is_some();

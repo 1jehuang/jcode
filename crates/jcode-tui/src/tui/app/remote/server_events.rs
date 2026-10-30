@@ -464,6 +464,12 @@ pub(in crate::tui::app) fn handle_server_event(
         return true;
     }
 
+    // Control responses are transcript notices, never conversation-turn activity.
+    if let ServerEvent::RuntimeCommandResult { message, .. } = event {
+        app.push_display_message(DisplayMessage::system(message));
+        return true;
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -3346,4 +3352,47 @@ fn runtime_activity_status_notice(message: &str) -> String {
         .trim()
         .trim_end_matches('.')
         .to_string()
+}
+
+#[cfg(test)]
+mod runtime_command_tests {
+    use super::*;
+    use crate::tui::app::tests::create_test_app;
+    use crate::tui::backend::RemoteConnection;
+
+    #[test]
+    fn runtime_command_result_renders_without_starting_or_disrupting_turn() {
+        for active in [false, true] {
+            let mut app = create_test_app();
+            let mut remote = RemoteConnection::dummy();
+            app.input = "draft prompt".into();
+            app.is_processing = active;
+            app.status = if active {
+                ProcessingStatus::Sending
+            } else {
+                ProcessingStatus::Idle
+            };
+            app.current_message_id = active.then_some(99);
+            let activity = app.last_stream_activity;
+            let count = app.display_messages.len();
+            let event: ServerEvent = serde_json::from_value(serde_json::json!({
+                "type": "runtime_command_result", "id": 42, "command": "agents",
+                "data": {"enabled": true}, "message": "Agents enabled\nDaemon configuration updated."
+            })).unwrap();
+
+            assert!(handle_server_event(&mut app, event, &mut remote));
+            assert_eq!(app.display_messages.len(), count + 1);
+            let notice = app.display_messages.last().unwrap();
+            assert_eq!(notice.role, "system");
+            assert_eq!(
+                notice.content,
+                "Agents enabled\nDaemon configuration updated."
+            );
+            assert_eq!(app.is_processing, active);
+            assert_eq!(matches!(app.status, ProcessingStatus::Sending), active);
+            assert_eq!(app.current_message_id, active.then_some(99));
+            assert_eq!(app.last_stream_activity, activity);
+            assert_eq!(app.input, "draft prompt");
+        }
+    }
 }
