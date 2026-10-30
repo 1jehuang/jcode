@@ -689,9 +689,13 @@ fn apparent_heap_retention_bytes() -> Option<u64> {
     Some(rss_anon.saturating_sub(live))
 }
 
+/// Without /proc, use the allocator's own resident-minus-live gap. jemalloc's
+/// `retained_bytes` counter is unrelated to resident pages (it read 0 while the
+/// server held 1.9 GB of freed-but-resident memory on macOS).
 #[cfg(not(target_os = "linux"))]
 fn apparent_heap_retention_bytes() -> Option<u64> {
-    None
+    let stats = allocator_info().stats?;
+    Some(stats.resident_bytes?.saturating_sub(stats.allocated_bytes?))
 }
 
 /// Refresh the post-trim baseline from the current apparent retention.
