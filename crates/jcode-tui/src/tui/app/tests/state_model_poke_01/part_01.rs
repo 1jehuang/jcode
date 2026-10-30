@@ -163,6 +163,29 @@ fn test_rewind_lists_visible_messages_when_initial_session_context_is_hidden() {
     assert!(last.content.contains("Conversation history:"));
     assert!(last.content.contains("1 👤 User - msg-1"));
     assert!(last.content.contains("2 👤 User - msg-2"));
+    assert_eq!(last.title.as_deref(), Some("Rewind"));
+    let rows: Vec<String> =
+        crate::tui::ui::render_system_message(last, 100, crate::config::DiffDisplayMode::default())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+    let first = rows
+        .iter()
+        .position(|row| row.contains("1 👤 User - msg-1"))
+        .expect("first entry visible");
+    let second = rows
+        .iter()
+        .position(|row| row.contains("2 👤 User - msg-2"))
+        .expect("second entry visible");
+    assert!(
+        first < second,
+        "rewind entries must occupy separate ordered rows: {rows:?}"
+    );
     assert!(!last.content.contains("Session Context"));
     assert!(!last.content.contains("No messages in conversation"));
 }
