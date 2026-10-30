@@ -98,21 +98,33 @@ fn open_at(path: &std::path::Path) -> Result<Connection> {
     )?;
     // Additive migration for databases created before saved-session ordering
     // became part of the shared session-list contract.
-    let _ = connection.execute(
-        "ALTER TABLE recent_sessions ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = connection.execute("ALTER TABLE recent_sessions ADD COLUMN save_label TEXT", []);
-    for column in [
-        "resume_short_name",
-        "resume_fingerprint",
-        "resume_updated_at",
+    // Serialize migration checks with other processes so a duplicate column is
+    // never mistaken for a real migration failure (or vice versa).
+    let transaction = rusqlite::Transaction::new_unchecked(
+        &connection,
+        rusqlite::TransactionBehavior::Immediate,
+    )?;
+    let columns = {
+        let mut statement = transaction.prepare("PRAGMA table_info(recent_sessions)")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?
+    };
+    for (column, declaration) in [
+        ("saved", "INTEGER NOT NULL DEFAULT 0"),
+        ("save_label", "TEXT"),
+        ("resume_short_name", "TEXT"),
+        ("resume_fingerprint", "TEXT"),
+        ("resume_updated_at", "TEXT"),
     ] {
-        let _ = connection.execute(
-            &format!("ALTER TABLE recent_sessions ADD COLUMN {column} TEXT"),
-            [],
-        );
+        if !columns.contains(column) {
+            transaction.execute(
+                &format!("ALTER TABLE recent_sessions ADD COLUMN {column} {declaration}"),
+                [],
+            )?;
+        }
     }
+    transaction.commit()?;
     Ok(connection)
 }
 
@@ -148,9 +160,7 @@ fn recent_with(connection: &Connection, limit: usize) -> Result<Vec<RecentSessio
 
 /// Update the index after a successful session persistence operation.
 pub fn upsert_session(session: &Session) -> Result<()> {
-    let fingerprint = crate::session::session_path(&session.id)
-        .ok()
-        .and_then(|path| SessionFingerprint::read(&path));
+    let fingerprint = SessionFingerprint::read(&crate::session::session_path(&session.id)?);
     index_session(session, fingerprint.as_ref(), false)
 }
 
@@ -193,10 +203,7 @@ fn index_session(
             })
             .transpose()?;
         if backfill
-            && crate::session::session_path(&session.id)
-                .ok()
-                .and_then(|path| SessionFingerprint::read(&path))
-                .as_ref()
+            && SessionFingerprint::read(&crate::session::session_path(&session.id)?).as_ref()
                 != fingerprint
         {
             return Ok(());
@@ -291,11 +298,27 @@ pub(crate) fn resume_entries() -> Result<std::collections::HashMap<String, Resum
         let mut entries = std::collections::HashMap::new();
         for row in rows {
             let (id, short_name, generated, custom, saved, label, updated, fingerprint) = row?;
-            let Some(updated_at) = updated.and_then(|value| value.parse().ok()) else {
+            let Some(updated) = updated else {
+                crate::logging::debug(&format!("Resume index row {id} has no timestamp"));
                 continue;
             };
-            let Ok(fingerprint) = serde_json::from_str(&fingerprint) else {
-                continue;
+            let updated_at = match updated.parse() {
+                Ok(updated_at) => updated_at,
+                Err(error) => {
+                    crate::logging::debug(&format!(
+                        "Resume index row {id} has an invalid timestamp: {error}"
+                    ));
+                    continue;
+                }
+            };
+            let fingerprint = match serde_json::from_str(&fingerprint) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    crate::logging::debug(&format!(
+                        "Resume index row {id} has an invalid fingerprint: {error}"
+                    ));
+                    continue;
+                }
             };
             let title = custom
                 .as_deref()
@@ -347,13 +370,17 @@ pub fn backfill_resume_metadata_in_background() {
     if STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let _ = std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name("resume-index-backfill".into())
         .spawn(|| {
             if let Err(error) = crate::session::resume_cache::backfill() {
                 crate::logging::warn(&format!("Resume metadata backfill failed: {error}"));
             }
-        });
+        })
+    {
+        STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+        crate::logging::warn(&format!("Cannot start resume metadata backfill: {error}"));
+    }
 }
 
 /// Refresh only the derived title after the todo or plan file changes.

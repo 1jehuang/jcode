@@ -146,6 +146,71 @@ fn malformed_fingerprint_does_not_discard_other_resume_entries() -> Result<()> {
 }
 
 #[test]
+fn malformed_timestamp_does_not_discard_other_resume_entries() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = HomeGuard::set(home.path());
+    let mut healthy = session("session_timestamp_healthy", "Healthy title");
+    let mut corrupt = session("session_timestamp_corrupt", "Corrupt title");
+    healthy.save()?;
+    corrupt.save()?;
+    for malformed in [Some("not a timestamp"), Some(""), None] {
+        with_connection(|connection| {
+            connection.execute(
+                "UPDATE recent_sessions SET resume_updated_at = ?2 WHERE session_id = ?1",
+                params![corrupt.id, malformed],
+            )?;
+            Ok(())
+        })?;
+        let entries = resume_entries()?;
+        assert!(entries.contains_key(&healthy.id));
+        assert!(!entries.contains_key(&corrupt.id));
+    }
+    // Skipped rows remain recoverable from the authoritative snapshot.
+    assert_eq!(
+        crate::session::find_session_by_name_or_id("Corrupt title")?,
+        corrupt.id
+    );
+    assert!(resume_entries()?.contains_key(&corrupt.id));
+    Ok(())
+}
+
+#[test]
+fn concurrent_schema_migrations_are_idempotent() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    let path = home.path().join("index.sqlite3");
+    // Initialize WAL before racing the additive migrations themselves.
+    let connection = Connection::open(&path)?;
+    connection.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE recent_sessions (
+             session_id TEXT PRIMARY KEY NOT NULL,
+             working_dir TEXT, generated_title TEXT, custom_title TEXT,
+             todo_title TEXT, updated_at_ms INTEGER NOT NULL,
+             last_active_at_ms INTEGER
+         );",
+    )?;
+    let barrier = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    let connection = open_at(&path)?;
+                    assert!(recent_with(&connection, 1)?.is_empty());
+                    Ok::<_, anyhow::Error>(())
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("migration worker panicked")?;
+        }
+        Ok::<_, anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+#[test]
 fn resume_title_precedence_excludes_todo_title() -> Result<()> {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir()?;
