@@ -214,8 +214,28 @@ pub fn assess(command: &str, ctx: &RiskContext) -> RiskAssessment {
         });
     }
 
+    // A `cd` earlier in the same command line decides where later relative
+    // paths resolve (#932). Without that, `cd /etc && rm -rf passwd` was judged
+    // as a delete inside the workspace while the shell would remove
+    // `/etc/passwd`. Subshell parentheses are flattened away by the tokenizer,
+    // so a `cd` inside `( ... )` over-approximates the rest of the line; that
+    // direction only ever costs a confirmation.
+    let mut cwd = ctx.working_dir.clone();
     for segment in tokenize::split_segments(command) {
-        assess_segment(&segment, ctx, &mut findings);
+        let segment_ctx = RiskContext {
+            working_dir: cwd.clone(),
+            ..ctx.clone()
+        };
+        match directory_change(&segment, &segment_ctx) {
+            DirectoryChange::None => {}
+            DirectoryChange::Known(dir) => cwd = Some(dir),
+            DirectoryChange::Unknown => cwd = None,
+        }
+        let segment_ctx = RiskContext {
+            working_dir: cwd.clone(),
+            ..ctx.clone()
+        };
+        assess_segment(&segment, &segment_ctx, &mut findings);
     }
 
     // `"$(...)"`, backticks and unquoted heredoc bodies run commands the
@@ -233,6 +253,67 @@ pub fn assess(command: &str, ctx: &RiskContext) -> RiskAssessment {
         return RiskAssessment::safe();
     }
     RiskAssessment::from_findings(findings)
+}
+
+/// What a segment does to the shell's working directory.
+enum DirectoryChange {
+    /// Not a `cd`.
+    None,
+    /// A `cd` whose destination can be resolved statically.
+    Known(std::path::PathBuf),
+    /// A `cd` whose destination depends on runtime state (`cd -`, `cd $VAR`).
+    Unknown,
+}
+
+/// Track `cd` so later relative operands resolve where the shell will be.
+fn directory_change(tokens: &[Token], ctx: &RiskContext) -> DirectoryChange {
+    let mut rest = tokens;
+    while rest.len() > 1 && SHELL_CONTROL_PREFIXES.contains(&rest[0].text.as_str()) {
+        rest = &rest[1..];
+    }
+    // Leading `VAR=value` assignments prefix a command without changing it.
+    while rest.len() > 1 && rest[0].text.contains('=') && !rest[0].is_flag() {
+        rest = &rest[1..];
+    }
+    if rest.first().map(Token::basename).as_deref() != Some("cd") {
+        return DirectoryChange::None;
+    }
+
+    let mut destination: Option<&str> = None;
+    for token in rest.iter().skip(1) {
+        if token.is_operator || token.is_redirect_target {
+            continue;
+        }
+        // `cd -P /x`, `cd -- /x`: options precede the destination.
+        if destination.is_none() && (token.is_flag() || token.text == "--") {
+            continue;
+        }
+        if destination.is_some() {
+            // `cd a b` is an error in every shell, so the directory did not
+            // change in a way worth guessing at.
+            return DirectoryChange::Unknown;
+        }
+        destination = Some(token.text.as_str());
+    }
+
+    let Some(destination) = destination else {
+        // A bare `cd` goes home.
+        return match &ctx.home_dir {
+            Some(home) => DirectoryChange::Known(home.clone()),
+            None => DirectoryChange::Unknown,
+        };
+    };
+    // `cd -` uses OLDPWD, and substitutions or globs need the shell's own
+    // expansion before the directory is known.
+    if destination == "-" || destination.contains(['$', '`', '*', '?']) {
+        return DirectoryChange::Unknown;
+    }
+    let resolved = paths::expand(destination, ctx);
+    if resolved.is_absolute() {
+        DirectoryChange::Known(resolved)
+    } else {
+        DirectoryChange::Unknown
+    }
 }
 
 fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFinding>) {
@@ -389,7 +470,7 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
     let targets: Vec<&Token> = tokens
         .iter()
         .skip(1)
-        .filter(|t| !t.is_flag() && !t.is_operator && !t.is_truncating_redirect_target)
+        .filter(|t| !t.is_flag() && !t.is_operator && !t.is_redirect_target)
         .collect();
 
     // A destructive command fed by a pipe takes its operands from the previous
@@ -449,7 +530,7 @@ fn assess_find(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFindi
         .skip(1)
         .skip_while(|t| matches!(t.text.as_str(), "-H" | "-L" | "-P" | "--"))
         .take_while(|t| !t.is_flag() && !t.is_operator && !matches!(t.text.as_str(), "!" | "("))
-        .filter(|t| !t.is_truncating_redirect_target)
+        .filter(|t| !t.is_redirect_target)
         .collect();
     let classify_roots = |findings: &mut Vec<RiskFinding>| {
         for raw in roots
