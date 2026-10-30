@@ -843,12 +843,27 @@ pub const TOOL_IMAGE_DECAY_KEEP_CHARS: usize = 24 * 1024 * 1024;
 ///
 /// Returns the number of images replaced.
 pub fn decay_old_tool_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+    decay_images_in_contents(contents, true)
+}
+
+/// Same bound for images the user pasted (no `ToolResult` in the message).
+/// Pasted screenshots are multi-MB each and otherwise accumulate without limit,
+/// making every resumed session load hundreds of MB.
+pub fn decay_old_user_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+    decay_images_in_contents(contents, false)
+}
+
+fn decay_images_in_contents(
+    contents: &mut [&mut Vec<ContentBlock>],
+    tool_results: bool,
+) -> usize {
     let mut images: Vec<(usize, usize, usize)> = Vec::new();
     let mut total: usize = 0;
     for (ci, content) in contents.iter().enumerate() {
-        if !content
+        if content
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            != tool_results
         {
             continue;
         }

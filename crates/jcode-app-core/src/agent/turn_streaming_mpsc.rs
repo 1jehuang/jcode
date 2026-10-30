@@ -1882,7 +1882,7 @@ impl Agent {
                 } else if self.is_graceful_shutdown() {
                     // Server reload - abort tool and save interrupted result
                     logging::info(&format!(
-                        "Tool '{}' interrupted by server reload after {:.1}s",
+                        "Tool '{}' interrupted by shutdown/cancel signal (server reload OR a new user message/Esc) after {:.1}s",
                         tc.name,
                         tool_elapsed.as_secs_f64()
                     ));

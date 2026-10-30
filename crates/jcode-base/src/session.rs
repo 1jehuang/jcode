@@ -67,9 +67,6 @@ fn message_has_tool_image(content: &[ContentBlock]) -> bool {
     content
         .iter()
         .any(|block| matches!(block, ContentBlock::Image { .. }))
-        && content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
 fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
@@ -1430,7 +1427,8 @@ request in this new forked session, using the inherited conversation only as con
     pub fn decay_old_tool_images(&mut self) -> usize {
         let mut contents: Vec<&mut Vec<ContentBlock>> =
             self.messages.iter_mut().map(|m| &mut m.content).collect();
-        let stripped = jcode_compaction_core::decay_old_tool_images_in_contents(&mut contents);
+        let mut stripped = jcode_compaction_core::decay_old_tool_images_in_contents(&mut contents);
+        stripped += jcode_compaction_core::decay_old_user_images_in_contents(&mut contents);
         if stripped > 0 {
             self.mark_memory_profile_dirty();
             self.mark_messages_full_dirty();
