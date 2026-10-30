@@ -3442,24 +3442,16 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+pub(super) fn handle_display_settings_command(app: &mut App, trimmed: &str) -> bool {
+    handle_alignment_command(app, trimmed)
+        || handle_reasoning_display_command(app, trimmed)
+        || handle_compact_notifications_command(app, trimmed)
+        || handle_show_agentgrep_output_command(app, trimmed)
+        || handle_tool_call_details_command(app, trimmed)
+}
+
 pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
-    if handle_alignment_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_reasoning_display_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_compact_notifications_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_show_agentgrep_output_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_tool_call_details_command(app, trimmed) {
+    if handle_display_settings_command(app, trimmed) {
         return true;
     }
 
