@@ -106,6 +106,9 @@ impl ActivityGate {
         runtime: OwnedRwLockReadGuard<()>,
         session: Option<String>,
     ) -> anyhow::Result<ActivityReservation> {
+        // Absent ownership must never masquerade as an unrelated session
+        // and bypass a transfer fence.
+        let session = session.filter(|id| !id.trim().is_empty());
         let mut state = self.scoped.lock().unwrap();
         anyhow::ensure!(
             session
@@ -318,6 +321,20 @@ mod tests {
         assert!(gate.try_idle_sessions(&selected).is_none());
         drop((unknown, unrelated));
         assert!(gate.try_idle().is_some());
+    }
+
+    #[test]
+    fn empty_owner_remains_globally_blocking() {
+        let gate = ActivityGate::default();
+        let selected = BTreeSet::from(["selected".into()]);
+        for owner in ["", "   "] {
+            let unknown = gate.try_enter_session(owner).unwrap();
+            assert!(gate.try_idle_sessions(&selected).is_none());
+            drop(unknown);
+            let fence = gate.try_idle_sessions(&selected).unwrap();
+            assert!(gate.try_enter_session(owner).is_err());
+            drop(fence);
+        }
     }
 
     #[tokio::test]
