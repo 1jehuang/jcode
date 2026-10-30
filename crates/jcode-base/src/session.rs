@@ -1511,6 +1511,66 @@ request in this new forked session, using the inherited conversation only as con
         stripped
     }
 
+    /// Shrink the already-compacted prefix of the transcript. Messages covered
+    /// by the compaction state are never replayed to a provider, yet long-lived
+    /// seats kept every tool output and reasoning blob of them in RAM (tens of
+    /// MB per session, GBs across a shared server). Keeps block structure and
+    /// tool_use/tool_result pairing, only shortens the payloads.
+    /// Returns the number of blocks shrunk.
+    pub fn trim_compacted_prefix(&mut self) -> usize {
+        const KEEP_TOOL_RESULT_CHARS: usize = 2048;
+        let covered = match &self.compaction {
+            Some(c) => c.compacted_count.min(self.messages.len()),
+            None => return 0,
+        };
+        let mut shrunk = 0usize;
+        for message in self.messages.iter_mut().take(covered) {
+            for block in message.content.iter_mut() {
+                match block {
+                    ContentBlock::ToolResult { content, .. }
+                        if content.len() > KEEP_TOOL_RESULT_CHARS =>
+                    {
+                        let mut cut = KEEP_TOOL_RESULT_CHARS;
+                        while !content.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        let original = content.len();
+                        content.truncate(cut);
+                        content.push_str(&format!(
+                            "\n[... trimmed from compacted history, original {original} bytes]"
+                        ));
+                        shrunk += 1;
+                    }
+                    ContentBlock::OpenAIReasoning {
+                        summary,
+                        encrypted_content,
+                        ..
+                    } if encrypted_content.is_some() || !summary.is_empty() => {
+                        summary.clear();
+                        *encrypted_content = None;
+                        shrunk += 1;
+                    }
+                    ContentBlock::Reasoning { text } | ContentBlock::ReasoningTrace { text }
+                        if !text.is_empty() =>
+                    {
+                        text.clear();
+                        shrunk += 1;
+                    }
+                    ContentBlock::AnthropicThinking { thinking, .. } if !thinking.is_empty() => {
+                        thinking.clear();
+                        shrunk += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if shrunk > 0 {
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+        shrunk
+    }
+
     pub fn visible_conversation_message_count(&self) -> usize {
         self.messages
             .iter()

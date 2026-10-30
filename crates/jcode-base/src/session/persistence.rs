@@ -412,6 +412,7 @@ impl Session {
         // Sessions written before tool screenshots were bounded (#1680) can
         // hold hundreds of MB of old inline images. Decay them now so the next
         // save rewrites a compact snapshot.
+        session.trim_compacted_prefix();
         let decayed_tool_images = session.decay_old_tool_images();
         if decayed_tool_images > 0 {
             crate::logging::event_info(
