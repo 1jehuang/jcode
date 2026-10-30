@@ -547,7 +547,11 @@ pub(in crate::tui::app) async fn connect_with_retry(
             Ok(ConnectOutcome::Connected(remote))
         }
         Err(e) => {
-            if state.reconnect_attempts == 0 && !app.server_spawning {
+            // A seat pointed at an explicit shared socket (JCODE_SOCKET) must ride out a
+            // server reload/restart: fall through to the reconnect loop instead of
+            // dropping the pane to a bare shell.
+            let explicit_socket = std::env::var_os("JCODE_SOCKET").is_some();
+            if state.reconnect_attempts == 0 && !app.server_spawning && !explicit_socket {
                 if let Some(host) = crate::tui::ssh_remote_host() {
                     return Err(anyhow::anyhow!(
                         "Failed to connect to the SSH adapter for {host}: {e}"
