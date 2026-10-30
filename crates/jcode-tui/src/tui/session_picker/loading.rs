@@ -396,6 +396,15 @@ pub(super) fn session_matches_picker_query(session: &SessionInfo, query: &str) -
     parsed.matches(session)
 }
 
+/// Split a raw query into normalized (lowercased, whitespace-trimmed) search
+/// tokens. Empty/whitespace-only queries yield no tokens (match everything).
+pub(super) fn search_query_tokens(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
 /// A picker search query split into free-text tokens and structured qualifiers.
 ///
 /// Qualifier tokens use a `key:value` shape; anything else is free text matched

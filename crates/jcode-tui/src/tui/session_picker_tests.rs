@@ -16,6 +16,8 @@ fn completed_empty_preview_is_not_loaded_again() {
     tx.send(Some(LoadedSessionPreview {
         messages: vec![],
         extras: PreviewExtras::default(),
+        model: None,
+        provider_key: None,
     }))
     .unwrap();
     assert!(picker.poll_preview_load());
@@ -274,42 +276,6 @@ fn cloud_session_picker_renders_host_and_preserves_resume_target() {
 }
 
 #[test]
-||||||| parent of 41b00efff (feat(tui): pin current-folder sessions to top of /resume with running-first sort)
-fn cloud_session_picker_renders_host_and_preserves_resume_target() {
-    let mut session = make_session(
-        "session_cloud_1770000000000",
-        "cloud",
-        false,
-        SessionStatus::Closed,
-    );
-    session.server_name = Some("cloud: dev-cloud".into());
-    session.server_icon = Some("☁".into());
-    let target = session.resume_target.clone();
-    let mut picker = SessionPicker::new_grouped(
-        vec![ServerGroup {
-            name: "cloud: dev-cloud".into(),
-            icon: "☁".into(),
-            version: String::new(),
-            git_hash: String::new(),
-            is_running: false,
-            sessions: vec![session],
-        }],
-        vec![],
-    );
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
-    terminal.draw(|frame| picker.render(frame)).unwrap();
-    let text: String = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(text.contains("cloud: dev-cloud"));
-    assert_eq!(picker.selection_or_current_targets(), vec![target]);
-}
-
-#[test]
 fn standalone_resume_renders_before_list_load_finishes() {
     let mut picker = SessionPicker::loading();
     let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
@@ -515,6 +481,9 @@ fn loading_picker_enter_preserves_search_without_queuing_resume() {
 #[test]
 fn loading_picker_filter_choice_survives_refresh() {
     let mut picker = SessionPicker::loading();
+    picker
+        .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
+        .unwrap();
     picker
         .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
         .unwrap();
@@ -1504,6 +1473,10 @@ fn test_search_typing_and_word_delete_work_through_keyboard_path() {
 
 #[test]
 fn test_search_hint_line_lists_qualifier_keys_in_rendered_frame() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let previous_home = std::env::var("JCODE_HOME").ok();
+    crate::env::set_var("JCODE_HOME", temp.path());
     let mut picker = SessionPicker::new(vec![make_session(
         "hint_session",
         "hint",
@@ -1514,10 +1487,24 @@ fn test_search_hint_line_lists_qualifier_keys_in_rendered_frame() {
     picker.search_query = "model:gpt".to_string();
     picker.rebuild_items();
 
+    // The transcript-search worker only settles after its debounce window;
+    // the real UI polls it every frame, so drain it here before asserting on
+    // the settled title-bar hint.
+    for _ in 0..50 {
+        std::thread::sleep(StdDuration::from_millis(20));
+        picker.poll_transcript_search();
+    }
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+
     // 120 cols is the default terminal width where the old title-bar hint
     // lost its tail (debug:/canary:/after:/before: never rendered). The
     // qualifier keys now live in the dedicated search row and must fit.
-    let lines = render_onboarding_picker_lines(&mut picker, 120, 40);
+    let lines = onboarding::render_onboarding_picker_lines(&mut picker, 120, 40);
     let hint_line = lines
         .iter()
         .find(|line| line.contains("filters:"))
@@ -1538,7 +1525,7 @@ fn test_search_hint_line_lists_qualifier_keys_in_rendered_frame() {
 
     // The active query is echoed in the title bar, and the title keeps a
     // short nav hint instead of the full qualifier list.
-    let lines_wide = render_onboarding_picker_lines(&mut picker, 220, 40);
+    let lines_wide = onboarding::render_onboarding_picker_lines(&mut picker, 220, 40);
     assert!(lines_wide.iter().any(|line| line.contains("\"model:gpt\"")));
     assert!(lines_wide.iter().any(|line| line.contains("Ctrl+J/K nav")));
     assert!(lines.iter().any(|line| line.contains("Esc to clear")));

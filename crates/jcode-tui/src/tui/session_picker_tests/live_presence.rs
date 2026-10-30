@@ -302,6 +302,7 @@ fn test_working_filter_shows_only_streaming_sessions() {
     picker.cycle_filter_mode(); // CurrentDir
     picker.cycle_filter_mode(); // CatchUp
     picker.cycle_filter_mode(); // Saved
+    picker.cycle_filter_mode(); // Cloud
     picker.cycle_filter_mode(); // Active
     picker.cycle_filter_mode(); // Working
     assert_eq!(picker.filter_mode, SessionFilterMode::Working);

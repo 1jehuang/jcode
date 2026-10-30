@@ -189,6 +189,14 @@ fn test_current_dir_group_pinned_across_server_groups_and_orphans() {
     );
     orphan_elsewhere.working_dir = Some("/home/jeremy/elsewhere".to_string());
     orphan_elsewhere.last_message_time = Utc::now() - ChronoDuration::minutes(10);
+    let mut grouped_elsewhere = make_session(
+        "grouped_elsewhere",
+        "grouped-elsewhere",
+        false,
+        SessionStatus::Closed,
+    );
+    grouped_elsewhere.working_dir = Some("/home/jeremy/other".to_string());
+    grouped_elsewhere.last_message_time = Utc::now() - ChronoDuration::minutes(7);
 
     let groups = vec![ServerGroup {
         name: "main".to_string(),
@@ -196,7 +204,7 @@ fn test_current_dir_group_pinned_across_server_groups_and_orphans() {
         version: "v0.1.0".to_string(),
         git_hash: "abc1234".to_string(),
         is_running: true,
-        sessions: vec![grouped_here.clone()],
+        sessions: vec![grouped_here.clone(), grouped_elsewhere.clone()],
     }];
 
     let mut picker =
@@ -213,7 +221,12 @@ fn test_current_dir_group_pinned_across_server_groups_and_orphans() {
         .collect();
     assert_eq!(
         visible_ids,
-        vec!["grouped_here", "orphan_here", "orphan_elsewhere"]
+        vec![
+            "grouped_here",
+            "orphan_here",
+            "grouped_elsewhere",
+            "orphan_elsewhere"
+        ]
     );
     assert!(matches!(
         picker.items[0],
@@ -224,6 +237,13 @@ fn test_current_dir_group_pinned_across_server_groups_and_orphans() {
     ));
     assert!(matches!(
         picker.items[3],
+        PickerItem::ServerHeader {
+            session_count: 1,
+            ..
+        }
+    ));
+    assert!(matches!(
+        picker.items[5],
         PickerItem::OrphanHeader { session_count: 1 }
     ));
 }
