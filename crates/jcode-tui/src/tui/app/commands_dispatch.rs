@@ -98,7 +98,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/save"
             | "/unsave"
             | "/transcript"
-            | "/git"
             | "/open"
             | "/file"
             | "/selfdev"
@@ -116,6 +115,9 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/reset"
             | "/subscription"
             | "/fix"
+            | "/poke"
+            | "/improve"
+            | "/refactor"
             | "/support"
             | "/feedback"
             | "/productivity"
@@ -133,9 +135,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/screenshot"
             | "/record"
             | "/subagent-model"
-            | "/continue"
-            | "/resumeall"
-            | "/resume-all"
             | "/z"
             | "/zz"
             | "/zzz"
@@ -325,7 +324,7 @@ mod tests {
         use crate::tui::app::{input, tests::create_test_app};
         let mut app = create_test_app();
         app.is_remote = true;
-        for command in ["/config init", "/logout", "/save test", "/reload", "/git"] {
+        for command in ["/config init", "/logout", "/save test", "/reload"] {
             assert!(super::dispatch_local_command(&mut app, command));
             assert!(
                 app.display_messages
@@ -381,7 +380,6 @@ mod tests {
             "/config edit",
             "/permissions",
             "/open /etc/passwd",
-            "/git",
             "/save name",
             "/resume",
             "/selfdev status",
@@ -401,6 +399,9 @@ mod tests {
             "/desktop",
             "/workspace",
             "/workspace split",
+            "/poke",
+            "/improve plan remote changes",
+            "/refactor resume",
             "/review",
             "/subagent investigate",
         ] {
@@ -409,6 +410,10 @@ mod tests {
         for command in [
             "/account",
             "/accounts openai",
+            "/git",
+            "/continue",
+            "/resumeall",
+            "/resume-all",
             "/todos",
             "/todo",
             "/login",
