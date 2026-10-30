@@ -3109,6 +3109,115 @@ fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
     Ok(())
 }
 
+fn assert_persisted_route(session_id: &str, expected: Option<&str>) -> Result<()> {
+    assert_eq!(
+        Session::load(session_id)?.route_api_method.as_deref(),
+        expected
+    );
+    assert_eq!(
+        Session::load_startup_stub(session_id)?
+            .route_api_method
+            .as_deref(),
+        expected
+    );
+    assert_eq!(
+        Session::load_for_remote_startup(session_id)?
+            .route_api_method
+            .as_deref(),
+        expected
+    );
+    Ok(())
+}
+
+fn route_journal_roundtrip(large: bool) -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let session_id = "session_route_journal";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.provider_key = Some("openai".into());
+    session.model = Some("same-model".into());
+    session.route_api_method = Some("account:first".into());
+    session.append_stored_message(StoredMessage {
+        id: "message".into(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "x".repeat(if large { 2 * 1024 * 1024 } else { 10 }),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save()?;
+    let path = storage_paths::session_path(session_id)?;
+    let before = std::fs::read(&path)?;
+    for route in [Some("account:second"), Some("account:third"), None] {
+        session.route_api_method = route.map(str::to_string);
+        session.save()?;
+        assert_persisted_route(session_id, route)?;
+        if large {
+            assert_eq!(std::fs::read(&path)?, before);
+            assert!(session_journal_path(session_id)?.exists());
+        } else {
+            // Small metadata updates keep the snapshot self-contained.
+            let snapshot: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            assert_eq!(snapshot["route_api_method"].as_str(), route);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn route_journal_small_session_roundtrip() -> Result<()> {
+    route_journal_roundtrip(false)
+}
+
+#[test]
+fn route_journal_large_session_roundtrip() -> Result<()> {
+    route_journal_roundtrip(true)
+}
+
+#[test]
+fn route_journal_legacy_entries_preserve_snapshot_and_prior_journal_route() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let session_id = "session_route_legacy_journal";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.route_api_method = Some("account:snapshot".into());
+    session.title = Some("legacy route test".into());
+    session.save()?;
+    // Metadata-only entries at or before the checkpoint timestamp are stale.
+    session.updated_at += chrono::Duration::seconds(1);
+    let mut legacy = serde_json::to_value(session.journal_meta())?;
+    legacy.as_object_mut().unwrap().remove("route_api_method");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("route_api_method_present");
+    let legacy_line = serde_json::json!({"meta": legacy}).to_string();
+    let path = session_journal_path(session_id)?;
+    std::fs::write(&path, format!("{legacy_line}\n"))?;
+    assert_persisted_route(session_id, Some("account:snapshot"))?;
+
+    session.route_api_method = Some("account:journal".into());
+    let current_line = serde_json::json!({"meta": session.journal_meta()}).to_string();
+    // A downgraded writer can append legacy metadata after new metadata.
+    std::fs::write(&path, format!("{current_line}\n{legacy_line}\n"))?;
+    assert_persisted_route(session_id, Some("account:journal"))?;
+
+    session.route_api_method = None;
+    let cleared_line = serde_json::json!({"meta": session.journal_meta()}).to_string();
+    std::fs::write(
+        &path,
+        format!("{current_line}\n{cleared_line}\n{legacy_line}\n"),
+    )?;
+    assert_persisted_route(session_id, None)?;
+    Ok(())
+}
+
 fn big_compaction(tag: &str) -> crate::session::StoredCompactionState {
     crate::session::StoredCompactionState {
         summary_text: String::new(),

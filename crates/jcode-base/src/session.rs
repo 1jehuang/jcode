@@ -538,6 +538,8 @@ impl Session {
             provider_session_id: self.provider_session_id.clone(),
             model_usage_turn_id: self.model_usage_turn_id.clone(),
             provider_key: self.provider_key.clone(),
+            route_api_method: self.route_api_method.clone(),
+            route_api_method_present: true,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             context_cap: self.context_cap,
@@ -742,6 +744,9 @@ impl Session {
         self.provider_session_id = meta.provider_session_id;
         self.model_usage_turn_id = meta.model_usage_turn_id;
         self.provider_key = meta.provider_key;
+        if meta.route_api_method_present {
+            self.route_api_method = meta.route_api_method;
+        }
         self.model = meta.model;
         self.reasoning_effort = meta.reasoning_effort;
         self.context_cap = meta.context_cap;
