@@ -29,7 +29,6 @@ impl App {
             self.set_status_notice(format!("Could not save account priority: {error}"));
             return Ok(());
         }
-        let priority = pool.priority(&key);
         if let Some(picker) = self.inline_interactive_state.as_mut() {
             for entry in &mut picker.entries {
                 if let Some(key) = entry.account_pool_key() {
@@ -38,10 +37,9 @@ impl App {
             }
         }
         self.set_status_notice(format!(
-            "{} → P{}{} (lower number first; auto-switch membership unchanged)",
+            "{} → priority {} (auto-switch membership unchanged)",
             key,
-            u64::from(priority) + 1,
-            if automatic { " (automatic)" } else { "" },
+            if automatic { "automatic" } else { "saved" },
         ));
         Ok(())
     }

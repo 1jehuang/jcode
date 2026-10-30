@@ -341,25 +341,26 @@ fn inventory_lines(
 }
 
 fn priority_row(mut row: Line<'static>, priority: u32, tiers: &[u32]) -> Line<'static> {
-    let selected = row.spans.first().is_some_and(|span| span.content == "> ");
     let rank = tiers.binary_search(&priority).unwrap_or(0);
     let dimming = if tiers.len() < 2 {
         0
     } else {
-        rank * 60 / (tiers.len() - 1)
-    };
-    let value = if selected {
-        225
-    } else {
-        195u8.saturating_sub(dimming as u8)
+        rank * 40 / (tiers.len() - 1)
     };
     // Only decorate the identity span. Arrows, status dots and the info widget's
     // usage-limit bars retain their established glyphs and colors.
     if let Some(identity) = row.spans.get_mut(2) {
-        identity.content = format!(" P{}{}", u64::from(priority) + 1, identity.content).into();
-        identity.style = identity
-            .style
-            .fg(rgb(value, value, value.saturating_add(10)));
+        if dimming > 0
+            && let Some(base) = identity.style.fg
+        {
+            let (r, g, b) = match base {
+                Color::Rgb(r, g, b) => (r, g, b),
+                Color::Indexed(index) => jcode_tui_style::indexed_to_rgb(index),
+                _ => return row,
+            };
+            let scale = |value: u8| (usize::from(value) * (100 - dimming) / 100) as u8;
+            identity.style = identity.style.fg(Color::Rgb(scale(r), scale(g), scale(b)));
+        }
     }
     row
 }
@@ -721,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn router_priority_badges_dim_identity_only_and_fit_narrow_headers() {
+    fn router_priorities_only_dim_original_identity_colors_and_fit_narrow_headers() {
         let usage = crate::usage::AccountUsageSnapshot {
             label: "one".into(),
             email: None,
@@ -743,10 +744,11 @@ mod tests {
                 .extend(remaining_bar(&usage, false).unwrap().spans);
             let high = priority_row(row.clone(), 20, &[20, 30, 90]);
             let low = priority_row(row.clone(), 90, &[20, 30, 90]);
-            assert!(low.spans[2].content.starts_with(" P91 "));
+            assert_eq!(low.spans[2].content, row.spans[2].content);
+            assert_eq!(high.spans[2].style.fg, row.spans[2].style.fg);
             assert_eq!(low.spans[..2], row.spans[..2]);
             assert_eq!(low.spans[3..], row.spans[3..]);
-            assert_eq!(high.spans[2].style.fg == low.spans[2].style.fg, selected);
+            assert_ne!(high.spans[2].style.fg, low.spans[2].style.fg);
             assert_eq!(
                 high.spans[2].style.fg,
                 priority_row(row.clone(), 0, &[0, 1, 2]).spans[2].style.fg

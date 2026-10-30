@@ -309,20 +309,17 @@ fn account_picker_entry_title(
     } else {
         String::new()
     };
-    let priority_prefix = entry
-        .account_priority()
-        .map(|priority| format!("P{} · ", u64::from(priority) + 1))
-        .unwrap_or_default();
-    let prefix_chars = priority_prefix.chars().count() + provider_prefix.chars().count();
-    (
-        format!("{}{}{}", priority_prefix, provider_prefix, display_name),
-        prefix_chars,
-    )
+    let prefix_chars = provider_prefix.chars().count();
+    (format!("{}{}", provider_prefix, display_name), prefix_chars)
 }
 
 /// Normalize over the visible effective tiers, not their absolute values. A
 /// picker containing only a single tier always gets full brightness.
-fn account_priority_color(priority: u32, priorities: impl Iterator<Item = u32>) -> Color {
+fn account_priority_color(
+    base: Color,
+    priority: u32,
+    priorities: impl Iterator<Item = u32>,
+) -> Color {
     let mut tiers: Vec<_> = priorities.collect();
     tiers.sort_unstable();
     tiers.dedup();
@@ -330,10 +327,18 @@ fn account_priority_color(priority: u32, priorities: impl Iterator<Item = u32>) 
     let dimming = if tiers.len() < 2 {
         0
     } else {
-        rank * 100 / (tiers.len() - 1)
+        rank * 40 / (tiers.len() - 1)
     };
-    let value = 220u8.saturating_sub(dimming as u8);
-    rgb(value, value, value.saturating_add(15))
+    if dimming == 0 {
+        return base;
+    }
+    let (r, g, b) = match base {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => jcode_tui_style::indexed_to_rgb(index),
+        _ => return base,
+    };
+    let scale = |value: u8| (usize::from(value) * (100 - dimming) / 100) as u8;
+    Color::Rgb(scale(r), scale(g), scale(b))
 }
 
 fn account_inline_interactive_state_label(entry: &crate::tui::PickerEntry) -> &'static str {
@@ -884,22 +889,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
             }) => Some(rgb(150, 190, 255)),
             _ => None,
         };
-        let primary_style = if is_row_selected && is_account_picker {
-            Style::default().fg(Color::White).bg(rgb(60, 60, 80)).bold()
-        } else if is_account_picker && entry.account_priority().is_some() {
-            let style = Style::default().fg(account_priority_color(
-                entry.account_priority().unwrap(),
-                picker
-                    .filtered
-                    .iter()
-                    .filter_map(|&index| picker.entries[index].account_priority()),
-            ));
-            if unavailable {
-                style.add_modifier(Modifier::DIM)
-            } else {
-                style
-            }
-        } else if unavailable {
+        let mut primary_style = if unavailable {
             Style::default().fg(rgb(80, 80, 80))
         } else if is_row_selected && col == 0 {
             Style::default().fg(Color::White).bg(rgb(60, 60, 80)).bold()
@@ -916,6 +906,21 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         } else {
             Style::default().fg(rgb(200, 200, 220))
         };
+
+        if is_account_picker
+            && !is_row_selected
+            && let Some(priority) = entry.account_priority()
+            && let Some(base) = primary_style.fg
+        {
+            primary_style = primary_style.fg(account_priority_color(
+                base,
+                priority,
+                picker
+                    .filtered
+                    .iter()
+                    .filter_map(|&index| picker.entries[index].account_priority()),
+            ));
+        }
 
         if is_account_picker {
             let (title_text, title_prefix_chars) =

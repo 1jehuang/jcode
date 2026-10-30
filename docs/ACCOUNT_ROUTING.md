@@ -6,8 +6,8 @@ when supported. It does not pin new sessions to the last-used login. Explicit
 CLI/environment provider selections still take precedence, and existing sessions
 keep their current account.
 
-Lower numeric values have higher priority. The TUI displays stored `0` as `P1`,
-`1` as `P2`, and so on. Accounts in the same tier keep their pool order. Failover
+Lower numeric values have higher priority. Account rows communicate priority
+through dimming only, without numeric badges. Accounts in the same tier keep their pool order. Failover
 cycles within a tier before considering lower-priority accounts. Exhausted or
 unavailable accounts are skipped while a ready account exists.
 
@@ -30,8 +30,9 @@ pool membership. Setting a priority never enrolls an account in automatic routin
 
 In `/account`, select a credential and press `[` for higher priority, `]` for
 lower priority, or `Ctrl+R` to restore automatic plan-based priority. The picker
-shows the plan when known and labels unknown plans explicitly. Priority badges
-and normalized brightness make lower-priority identities subtly dimmer while
+shows the plan when known and labels unknown plans explicitly. Normalized
+brightness makes lower-priority identities subtly dimmer, never brighter than
+their original colors, while
 status dots and usage-limit colors keep their existing meaning.
 
 Missing Claude plan metadata is backfilled asynchronously through the normal
