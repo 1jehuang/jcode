@@ -2227,6 +2227,11 @@ pub(super) async fn handle_client(
 
             Request::RuntimeCommand { id, command, args } => {
                 let result: anyhow::Result<(serde_json::Value, String)> = async {
+                    // Stop/status must remain available while a loop's model or
+                    // tool turn owns the Agent mutex.
+                    if let Some(result) = super::runtime_ssh_loops::control(&client_session_id, &command, &args)? {
+                        return Ok(result);
+                    }
                     // Supplemental SSH/cloud commands intentionally precede the shared
                     // enum parser so new host workflows do not require a wire-enum release.
                     if super::runtime_ssh_sessions::handles(&command)
@@ -2234,6 +2239,10 @@ pub(super) async fn handle_client(
                         || super::runtime_ssh_accounts::handles(&command)
                         || super::runtime_ssh_host::handles(&command)
                     {
+                        if super::runtime_ssh_loops::handles(&command)
+                            && (client_is_processing || crate::turn_cancel_registry::has_active_turn(&client_session_id)) {
+                            anyhow::bail!("Session is busy. Stop/status are available now. Start or resume after the current turn.");
+                        }
                         let mut guard = agent.try_lock().map_err(|_| anyhow::anyhow!("Session is busy. Retry this command after the current turn."))?;
                         if super::runtime_ssh_sessions::handles(&command) {
                             return super::runtime_ssh_sessions::execute(&mut guard, &command, &args).await;
@@ -2305,7 +2314,57 @@ pub(super) async fn handle_client(
                     super::runtime_commands::execute(&mut guard, parsed, &args, swarm_enabled, serde_json::Value::Null).await
                 }.await;
                 match result {
-                    Ok((data, message)) if !data.is_null() => { let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message }); },
+                    Ok((mut data, message)) if !data.is_null() => {
+                        // Only the server loop implementation can supply a
+                        // launch item. Never dispatch arbitrary response data
+                        // from an unrelated runtime command as a model prompt.
+                        let next_prompt = if super::runtime_ssh_loops::handles(&command) {
+                            data.as_object_mut().and_then(|object| object.remove("next_prompt"))
+                                .and_then(|value| value.as_str().map(str::to_owned))
+                        } else { None };
+                        if next_prompt.is_some() { data["started"] = serde_json::json!(true); }
+                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message });
+                        if let Some(content) = next_prompt {
+                            // The execute closure has returned and dropped its
+                            // Agent guard. Reuse the actual message lifecycle:
+                            // processing state, task ownership, fanout, cancel,
+                            // failover, completion and disconnected continuation.
+                            if provisional_session {
+                                agent.lock().await.activate_concurrency_tracking();
+                                provisional_session = false;
+                            }
+                            if !client_is_processing {
+                                if continue_on_disconnect && let Ok(mut guard) = agent.try_lock() {
+                                    guard.set_stdin_request_tx(stdin_req_tx.clone());
+                                }
+                                let mut connections = client_connections.write().await;
+                                if let Some(info) = connections.get_mut(&client_connection_id) {
+                                    info.is_processing = true;
+                                    info.current_tool_name = None;
+                                }
+                            }
+                            start_processing_message(
+                                ProcessingMessage {
+                                    id, content, images: Vec::new(), system_reminder: None,
+                                    active_skill: None, server_failover: true,
+                                },
+                                &client_session_id,
+                                &mut ProcessingState {
+                                    client_is_processing: &mut client_is_processing,
+                                    message_id: &mut processing_message_id,
+                                    session_id: &mut processing_session_id,
+                                    task: &mut processing_task,
+                                },
+                                &agent, &client_event_tx, &processing_done_tx,
+                                active_terminal_env.clone(),
+                                &SwarmStatusRefs {
+                                    members: &swarm_members, swarms_by_id: &swarms_by_id,
+                                    event_history: &event_history, event_counter: &event_counter,
+                                    event_tx: &swarm_event_tx,
+                                },
+                            ).await;
+                        }
+                    },
                     Ok(_) => {},
                     Err(error) => { let _ = client_event_tx.send(ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }); },
                 }
