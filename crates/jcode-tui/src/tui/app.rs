@@ -1931,8 +1931,6 @@ impl Provider for InertRuntimeProvider {
 }
 
 impl App {
-    const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
-    const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
     /// Observed live: a session that stopped updating its todos was re-nudged
     /// with the same hidden continuation every ~5 seconds indefinitely, one
