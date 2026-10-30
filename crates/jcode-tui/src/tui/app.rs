@@ -317,12 +317,7 @@ struct KvCacheMissSample {
 }
 
 struct PendingSessionPickerLoad {
-    receiver: mpsc::Receiver<
-        anyhow::Result<(
-            Vec<super::session_picker::ServerGroup>,
-            Vec<super::session_picker::SessionInfo>,
-        )>,
-    >,
+    receiver: mpsc::Receiver<super::session_picker::SessionListUpdate>,
 }
 
 /// Session id, display messages, and rendered images from the fast-start thread.

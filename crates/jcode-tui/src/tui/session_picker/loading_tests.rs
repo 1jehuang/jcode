@@ -274,6 +274,78 @@ fn cached_grouped_sessions_round_trip_from_disk() {
 }
 
 #[test]
+fn grouped_refresh_bypasses_fresh_in_process_session_cache() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let sessions_dir = temp.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    invalidate_session_list_cache();
+    let _initial = load_sessions().expect("populate in-process cache");
+
+    let id = "session_justclosed_1770000000000";
+    std::fs::write(sessions_dir.join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({
+        "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "recover this session"}]}]
+    })).unwrap()).unwrap();
+    // Ordinary callers still use the fresh cache. The explicit refresh must not.
+    assert!(!load_sessions().unwrap().iter().any(|s| s.id == id));
+    let (groups, orphans) = load_sessions_grouped().expect("forced grouped refresh");
+    assert!(
+        orphans
+            .iter()
+            .chain(groups.iter().flat_map(|g| g.sessions.iter()))
+            .any(|s| s.id == id)
+    );
+    invalidate_session_list_cache();
+}
+
+#[test]
+fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set_path("JCODE_RUNTIME_DIR", temp.path());
+    let dir = temp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = "session_recovered_1770000000000";
+    let path = dir.join(format!("{id}.json"));
+    let write_snapshot =
+        |title: &str| {
+            std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+            "title": title, "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "recover me"}]}]
+        })).unwrap()).unwrap();
+        };
+    write_snapshot("Stale title");
+    let catchup = crate::catchup::CatchupSeenSnapshot::load();
+    let stale = parse_jcode_session_info(&dir, id, &catchup).unwrap();
+    write_grouped_session_list_disk_cache(&dir, session_scan_limit(), &[], &[stale]);
+    write_snapshot("Latest title");
+    session::record_window_closed(id);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    send_session_list_updates(sender);
+    for _ in 0..2 {
+        let super::super::SessionListUpdate::Cached((groups, orphans)) = receiver.recv().unwrap()
+        else {
+            panic!("recent recovery and cache must precede the history refresh");
+        };
+        let recovered: Vec<_> = orphans
+            .iter()
+            .chain(groups.iter().flat_map(|g| g.sessions.iter()))
+            .filter(|s| s.id == id)
+            .collect();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].title, "Latest title");
+    }
+    assert!(matches!(
+        receiver.recv().unwrap(),
+        super::super::SessionListUpdate::Fresh(Ok(_))
+    ));
+    invalidate_session_list_cache();
+}
+
+#[test]
 fn load_sessions_includes_claude_code_sessions_from_external_home() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");

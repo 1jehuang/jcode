@@ -279,6 +279,62 @@ pub fn load_cached_sessions_grouped() -> Option<(Vec<ServerGroup>, Vec<SessionIn
     Some((cache.server_groups, cache.orphan_sessions))
 }
 
+/// Recover the exact recently closed sessions without enumerating historical
+/// transcripts or waiting for the large search cache to deserialize.
+fn load_recently_closed_sessions() -> Vec<SessionInfo> {
+    let window = Duration::from_secs(crate::config::config().display.resume_recent_close_seconds);
+    let closures = session::recent_window_closures(window);
+    if closures.is_empty() {
+        return Vec::new();
+    }
+    let Ok(home) = storage::jcode_dir() else {
+        return Vec::new();
+    };
+    let sessions_dir = home.join("sessions");
+    let catchup = crate::catchup::CatchupSeenSnapshot::load();
+    let mut ids: Vec<_> = closures.into_iter().collect();
+    ids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    parallel_map(ids, |(id, _)| {
+        parse_jcode_session_info(&sessions_dir, &id, &catchup)
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Shared staged loader for the standalone and in-session pickers. A just-closed
+/// session is actionable before loading either the cache or the historical list.
+pub(crate) fn send_session_list_updates(sender: std::sync::mpsc::Sender<super::SessionListUpdate>) {
+    let recent = load_recently_closed_sessions();
+    if !recent.is_empty()
+        && sender
+            .send(super::SessionListUpdate::Cached((
+                Vec::new(),
+                recent.clone(),
+            )))
+            .is_err()
+    {
+        return;
+    }
+    if let Some((mut groups, mut orphans)) = load_cached_sessions_grouped() {
+        // Do not let an older cached snapshot remove or roll back the recovered
+        // session while the full refresh is still running.
+        let ids: HashSet<_> = recent.iter().map(|s| s.id.as_str()).collect();
+        for group in &mut groups {
+            group.sessions.retain(|s| !ids.contains(s.id.as_str()));
+        }
+        orphans.retain(|s| !ids.contains(s.id.as_str()));
+        orphans.extend(recent);
+        if sender
+            .send(super::SessionListUpdate::Cached((groups, orphans)))
+            .is_err()
+        {
+            return;
+        }
+    }
+    let _ = sender.send(super::SessionListUpdate::Fresh(load_sessions_grouped()));
+}
+
 #[path = "loading_search_text.rs"]
 mod search_text;
 pub(super) use search_text::{
@@ -2978,7 +3034,9 @@ fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
 pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
-    let all_sessions = load_sessions()?;
+    // An explicit picker refresh must see newly closed/created sessions even
+    // when another scan populated the five-second in-process cache recently.
+    let all_sessions = load_sessions_inner(true)?;
     let servers = load_servers();
 
     let mut session_to_server: HashMap<String, &ServerInfo> = HashMap::new();
