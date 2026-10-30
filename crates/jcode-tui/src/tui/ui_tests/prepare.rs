@@ -1182,6 +1182,57 @@ fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
 }
 
 #[test]
+fn test_prepare_messages_thinking_and_tools_have_no_blank_rows() {
+    let _guard = crate::storage::lock_test_env();
+    clear_test_render_state_for_tests();
+    let tool = |id: &str, title: &str| DisplayMessage {
+        role: "tool".into(),
+        content: "ok".into(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: Some(title.into()),
+        tool_data: Some(ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "true"}),
+            intent: Some(title.into()),
+            thought_signature: None,
+        }),
+    };
+    let state = TestState {
+        display_messages: vec![
+            tool("before", "Before thinking"),
+            DisplayMessage::reasoning(jcode_tui_markdown::reasoning_line_markup(
+                "Thinking compactly",
+            )),
+            tool("after", "After thinking"),
+            DisplayMessage::assistant("Final answer"),
+        ],
+        ..Default::default()
+    };
+    let prepared = prepare::prepare_messages(&state, 100, 30);
+    let rows: Vec<String> = prepared
+        .materialize_all_lines()
+        .iter()
+        .map(extract_line_text)
+        .collect();
+    let thinking = rows
+        .iter()
+        .position(|row| row.contains("Thinking compactly"))
+        .unwrap();
+    assert!(rows[thinking - 1].contains("Before thinking"), "{rows:?}");
+    assert!(rows[thinking + 1].contains("After thinking"), "{rows:?}");
+    let answer = rows
+        .iter()
+        .position(|row| row.contains("Final answer"))
+        .unwrap();
+    assert!(
+        rows[answer - 1].trim().is_empty(),
+        "prose keeps its separator: {rows:?}"
+    );
+}
+
+#[test]
 fn test_prepare_messages_renders_reasoning_role_dim_italic_without_sentinel() {
     let _guard = crate::storage::lock_test_env();
     clear_test_render_state_for_tests();

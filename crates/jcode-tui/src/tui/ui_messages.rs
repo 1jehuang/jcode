@@ -361,7 +361,9 @@ pub(super) fn is_kv_cache_footer(msg: &DisplayMessage) -> bool {
 
 /// Keep the same separator policy in full/incremental layout and overflow estimates.
 pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
-    !matches!(msg.effective_role(), "tool" | "meta" | "swarm") && !is_kv_cache_footer(msg)
+    // Thinking and tool calls form one compact activity stream.
+    !matches!(msg.effective_role(), "tool" | "meta" | "swarm" | "reasoning")
+        && !is_kv_cache_footer(msg)
 }
 
 pub(crate) fn render_system_message(

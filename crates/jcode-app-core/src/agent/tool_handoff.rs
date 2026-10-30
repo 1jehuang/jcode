@@ -16,7 +16,10 @@ pub(in crate::agent) async fn execute_with_background(
     let auto_background = auto_background_allowed(&name, &input);
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
-    let mut work = tokio::spawn(async move { registry.execute(&tool_name, input, ctx).await });
+    let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
+        registry.execute(&tool_name, input, ctx).await
+    })
+    .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
     tokio::select! {
         biased;
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,

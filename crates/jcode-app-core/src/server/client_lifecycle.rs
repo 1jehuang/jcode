@@ -3480,7 +3480,7 @@ async fn start_processing_message(
     );
     let done_tx = processing_done_tx.clone();
     crate::logging::info(&format!("Processing message id={} spawning task", id));
-    *state.task = crate::runtime_activity::spawn(async move {
+    *state.task = crate::runtime_activity::spawn_session(client_session_id, async move {
         let event_tx = tx.clone();
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(

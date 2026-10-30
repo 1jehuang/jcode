@@ -2081,7 +2081,13 @@ impl Server {
                 break;
             };
             // Keep the envelope alive through asynchronous queue delivery, not
-            // just receipt. An idle upgrade must include every accepted wake.
+            // just receipt. A queued selected-session callback must exclude
+            // transfer even after its original turn/background task exits.
+            let Some(_activity) =
+                self::background_tasks::admit_runtime_delivery(&delivery.event).await
+            else {
+                continue;
+            };
             match delivery.event.clone() {
                 BusEvent::FileTouch(touch) => {
                     let path = touch.path.clone();

@@ -823,7 +823,7 @@ pub(super) async fn spawn_swarm_agent(
             let event_history2 = Arc::clone(event_history);
             let event_counter2 = Arc::clone(event_counter);
             let swarm_event_tx2 = swarm_event_tx.clone();
-            crate::runtime_activity::spawn(async move {
+            crate::runtime_activity::spawn_session(&new_session_id, async move {
                 update_member_status(
                     &sid_clone,
                     "running",

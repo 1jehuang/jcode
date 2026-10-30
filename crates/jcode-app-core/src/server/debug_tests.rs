@@ -48,16 +48,41 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn production_group_transfer_busy_error_keeps_debug_socket_alive() {
+    async fn production_group_transfer_scopes_admission_and_keeps_debug_socket_alive() {
         use super::debug_execution_tests::TestProvider;
         use crate::server::Server;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+        // A child test process isolates the global gate from other tests' turns
+        // and keeps all fixture sessions and leases outside user directories.
+        const CHILD: &str = "JCODE_TEST_SCOPED_TRANSFER_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "production_group_transfer_scopes_admission_and_keeps_debug_socket_alive",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("JCODE_HOME", home.path())
+                .env("JCODE_RUNTIME_DIR", home.path().join("runtime"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated transport regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        crate::session::Session::create_with_id("selected".into(), None, None)
+            .save_prepared()
+            .unwrap();
         let server = Server::new_with_name(Arc::new(TestProvider), Some("transfer-test".into()));
         let (client, stream) = tokio::net::UnixStream::pair().unwrap();
-        // Model a turn or detached task in an unrelated session. Production
-        // transfer control must bypass request admission but not the idle fence.
-        let _activity = crate::runtime_activity::global().try_enter().unwrap();
         let handler = tokio::spawn(super::super::handle_debug_client(
             stream,
             server.sessions,
@@ -88,13 +113,22 @@ mod tests {
         ));
         let (reader, mut writer) = client.into_split();
         let mut reader = BufReader::new(reader);
-        for (id, command) in [
-            (1, "group_transfer:inspect:{\"session_ids\":[\"selected\"]}"),
-            (
-                2,
-                "server:group_transfer:inspect:{\"session_ids\":[\"selected\"]}",
-            ),
+        let mut id = 0;
+        for (owner, expect_success) in [
+            (None, false),
+            (Some("selected"), false),
+            (Some("unrelated"), true),
         ] {
+            let gate = crate::runtime_activity::global();
+            let _activity = match owner {
+                Some(session) => gate.try_enter_session(session).unwrap(),
+                None => gate.try_enter_global().unwrap(),
+            };
+            for command in [
+                "group_transfer:inspect:{\"session_ids\":[\"selected\"]}",
+                "server:group_transfer:inspect:{\"session_ids\":[\"selected\"]}",
+            ] {
+            id += 1;
             let request = serde_json::json!({
                 "type": "debug_command", "id": id, "command": command,
             });
@@ -113,16 +147,23 @@ mod tests {
             let response: serde_json::Value = serde_json::from_str(&line).unwrap();
             assert_eq!(response["type"], "debug_response");
             assert_eq!(response["id"], id);
-            assert_eq!(response["ok"], false);
+            assert_eq!(response["ok"], expect_success, "owner={owner:?}: {response}");
             let output = response["output"].as_str().unwrap();
-            assert!(output.contains("daemon is busy"), "{output}");
+            if expect_success {
+                let bundle: serde_json::Value = serde_json::from_str(output).unwrap();
+                assert_eq!(bundle["sessions"][0]["session_id"], "selected");
+                assert_eq!(bundle["sessions"].as_array().unwrap().len(), 1);
+            } else {
+            assert!(output.contains("selected sessions or unscoped background tasks are busy"), "{output}");
             assert!(
                 output.contains("action=inspect phase=idle_admission"),
                 "{output}"
             );
+            }
+            }
         }
         writer
-            .write_all(b"{\"type\":\"ping\",\"id\":3}\n")
+            .write_all(b"{\"type\":\"ping\",\"id\":7}\n")
             .await
             .unwrap();
         let mut line = String::new();
@@ -135,7 +176,7 @@ mod tests {
         .unwrap();
         let response: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(response["type"], "pong");
-        assert_eq!(response["id"], 3);
+        assert_eq!(response["id"], 7);
         drop(writer);
         drop(reader);
         handler.await.unwrap().unwrap();

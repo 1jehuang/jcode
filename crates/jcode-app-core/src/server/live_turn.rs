@@ -108,7 +108,7 @@ pub(super) async fn spawn_tracked_live_turn(
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
-    let Ok(_admission) = crate::runtime_activity::global().try_enter() else {
+    let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
         return false;
     };
     if swarm
@@ -134,7 +134,7 @@ pub(super) async fn spawn_tracked_live_turn(
 
     let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
     let session_id = session_id.to_string();
-    crate::runtime_activity::spawn(async move {
+    crate::runtime_activity::spawn_session(&session_id.clone(), async move {
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
         let (result, stop_reason) = catch_live_turn_panic(async {

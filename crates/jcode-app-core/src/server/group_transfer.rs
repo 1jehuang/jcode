@@ -234,12 +234,9 @@ fn validate_bundle(bundle: &GroupTransferBundle) -> Result<()> {
     Ok(())
 }
 
-/// All operations, including inspect, use an exclusive global admission reservation.
-/// Inspect reads a cross-map swarm snapshot and durable epochs used by prepare,
-/// so selected-agent locks alone cannot exclude detached callbacks changing group
-/// membership or ownership. Keep this global until activity is scoped by session.
-/// This intentionally rejects even unrelated busy turns rather than guessing
-/// whether detached tool callbacks can still mutate the selected state.
+/// Operations fence the selected sessions and their complete swarm closure.
+/// Unknown-owner mutation remains globally exclusive with transfers. Snapshot
+/// expansion is verified again under admission and per-swarm operation locks.
 pub async fn handle(
     cmd: &str,
     sessions: &SessionAgents,
@@ -263,9 +260,30 @@ async fn handle_with_gate(
     let (action, json) = rest
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("group_transfer requires action:JSON"))?;
-    let _idle = gate.try_idle().ok_or_else(|| {
+    let selection: GroupTransferSelection = match action {
+        "inspect" => serde_json::from_str(json)?,
+        "prepare" => serde_json::from_str::<PrepareRequest>(json)?.selection,
+        "abort" | "reserve" | "import" | "check_import" => {
+            let bundle: GroupTransferBundle = serde_json::from_str(json)?;
+            validate_bundle(&bundle)?;
+            GroupTransferSelection {
+                session_ids: bundle
+                    .sessions
+                    .iter()
+                    .map(|s| s.session_id.clone())
+                    .collect(),
+                // Destination swarms may not exist yet. Their complete member
+                // sets have already been validated against the bundle sessions.
+                swarm_ids: Vec::new(),
+            }
+        }
+        _ => bail!("unknown group_transfer action: {action}"),
+    };
+    let before = snapshots(state).await;
+    let (admitted_ids, _) = expand_selection(&selection, &before)?;
+    let _idle = gate.try_idle_sessions(&admitted_ids).ok_or_else(|| {
         anyhow::anyhow!(
-            "group_transfer action={action} phase=idle_admission: daemon is busy; wait for all turns and background tasks to finish before group transfer"
+            "group_transfer action={action} phase=idle_admission: selected sessions or unscoped background tasks are busy; wait for selected turns and callbacks to finish"
         )
     })?;
     match action {
@@ -291,6 +309,7 @@ async fn handle_with_gate(
             };
             let all = snapshots(state).await;
             let (ids, swarm_ids) = expand_selection(&selection, &all)?;
+            ensure!(ids == admitted_ids, "swarm changed during admission; retry");
             ensure!(
                 storage::session_presence()
                     .iter()
@@ -501,7 +520,8 @@ fn cancellation_path(bundle: &GroupTransferBundle) -> std::path::PathBuf {
         .join(format!("{}.cancelled.json", bundle.transfer_id))
 }
 
-fn read_transfer_lease(id: &str) -> Result<Option<SessionLease>> {
+pub(super) fn read_transfer_lease(id: &str) -> Result<Option<SessionLease>> {
+    ensure!(valid_id(id), "invalid session id");
     let path = storage::session_leases_dir()
         .ok_or_else(|| anyhow::anyhow!("session lease directory unavailable"))?
         .join(format!("{id}.json"));
