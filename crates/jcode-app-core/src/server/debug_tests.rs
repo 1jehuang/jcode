@@ -128,38 +128,44 @@ mod tests {
                 "group_transfer:inspect:{\"session_ids\":[\"selected\"]}",
                 "server:group_transfer:inspect:{\"session_ids\":[\"selected\"]}",
             ] {
-            id += 1;
-            let request = serde_json::json!({
-                "type": "debug_command", "id": id, "command": command,
-            });
-            writer
-                .write_all(format!("{request}\n").as_bytes())
+                id += 1;
+                let request = serde_json::json!({
+                    "type": "debug_command", "id": id, "command": command,
+                });
+                writer
+                    .write_all(format!("{request}\n").as_bytes())
+                    .await
+                    .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    reader.read_line(&mut line),
+                )
                 .await
+                .unwrap()
                 .unwrap();
-            let mut line = String::new();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                reader.read_line(&mut line),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            let response: serde_json::Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(response["type"], "debug_response");
-            assert_eq!(response["id"], id);
-            assert_eq!(response["ok"], expect_success, "owner={owner:?}: {response}");
-            let output = response["output"].as_str().unwrap();
-            if expect_success {
-                let bundle: serde_json::Value = serde_json::from_str(output).unwrap();
-                assert_eq!(bundle["sessions"][0]["session_id"], "selected");
-                assert_eq!(bundle["sessions"].as_array().unwrap().len(), 1);
-            } else {
-            assert!(output.contains("selected sessions or unscoped background tasks are busy"), "{output}");
-            assert!(
-                output.contains("action=inspect phase=idle_admission"),
-                "{output}"
-            );
-            }
+                let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(response["type"], "debug_response");
+                assert_eq!(response["id"], id);
+                assert_eq!(
+                    response["ok"], expect_success,
+                    "owner={owner:?}: {response}"
+                );
+                let output = response["output"].as_str().unwrap();
+                if expect_success {
+                    let bundle: serde_json::Value = serde_json::from_str(output).unwrap();
+                    assert_eq!(bundle["sessions"][0]["session_id"], "selected");
+                    assert_eq!(bundle["sessions"].as_array().unwrap().len(), 1);
+                } else {
+                    assert!(
+                        output.contains("selected sessions or unscoped background tasks are busy"),
+                        "{output}"
+                    );
+                    assert!(
+                        output.contains("action=inspect phase=idle_admission"),
+                        "{output}"
+                    );
+                }
             }
         }
         writer
