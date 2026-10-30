@@ -58,10 +58,10 @@ fn ssh_session_wire_controls_and_navigation() {
     ) {
         return;
     }
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.is_remote = true;
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let mut app = crate::tui::app::tests::create_test_app();
-        app.is_remote = true;
         let mut remote = RemoteConnection::dummy();
         remote.set_session_id("remote-parent".into());
         remote.mark_history_loaded();

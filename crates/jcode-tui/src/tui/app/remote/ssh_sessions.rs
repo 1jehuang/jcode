@@ -79,7 +79,7 @@ pub(in crate::tui::app) async fn handle_command(
     };
     if app.ssh_sessions.navigation.is_some() || app.ssh_sessions.child.is_some() {
         app.push_display_message(DisplayMessage::system(
-            "A remote session switch is pending. Wait for its history or error response.".into(),
+            "A remote session switch is pending. Wait for its history or error response.",
         ));
         return Ok(true);
     }
@@ -89,7 +89,7 @@ pub(in crate::tui::app) async fn handle_command(
     ) || (command == "/session" && !args.is_empty());
     if switching && app.is_processing {
         app.push_display_message(DisplayMessage::system(
-            "Wait for this turn to finish or cancel it before switching remote sessions.".into(),
+            "Wait for this turn to finish or cancel it before switching remote sessions.",
         ));
         return Ok(true);
     }
@@ -136,8 +136,7 @@ pub(in crate::tui::app) async fn handle_command(
                 navigate(app, remote, &target, true, None).await?;
             } else {
                 app.push_display_message(DisplayMessage::system(
-                    "No previous remote session in this connection. Use /resume to list sessions."
-                        .into(),
+                    "No previous remote session in this connection. Use /resume to list sessions.",
                 ));
             }
         }

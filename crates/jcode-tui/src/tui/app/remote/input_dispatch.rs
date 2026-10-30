@@ -727,6 +727,63 @@ mod ssh_slash_tests {
     }
 
     #[test]
+    fn ssh_host_loop_and_usage_commands_send_structured_requests() {
+        if app_mod::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_host_loop_and_usage_commands_send_structured_requests",
+        ) {
+            return;
+        }
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut remote = RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = BufReader::new(reader);
+            for (input, command, args) in [
+                ("/config view", "config", vec!["view"]),
+                ("/fast default off", "fast_default", vec!["off"]),
+                ("/open README.md", "open", vec!["README.md"]),
+                ("/poke status", "poke", vec!["status"]),
+                ("/improve plan", "improve", vec!["plan"]),
+                ("/refactor stop", "refactor", vec!["stop"]),
+                ("/fix", "fix", vec![]),
+                ("/usage", "ssh_account", vec!["usage"]),
+                (
+                    "/reset usage limits openai",
+                    "ssh_account",
+                    vec!["reset", "usage", "limits", "openai"],
+                ),
+            ] {
+                submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    input::PreparedInput {
+                        raw_input: input.into(),
+                        expanded: input.into(),
+                        images: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], "runtime_command", "{input}");
+                assert_eq!(request["command"], command, "{input}");
+                assert_eq!(request["args"], serde_json::json!(args), "{input}");
+                assert!(app.pending_prompt_before_history.is_none(), "{input}");
+                assert!(!app.pending_turn, "{input}");
+            }
+        });
+    }
+
+    #[test]
     fn ssh_registered_unimplemented_command_fails_closed_but_skills_reach_server() {
         if app_mod::commands_dispatch::ssh_test_runs_in_child(
             "ssh_registered_unimplemented_command_fails_closed_but_skills_reach_server",
@@ -741,12 +798,11 @@ mod ssh_slash_tests {
             // No history makes normal remote prompts queue without a wire
             // send, providing a direct distinction from rejected commands.
             for command in [
-                "/subscribe",
-                "/terminal-setup",
-                "/screenshot-mode",
-                "/poke",
-                "/improve resume",
-                "/refactor stop",
+                "/desktop",
+                "/workspace",
+                "/ssh other-host",
+                "/onboarding-sim",
+                "/update-rehearsal",
             ] {
                 let next_id = remote.next_request_id_for_test();
                 submit_remote_slash_input(
