@@ -24,6 +24,8 @@ mod reconnect;
 mod server_event_handlers;
 mod server_events;
 mod session_persistence;
+mod ssh_host;
+pub(super) mod ssh_sessions;
 mod swarm_plan_core;
 mod swarm_status_core;
 mod workspace;
@@ -1025,7 +1027,11 @@ pub(super) async fn handle_remote_event<B: Backend>(
             Ok((RemoteEventOutcome::Continue, needs_redraw))
         }
         RemoteRead::Event(server_event) => {
+            if ssh_sessions::handle_event(app, remote, &server_event).await? {
+                return Ok((RemoteEventOutcome::Continue, true));
+            }
             let needs_redraw = handle_server_event(app, server_event, remote);
+            ssh_sessions::after_event(app, remote).await?;
             process_remote_followups(app, remote).await;
             Ok((RemoteEventOutcome::Continue, needs_redraw))
         }

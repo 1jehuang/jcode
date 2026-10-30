@@ -5,6 +5,8 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+mod ssh_sessions;
+
 use crate::message::ToolCall;
 use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
 use crate::server;

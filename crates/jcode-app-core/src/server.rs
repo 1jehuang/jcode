@@ -61,6 +61,10 @@ mod reload_trace;
 mod runtime;
 mod runtime_commands;
 mod runtime_special_commands;
+mod runtime_ssh_accounts;
+mod runtime_ssh_host;
+mod runtime_ssh_loops;
+mod runtime_ssh_sessions;
 mod runtime_upgrade;
 mod socket;
 mod swarm;
@@ -2376,6 +2380,10 @@ impl Server {
                         &swarm_event_tx,
                     )
                     .await;
+                }
+                BusEvent::SessionUpdateStatus(status) => {
+                    let (session_id, event) = runtime_ssh_host::maintenance_event(status);
+                    fanout_session_event(&swarm_members, &session_id, event).await;
                 }
                 BusEvent::UiActivity(activity) => {
                     dispatch_ui_activity(&activity, &swarm_members).await;

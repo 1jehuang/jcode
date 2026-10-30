@@ -11,9 +11,16 @@ use crate::tui::core;
 /// Canonical runtime commands never run the similarly named laptop handler.
 /// Keep argument validation and destructive-action confirmation on the daemon.
 fn ssh_runtime_command(input: &str) -> Option<(&'static str, Vec<String>)> {
+    if let Some(command) = super::ssh_host::command(input) {
+        return Some(command);
+    }
     let mut words = input.split_whitespace();
     let token = words.next()?;
     let command = match token {
+        "/poke" => "poke",
+        "/improve" => "improve",
+        "/refactor" => "refactor",
+        "/fix" => "fix",
         "/skills" => "skills",
         "/refresh-model-list" => "refresh_model_list",
         "/context" => "context",
@@ -77,10 +84,8 @@ mod ssh_runtime_routing_tests {
             "/contextual skill",
             "/home/vm/info",
             "/logout-custom-skill",
-            "/fast default on",
-            "/improve resume",
-            "/refactor",
-            "/poke",
+            "/improve-custom-skill",
+            "/fast-default-custom",
         ] {
             assert!(super::ssh_runtime_command(input).is_none(), "{input}");
         }
@@ -433,9 +438,8 @@ async fn handle_remote_key_internal(
     }
 
     if app.dictation_key_matches(code, modifiers) {
-        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "Local dictation") {
-            return Ok(());
-        }
+        // The microphone belongs to this terminal. Completed transcripts use
+        // the same remote input path as typed prompts.
         app.handle_dictation_trigger();
         return Ok(());
     }
@@ -1203,6 +1207,14 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
+        if app_mod::auth_account_commands::handle_ssh_usage_command_remote(app, trimmed, remote)
+            .await?
+        {
+            return Ok(());
+        }
+        if super::ssh_sessions::handle_command(app, remote, trimmed).await? {
+            return Ok(());
+        }
         if crate::tui::is_ssh_remote()
             && let Some((command, args)) = ssh_runtime_command(trimmed)
         {
@@ -1211,6 +1223,23 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
+        if crate::tui::is_ssh_remote() && trimmed == "/client-reload" {
+            let Some(session_id) = app
+                .remote_session_id
+                .clone()
+                .or_else(|| app.resume_session_id.clone())
+            else {
+                app.push_display_message(DisplayMessage::system(
+                    "Wait for the remote session to connect before reloading the client."
+                        .to_string(),
+                ));
+                return Ok(());
+            };
+            app.save_input_for_reload(&session_id);
+            app.reload_requested = Some(session_id);
+            app.should_quit = true;
+            return Ok(());
+        }
         if app_mod::commands_dispatch::handle_ssh_presentation_command(app, trimmed) {
             if matches!(trimmed.split_whitespace().next(), Some("/todos" | "/todo")) {
                 remote.request_todos().await?;

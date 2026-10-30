@@ -182,6 +182,12 @@ pub async fn run_tui_client(
             super::cloud_move::stash_handoff(handoff);
             return Ok(());
         }
+        if let Some(session_id) = run_result.reload_session.as_deref() {
+            // The owning SSH guard closes its transport before the re-exec.
+            // Never hand a remote ID to hot_reload, which resumes locally.
+            super::ssh::stash_client_reload(session_id.to_string());
+            return Ok(());
+        }
         if has_requested_action(&run_result) {
             anyhow::bail!(
                 "local reload/update actions are unavailable during SSH attach; reconnect after updating explicitly"

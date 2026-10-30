@@ -5,6 +5,41 @@ use anyhow::{Context, Result, bail};
 use super::args::{Args, Command};
 use super::provider_init::ProviderChoice;
 
+static CLIENT_RELOAD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub(crate) fn stash_client_reload(session_id: String) {
+    *CLIENT_RELOAD
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(session_id);
+}
+
+fn client_reload_command(
+    executable: &std::path::Path,
+    args: &Args,
+    session_id: &str,
+    working_dir: &str,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("--ssh")
+        .arg(args.ssh.as_deref().expect("SSH reload target"));
+    if let Some(binary) = args.ssh_binary.as_deref() {
+        command.arg("--ssh-binary").arg(binary);
+    }
+    if let Some(socket) = args.ssh_server_socket.as_deref() {
+        command.arg("--ssh-server-socket").arg(socket);
+    }
+    command.arg("--remote-working-dir").arg(working_dir);
+    command.arg("--resume").arg(session_id).arg("--no-update");
+    if matches!(args.command, Some(Command::SelfDev { .. })) {
+        command.arg("self-dev");
+    }
+    // The previous terminal was fully restored and the adapter socket died
+    // with its SSH guard. The fresh process must create both again.
+    command.env_remove("JCODE_RESUMING");
+    command
+}
+
 fn validate(args: &Args) -> Result<()> {
     match args.command {
         None | Some(Command::SelfDev { build: false }) => {}
@@ -148,7 +183,7 @@ async fn run_unix(args: Args) -> Result<()> {
     let mut quit = signal(SignalKind::quit())?;
     let result = tokio::select! {
         result = super::tui_launch::run_tui_client(
-            args.resume, None, false, true, Some(working_dir), false, false,
+            args.resume.clone(), None, false, true, Some(working_dir.clone()), false, false,
         ) => result,
         _ = hup.recv() => Ok(()),
         _ = term.recv() => Ok(()),
@@ -161,6 +196,21 @@ async fn run_unix(args: Args) -> Result<()> {
         && let Some(handoff) = super::cloud_move::take_stashed_handoff()
     {
         return super::cloud_move::exec_handoff(handoff);
+    }
+    if result.is_ok() {
+        let reload = CLIENT_RELOAD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(session_id) = reload {
+            let is_selfdev = matches!(args.command, Some(Command::SelfDev { .. }));
+            let executable = crate::build::preferred_reload_candidate(is_selfdev)
+                .map(|(path, _)| path)
+                .unwrap_or(std::env::current_exe()?);
+            let mut command = client_reload_command(&executable, &args, &session_id, &working_dir);
+            let error = crate::platform::replace_process(&mut command);
+            return Err(anyhow::anyhow!("Failed to reload SSH client: {error}"));
+        }
     }
     result
 }
@@ -206,6 +256,56 @@ pub(crate) fn resume_hint(session_id: &str) -> Option<String> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn ssh_client_reload_preserves_remote_transport_and_workspace() {
+        let args = Args::try_parse_from([
+            "jcode",
+            "--ssh",
+            "dev",
+            "--ssh-binary",
+            "/opt/jcode",
+            "--ssh-server-socket",
+            "/run/remote.sock",
+            "--resume",
+            "session_old",
+            "self-dev",
+        ])
+        .unwrap();
+        let command = client_reload_command(
+            std::path::Path::new("/local/new-jcode"),
+            &args,
+            "session_remote",
+            "/vm/project space",
+        );
+        let argv = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let parsed = Args::try_parse_from(std::iter::once("jcode".to_owned()).chain(argv)).unwrap();
+        validate(&parsed).unwrap();
+        assert_eq!(command.get_program(), "/local/new-jcode");
+        assert_eq!(parsed.ssh.as_deref(), Some("dev"));
+        assert_eq!(parsed.ssh_binary.as_deref(), Some("/opt/jcode"));
+        assert_eq!(
+            parsed.ssh_server_socket.as_deref(),
+            Some("/run/remote.sock")
+        );
+        assert_eq!(
+            parsed.remote_working_dir.as_deref(),
+            Some("/vm/project space")
+        );
+        assert_eq!(parsed.resume.as_deref(), Some("session_remote"));
+        assert!(matches!(
+            parsed.command,
+            Some(Command::SelfDev { build: false })
+        ));
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "JCODE_RESUMING" && value.is_none())
+        );
+    }
 
     #[test]
     fn transfer_timestamp_requires_matching_host_and_valid_lease() {

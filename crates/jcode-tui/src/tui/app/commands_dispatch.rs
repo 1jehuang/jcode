@@ -40,12 +40,33 @@ pub(super) fn ssh_presentation_command(input: &str) -> bool {
             | "/version"
             | "/changelog"
             | "/hotkeys"
+            | "/subscribe"
+            | "/hosted"
+            | "/update-sim"
+            | "/onboarding-preview"
+            | "/observe"
+            | "/splitview"
+            | "/split-view"
+            | "/voice"
+            | "/dictate"
+            | "/dictation"
+            | "/terminal-setup"
+            | "/debug-visual"
+            | "/screenshot-mode"
+            | "/screenshot"
+            | "/record"
+            | "/feedback"
+            | "/support"
     )
 }
 
 pub(super) fn handle_ssh_presentation_command(app: &mut App, input: &str) -> bool {
     if !crate::tui::is_ssh_remote() || !ssh_presentation_command(input) {
         return false;
+    }
+    if matches!(input, "/subscribe" | "/hosted") {
+        app.show_subscribe_pitch();
+        return true;
     }
     if matches!(input, "/cls" | "/clear-view") {
         app.clear_view_keep_context();
@@ -54,7 +75,20 @@ pub(super) fn handle_ssh_presentation_command(app: &mut App, input: &str) -> boo
     if matches!(input, "/version" | "/changelog") {
         return super::state_ui::handle_info_command(app, input);
     }
-    super::commands::handle_cancel_command(app, input)
+    if matches!(
+        input.split_whitespace().next(),
+        Some("/update-sim" | "/onboarding-preview")
+    ) {
+        return super::tui_lifecycle_runtime::handle_dev_command(app, input);
+    }
+    super::commands::handle_observe_command(app, input)
+        || super::split_view::handle_split_view_command(app, input)
+        || super::commands::handle_dictation_command(app, input)
+        || app.handle_terminal_setup_command(input)
+        || super::debug::handle_debug_command(app, input)
+        || super::commands::handle_feedback_command(app, input)
+        || super::support::handle_support_command(app, input)
+        || super::commands::handle_cancel_command(app, input)
         || app.handle_hotkeys_command(input)
         || super::todos_view::handle_todos_view_command(app, input)
         || super::commands::handle_help_command(app, input)
@@ -107,10 +141,8 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/restart"
             | "/rebuild"
             | "/update"
-            | "/update-sim"
             | "/update-rehearsal"
             | "/onboarding-sim"
-            | "/onboarding-preview"
             | "/usage"
             | "/reset"
             | "/subscription"
@@ -118,8 +150,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/poke"
             | "/improve"
             | "/refactor"
-            | "/support"
-            | "/feedback"
             | "/productivity"
             | "/wrapped"
             | "/stats"
@@ -127,13 +157,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/cache"
             | "/initiatives"
             | "/goals"
-            | "/dictate"
-            | "/dictation"
-            | "/voice"
             | "/debug-fixture"
-            | "/debug-visual"
-            | "/screenshot"
-            | "/record"
             | "/subagent-model"
             | "/z"
             | "/zz"
@@ -141,9 +165,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/zstatus"
             | "/autoreview"
             | "/autojudge"
-            | "/observe"
-            | "/splitview"
-            | "/split-view"
             | "/review"
             | "/judge"
             | "/subagent"
@@ -488,6 +509,23 @@ mod tests {
             "/version",
             "/changelog",
             "/hotkeys",
+            "/subscribe",
+            "/hosted",
+            "/update-sim reset",
+            "/onboarding-preview status",
+            "/observe status",
+            "/splitview status",
+            "/split-view status",
+            "/voice",
+            "/dictate",
+            "/dictation",
+            "/terminal-setup",
+            "/debug-visual off",
+            "/screenshot-mode off",
+            "/screenshot info",
+            "/record cancel",
+            "/feedback test",
+            "/support",
         ] {
             assert!(super::ssh_presentation_command(command), "{command}");
             assert!(!super::ssh_unsupported_command(command), "{command}");
@@ -519,6 +557,14 @@ mod tests {
             "/tool-call-details",
             "/colors export",
             "/diff inline",
+            "/update-sim reset",
+            "/onboarding-preview off",
+            "/observe off",
+            "/splitview off",
+            "/split-view status",
+            "/debug-visual off",
+            "/screenshot-mode off",
+            "/record cancel",
         ] {
             assert!(
                 super::dispatch_local_command(&mut app, command),
