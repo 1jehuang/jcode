@@ -554,9 +554,15 @@ fn render_side_panel_markdown_without_native_protocol_shows_mermaid_source() {
     // flicker-bench debug test) initialize as a side effect, and
     // VIDEO_EXPORT_MODE is a process-global atomic, so without the override
     // this test is order-dependent under a parallel test run.
+    // with_herdr_webui_override pins the pane state OFF too: a self-dev
+    // session running inside a herdr-webui pane exports HERDR_WEBUI=1, and
+    // the env fallback would make the gate treat this thread as a webui pane
+    // (text render available) instead of the unsupported-terminal case.
     let rendered = with_serialized_mermaid_state(|| {
-        crate::tui::mermaid::with_image_protocol_override(Some(false), || {
-            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 36, 20), false, true)
+        crate::tui::mermaid::with_herdr_webui_override(Some(false), || {
+            crate::tui::mermaid::with_image_protocol_override(Some(false), || {
+                render_side_panel_markdown_cached(&page, Rect::new(0, 0, 36, 20), false, true)
+            })
         })
     });
     let text: Vec<String> = rendered
