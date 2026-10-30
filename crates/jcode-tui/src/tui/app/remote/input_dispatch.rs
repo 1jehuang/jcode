@@ -184,19 +184,12 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     let raw_input = prepared.raw_input.clone();
 
     if crate::tui::is_ssh_remote() {
-        let trimmed = prepared.expanded.trim();
-        if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
-            return Ok(());
-        }
-        if matches!(
-            trimmed.split_whitespace().next(),
-            Some("/cancel" | "/stop" | "/help" | "/?" | "/commands" | "/diff")
-        ) {
-            app_mod::commands_dispatch::dispatch_local_command(app, trimmed);
-            return Ok(());
-        }
-        // Only the server knows remote skills and their multi-word names.
-        return submit_prepared_remote_input(app, remote, prepared).await;
+        // Box the shared dispatcher because its non-SSH fallback can call
+        // this entry point. The SSH branch terminates in a wire send instead.
+        return Box::pin(super::key_handling::submit_prepared_remote_enter_input(
+            app, remote, prepared,
+        ))
+        .await;
     }
 
     // Text that merely starts with `/` is not necessarily a command. A terminal
@@ -464,7 +457,7 @@ async fn submit_remote_transcript_input(
     Ok(())
 }
 
-async fn submit_remote_input_shell(
+pub(super) async fn submit_remote_input_shell(
     app: &mut App,
     remote: &mut RemoteConnection,
     raw_input: String,
@@ -643,4 +636,134 @@ pub(in crate::tui::app) fn stage_turn_for_remote_tick_loop(app: &mut App, input:
     app.queued_messages.push(input.to_string());
     app.pending_images.clear();
     true
+}
+
+#[cfg(test)]
+mod ssh_slash_tests {
+    use super::*;
+
+    #[test]
+    fn ssh_slash_capability_matrix_covers_entire_registry() {
+        let matrix = include_str!("../../../../../../docs/ssh-slash-commands.md");
+        for command in app_mod::registered_command_names() {
+            assert!(
+                matrix.contains(&format!("`{command}`")),
+                "missing {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_alternate_slash_input_uses_wire_dispatch_not_agent_prompt() {
+        if app_mod::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_alternate_slash_input_uses_wire_dispatch_not_agent_prompt",
+        ) {
+            return;
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use tokio::io::AsyncBufReadExt;
+            let mut app = app_mod::tests::create_test_app();
+            app.is_remote = true;
+            let mut remote = RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            let mut peer = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+            for (command, expected) in [
+                ("/compact", "compact"),
+                ("/rename remote title", "rename_session"),
+                ("/memory on", "set_feature"),
+                ("/model refresh", "refresh_models"),
+                ("/git status", "input_shell"),
+                ("/auth", "runtime_command"),
+                ("/logout openai", "runtime_command"),
+                ("/context", "runtime_command"),
+                ("/overnight status", "runtime_command"),
+            ] {
+                submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    input::PreparedInput {
+                        raw_input: command.to_string(),
+                        expanded: command.to_string(),
+                        images: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(std::time::Duration::from_secs(1), peer.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], expected, "{command}: {line}");
+                if command == "/git status" {
+                    assert_eq!(request["command"], "git status --short --branch");
+                }
+                if command == "/logout openai" {
+                    assert_eq!(request["command"], "logout");
+                    assert_eq!(request["args"], serde_json::json!(["openai"]));
+                }
+                assert!(!app.pending_turn);
+            }
+        });
+    }
+
+    #[test]
+    fn ssh_registered_unimplemented_command_fails_closed_but_skills_reach_server() {
+        if app_mod::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_registered_unimplemented_command_fails_closed_but_skills_reach_server",
+        ) {
+            return;
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut app = app_mod::tests::create_test_app();
+            app.is_remote = true;
+            let mut remote = RemoteConnection::dummy();
+            // No history makes normal remote prompts queue without a wire
+            // send, providing a direct distinction from rejected commands.
+            for command in ["/subscribe", "/terminal-setup", "/screenshot-mode"] {
+                let next_id = remote.next_request_id_for_test();
+                submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    input::PreparedInput {
+                        raw_input: command.to_string(),
+                        expanded: command.to_string(),
+                        images: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(app.pending_prompt_before_history.is_none(), "{command}");
+                assert_eq!(remote.next_request_id_for_test(), next_id);
+                assert!(
+                    app.display_messages()
+                        .last()
+                        .unwrap()
+                        .content
+                        .contains("SSH")
+                );
+            }
+            for command in ["/future remote skill /context", "/home/vm/notes"] {
+                submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    input::PreparedInput {
+                        raw_input: command.to_string(),
+                        expanded: command.to_string(),
+                        images: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    app.pending_prompt_before_history.take().unwrap().expanded,
+                    command
+                );
+                assert!(!app.pending_turn);
+            }
+        });
+    }
 }

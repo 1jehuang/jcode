@@ -8,6 +8,84 @@ use crate::tui::app as app_mod;
 use crate::tui::app::PendingRemoteRewindNotice;
 use crate::tui::core;
 
+/// Canonical runtime commands never run the similarly named laptop handler.
+/// Keep argument validation and destructive-action confirmation on the daemon.
+fn ssh_runtime_command(input: &str) -> Option<(&'static str, Vec<String>)> {
+    let mut words = input.split_whitespace();
+    let token = words.next()?;
+    let command = match token {
+        "/skills" => "skills",
+        "/context" => "context",
+        "/info" => "info",
+        "/cache" => "cache",
+        "/agents" => "agents",
+        "/subagent-model" => "subagent_model",
+        "/autoreview" => "autoreview",
+        "/autojudge" => "autojudge",
+        "/review" => "review",
+        "/judge" => "judge",
+        "/subagent" => "subagent",
+        "/telemetry" => "telemetry",
+        "/subscription" => "subscription",
+        "/overnight" => "overnight",
+        "/productivity" | "/wrapped" => "productivity",
+        "/initiatives" | "/goals" => "initiatives",
+        "/auth" => "auth",
+        "/logout" => "logout",
+        "/remote" => "remote",
+        "/provider-test-coverage" | "/model-status" => "provider_test_coverage",
+        "/z" | "/zz" | "/zzz" | "/zstatus" => "premium",
+        _ => return None,
+    };
+    let mut args = Vec::new();
+    match token {
+        "/z" => args.push("normal".to_string()),
+        "/zz" => args.push("toggle-one".to_string()),
+        "/zzz" => args.push("toggle-zero".to_string()),
+        "/zstatus" => args.push("status".to_string()),
+        _ => {}
+    }
+    args.extend(words.map(str::to_string));
+    Some((command, args))
+}
+
+#[cfg(test)]
+mod ssh_runtime_routing_tests {
+    #[test]
+    fn ssh_runtime_aliases_preserve_arguments_and_confirmation() {
+        for (input, command, args) in [
+            ("/logout openai", "logout", vec!["openai"]),
+            (
+                "/logout openai confirm",
+                "logout",
+                vec!["openai", "confirm"],
+            ),
+            ("/wrapped status", "productivity", vec!["status"]),
+            ("/goals", "initiatives", vec![]),
+            ("/model-status", "provider_test_coverage", vec![]),
+            ("/z", "premium", vec!["normal"]),
+            ("/zz", "premium", vec!["toggle-one"]),
+            ("/zzz", "premium", vec!["toggle-zero"]),
+            ("/zstatus", "premium", vec!["status"]),
+        ] {
+            let (actual, actual_args) = super::ssh_runtime_command(input).unwrap();
+            assert_eq!(actual, command, "{input}");
+            assert_eq!(actual_args, args, "{input}");
+        }
+        for input in [
+            "/contextual skill",
+            "/home/vm/info",
+            "/logout-custom-skill",
+            "/fast default on",
+            "/improve resume",
+            "/refactor",
+            "/poke",
+        ] {
+            assert!(super::ssh_runtime_command(input).is_none(), "{input}");
+        }
+    }
+}
+
 #[cfg(test)]
 pub(in crate::tui::app) use update::reload_stale_remote_server_before_update;
 pub(in crate::tui::app) use update::{
@@ -1035,6 +1113,32 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
         let prepared = input::take_prepared_input(app);
+        return submit_prepared_remote_enter_input(app, remote, prepared).await;
+    }
+    Ok(())
+}
+
+/// Already-expanded input shares Enter's wire-backed handlers without touching
+/// the composer or consulting the laptop's skill catalog in SSH mode.
+pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    prepared: input::PreparedInput,
+) -> Result<()> {
+    {
+        if !app_mod::commands_cloud::check_cloud_handoff_input(app, prepared.expanded.trim()) {
+            restore_prepared_remote_input(app, prepared);
+            return Ok(());
+        }
+        if app.cloud_handoff_blocks_work()
+            && app_mod::commands_cloud::parse_cloud_command(prepared.expanded.trim()).is_none()
+        {
+            restore_prepared_remote_input(app, prepared);
+            app.set_status_notice(
+                "Cloud handoff pending. Use /cloud cancel before submitting more work.",
+            );
+            return Ok(());
+        }
         let trimmed = prepared.expanded.trim();
 
         // Before the SSH gate: `/local` must work from a client attached
@@ -1076,7 +1180,39 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
 
+        if crate::tui::is_ssh_remote()
+            && let Some((command, args)) = ssh_runtime_command(trimmed)
+        {
+            remote.runtime_command(command, args).await?;
+            app.set_status_notice(format!("Requested remote {command}"));
+            return Ok(());
+        }
+
+        if app_mod::commands_dispatch::handle_ssh_presentation_command(app, trimmed) {
+            if matches!(trimmed.split_whitespace().next(), Some("/todos" | "/todo")) {
+                remote.request_todos().await?;
+            }
+            return Ok(());
+        }
+
         if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
+            return Ok(());
+        }
+
+        if crate::tui::is_ssh_remote() && trimmed.split_whitespace().next() == Some("/git") {
+            if matches!(trimmed, "/git" | "/git status") {
+                // The daemon resolves its own CWD. Never consult local git or
+                // interpolate the remote working directory into a shell string.
+                super::input_dispatch::submit_remote_input_shell(
+                    app,
+                    remote,
+                    prepared.raw_input,
+                    "git status --short --branch".to_string(),
+                )
+                .await?;
+            } else {
+                app.push_display_message(DisplayMessage::error("Usage: /git or /git status"));
+            }
             return Ok(());
         }
 
@@ -2695,6 +2831,18 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
         }
 
         if trimmed.starts_with('/') {
+            if crate::tui::is_ssh_remote() {
+                // Known client commands must never fall through as an agent
+                // prompt. Unknown skills and absolute paths belong to the VM.
+                let token = trimmed.split_whitespace().next();
+                if (app_mod::registered_command_names().any(|name| Some(name) == token)
+                    || app_mod::commands_dispatch::ssh_presentation_command(trimmed))
+                    && app_mod::commands_dispatch::dispatch_local_command(app, trimmed)
+                {
+                    return Ok(());
+                }
+                return submit_prepared_remote_input(app, remote, prepared).await;
+            }
             submit_remote_slash_input(app, remote, prepared).await?;
             return Ok(());
         }
