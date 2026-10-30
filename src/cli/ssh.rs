@@ -37,6 +37,13 @@ fn client_reload_command(
     // The previous terminal was fully restored and the adapter socket died
     // with its SSH guard. The fresh process must create both again.
     command.env_remove("JCODE_RESUMING");
+    command.env_remove("JCODE_SOCKET");
+    // run_unix caches the client cwd in this variable even when it was not
+    // explicitly authorized as a local source. Do not promote that cached
+    // fallback into explicit migration authority on reload.
+    if std::env::var("JCODE_SSH_LOCAL_IS_SOURCE").as_deref() != Ok("1") {
+        command.env_remove("JCODE_SSH_LOCAL_WORKING_DIR");
+    }
     command
 }
 
@@ -305,6 +312,18 @@ mod tests {
                 .get_envs()
                 .any(|(key, value)| key == "JCODE_RESUMING" && value.is_none())
         );
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "JCODE_SOCKET" && value.is_none())
+        );
+        if std::env::var("JCODE_SSH_LOCAL_IS_SOURCE").as_deref() != Ok("1") {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == "JCODE_SSH_LOCAL_WORKING_DIR" && value.is_none())
+            );
+        }
     }
 
     #[test]

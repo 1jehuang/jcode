@@ -464,8 +464,18 @@ pub(in crate::tui::app) fn handle_server_event(
         return true;
     }
 
+    // Control failures use the shared Error wire shape, but must not end an
+    // unrelated active turn, trigger rate-limit retry, or discard draft input.
+    if let ServerEvent::Error { id, message, .. } = &event
+        && remote.finish_runtime_command(*id)
+    {
+        app.push_display_message(DisplayMessage::error(message.clone()));
+        return true;
+    }
+
     // Control responses are transcript notices, never conversation-turn activity.
-    if let ServerEvent::RuntimeCommandResult { message, .. } = event {
+    if let ServerEvent::RuntimeCommandResult { id, message, .. } = event {
+        remote.finish_runtime_command(id);
         app.push_display_message(DisplayMessage::system(message));
         return true;
     }
@@ -3417,6 +3427,61 @@ mod runtime_command_tests {
     use super::*;
     use crate::tui::app::tests::create_test_app;
     use crate::tui::backend::RemoteConnection;
+
+    #[test]
+    fn runtime_command_error_preserves_active_turn_and_clears_request_ownership() {
+        let mut app = create_test_app();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut remote = RemoteConnection::dummy();
+            let id = remote
+                .runtime_command("config", vec!["invalid".into()])
+                .await
+                .unwrap();
+            app.is_processing = true;
+            app.pending_turn = true;
+            app.current_message_id = Some(99);
+            app.status = ProcessingStatus::Sending;
+            app.input = "unsent draft".into();
+            app.replace_streaming_text("partial response".into());
+            let activity = app.last_stream_activity;
+            assert!(handle_server_event(
+                &mut app,
+                ServerEvent::Error {
+                    id,
+                    message: "Session is busy. Retry this command after the current turn.".into(),
+                    retry_after_secs: None,
+                },
+                &mut remote
+            ));
+            assert!(app.is_processing);
+            assert!(app.pending_turn);
+            assert_eq!(app.current_message_id, Some(99));
+            assert!(matches!(app.status, ProcessingStatus::Sending));
+            assert_eq!(app.input, "unsent draft");
+            assert_eq!(app.streaming_text(), "partial response");
+            assert_eq!(app.last_stream_activity, activity);
+            assert_eq!(app.display_messages.last().unwrap().role, "error");
+            assert!(!remote.finish_runtime_command(id));
+
+            let id = remote
+                .runtime_command("poke", vec!["status".into()])
+                .await
+                .unwrap();
+            assert!(handle_server_event(
+                &mut app,
+                ServerEvent::RuntimeCommandResult {
+                    id,
+                    command: "poke".into(),
+                    data: serde_json::json!({}),
+                    message: "Stopped".into(),
+                },
+                &mut remote
+            ));
+            assert!(!remote.finish_runtime_command(id));
+            assert!(app.is_processing);
+        });
+    }
 
     #[test]
     fn runtime_command_result_renders_without_starting_or_disrupting_turn() {
