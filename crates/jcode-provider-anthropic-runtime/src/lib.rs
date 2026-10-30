@@ -786,7 +786,7 @@ impl AnthropicProvider {
     }
 
     fn model_supports_priority_service_tier(model: &str) -> bool {
-        Self::normalized_model_key(model).contains("claude-opus-4-8")
+        jcode_provider_core::anthropic_model_supports_fast_mode(model)
     }
 
     fn normalize_service_tier(raw: &str) -> Result<Option<String>> {
@@ -1602,7 +1602,7 @@ impl Provider for AnthropicProvider {
         if normalized.as_deref() == Some("auto")
             && !Self::model_supports_priority_service_tier(&self.model())
         {
-            anyhow::bail!("Anthropic priority fast tier is only supported for Claude Opus 4.8");
+            anyhow::bail!("Anthropic fast mode is only supported for Claude Opus 5.5 and Opus 4.8");
         }
         *self
             .service_tier
@@ -2247,6 +2247,7 @@ async fn stream_response(
             request.thinking.is_some(),
         );
         let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
+        let beta_header = with_fast_mode_beta(&beta_header, model_name, &request.service_tier);
         req = apply_oauth_attribution_headers(
             req.header("Authorization", format!("Bearer {}", token))
                 .header("User-Agent", CLAUDE_CLI_USER_AGENT)
@@ -2264,6 +2265,7 @@ async fn stream_response(
         let beta_header =
             anthropic_beta_header_with_thinking(beta_header, request.thinking.is_some());
         let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
+        let beta_header = with_fast_mode_beta(&beta_header, model_name, &request.service_tier);
         req = match direct_transport.auth_mode.as_str() {
             "none" => req,
             "bearer" => req.header("Authorization", format!("Bearer {token}")),
@@ -2372,6 +2374,23 @@ async fn stream_response(
 
 mod error_classification;
 use error_classification::*;
+
+/// Append the fast-mode beta for research-preview models when fast is requested.
+fn with_fast_mode_beta(base: &str, model: &str, tier: &Option<String>) -> String {
+    let beta = jcode_provider_core::ANTHROPIC_FAST_MODE_BETA;
+    if tier.as_deref() == Some("auto")
+        && jcode_provider_core::anthropic_fast_mode_requires_beta(model)
+        && !base.split(',').any(|h| h.trim() == beta)
+    {
+        if base.is_empty() {
+            beta.to_string()
+        } else {
+            format!("{base},{beta}")
+        }
+    } else {
+        base.to_string()
+    }
+}
 
 fn anthropic_beta_header_with_thinking(base: &str, thinking_enabled: bool) -> String {
     if thinking_enabled && !base.contains("interleaved-thinking-2025-05-14") {
