@@ -104,3 +104,54 @@ fn durable_reasoning_and_cap_are_retained_without_fake_context_usage() {
     assert!(data.observed_context_tokens.is_none());
     assert!(data.context_info.is_none());
 }
+
+#[test]
+fn persisted_session_widget_matches_real_margin_engine_and_buffer() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    let was_enabled = info_widget::is_enabled();
+    if !was_enabled {
+        info_widget::toggle_enabled();
+    }
+    let session = selected_session();
+    let mut stored = Session::create_with_id(session.id.clone(), None, None);
+    stored.short_name = Some(session.short_name.clone());
+    let extras = PreviewExtras {
+        info_data: Some(persisted_info(&stored)),
+        ..Default::default()
+    };
+    let area = Rect::new(0, 0, 120, 30);
+    let lines = vec![Line::from("short transcript")];
+    let data = selected_info(&session, Some(&extras));
+    let margins = crate::tui::ui::viewport::compute_visible_margins(&lines, &[], area, false);
+    let placements = crate::tui::info_widget_layout::calculate_placements_anchored(
+        area,
+        &margins,
+        &data,
+        true,
+        &[],
+    );
+    assert!(
+        !placements.visible.is_empty(),
+        "persisted session name must yield a real widget"
+    );
+    let mut actual = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    let mut expected = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    actual
+        .draw(|frame| draw_widgets(frame, area, &lines, &session, Some(&extras)))
+        .unwrap();
+    expected
+        .draw(|frame| info_widget::render_all(frame, &placements.visible, &data))
+        .unwrap();
+    assert_eq!(actual.backend().buffer(), expected.backend().buffer());
+    assert!(
+        actual
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol() != " ")
+    );
+    if !was_enabled {
+        info_widget::toggle_enabled();
+    }
+}
