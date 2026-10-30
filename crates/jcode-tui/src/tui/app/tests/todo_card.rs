@@ -1,6 +1,91 @@
 // Tests for the inline chat todo card (`/todos` command + todo-card hotkey).
 
 #[test]
+fn ssh_todos_command_renders_remote_card() {
+    if super::commands_dispatch::ssh_test_runs_in_child("ssh_todos_command_renders_remote_card") {
+        return;
+    }
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("remote-render-test".into());
+    assert!(super::commands_dispatch::dispatch_local_command(
+        &mut app, "/todos"
+    ));
+    assert!(app.remote_todos_refresh_due());
+    assert!(
+        !app.remote_todos_refresh_due(),
+        "refresh requests are throttled"
+    );
+    app.receive_remote_todos("remote-render-test".into(), serde_json::json!({
+        "todos": [{"id":"remote-task", "content":"Cloud todo visible", "priority":"high", "status":"pending"}],
+        "plan": {}, "goals": []
+    }).to_string());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &app))
+        .unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Cloud todo visible"), "{text}");
+    assert!(!text.contains("unavailable in SSH"), "{text}");
+}
+
+#[test]
+fn remote_todos_render_and_refresh_without_reading_local_todos() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("cloud-todos-test".into());
+    let payload = |status: &str| {
+        serde_json::json!({
+        "todos": [{"id":"cloud-only", "content":"Remote task", "priority":"high", "status":status}],
+        "plan": {}, "goals": []
+    }).to_string()
+    };
+    app.receive_remote_todos("cloud-todos-test".into(), payload("pending"));
+    app.toggle_todo_card();
+    let card = app
+        .display_messages
+        .iter()
+        .find(|m| m.role == "todos")
+        .unwrap();
+    assert!(card.content.contains("Remote task"));
+    app.receive_remote_todos("cloud-todos-test".into(), payload("completed"));
+    let card = app
+        .display_messages
+        .iter()
+        .find(|m| m.role == "todos")
+        .unwrap();
+    assert!(card.content.contains("completed"));
+    app.set_todos_view_enabled(true, true);
+    assert!(app.todos_view_markdown.contains("Remote task"));
+
+    // Late replies and cached state from the old session must not leak.
+    app.remote_session_id = Some("another-cloud-session".into());
+    app.receive_remote_todos("cloud-todos-test".into(), payload("pending"));
+    app.refresh_todo_card_if_needed();
+    let card = app
+        .display_messages
+        .iter()
+        .find(|m| m.role == "todos")
+        .unwrap();
+    assert!(!card.content.contains("Remote task"));
+}
+
+#[test]
+fn todos_command_requires_a_token_boundary() {
+    let mut app = create_test_app();
+    assert!(!super::todos_view::handle_todos_view_command(
+        &mut app,
+        "/todos-custom-skill"
+    ));
+}
+
+#[test]
 fn toggle_todo_card_pushes_then_dismisses_trailing_card() {
     let mut app = create_test_app();
     assert!(!app.display_messages.iter().any(|m| m.role == "todos"));

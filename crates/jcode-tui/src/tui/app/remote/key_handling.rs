@@ -535,10 +535,10 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
     if app.toggle_keys.todo_card.matches(code, modifiers) {
-        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "Local todo view") {
-            return Ok(());
-        }
         app.toggle_todo_card();
+        if crate::tui::is_ssh_remote() {
+            remote.request_todos().await?;
+        }
         return Ok(());
     }
     if app.centered_toggle_keys.matches(code, modifiers) {
@@ -1866,17 +1866,18 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
 
+        if trimmed == "/todo" || trimmed == "/todos" || trimmed.starts_with("/todos ") {
+            app_mod::todos_view::handle_todos_view_command(app, trimmed);
+            if crate::tui::is_ssh_remote() {
+                remote.request_todos().await?;
+            }
+            return Ok(());
+        }
+
         if trimmed == "/observe"
             || trimmed == "/observe on"
             || trimmed == "/observe off"
             || trimmed == "/observe status"
-            || trimmed == "/todo"
-            || trimmed == "/todos"
-            || trimmed == "/todos card"
-            || trimmed == "/todos panel"
-            || trimmed == "/todos on"
-            || trimmed == "/todos off"
-            || trimmed == "/todos status"
             || trimmed == "/splitview"
             || trimmed == "/splitview on"
             || trimmed == "/splitview off"

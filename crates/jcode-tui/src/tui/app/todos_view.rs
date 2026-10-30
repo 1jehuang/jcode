@@ -13,6 +13,59 @@ const TODOS_VIEW_TITLE: &str = "Todos";
 const TODO_CARD_ROLE: &str = "todos";
 
 impl App {
+    fn current_todo_state(
+        &self,
+    ) -> (
+        Vec<TodoItem>,
+        crate::todo::TodoPlan,
+        Vec<crate::todo::TodoGoal>,
+    ) {
+        let session_id = self.active_client_session_id();
+        if crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some() {
+            let payload = self
+                .remote_todos_payload
+                .as_ref()
+                .filter(|(id, _)| Some(id.as_str()) == session_id)
+                .and_then(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .unwrap_or_default();
+            return (
+                serde_json::from_value(payload["todos"].clone()).unwrap_or_default(),
+                serde_json::from_value(payload["plan"].clone()).unwrap_or_default(),
+                serde_json::from_value(payload["goals"].clone()).unwrap_or_default(),
+            );
+        }
+        (
+            load_current_session_todos(session_id),
+            load_current_session_plan(session_id),
+            load_current_session_goals(session_id),
+        )
+    }
+
+    pub(super) fn remote_todos_refresh_due(&mut self) -> bool {
+        if !crate::tui::is_ssh_remote()
+            || !(self.todos_view_enabled
+                || self.latest_todo_card_index().is_some()
+                || crate::config::config().display.pin_todos)
+            || self
+                .remote_todos_requested_at
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2))
+        {
+            return false;
+        }
+        self.remote_todos_requested_at = Some(Instant::now());
+        true
+    }
+
+    pub(super) fn receive_remote_todos(&mut self, session_id: String, payload: String) {
+        if self.active_client_session_id() != Some(session_id.as_str()) {
+            return;
+        }
+        self.remote_todos_payload = Some((session_id, payload));
+        self.refresh_todo_card_if_needed();
+        self.refresh_todos_view_now();
+        self.refresh_pinned_todos_now();
+    }
+
     pub(super) fn todos_view_enabled(&self) -> bool {
         self.todos_view_enabled
     }
@@ -40,16 +93,8 @@ impl App {
     /// Push (or move to the bottom) the inline todo card with fresh data. The
     /// transcript keeps at most one card so repeated toggles don't stack.
     pub(super) fn show_todo_card(&mut self) {
-        if crate::tui::is_ssh_remote() {
-            self.set_status_notice(
-                "Local todo view unavailable for SSH; ask the remote agent for todos",
-            );
-            return;
-        }
         let session_id = self.active_client_session_id().map(str::to_string);
-        let todos = load_current_session_todos(session_id.as_deref());
-        let goals = load_current_session_goals(session_id.as_deref());
-        let plan = load_current_session_plan(session_id.as_deref());
+        let (todos, plan, goals) = self.current_todo_state();
         let tasks = self.todo_card_background_tasks(&todos);
         let content = with_background_tasks(todo_card_payload_json(&todos, &plan, &goals), &tasks);
         self.todo_card_rendered_hash =
@@ -70,16 +115,11 @@ impl App {
     /// Live-refresh the inline todo card when the session todo list changed.
     /// Returns true when the transcript was updated.
     pub(super) fn refresh_todo_card_if_needed(&mut self) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
         let Some(idx) = self.latest_todo_card_index() else {
             return false;
         };
         let session_id = self.active_client_session_id().map(str::to_string);
-        let todos = load_current_session_todos(session_id.as_deref());
-        let goals = load_current_session_goals(session_id.as_deref());
-        let plan = load_current_session_plan(session_id.as_deref());
+        let (todos, plan, goals) = self.current_todo_state();
         let tasks = self.todo_card_background_tasks(&todos);
         let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
             ^ hash_background_tasks(&tasks);
@@ -95,9 +135,6 @@ impl App {
     /// (`display.pin_todos`). Returns true when the payload changed and the
     /// viewport should redraw. Disk reads are throttled to once per second.
     pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
         if !crate::config::config().display.pin_todos {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -114,7 +151,7 @@ impl App {
         }
         self.pinned_todos_checked_at = Some(Instant::now());
         let session_id = self.active_client_session_id().map(str::to_string);
-        let todos = load_current_session_todos(session_id.as_deref());
+        let (todos, plan, goals) = self.current_todo_state();
         if todos.is_empty() {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -123,8 +160,6 @@ impl App {
             }
             return false;
         }
-        let goals = load_current_session_goals(session_id.as_deref());
-        let plan = load_current_session_plan(session_id.as_deref());
         let agents = self.todo_card_agents(&todos);
         let tasks = self.todo_card_background_tasks(&todos);
         let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
@@ -325,13 +360,8 @@ impl App {
     }
 
     fn refresh_todos_view_cache(&mut self, force: bool) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
         let session_id = self.active_client_session_id();
-        let todos = load_current_session_todos(session_id);
-        let goals = load_current_session_goals(session_id);
-        let plan = load_current_session_plan(session_id);
+        let (todos, plan, goals) = self.current_todo_state();
         let next_hash = hash_todos_payload(session_id, &todos, &plan, &goals);
         if !force && self.todos_view_rendered_hash == next_hash {
             return false;
@@ -381,7 +411,9 @@ pub(super) fn todos_view_status_message(app: &App) -> String {
 pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
     let arg = if trimmed == "/todo" {
         ""
-    } else if let Some(rest) = trimmed.strip_prefix("/todos") {
+    } else if trimmed == "/todos" {
+        ""
+    } else if let Some(rest) = trimmed.strip_prefix("/todos ") {
         rest.trim()
     } else {
         return false;

@@ -1546,6 +1546,10 @@ pub struct App {
     todos_view_markdown: String,
     todos_view_updated_at_ms: u64,
     todos_view_rendered_hash: u64,
+    /// Remote todo snapshot paired with its owning session. Never read SSH
+    /// session IDs from laptop-local todo storage.
+    remote_todos_payload: Option<(String, String)>,
+    remote_todos_requested_at: Option<Instant>,
     /// Hash of the todo payload rendered into the inline chat todo card, used
     /// to keep the card live-updating while it stays in the transcript.
     todo_card_rendered_hash: u64,

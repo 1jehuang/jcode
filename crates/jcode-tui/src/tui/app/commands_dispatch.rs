@@ -100,8 +100,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/zstatus"
             | "/autoreview"
             | "/autojudge"
-            | "/todo"
-            | "/todos"
             | "/observe"
             | "/splitview"
             | "/split-view"
@@ -211,6 +209,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
     // back to local session/model/storage handlers for a remote command.
     if crate::tui::is_ssh_remote() {
         if super::commands::handle_cancel_command(app, trimmed)
+            || super::todos_view::handle_todos_view_command(app, trimmed)
             || super::commands::handle_help_command(app, trimmed)
             || super::commands::handle_diff_command(app, trimmed)
         {
@@ -373,13 +372,14 @@ mod tests {
             "/desktop",
             "/workspace",
             "/workspace split",
-            "/todos",
             "/review",
             "/subagent investigate",
         ] {
             assert!(super::ssh_unsupported_command(command), "{command}");
         }
         for command in [
+            "/todos",
+            "/todo",
             "/login",
             "hello",
             "explain !commands",

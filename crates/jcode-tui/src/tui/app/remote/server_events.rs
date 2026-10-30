@@ -430,6 +430,7 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::Ack { .. }
             | ServerEvent::SwarmStatus { .. }
             | ServerEvent::SidePanelState { .. }
+            | ServerEvent::Todos { .. }
             | ServerEvent::AccountUsage { .. }
             | ServerEvent::ModelUsageUpdated { .. }
             | ServerEvent::AvailableModelsUpdated { .. }
@@ -2460,6 +2461,13 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::SidePanelState { snapshot } => {
             app.set_side_panel_snapshot(snapshot);
             false
+        }
+        ServerEvent::Todos {
+            session_id,
+            payload,
+        } => {
+            app.receive_remote_todos(session_id, payload);
+            true
         }
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {

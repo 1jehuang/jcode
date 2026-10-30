@@ -201,6 +201,11 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         needs_redraw |= app.handle_server_event(crate::protocol::ServerEvent::Done { id }, remote);
     }
 
+    if app.remote_todos_refresh_due()
+        && let Err(error) = remote.request_todos().await
+    {
+        crate::logging::warn(&format!("Remote todo refresh failed: {error}"));
+    }
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_todo_card_if_needed();
     needs_redraw |= app.refresh_completed_todo_report(false);
