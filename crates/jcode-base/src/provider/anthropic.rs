@@ -107,7 +107,8 @@ pub fn load_anthropic_api_key() -> Result<String> {
             );
         }
     }
-    if let Ok(value) = std::env::var("ANTHROPIC_AUTH_TOKEN")
+    if let Some(value) =
+        crate::provider_catalog::Creds::get("ANTHROPIC_AUTH_TOKEN", "anthropic.env")
         && !value.trim().is_empty()
     {
         return Ok(value);

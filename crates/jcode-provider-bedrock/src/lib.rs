@@ -172,6 +172,9 @@ impl BedrockProvider {
         }
 
         let has_region = Self::configured_region().is_some();
+        // ponytail: foreign-reader carve-out — these are the AWS SDK's own
+        // credential-chain names (and its `~/.aws` files); jcode cannot
+        // redirect the SDK, so the process env (live) stays the source (#1389).
         let has_credential_hint = Self::configured_bearer_token().is_some()
             || Self::configured_profile().is_some()
             || std::env::var_os("AWS_ACCESS_KEY_ID").is_some()

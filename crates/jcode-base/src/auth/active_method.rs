@@ -91,8 +91,8 @@ pub fn resolve_dual_credential_auth(
             // `has_api_key` already folds in the ANTHROPIC_API_KEY env var via the
             // auth probe, but re-check defensively so an env-only key set after the
             // cached snapshot still reports honestly.
-            let has_api_key =
-                auth.anthropic.has_api_key || std::env::var("ANTHROPIC_API_KEY").is_ok();
+            let has_api_key = auth.anthropic.has_api_key
+                || crate::provider_catalog::Creds::has("ANTHROPIC_API_KEY", "anthropic.env");
             (has_oauth, has_api_key)
         }
         jcode_provider_core::DualAuthProvider::OpenAI => {

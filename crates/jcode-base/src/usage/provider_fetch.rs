@@ -484,20 +484,8 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
 }
 
 pub(super) fn openrouter_api_key() -> Option<String> {
-    std::env::var("OPENROUTER_API_KEY")
-        .ok()
-        .or_else(|| {
-            let config_path = crate::storage::app_config_dir()
-                .ok()?
-                .join("openrouter.env");
-            crate::storage::harden_secret_file_permissions(&config_path);
-            let content = std::fs::read_to_string(config_path).ok()?;
-            content
-                .lines()
-                .find_map(|line| line.strip_prefix("OPENROUTER_API_KEY="))
-                .map(|k| k.trim().to_string())
-        })
-        .filter(|k| !k.is_empty())
+    // Env read live, then `openrouter.env` — the file is the only store (#1389).
+    crate::provider_catalog::load_api_key_from_env_or_config("OPENROUTER_API_KEY", "openrouter.env")
 }
 
 /// Antigravity per-model quota report. The backend's `fetchAvailableModels`

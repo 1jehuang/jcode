@@ -7,13 +7,13 @@ async fn catalog_request_headers_follow_provider_auth_rules() {
         "https://API.ANTHROPIC.COM/v1",
     ] {
         for auth in [
-            ProviderAuth::AuthorizationBearer {
+            ProviderAuth::InlineBearer {
                 token: "test-key".into(),
                 label: "test".into(),
             },
-            ProviderAuth::HeaderValue {
+            ProviderAuth::InlineHeader {
                 header_name: HeaderName::from_static("x-api-key"),
-                value: "test-key".into(),
+                token: "test-key".into(),
                 label: "test".into(),
             },
         ] {
@@ -39,7 +39,7 @@ async fn catalog_request_headers_follow_provider_auth_rules() {
     ] {
         for (auth, expected_header, expected_value) in [
             (
-                ProviderAuth::AuthorizationBearer {
+                ProviderAuth::InlineBearer {
                     token: "test-key".into(),
                     label: "test".into(),
                 },
@@ -47,9 +47,9 @@ async fn catalog_request_headers_follow_provider_auth_rules() {
                 "Bearer test-key",
             ),
             (
-                ProviderAuth::HeaderValue {
+                ProviderAuth::InlineHeader {
                     header_name: HeaderName::from_static("api-key"),
-                    value: "test-key".into(),
+                    token: "test-key".into(),
                     label: "test".into(),
                 },
                 Some("api-key"),

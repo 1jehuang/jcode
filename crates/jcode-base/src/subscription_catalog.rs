@@ -645,6 +645,8 @@ mod tests {
         crate::env::set_var(JCODE_TIER_ENV, JcodeTier::Ultra.as_str());
         assert_eq!(effective_tier(), JcodeTier::Ultra);
         assert!(!is_model_allowed_for_current_tier("not-a-hosted-model"));
+        // Saving writes only the file (#1389); drop the env override to read it.
+        crate::env::remove_var(JCODE_TIER_ENV);
         store_cached_tier(Some(JcodeTier::Flagship)).expect("persist tier");
         assert_eq!(cached_tier(), Some(JcodeTier::Flagship));
         assert!(is_model_allowed_for_current_tier("claude-sonnet-5-5"));

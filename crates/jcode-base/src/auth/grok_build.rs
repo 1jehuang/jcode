@@ -393,6 +393,8 @@ pub fn load_credential() -> Option<GrokCredential> {
 }
 
 fn deployment_key() -> Option<String> {
+    // ponytail: user-exported deployment key; jcode never persists it to an
+    // env file, so the process env is the only source (#1389).
     std::env::var("GROK_DEPLOYMENT_KEY")
         .ok()
         .map(|value| value.trim().to_string())
