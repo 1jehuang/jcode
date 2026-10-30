@@ -3,6 +3,53 @@ use chrono::{Duration as ChronoDuration, Utc};
 use std::io::Write;
 use std::time::{Duration as StdDuration, SystemTime};
 
+#[test]
+fn completed_empty_preview_is_not_loaded_again() {
+    let mut session = make_session("empty_preview", "empty", false, SessionStatus::Closed);
+    session.messages_preview.clear();
+    let mut picker = SessionPicker::new(vec![session]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    picker.pending_preview_load = Some(PendingSessionPreviewLoad {
+        session_id: "empty_preview".into(),
+        receiver: rx,
+    });
+    tx.send(Some(LoadedSessionPreview {
+        messages: vec![],
+        extras: PreviewExtras::default(),
+    }))
+    .unwrap();
+    assert!(picker.poll_preview_load());
+    picker.ensure_selected_preview_loading();
+    assert!(picker.pending_preview_load.is_none());
+}
+
+#[test]
+fn failed_preview_is_not_retried_or_rendered_as_loading() {
+    let mut session = make_session("failed_preview", "failed", false, SessionStatus::Closed);
+    session.messages_preview.clear();
+    let mut picker = SessionPicker::new(vec![session]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    picker.pending_preview_load = Some(PendingSessionPreviewLoad {
+        session_id: "failed_preview".into(),
+        receiver: rx,
+    });
+    tx.send(None).unwrap();
+    assert!(picker.poll_preview_load());
+    picker.ensure_selected_preview_loading();
+    assert!(picker.pending_preview_load.is_none());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 30)).unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Preview unavailable"));
+    assert!(!text.contains("Loading preview"));
+}
+
 fn write_session_file_with_mtime(
     path: impl AsRef<std::path::Path>,
     content: &str,
