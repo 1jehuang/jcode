@@ -2,6 +2,70 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
+fn old_history_payloads_are_trimmed_in_memory_without_removing_messages() {
+    let mut session = Session::create_with_id("session_old_history_trim".into(), None, None);
+    let old = StoredMessage {
+        id: "old-message".into(),
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::OpenAIReasoning {
+                id: "reasoning".into(),
+                summary: vec!["s".repeat(32)],
+                encrypted_content: Some("e".repeat(4096)),
+                status: None,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "tool".into(),
+                content: "t".repeat(4096),
+                is_error: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "i".repeat(4096),
+            },
+        ],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    };
+    let mut recent = old.clone();
+    recent.id = "recent-message".into();
+    session.messages = vec![old, recent];
+    session.reset_provider_messages_cache();
+
+    assert_eq!(session.trim_old_history_in_memory(1), 3);
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.messages[0].id, "old-message");
+    assert_eq!(session.messages[1].id, "recent-message");
+    assert!(matches!(
+        &session.messages[0].content[0],
+        ContentBlock::OpenAIReasoning { summary, encrypted_content: None, .. }
+            if summary.is_empty()
+    ));
+    assert!(matches!(
+        &session.messages[0].content[1],
+        ContentBlock::ToolResult { content, .. }
+            if content.len() < 600 && content.contains("original 4096 bytes")
+    ));
+    assert!(matches!(
+        &session.messages[0].content[2],
+        ContentBlock::Text { text, .. } if text.contains("original_base64_chars=4096")
+    ));
+    assert!(matches!(
+        &session.messages[1].content[0],
+        ContentBlock::OpenAIReasoning {
+            encrypted_content: Some(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &session.messages[1].content[1],
+        ContentBlock::ToolResult { content, .. } if content.len() == 4096
+    ));
+}
+
+#[test]
 fn compacted_prefix_releases_discarded_string_capacity() {
     let mut session = Session::create_with_id("session_trim_capacity".into(), None, None);
     session.append_stored_message(StoredMessage {

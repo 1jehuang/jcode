@@ -1511,6 +1511,62 @@ request in this new forked session, using the inherited conversation only as con
         stripped
     }
 
+    /// Bound old transcript payloads held by a loaded session without changing
+    /// the on-disk snapshot. The original messages remain recoverable from disk;
+    /// keep the newest window intact for provider continuity and current UI use.
+    /// Message order, IDs, and tool-use/result pairing are preserved.
+    pub fn trim_old_history_in_memory(&mut self, keep_recent_messages: usize) -> usize {
+        const KEEP_TOOL_RESULT_CHARS: usize = 512;
+        let old_count = self.messages.len().saturating_sub(keep_recent_messages);
+        let mut trimmed = 0;
+        for message in self.messages.iter_mut().take(old_count) {
+            for block in &mut message.content {
+                match block {
+                    ContentBlock::OpenAIReasoning {
+                        summary,
+                        encrypted_content,
+                        ..
+                    } if !summary.is_empty() || encrypted_content.is_some() => {
+                        *summary = Vec::new();
+                        *encrypted_content = None;
+                        trimmed += 1;
+                    }
+                    ContentBlock::ToolResult { content, .. }
+                        if content.len() > KEEP_TOOL_RESULT_CHARS =>
+                    {
+                        let mut cut = KEEP_TOOL_RESULT_CHARS;
+                        while !content.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        let original_len = content.len();
+                        *content = format!(
+                            "{}\n[... older tool output trimmed; original {original_len} bytes]",
+                            &content[..cut]
+                        );
+                        content.shrink_to_fit();
+                        trimmed += 1;
+                    }
+                    ContentBlock::Image { media_type, data } => {
+                        let original_len = data.len();
+                        *block = ContentBlock::Text {
+                            text: format!(
+                                "[Older image omitted: media_type={media_type}, original_base64_chars={original_len}]"
+                            ),
+                            cache_control: None,
+                        };
+                        trimmed += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if trimmed > 0 {
+            self.mark_memory_profile_dirty();
+            self.reset_provider_messages_cache();
+        }
+        trimmed
+    }
+
     /// Shrink the already-compacted prefix of the transcript. Messages covered
     /// by the compaction state are never replayed to a provider, yet long-lived
     /// seats kept every tool output and reasoning blob of them in RAM (tens of

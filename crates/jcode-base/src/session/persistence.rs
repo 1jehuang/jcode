@@ -417,6 +417,7 @@ impl Session {
         // hold hundreds of MB of old inline images. Decay them now so the next
         // save rewrites a compact snapshot.
         session.trim_compacted_prefix();
+        session.trim_old_history_in_memory(256);
         let decayed_tool_images = session.decay_old_tool_images();
         if decayed_tool_images > 0 {
             crate::logging::event_info(
@@ -577,6 +578,7 @@ impl Session {
         // this path, so without them every old image and compacted tool output
         // stays resident (GBs across a fleet).
         session.trim_compacted_prefix();
+        session.trim_old_history_in_memory(256);
         session.decay_old_tool_images();
         session.mark_memory_profile_dirty();
         let finalize_ms = finalize_start.elapsed().as_millis();
