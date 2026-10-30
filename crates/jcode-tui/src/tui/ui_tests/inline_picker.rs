@@ -41,6 +41,7 @@ fn model_picker_entry() -> crate::tui::PickerEntry {
         is_current: true,
         is_default: false,
         is_favorite: false,
+        is_memory_model: false,
         recommended: true,
         recommendation_rank: 0,
         usage_score: 0,

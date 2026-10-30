@@ -174,6 +174,22 @@ impl Config {
                 self.acp.tool_profile = trimmed.to_string();
             }
         }
+        if let Ok(v) = std::env::var("JCODE_ACP_PERMISSION")
+            && let Ok(existing) = std::env::var("JCODE_CURSOR_ACP_PERMISSION")
+        {
+            // JCODE_CURSOR_ACP_PERMISSION wins as the more specific runtime knob.
+            let trimmed = existing.trim();
+            if !trimmed.is_empty() {
+                self.acp.permission_mode = trimmed.to_string();
+            } else {
+                let _ = v; // keep config value as-is
+            }
+        } else if let Ok(v) = std::env::var("JCODE_ACP_PERMISSION") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.acp.permission_mode = trimmed.to_string();
+            }
+        }
 
         // Display
         if let Ok(v) = std::env::var("JCODE_DIFF_MODE") {
@@ -469,6 +485,20 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.agents.memory_sidecar_enabled = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_BACKEND") {
+            let trimmed = v.trim();
+            self.agents.memory_sidecar_backend = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_FALLBACK") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.agents.memory_sidecar_fallback = trimmed.to_string();
             }
         }
         if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_BACKEND") {
