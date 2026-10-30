@@ -835,6 +835,48 @@ fn send_catalog_activity(client_event_tx: &mpsc::UnboundedSender<ServerEvent>, m
     });
 }
 
+/// Apply at a turn boundary, without blocking the connection's request reader.
+pub(super) async fn handle_set_context_cap(
+    id: u64,
+    session_id: String,
+    max_context_tokens: Option<usize>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let agent = Arc::clone(agent);
+    let client_event_tx = client_event_tx.clone();
+    crate::runtime_activity::spawn(async move {
+        let mut agent = agent.lock().await;
+        if agent.session_id() != session_id {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!(
+                    "target session changed before context cap could be applied: {session_id}"
+                ),
+                retry_after_secs: None,
+            });
+            return;
+        }
+        match agent.set_context_cap(max_context_tokens).await {
+            Ok(effective_budget) => {
+                let _ = client_event_tx.send(ServerEvent::ContextCapChanged {
+                    id,
+                    session_id: agent.session_id().to_string(),
+                    max_context_tokens: max_context_tokens.filter(|cap| *cap > 0),
+                    effective_budget,
+                });
+            }
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: crate::util::format_error_chain(&error),
+                    retry_after_secs: None,
+                });
+            }
+        }
+    });
+}
+
 pub(super) async fn handle_set_reasoning_effort(
     id: u64,
     effort: String,

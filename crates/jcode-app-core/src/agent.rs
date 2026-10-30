@@ -742,6 +742,7 @@ impl Agent {
             }
         };
         manager.reset();
+        manager.set_context_cap_override(self.session.context_cap);
         let budget = self.provider.context_window();
         manager.set_budget(budget);
         if let Some(state) = self.session.compaction.as_ref() {

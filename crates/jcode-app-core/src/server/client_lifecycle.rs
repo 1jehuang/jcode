@@ -41,9 +41,9 @@ use super::comm_sync::{
 use super::provider_control::{
     handle_cycle_model, handle_invalidate_anthropic_usage, handle_invalidate_openai_usage,
     handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
-    handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort, handle_set_route,
-    handle_set_service_tier, handle_set_transport, handle_switch_anthropic_account,
-    handle_switch_openai_account, try_available_models_catalog,
+    handle_set_context_cap, handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort,
+    handle_set_route, handle_set_service_tier, handle_set_transport,
+    handle_switch_anthropic_account, handle_switch_openai_account, try_available_models_catalog,
 };
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
@@ -1942,6 +1942,23 @@ pub(super) async fn handle_client(
                     &agent,
                     &client_event_tx,
                 );
+            }
+
+            Request::SetContextCap {
+                id,
+                max_context_tokens,
+                session_id,
+            } => {
+                let target_agent = sessions.read().await.get(&session_id).cloned();
+                if let Some(target_agent) = target_agent {
+                    handle_set_context_cap(id, session_id, max_context_tokens, &target_agent, &client_event_tx).await;
+                } else {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "target session not found".to_string(),
+                        retry_after_secs: None,
+                    });
+                }
             }
 
             Request::SetReasoningEffort {

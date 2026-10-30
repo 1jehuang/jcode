@@ -174,6 +174,30 @@ impl Agent {
         Ok(())
     }
 
+    /// Resolve the current model window and live global/session ceiling.
+    pub async fn effective_context_budget(&self) -> usize {
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.write().await;
+        manager.set_budget(self.provider.context_window());
+        manager.token_budget()
+    }
+
+    /// Set this session's compaction ceiling without changing daemon config.
+    pub async fn set_context_cap(&mut self, max_context_tokens: Option<usize>) -> Result<usize> {
+        let cap = max_context_tokens.filter(|cap| *cap > 0);
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.write().await;
+        let previous = self.session.context_cap;
+        self.session.context_cap = cap;
+        if let Err(error) = self.persist_session_now() {
+            self.session.context_cap = previous;
+            return Err(error);
+        }
+        manager.set_context_cap_override(cap);
+        manager.set_budget(self.provider.context_window());
+        Ok(manager.token_budget())
+    }
+
     fn refresh_compaction_budget(&self) {
         let compaction = self.registry.compaction();
         match compaction.try_write() {

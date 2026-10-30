@@ -731,6 +731,7 @@ pub(in crate::tui::app) fn handle_server_event(
             output,
             cache_read_input,
             cache_creation_input,
+            ..
         } => {
             let previous_input = app.streaming.streaming_input_tokens;
             let previous_output = app.streaming.streaming_output_tokens;

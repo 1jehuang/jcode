@@ -143,6 +143,89 @@ async fn test_agent(
 }
 
 #[tokio::test]
+async fn set_context_cap_is_deferred_isolated_and_persisted() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let (_, agent, tx, mut rx) = test_agent("session_context_cap_control").await;
+    let (_, other, _, _) = test_agent("session_context_cap_other").await;
+    let original_other_budget = other.lock().await.effective_context_budget().await;
+    handle_set_context_cap(70, "replaced-session".to_string(), Some(1), &agent, &tx).await;
+    let rejected = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(rejected, ServerEvent::Error { id: 70, .. }));
+    assert_eq!(
+        agent.lock().await.effective_context_budget().await,
+        original_other_budget
+    );
+    let lock = agent.lock().await;
+    timeout(
+        Duration::from_millis(100),
+        handle_set_context_cap(
+            71,
+            "session_context_cap_control".to_string(),
+            Some(8_000),
+            &agent,
+            &tx,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(rx.try_recv().is_err());
+    drop(lock);
+    let event = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        ServerEvent::ContextCapChanged {
+            id: 71,
+            max_context_tokens: Some(8_000),
+            effective_budget: 8_000,
+            ..
+        }
+    ));
+    assert_eq!(
+        other.lock().await.effective_context_budget().await,
+        original_other_budget
+    );
+    let saved = crate::session::Session::load("session_context_cap_control").unwrap();
+    assert_eq!(saved.context_cap, Some(8_000));
+    let provider: Arc<dyn Provider> = Arc::new(TestEffortProvider::default());
+    let registry = crate::tool::Registry::new(Arc::clone(&provider)).await;
+    let mut resumed = Agent::new_with_session(provider, registry, saved, None);
+    assert_eq!(resumed.effective_context_budget().await, 8_000);
+    assert_eq!(
+        resumed.set_context_cap(Some(100_000)).await.unwrap(),
+        16_000
+    );
+    let fallback = resumed.set_context_cap(Some(0)).await.unwrap();
+    assert_eq!(fallback, original_other_budget);
+    assert_eq!(
+        crate::session::Session::load("session_context_cap_control")
+            .unwrap()
+            .context_cap,
+        None
+    );
+}
+
+#[tokio::test]
 async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
     let _guard = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();

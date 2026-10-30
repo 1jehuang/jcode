@@ -129,6 +129,7 @@ async fn live_status_fanout_projects_worker_events_into_broadcast() {
             output: 45,
             cache_read_input: Some(999),
             cache_creation_input: None,
+            effective_budget: None,
         },
         ServerEvent::ToolStart {
             id: "call".into(),
@@ -173,6 +174,7 @@ async fn live_status_fanout_projects_worker_events_into_broadcast() {
             output: 46,
             cache_read_input: None,
             cache_creation_input: None,
+            effective_budget: None,
         },
     )
     .await;
