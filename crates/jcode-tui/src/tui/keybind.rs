@@ -6,8 +6,8 @@ pub use jcode_tui_core::keybind::{
     SpeedSwitchKeys, WorkspaceNavigationDirection, WorkspaceNavigationKeys,
 };
 use jcode_tui_core::keybind::{
-    format_binding, is_disabled, macos_option_char_to_ascii_key, parse_bindings_or_default,
-    parse_keybinding, parse_optional, parse_or_default,
+    format_binding, is_disabled, parse_bindings_or_default, parse_keybinding, parse_optional,
+    parse_or_default,
 };
 
 // Re-export the per-platform keybinding registry + provenance + validation API
@@ -348,13 +348,10 @@ pub fn load_centered_toggle_key() -> CenteredToggleKeys {
     CenteredToggleKeys { toggle }
 }
 
-/// A single configurable toggle binding plus, when the binding is `alt+<letter>`,
-/// the letter used to match macOS terminals that insert Option+letter as a Unicode
-/// character (e.g. Option+M -> `µ`).
+/// A single configurable toggle binding.
 #[derive(Clone, Debug)]
 pub struct ToggleBinding {
     binding: Option<KeyBinding>,
-    macos_option_letter: Option<char>,
 }
 
 impl ToggleBinding {
@@ -372,18 +369,7 @@ impl ToggleBinding {
     fn load_with_default(raw: &str, default: KeyBinding) -> Self {
         let default_label = format_binding(&default);
         let (binding, _) = parse_optional(raw, default, &default_label);
-        let macos_option_letter = binding.as_ref().and_then(|b| {
-            if b.modifiers == KeyModifiers::ALT
-                && let KeyCode::Char(c) = b.code
-            {
-                return Some(c.to_ascii_lowercase());
-            }
-            None
-        });
-        Self {
-            binding,
-            macos_option_letter,
-        }
+        Self { binding }
     }
 
     pub fn matches(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -403,11 +389,6 @@ impl ToggleBinding {
                 KeyCode::Char(c.to_ascii_lowercase()),
                 modifiers | KeyModifiers::SHIFT,
             )
-        {
-            return true;
-        }
-        if let Some(letter) = self.macos_option_letter
-            && shortcut_char_for_macos_option_key(code, modifiers) == Some(letter)
         {
             return true;
         }
@@ -545,105 +526,6 @@ pub(crate) fn todo_card_key_label() -> String {
     }
 }
 
-pub(crate) fn shortcut_char_for_macos_option_key(
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> Option<char> {
-    shortcut_char_for_macos_option_key_for_platform(code, modifiers, cfg!(target_os = "macos"))
-}
-
-pub(crate) fn shortcut_char_for_macos_option_shift_key(
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> Option<char> {
-    shortcut_char_for_macos_option_shift_key_for_platform(
-        code,
-        modifiers,
-        cfg!(target_os = "macos"),
-    )
-}
-
-fn shortcut_char_for_macos_option_key_for_platform(
-    code: KeyCode,
-    modifiers: KeyModifiers,
-    is_macos: bool,
-) -> Option<char> {
-    if !is_macos || !modifiers.is_empty() {
-        return None;
-    }
-    macos_option_char_to_ascii_key(code)
-}
-
-fn shortcut_char_for_macos_option_shift_key_for_platform(
-    code: KeyCode,
-    modifiers: KeyModifiers,
-    is_macos: bool,
-) -> Option<char> {
-    if !is_macos || !modifiers.is_empty() {
-        return None;
-    }
-    macos_option_shift_char_to_ascii_key(code)
-}
-
-fn macos_option_shift_char_to_ascii_key(code: KeyCode) -> Option<char> {
-    let KeyCode::Char(ch) = code else {
-        return None;
-    };
-
-    // macOS terminals that do not treat Option as Meta/Alt insert these Unicode
-    // characters for Option+Shift+letter on a US keyboard. Copy badges advertise
-    // [Alt] [⇧] [key], so normalize the inserted character back to the badge key.
-    match ch {
-        'Å' => Some('a'),
-        'ı' => Some('b'),
-        'Ç' => Some('c'),
-        'Î' => Some('d'),
-        '´' => Some('e'),
-        'Ï' => Some('f'),
-        '˝' => Some('g'),
-        'Ó' => Some('h'),
-        'ˆ' => Some('i'),
-        'Ô' => Some('j'),
-        '' => Some('k'),
-        'Ò' => Some('l'),
-        'Â' => Some('m'),
-        '˜' => Some('n'),
-        'Ø' => Some('o'),
-        '∏' => Some('p'),
-        'Œ' => Some('q'),
-        '‰' => Some('r'),
-        'Í' => Some('s'),
-        'ˇ' => Some('t'),
-        '¨' => Some('u'),
-        '◊' => Some('v'),
-        '„' => Some('w'),
-        '˛' => Some('x'),
-        'Á' => Some('y'),
-        '¸' => Some('z'),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-fn matches_side_panel_toggle_key_for_platform(
-    code: KeyCode,
-    modifiers: KeyModifiers,
-    is_macos: bool,
-) -> bool {
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
-        return true;
-    }
-
-    // macOS terminals often insert Option+M as `µ` unless Option is configured
-    // as Meta/Alt. Treat that character as the same toggle so the advertised
-    // shortcut works with the default Terminal/iTerm-style Option behavior.
-    if shortcut_char_for_macos_option_key_for_platform(code, modifiers, is_macos) == Some('m') {
-        return true;
-    }
-
-    false
-}
-
 pub fn load_dictation_key() -> OptionalBinding {
     let cfg = config();
     let raw = cfg.dictation.key.trim();
@@ -745,105 +627,10 @@ mod tests {
     }
 
     #[test]
-    fn side_panel_toggle_matches_alt_m_on_all_platforms() {
-        assert!(matches_side_panel_toggle_key_for_platform(
-            KeyCode::Char('m'),
-            KeyModifiers::ALT,
-            false,
-        ));
-        assert!(matches_side_panel_toggle_key_for_platform(
-            KeyCode::Char('m'),
-            KeyModifiers::ALT,
-            true,
-        ));
-    }
-
-    #[test]
-    fn side_panel_toggle_matches_macos_option_m_micro_sign() {
-        assert!(matches_side_panel_toggle_key_for_platform(
-            KeyCode::Char('µ'),
-            KeyModifiers::empty(),
-            true,
-        ));
-        assert!(!matches_side_panel_toggle_key_for_platform(
-            KeyCode::Char('µ'),
-            KeyModifiers::empty(),
-            false,
-        ));
-    }
-
-    #[test]
-    fn side_panel_toggle_rejects_plain_m() {
-        assert!(!matches_side_panel_toggle_key_for_platform(
-            KeyCode::Char('m'),
-            KeyModifiers::empty(),
-            true,
-        ));
-    }
-
-    #[test]
-    fn macos_option_shortcut_chars_cover_builtin_alt_letter_shortcuts() {
-        for (option_char, ascii) in [
-            ('å', 'a'),
-            ('∫', 'b'),
-            ('ç', 'c'),
-            ('∂', 'd'),
-            ('´', 'e'),
-            ('ƒ', 'f'),
-            ('˙', 'h'),
-            ('ˆ', 'i'),
-            ('∆', 'j'),
-            ('˚', 'k'),
-            ('¬', 'l'),
-            ('µ', 'm'),
-            ('ß', 's'),
-            ('†', 't'),
-            ('¨', 'u'),
-            ('√', 'v'),
-            ('¥', 'y'),
-        ] {
-            assert_eq!(
-                shortcut_char_for_macos_option_key_for_platform(
-                    KeyCode::Char(option_char),
-                    KeyModifiers::empty(),
-                    true,
-                ),
-                Some(ascii),
-                "Option+{ascii} should map from {option_char}"
-            );
-        }
-    }
-
-    #[test]
-    fn macos_option_shift_shortcut_chars_cover_builtin_alt_shift_letter_shortcuts() {
-        for (option_shift_char, ascii) in [
-            ('Å', 'a'),
-            ('ı', 'b'),
-            ('Ç', 'c'),
-            ('Î', 'd'),
-            ('´', 'e'),
-            ('Ï', 'f'),
-            ('Ó', 'h'),
-            ('ˆ', 'i'),
-            ('Ô', 'j'),
-            ('', 'k'),
-            ('Ò', 'l'),
-            ('Â', 'm'),
-            ('Í', 's'),
-            ('ˇ', 't'),
-            ('¨', 'u'),
-            ('◊', 'v'),
-            ('Á', 'y'),
-        ] {
-            assert_eq!(
-                shortcut_char_for_macos_option_shift_key_for_platform(
-                    KeyCode::Char(option_shift_char),
-                    KeyModifiers::empty(),
-                    true,
-                ),
-                Some(ascii),
-                "Option+Shift+{ascii} should map from {option_shift_char}"
-            );
-        }
+    fn native_text_does_not_toggle_the_side_panel() {
+        let binding = ToggleBinding::load("alt+m", 'm');
+        assert!(binding.matches(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert!(!binding.matches(KeyCode::Char('m'), KeyModifiers::empty()));
+        assert!(!binding.matches(KeyCode::Char('µ'), KeyModifiers::empty()));
     }
 }

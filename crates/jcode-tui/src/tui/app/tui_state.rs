@@ -2559,14 +2559,6 @@ pub(crate) fn swarm_panel_action_for_key(
         return Some(SwarmPanelAction::Exit);
     }
     let alt = modifiers.contains(KeyModifiers::ALT);
-    // macOS Option+letter often arrives as a transformed glyph with no ALT
-    // modifier; normalize through the shared shortcut helper.
-    let macos_letter = crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
-    let macos_shift_letter =
-        crate::tui::keybind::shortcut_char_for_macos_option_shift_key(code, modifiers);
-    if macos_shift_letter == Some('p') {
-        return Some(SwarmPanelAction::OpenPrompt);
-    }
     match code {
         KeyCode::Down | KeyCode::Char('j') if alt => Some(SwarmPanelAction::SelectNext),
         KeyCode::Up | KeyCode::Char('k') if alt => Some(SwarmPanelAction::SelectPrev),
@@ -2575,12 +2567,7 @@ pub(crate) fn swarm_panel_action_for_key(
         KeyCode::Char('p') if alt && modifiers.contains(KeyModifiers::SHIFT) => {
             Some(SwarmPanelAction::OpenPrompt)
         }
-        _ => match macos_letter {
-            Some('j') => Some(SwarmPanelAction::SelectNext),
-            Some('k') => Some(SwarmPanelAction::SelectPrev),
-            Some('o') => Some(SwarmPanelAction::PopOut),
-            _ => None,
-        },
+        _ => None,
     }
 }
 

@@ -57,6 +57,31 @@ To fix, either:
   (e.g. `model_switch_next = "ctrl+shift+m"`), or
 - change the conflicting shortcut in your terminal or OS settings.
 
+## macOS Option and literal Unicode text
+
+Jcode does not infer Alt/Option from an unmodified Unicode character. For example,
+typing `ç`, `ß`, or `µ` does not trigger `Alt+C`, `Alt+S`, or `Alt+M`.
+This also applies to the former Option+Shift character aliases used by copy badges.
+
+Terminals that use Option for text entry can send Option+C as the same bare `ç`
+bytes as ordinary text, so Jcode cannot distinguish those intentions. This affects
+ordinary Terminal.app and iTerm2 profiles, not just older terminals. Without
+Meta/Escape-prefixed input or a modifier-reporting protocol, the affected
+Option+letter and Option+Shift shortcuts now insert text instead of running actions.
+
+To use Option shortcuts with such profiles:
+
+- Terminal.app: Settings → Profiles → select the profile → Keyboard → enable
+  [Use Option as Meta key](https://support.apple.com/guide/terminal/change-profiles-keyboard-settings-trmlkbrd/mac).
+- iTerm2: Settings → Profiles → Keys → General → set the relevant
+  [Left/Right Option Key](https://iterm2.com/documentation-preferences-profiles-keys.html)
+  to **+Esc**, not the high-bit **Meta** option.
+- Alternatively, use a modifier-reporting keyboard protocol when supported, or
+  choose another explicitly encoded chord.
+
+Existing Alt/Ctrl/Cmd events and supported Kitty shortcuts keep their matching
+rules; only guessing those modifiers from printable Unicode is removed.
+
 ## Implementation
 
 All logic lives in `crates/jcode-setup-hints/src/keymap/`:
