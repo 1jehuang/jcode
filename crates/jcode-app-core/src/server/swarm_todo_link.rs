@@ -305,7 +305,7 @@ pub(crate) fn apply_plan(todos: &mut [TodoItem], items: &[PlanItem]) -> bool {
                     .all(|todo| todo.assigned_to.as_deref() == Some(worker))
             } else {
                 find_todo(todos, &item.id, &item.content)
-                    .is_some_and(|todo| todo.assigned_to.is_some())
+                    .is_some_and(|todo| todo.assigned_to.as_deref() == Some(worker))
             };
             if !already {
                 changed |= apply_assignment(todos, &item.id, &item.content, worker);
