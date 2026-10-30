@@ -526,6 +526,25 @@ fn cloud_sessions_subcommands_parse() {
 }
 
 #[test]
+fn cloud_return_preserves_local_auth_only_when_explicit() {
+    for explicit in [false, true] {
+        let mut argv = vec!["jcode", "cloud", "return", "--session", "old-cloud-session", "--refs-only"];
+        if explicit {
+            argv.push("--keep-local-auth");
+        }
+        let args = Args::try_parse_from(argv).unwrap();
+        match args.command {
+            Some(Command::Cloud(CloudCommand::Return { session, refs_only, keep_local_auth, .. })) => {
+                assert_eq!(session.as_deref(), Some("old-cloud-session"));
+                assert!(refs_only);
+                assert_eq!(keep_local_auth, explicit);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn login_no_browser_flag_parses() {
     let args = Args::try_parse_from(["jcode", "login", "--no-browser"]).unwrap();
     match args.command {
