@@ -2,12 +2,12 @@
   "threshold_loc": 1200,
   "tracked_files": {
     "crates/jcode-app-core/src/agent_tests.rs": 3164,
-    "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1912,
+    "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1916,
     "crates/jcode-app-core/src/server/comm_session_tests.rs": 1296,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1301,
-    "crates/jcode-app-core/src/tool/bash_tests.rs": 1395,
-    "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1436,
-    "crates/jcode-app-core/src/tool/tests.rs": 1976,
+    "crates/jcode-app-core/src/tool/bash_tests.rs": 1398,
+    "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1437,
+    "crates/jcode-app-core/src/tool/tests.rs": 1985,
     "crates/jcode-base/src/compaction_tests.rs": 1269,
     "crates/jcode-base/src/config_tests.rs": 1767,
     "crates/jcode-base/src/live_tests.rs": 3087,
@@ -22,7 +22,8 @@
     "crates/jcode-sdk/tests/client_behavior.rs": 1490,
     "crates/jcode-telemetry-core/src/tests.rs": 1836,
     "crates/jcode-tui/src/tui/app/commands_cloud_tests.rs": 1360,
-    "crates/jcode-tui/src/tui/app/remote_tests.rs": 1266,
+    "crates/jcode-tui/src/tui/app/decision_tests.rs": 1303,
+    "crates/jcode-tui/src/tui/app/remote_tests.rs": 1516,
     "crates/jcode-tui/src/tui/app/tests.rs": 1939,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_01/part_01.rs": 1604,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_02/part_01.rs": 1383,
@@ -47,7 +48,7 @@
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1398,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1476,
     "src/cli/commands_tests.rs": 1732,
-    "tests/e2e/test_support/mod.rs": 1417
+    "tests/e2e/test_support/mod.rs": 1420
   },
   "version": 1
 }
