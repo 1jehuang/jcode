@@ -16,6 +16,8 @@ fn cloud_auto_recovery_explicit_cancel_and_retry_control_diagnosis() {
 
 #[test]
 fn cloud_auto_recovery_survives_offline_send_and_dispatches_after_reconnect() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
     let mut app = crate::tui::app::tests::create_test_app();
     app.is_remote = true;
     let session = super::super::commands::active_session_id(&app);
@@ -29,7 +31,6 @@ fn cloud_auto_recovery_survives_offline_send_and_dispatches_after_reconnect() {
     let mut offline = crate::tui::backend::RemoteConnection::dummy();
     offline.mark_history_loaded();
     drop(offline.take_dummy_peer());
-    let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(super::super::remote::process_remote_followups(
         &mut app,
         &mut offline,
@@ -59,6 +60,8 @@ fn cloud_auto_recovery_survives_offline_send_and_dispatches_after_reconnect() {
 
 #[test]
 fn cloud_auto_recovery_waits_for_history_then_sends_hidden_diagnostics() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
     let mut app = crate::tui::app::tests::create_test_app();
     app.is_remote = true;
     let session = super::super::commands::active_session_id(&app);
@@ -69,7 +72,6 @@ fn cloud_auto_recovery_waits_for_history_then_sends_hidden_diagnostics() {
     app.pasted_contents.push("draft paste".into());
     show_cloud_failure(&mut app, "/cloud box", &session, Some(1), "handoff failed");
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(super::super::remote::process_remote_followups(
         &mut app,
         &mut remote,
@@ -110,6 +112,8 @@ fn cloud_auto_recovery_waits_for_history_then_sends_hidden_diagnostics() {
 
 #[test]
 fn cloud_auto_recovery_queued_user_turn_consumes_reminder_without_extra_turn() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
     let mut app = crate::tui::app::tests::create_test_app();
     app.is_remote = true;
     let session = super::super::commands::active_session_id(&app);
@@ -117,7 +121,6 @@ fn cloud_auto_recovery_queued_user_turn_consumes_reminder_without_extra_turn() {
     app.queued_messages.push("continue my work".into());
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     remote.mark_history_loaded();
-    let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(super::super::remote::process_remote_followups(
         &mut app,
         &mut remote,
@@ -541,7 +544,8 @@ fn cloud_recovery_is_bounded_and_keeps_command_and_cause() {
     assert!(context.ends_with("Error: permission denied"));
     assert!(context.chars().count() < 10000);
     assert!(context.contains("untrusted output"));
-    assert!(context.contains("ssh -F ~/.jcode/cloud/ssh_config"));
+    assert!(context.contains("ssh -F "));
+    assert!(context.contains("cloud/ssh_config"));
 }
 
 #[test]
@@ -560,7 +564,12 @@ fn cloud_recovery_guides_read_only_ssh_without_mutating_access() {
         "Do not alter session ownership or leases, restart daemons",
         "not the managed alias",
         "Validate and quote values",
-        "ask before state-changing recovery",
+        "apply safe reversible fixes",
+        "existing bash tool",
+        "LOCAL daemon's handoff RPC",
+        "Failure observed (UTC):",
+        "Do not stop unrelated sessions",
+        "never loop automatically",
         "bypass host-key verification",
     ] {
         assert!(
@@ -568,6 +577,19 @@ fn cloud_recovery_guides_read_only_ssh_without_mutating_access() {
             "missing safety guidance: {expected}"
         );
     }
+}
+
+#[test]
+fn cloud_recovery_uses_config_from_actual_jcode_state_directory() {
+    let context = cloud_recovery_context("/cloud", "session_test", "Error: Server disconnected");
+    let config = crate::storage::jcode_dir()
+        .unwrap()
+        .join("cloud/ssh_config");
+    let quoted = format!("'{}'", config.to_string_lossy().replace('\'', "'\\''"));
+    assert!(context.contains(&format!("ssh -F {quoted} -o BatchMode=yes")));
+    assert!(context.contains("Plain `ssh jcode-cloud` may not resolve"));
+    assert!(context.contains("Never read or print the key"));
+    assert!(context.contains("report that specific blocker"));
 }
 
 #[test]
