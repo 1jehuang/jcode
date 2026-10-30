@@ -562,6 +562,43 @@ fn test_prepare_body_incremental_applies_compaction_prompt_offset() {
 }
 
 #[test]
+fn test_full_prep_drops_old_versions_before_body_reuse() {
+    let key = FullPrepCacheKey {
+        width: 80,
+        height: 24,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: 1,
+        diagram_mode: crate::config::DiagramDisplayMode::Pinned,
+        centered: false,
+        compact_thinking: false,
+        mermaid_aspect_bucket: None,
+        is_processing: false,
+        streaming_text_len: 0,
+        streaming_text_hash: 0,
+        batch_progress_hash: 0,
+        inline_images_signature: (0, 0),
+        expanded_images_version: 0,
+        swarm_members_signature: 0,
+        latex_rendering: crate::config::LatexRenderingMode::Image,
+        inline_images_visible: true,
+    };
+    for oversized in [false, true] {
+        let body = make_prepared_messages_with_content_bytes(1024, "old-");
+        let mut cache = FullPrepCacheState::default();
+        cache.insert(key.clone(), make_prepared_chat_frame(body.clone()));
+        if oversized {
+            cache.oversized_entries = std::mem::take(&mut cache.entries);
+        }
+        assert!(Arc::strong_count(&body) > 1);
+        cache.retain_message_version(1);
+        assert!(cache.get_exact(&key).is_some());
+        cache.retain_message_version(2);
+        assert!(cache.get_exact(&key).is_none());
+        assert_eq!(Arc::strong_count(&body), 1);
+    }
+}
+
+#[test]
 fn test_full_prep_cache_state_keeps_multiple_width_entries() {
     let key_a = FullPrepCacheKey {
         width: 40,

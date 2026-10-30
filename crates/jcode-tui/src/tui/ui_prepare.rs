@@ -545,6 +545,7 @@ pub(super) fn prepare_messages(
                 return prepared;
             }
         }
+        cache.retain_message_version(key.messages_version);
     }
 
     super::note_full_prep_cache_lookup(cache_lookup_start.elapsed());

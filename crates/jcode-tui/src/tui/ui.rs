@@ -1274,6 +1274,15 @@ enum CacheEntryKind {
 }
 
 impl FullPrepCacheState {
+    // Frames from older transcripts retain rendered body snapshots. The last
+    // drawn frame remains independently available for viewport anchoring.
+    fn retain_message_version(&mut self, version: u64) {
+        self.entries
+            .retain(|entry| entry.key.messages_version == version);
+        self.oversized_entries
+            .retain(|entry| entry.key.messages_version == version);
+    }
+
     fn total_bytes(&self) -> usize {
         self.entries.iter().map(|entry| entry.prepared_bytes).sum()
     }
