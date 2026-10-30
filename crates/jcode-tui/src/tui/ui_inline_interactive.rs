@@ -192,11 +192,16 @@ fn selected_route_notice_text(
 }
 
 fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<&'static str> {
-    if picker.selected_entry().is_some_and(|entry| matches!(
-        entry.action,
-        crate::tui::PickerAction::AgentProfiles | crate::tui::PickerAction::AgentProfileChoice(_)
-    )) {
-        return Some(" INSTRUCTION PROFILE · THIS SESSION ONLY · Enter choose sources · Esc cancel · no global default");
+    if picker.selected_entry().is_some_and(|entry| {
+        matches!(
+            entry.action,
+            crate::tui::PickerAction::AgentProfiles
+                | crate::tui::PickerAction::AgentProfileChoice(_)
+        )
+    }) {
+        return Some(
+            " INSTRUCTION PROFILE · THIS SESSION ONLY · Enter choose sources · Esc cancel · no global default",
+        );
     }
     if picker.kind == crate::tui::PickerKind::Account {
         use crate::tui::{AccountPickerAction, PickerAction};
@@ -459,17 +464,36 @@ pub(super) fn agent_profile_source_lines(
     use crate::tui::PickerAction;
     let dim = Style::default().fg(dim_color());
     let accent = Style::default().fg(rgb(255, 213, 128));
-    let Some(apply) = picker.entries.iter().find(|entry| matches!(entry.action, PickerAction::AgentProfileApply(_))) else {
+    let Some(apply) = picker
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.action, PickerAction::AgentProfileApply(_)))
+    else {
         return Vec::new();
     };
-    let PickerAction::AgentProfileApply(name) = &apply.action else { return Vec::new(); };
+    let PickerAction::AgentProfileApply(name) = &apply.action else {
+        return Vec::new();
+    };
     let mut lines = Vec::new();
     let mut append = |text: &str, style| {
-        lines.extend(profile_source_wrap(text, width).into_iter().map(|line| Line::from(Span::styled(line, style))));
+        lines.extend(
+            profile_source_wrap(text, width)
+                .into_iter()
+                .map(|line| Line::from(Span::styled(line, style))),
+        );
     };
-    append(&format!("Instruction sources: {name} · this session only"), accent);
-    append("Profile alone by default. Optional Jcode-loaded Markdown stays OFF unless selected.", dim);
-    append("Base instructions, tool protocol, skills and runtime context remain.", dim);
+    append(
+        &format!("Instruction sources: {name} · this session only"),
+        accent,
+    );
+    append(
+        "Profile alone by default. Optional Jcode-loaded Markdown stays OFF unless selected.",
+        dim,
+    );
+    append(
+        "Base instructions, tool protocol, skills and runtime context remain.",
+        dim,
+    );
     if let Some(option) = apply.active_option() {
         if !option.provider.is_empty() {
             append(&option.provider, dim);
@@ -485,24 +509,38 @@ pub(super) fn agent_profile_source_lines(
     let visible = available_rows.saturating_sub(lines.len() + 3).min(sources);
     let selected = picker.selected.min(picker.entries.len().saturating_sub(1));
     if visible > 0 {
-        let start = selected.min(sources.saturating_sub(1)).saturating_sub(visible.saturating_sub(1))
+        let start = selected
+            .min(sources.saturating_sub(1))
+            .saturating_sub(visible.saturating_sub(1))
             .min(sources.saturating_sub(visible));
         for row in start..start + visible {
             let entry = &picker.entries[row];
             let focused = row == selected;
             let style = if focused { accent } else { dim };
             let detail = if matches!(entry.action, PickerAction::AgentProfileSource(_)) {
-                entry.active_option().map(|option| format!(" · {}", option.detail)).unwrap_or_default()
-            } else { String::new() };
+                entry
+                    .active_option()
+                    .map(|option| format!(" · {}", option.detail))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             lines.push(Line::from(Span::styled(
-                format!("{} {}{detail}", if focused { "▸" } else { " " }, entry.name), style,
+                format!("{} {}{detail}", if focused { "▸" } else { " " }, entry.name),
+                style,
             )));
         }
     }
     for row in sources..picker.entries.len() {
-        if lines.len() >= available_rows { break; }
+        if lines.len() >= available_rows {
+            break;
+        }
         lines.push(Line::from(Span::styled(
-            format!("{} {}", if row == selected { "▸" } else { " " }, picker.entries[row].name),
+            format!(
+                "{} {}",
+                if row == selected { "▸" } else { " " },
+                picker.entries[row].name
+            ),
             if row == selected { accent } else { dim },
         )));
     }
@@ -521,15 +559,22 @@ fn profile_source_wrap(text: &str, width: usize) -> Vec<String> {
             if !line.is_empty() && display_width(&line) + 1 + display_width(word) > width {
                 lines.push(std::mem::take(&mut line));
             }
-            if !line.is_empty() { line.push(' '); }
+            if !line.is_empty() {
+                line.push(' ');
+            }
             for ch in word.chars() {
-                if display_width(&line) + unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) > width && !line.is_empty() {
+                if display_width(&line) + unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+                    > width
+                    && !line.is_empty()
+                {
                     lines.push(std::mem::take(&mut line));
                 }
                 line.push(ch);
             }
         }
-        if !line.is_empty() { lines.push(line); }
+        if !line.is_empty() {
+            lines.push(line);
+        }
     }
     lines
 }
@@ -834,7 +879,14 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
             .border_style(Style::default().fg(rgb(85, 85, 110)));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        frame.render_widget(Paragraph::new(agent_profile_source_lines(picker, inner.height as usize, inner.width as usize)), inner);
+        frame.render_widget(
+            Paragraph::new(agent_profile_source_lines(
+                picker,
+                inner.height as usize,
+                inner.width as usize,
+            )),
+            inner,
+        );
         return;
     }
 

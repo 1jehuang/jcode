@@ -54,11 +54,11 @@ pub enum AppRuntimeMode {
     TestHarness,
 }
 
+mod agent_profiles;
 mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod catchup;
-mod agent_profiles;
 mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;

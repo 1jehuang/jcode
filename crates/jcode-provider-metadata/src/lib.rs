@@ -363,6 +363,22 @@ mod tests {
     }
 
     #[test]
+    fn vsllm_login_selects_live_openai_compatible_catalog() {
+        let provider = resolve_login_selection("vsllm", &cli_login_providers())
+            .expect("VSLLM CLI login provider");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("VSLLM should use the OpenAI-compatible runtime");
+        };
+
+        assert_eq!(profile.id, "vsllm");
+        assert_eq!(profile.api_base, "https://vsllm.cc/v1");
+        assert_eq!(profile.api_key_env, "VSLLM_API_KEY");
+        assert_eq!(profile.setup_url, "https://vsllm.cc/");
+        assert!(profile.requires_api_key);
+        assert_eq!(profile.default_model, None);
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),
@@ -460,7 +476,7 @@ mod tests {
     fn acme_profile_and_login_align_with_named_config_profile() {
         // Host and key env must match the pre-existing `[providers.acme]`
         // named profile in config.toml so one key serves both lines.
-        assert_eq!(ACME_PROFILE.api_base, "https://api.acme.com/v1");
+        assert_eq!(ACME_PROFILE.api_base, "https://api.acme.vip/v1");
         assert_eq!(ACME_PROFILE.api_key_env, "ACME_KEY");
         assert_eq!(ACME_PROFILE.env_file, "acme.env");
         assert_eq!(ACME_PROFILE.default_model, Some("gpt-6-astra"));

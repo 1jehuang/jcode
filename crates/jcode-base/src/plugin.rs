@@ -1,6 +1,6 @@
 //! Claude-compatible plugin marketplaces and scoped, explicit install registry.
 //! Discovery never fetches repositories or writes configuration.
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -611,8 +611,13 @@ fn validate_git_pin(git_ref: Option<&str>, sha: Option<&str>) -> Result<()> {
         );
     }
     if let Some(sha) = sha {
-        ensure!(sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-            "invalid plugin commit SHA: expected a full 40-character lowercase hexadecimal commit ID");
+        ensure!(
+            sha.len() == 40
+                && sha
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "invalid plugin commit SHA: expected a full 40-character lowercase hexadecimal commit ID"
+        );
     }
     Ok(())
 }
@@ -658,8 +663,10 @@ fn plugin_source(root: &Path, source: &serde_json::Value, target: &Path) -> Resu
         _ => bail!("unsupported plugin source: {kind}"),
     };
     for key in object.keys() {
-        ensure!(allowed.contains(&key.as_str()),
-            "unsupported plugin source option '{key}' for {kind}; subdirectories require source 'git-subdir' with 'path'");
+        ensure!(
+            allowed.contains(&key.as_str()),
+            "unsupported plugin source option '{key}' for {kind}; subdirectories require source 'git-subdir' with 'path'"
+        );
     }
     let string_option = |key: &str| -> Result<Option<&str>> {
         object

@@ -1557,10 +1557,9 @@ impl App {
             });
         let clicked_compact_expandable_todo_card = !self.pinned_todos_expanded
             && todo_expand_area.is_some()
-            && crate::tui::ui::viewport::pinned_todo_card_area()
-                .is_some_and(|area| {
-                    super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
-                });
+            && crate::tui::ui::viewport::pinned_todo_card_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            });
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && (clicked_todo_control
                 || clicked_expanded_todo_card

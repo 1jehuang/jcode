@@ -478,36 +478,47 @@ pub(in crate::tui::app) fn handle_server_event(
 
     // Replies to `/mcp` (dialog refresh or reconnect/enable/disable).
     match &event {
-        ServerEvent::RuntimeCommandResult { id, command, data, .. }
-            if command == "agent" && app.agent_profile_picker_request_id == Some(*id) => {
-                app.agent_profile_picker_request_id = None;
-                app.agent_profile_request_ids.remove(id);
-                app.apply_agent_profile_list(data);
-                return true;
-            }
+        ServerEvent::RuntimeCommandResult {
+            id, command, data, ..
+        } if command == "agent" && app.agent_profile_picker_request_id == Some(*id) => {
+            app.agent_profile_picker_request_id = None;
+            app.agent_profile_request_ids.remove(id);
+            app.apply_agent_profile_list(data);
+            return true;
+        }
         ServerEvent::Error { id, message, .. }
-            if app.handle_agent_profile_list_error(*id, message) => {
-                return true;
-            }
-        ServerEvent::RuntimeCommandResult { id, command, message, .. }
-            if command == "agent" && app.settle_agent_profile_apply(*id, None) => {
-                app.push_display_message(DisplayMessage::system(message.clone()).with_title("Agent profile"));
-                return true;
-            }
+            if app.handle_agent_profile_list_error(*id, message) =>
+        {
+            return true;
+        }
+        ServerEvent::RuntimeCommandResult {
+            id,
+            command,
+            message,
+            ..
+        } if command == "agent" && app.settle_agent_profile_apply(*id, None) => {
+            app.push_display_message(
+                DisplayMessage::system(message.clone()).with_title("Agent profile"),
+            );
+            return true;
+        }
         ServerEvent::Error { id, message, .. }
-            if app.settle_agent_profile_apply(*id, Some(message)) => {
-                return true;
-            }
+            if app.settle_agent_profile_apply(*id, Some(message)) =>
+        {
+            return true;
+        }
         ServerEvent::RuntimeCommandResult { id, message, .. }
-            if app.agent_profile_request_ids.remove(id) => {
-                app.push_display_message(DisplayMessage::system(message.clone()).with_title("Agent profile"));
-                return true;
-            }
-        ServerEvent::Error { id, message, .. }
-            if app.agent_profile_request_ids.remove(id) => {
-                app.push_display_message(DisplayMessage::error(message.clone()));
-                return true;
-            }
+            if app.agent_profile_request_ids.remove(id) =>
+        {
+            app.push_display_message(
+                DisplayMessage::system(message.clone()).with_title("Agent profile"),
+            );
+            return true;
+        }
+        ServerEvent::Error { id, message, .. } if app.agent_profile_request_ids.remove(id) => {
+            app.push_display_message(DisplayMessage::error(message.clone()));
+            return true;
+        }
         ServerEvent::RuntimeCommandResult {
             id, data, message, ..
         } if app.mcp_request_id == Some(*id) => {

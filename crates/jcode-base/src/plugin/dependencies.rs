@@ -54,7 +54,9 @@ pub(super) fn parse(value: Option<&serde_json::Value>) -> Result<Vec<String>> {
                 None => name.to_owned(),
             }
         } else {
-            bail!("unsupported dependency declaration; expected identifier or name/marketplace object")
+            bail!(
+                "unsupported dependency declaration; expected identifier or name/marketplace object"
+            )
         };
         let parts: Vec<_> = id.split('@').collect();
         ensure!(
@@ -161,7 +163,11 @@ impl Walk<'_> {
                 .filter(|p| self.manager.applies(p) && p.name == name && p.marketplace == market)
                 .max_by_key(|p| rank(p.scope))
             {
-                ensure!(effective.enabled, "dependency {id} is disabled or masked by {} scope; enable dependency first (automatic override of explicit disabled policy is unsupported)", effective.scope);
+                ensure!(
+                    effective.enabled,
+                    "dependency {id} is disabled or masked by {} scope; enable dependency first (automatic override of explicit disabled policy is unsupported)",
+                    effective.scope
+                );
             }
             let existing: Vec<_> = self
                 .registry
@@ -176,7 +182,10 @@ impl Walk<'_> {
                 .collect();
             ensure!(existing.len() <= 1, "ambiguous installed dependency: {id}");
             if let Some(existing) = existing.first() {
-                ensure!(existing.enabled, "dependency {id} is disabled; enable dependency first (automatic override of explicit disabled policy is unsupported)");
+                ensure!(
+                    existing.enabled,
+                    "dependency {id} is disabled; enable dependency first (automatic override of explicit disabled policy is unsupported)"
+                );
                 let base = self
                     .manager
                     .base()
@@ -206,8 +215,10 @@ impl Walk<'_> {
                 self.visited.insert(id.to_owned());
                 return Ok(());
             }
-            ensure!(market == self.root_marketplace || self.allowlist.contains(market),
-                "dependency {id} crosses marketplaces and is not in ROOT marketplace allowCrossMarketplaceDependenciesOn; install and enable dependency first");
+            ensure!(
+                market == self.root_marketplace || self.allowlist.contains(market),
+                "dependency {id} crosses marketplaces and is not in ROOT marketplace allowCrossMarketplaceDependenciesOn; install and enable dependency first"
+            );
         }
         ensure!(
             !self

@@ -2240,8 +2240,15 @@ impl App {
         }
         let members = self.inline_swarm_members();
         let Some(member) = crate::tui::info_widget::swarm_gallery::members_display_order(&members)
-            .get(self.swarm_panel_selected.min(members.len().saturating_sub(1)))
-            .and_then(|session_id| members.iter().find(|member| member.session_id == *session_id))
+            .get(
+                self.swarm_panel_selected
+                    .min(members.len().saturating_sub(1)),
+            )
+            .and_then(|session_id| {
+                members
+                    .iter()
+                    .find(|member| member.session_id == *session_id)
+            })
         else {
             self.set_status_notice("No swarm agents to enter");
             return;
@@ -2251,7 +2258,8 @@ impl App {
             .friendly_name
             .clone()
             .unwrap_or_else(|| session_id.chars().take(8).collect());
-        let parent = self.remote_session_id
+        let parent = self
+            .remote_session_id
             .as_deref()
             .or(self.resume_session_id.as_deref())
             .unwrap_or(&self.session.id)

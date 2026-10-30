@@ -273,7 +273,7 @@ fn acme_astra_models_accept_image_input_for_laundering() {
     // declared input — it still returns true because the branch fires before
     // the final `!supports_provider_features` fallback).
     let profile = jcode_base::config::NamedProviderConfig {
-        base_url: "https://api.acme.com/v1".to_string(),
+        base_url: "https://api.acme.vip/v1".to_string(),
         auth: jcode_base::config::NamedProviderAuth::None,
         default_model: Some("gpt-6-astra".to_string()),
         models: vec![

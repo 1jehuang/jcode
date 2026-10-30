@@ -228,7 +228,11 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
         // so the selected model remains visible even on short terminals.
         let height = area.y.saturating_sub(frame.area().y);
         let lines = if picker.is_agent_profile_sources() {
-            super::inline_interactive_ui::agent_profile_source_lines(picker, height as usize, area.width as usize)
+            super::inline_interactive_ui::agent_profile_source_lines(
+                picker,
+                height as usize,
+                area.width as usize,
+            )
         } else {
             super::inline_interactive_ui::model_suggestion_lines(picker, height as usize)
         };

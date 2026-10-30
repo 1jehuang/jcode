@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn fixture() -> (tempfile::TempDir, PluginManager) {
     let temp = tempfile::tempdir().unwrap();
@@ -123,11 +123,13 @@ fn cached_cycles_fail_runtime_and_update_without_acquiring_new_dependency_bytes(
     .unwrap();
     let before = registry(&manager);
     assert!(manager.enabled_roots().unwrap().is_empty());
-    assert!(manager
-        .dependency_diagnostics()
-        .unwrap()
-        .iter()
-        .any(|s| s.contains("cycle")));
+    assert!(
+        manager
+            .dependency_diagnostics()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("cycle"))
+    );
     let error = manager
         .update("root", PluginScope::User)
         .unwrap_err()
@@ -167,9 +169,10 @@ fn transitive_manifest_and_catalog_dependencies_stage_in_requested_scope() {
     manager.install("root", PluginScope::Project).unwrap();
     let list = manager.list().unwrap();
     assert_eq!(list.len(), 4);
-    assert!(list
-        .iter()
-        .all(|p| p.enabled && p.scope == PluginScope::Project));
+    assert!(
+        list.iter()
+            .all(|p| p.enabled && p.scope == PluginScope::Project)
+    );
     assert_eq!(manager.enabled_roots().unwrap().len(), 4);
     assert!(manager.enabled_user_roots().unwrap().is_empty());
     assert!(manager.dependency_diagnostics().unwrap().is_empty());
@@ -349,21 +352,25 @@ fn runtime_closure_disables_and_restores_contributions_without_mutating_reads() 
     manager.disable("leaf", PluginScope::User).unwrap();
     let before = registry(&manager);
     assert!(manager.enabled_roots().unwrap().is_empty());
-    assert!(manager
-        .dependency_diagnostics()
-        .unwrap()
-        .iter()
-        .any(|s| s.contains("disabled")));
+    assert!(
+        manager
+            .dependency_diagnostics()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("disabled"))
+    );
     assert_eq!(registry(&manager), before);
     manager.enable("leaf", PluginScope::User).unwrap();
     assert_eq!(manager.enabled_roots().unwrap().len(), 2);
     manager.uninstall("leaf", PluginScope::User).unwrap();
     assert!(manager.enabled_roots().unwrap().is_empty());
-    assert!(manager
-        .dependency_diagnostics()
-        .unwrap()
-        .iter()
-        .any(|s| s.contains("not installed")));
+    assert!(
+        manager
+            .dependency_diagnostics()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("not installed"))
+    );
 }
 
 #[test]
