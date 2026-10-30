@@ -195,6 +195,20 @@ pub(super) async fn remove_session_entry<T>(
     removed
 }
 
+/// Keep session presence locked until the synchronous registry update finishes.
+/// Otherwise a stale attached client could recreate credentials after teardown.
+pub(super) async fn set_live_session_env<T>(
+    sessions: &Arc<RwLock<HashMap<String, T>>>,
+    session_id: &str,
+    env: HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let sessions = sessions.read().await;
+    if !sessions.contains_key(session_id) {
+        anyhow::bail!("Session is no longer active");
+    }
+    crate::session_env::set_session_env(session_id, env)
+}
+
 const SERVER_NAME_ENV: &str = "JCODE_SERVER_NAME";
 const SERVER_DISPLAY_NAME_ENV: &str = "JCODE_SERVER_DISPLAY_NAME";
 const MAX_CONFIGURED_SERVER_NAME_LEN: usize = 64;

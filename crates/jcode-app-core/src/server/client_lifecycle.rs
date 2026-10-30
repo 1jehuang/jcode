@@ -1978,6 +1978,18 @@ pub(super) async fn handle_client(
                 handle_set_compaction_mode(id, mode, &agent, &client_event_tx).await;
             }
 
+            Request::SetSessionEnv { id, env } => {
+                let result = super::set_live_session_env(&sessions, &client_session_id, env).await;
+                let _ = client_event_tx.send(match result {
+                    Ok(()) => ServerEvent::Done { id },
+                    Err(_) => ServerEvent::Error {
+                        id,
+                        message: "Invalid session environment".to_string(),
+                        retry_after_secs: None,
+                    },
+                });
+            }
+
             Request::SetSessionSaved { id, saved, label } => {
                 if reject_if_agent_busy_for_request(
                     id,
@@ -1995,18 +2007,6 @@ pub(super) async fn handle_client(
                     label,
                     &agent,
                     &client_session_id,
-            Request::SetSessionEnv { id, env } => {
-                let result = crate::session_env::set_session_env(&client_session_id, env);
-                let _ = client_event_tx.send(match result {
-                    Ok(()) => ServerEvent::Done { id },
-                    Err(_) => ServerEvent::Error {
-                        id,
-                        message: "Invalid session environment".to_string(),
-                        retry_after_secs: None,
-                    },
-                });
-            }
-
                     &swarm_members,
                     &client_event_tx,
                 )

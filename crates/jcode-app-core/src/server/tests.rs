@@ -78,6 +78,31 @@ fn file_activity_scope_label_classifies_overlap() {
 }
 
 #[tokio::test]
+async fn session_env_live_updates_cannot_recreate_destroyed_sessions() {
+    let _guard = crate::storage::lock_test_env();
+    let sid = "session-env-live-update-cleanup";
+    let sessions = Arc::new(RwLock::new(HashMap::from([(sid.to_owned(), ())])));
+    let env = HashMap::from([("SESSION_SECRET".into(), "original".into())]);
+    super::set_live_session_env(&sessions, sid, env.clone())
+        .await
+        .unwrap();
+    assert_eq!(crate::session_env::session_env(sid), env);
+    let (update, removed) = tokio::join!(
+        super::set_live_session_env(&sessions, sid, env.clone()),
+        remove_session_entry(&sessions, sid),
+    );
+    let _ = update;
+    assert_eq!(removed, Some(()));
+    assert!(crate::session_env::session_env(sid).is_empty());
+    assert!(
+        super::set_live_session_env(&sessions, sid, env)
+            .await
+            .is_err()
+    );
+    assert!(crate::session_env::session_env(sid).is_empty());
+}
+
+#[tokio::test]
 async fn removing_server_session_clears_active_pid_marker() {
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().expect("create temporary JCODE_HOME");

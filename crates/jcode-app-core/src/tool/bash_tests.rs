@@ -76,6 +76,42 @@ async fn session_env_reload_persistable_command_receives_overrides() {
 }
 
 #[tokio::test]
+async fn session_env_updates_affect_only_new_launches_and_invalid_updates_keep_bash_working() {
+    use crate::session_env::{remove_session_env, set_session_env};
+    let sid = "env-bash-updates";
+    let mut ctx = make_ctx(None);
+    ctx.session_id = sid.into();
+    let tool = BashTool::new();
+    let input = json!({"command": "printf '%s' \"${SESSION_ENV_REGRESSION_PROBE-unset}\""});
+    for value in ["first", "second"] {
+        set_session_env(
+            sid,
+            std::collections::HashMap::from([(
+                "SESSION_ENV_REGRESSION_PROBE".into(),
+                value.into(),
+            )]),
+        )
+        .unwrap();
+        assert!(
+            set_session_env(
+                sid,
+                std::collections::HashMap::from([(
+                    "SESSION_ENV_REGRESSION_PROBE".into(),
+                    "invalid\0value".into()
+                ),])
+            )
+            .is_err()
+        );
+        let result = tool.execute(input.clone(), ctx.clone()).await.unwrap();
+        assert!(result.output.contains(value), "{}", result.output);
+    }
+    set_session_env(sid, std::collections::HashMap::new()).unwrap();
+    let result = tool.execute(input, ctx).await.unwrap();
+    assert!(result.output.contains("unset"), "{}", result.output);
+    remove_session_env(sid);
+}
+
+#[tokio::test]
 async fn session_env_background_snapshots_before_deferred_launch() {
     use crate::session_env::{remove_session_env, set_session_env};
     for clear in [false, true] {
