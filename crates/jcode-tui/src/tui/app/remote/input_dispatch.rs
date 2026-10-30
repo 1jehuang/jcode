@@ -754,7 +754,13 @@ mod ssh_slash_tests {
                         .contains("SSH")
                 );
             }
-            for command in ["/future remote skill /context", "/home/vm/notes"] {
+            for command in [
+                "/future remote skill /context",
+                "/home/vm/notes",
+                "/improve-custom-skill",
+                "/plan-custom-skill",
+                "/refactor-custom-skill",
+            ] {
                 submit_remote_slash_input(
                     &mut app,
                     &mut remote,

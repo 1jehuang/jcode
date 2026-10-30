@@ -1200,6 +1200,16 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
+        if crate::tui::is_ssh_remote() && trimmed.starts_with('/') {
+            let token = trimmed.split_whitespace().next();
+            if !app_mod::registered_command_names().any(|name| Some(name) == token) {
+                // Local prefix parsers are not a remote skill resolver. In
+                // particular /plan-custom and /improve-custom must not become
+                // client-side loop commands or consult laptop session storage.
+                return submit_prepared_remote_input(app, remote, prepared).await;
+            }
+        }
+
         if crate::tui::is_ssh_remote() && trimmed.split_whitespace().next() == Some("/git") {
             if matches!(trimmed, "/git" | "/git status") {
                 // The daemon resolves its own CWD. Never consult local git or
