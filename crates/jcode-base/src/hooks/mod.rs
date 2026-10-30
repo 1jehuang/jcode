@@ -268,10 +268,12 @@ pub fn dispatch_observer(event: HookEvent) {
     }
 }
 
+mod capabilities;
 mod feedback;
 mod gate;
 mod sync_runner;
 
+pub use capabilities::hook_capabilities;
 pub use feedback::run_post_tool_feedback;
 #[cfg(test)]
 use gate::{CommandVerdict, parse_gate_stdout};
