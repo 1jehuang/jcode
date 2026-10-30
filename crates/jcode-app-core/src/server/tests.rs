@@ -84,6 +84,11 @@ async fn removing_server_session_clears_active_pid_marker() {
     let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
     let session_id = "session_marker_cleanup_test";
     crate::storage::register_active_pid(session_id, std::process::id());
+    crate::session_env::set_session_env(
+        session_id,
+        HashMap::from([("LIFECYCLE_SECRET".into(), "cleanup-value".into())]),
+    )
+    .unwrap();
 
     let sessions = Arc::new(RwLock::new(HashMap::from([(
         session_id.to_string(),
@@ -92,6 +97,7 @@ async fn removing_server_session_clears_active_pid_marker() {
     let removed = remove_session_entry(&sessions, session_id).await;
 
     assert_eq!(removed, Some("agent"));
+    assert!(crate::session_env::session_env(session_id).is_empty());
     assert!(!sessions.read().await.contains_key(session_id));
     assert!(
         !crate::storage::active_session_ids()

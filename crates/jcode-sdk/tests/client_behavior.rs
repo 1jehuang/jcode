@@ -1270,6 +1270,51 @@ fn create_session_options_preserve_system_prompt_wire_values() {
 }
 
 #[test]
+fn set_session_env_sends_replacement_and_clear() {
+    let (ours, theirs) = UnixStream::pair().expect("socket pair");
+    let (tx, rx) = channel();
+    let server = std::thread::spawn(move || {
+        let mut reader = BufReader::new(theirs.try_clone().expect("clone"));
+        let mut writer = theirs;
+        for index in 0..3 {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read frame");
+            let frame: ClientFrame = serde_json::from_str(&line).expect("client frame");
+            if index == 0 {
+                reply(&frame, ApiEvent::HelloOk {
+                    version: API_VERSION_MAJOR,
+                    server: "fake-harness/1.0".into(),
+                    capabilities: vec!["sessions".into()],
+                }, &mut writer);
+            } else {
+                tx.send(serde_json::from_str::<serde_json::Value>(&line).unwrap()).unwrap();
+                reply(&frame, ApiEvent::Ok, &mut writer);
+            }
+        }
+    });
+    let client = JcodeClient::connect_with(
+        Box::new(PairTransport(ours)),
+        ConnectOptions {
+            request_timeout: Some(Duration::from_secs(5)),
+            ensure_runtime: false,
+            ..Default::default()
+        },
+    ).expect("connect");
+    for env in [std::collections::HashMap::from([
+        ("TOKEN".to_string(), "private-secret".to_string()),
+        ("EMPTY".to_string(), String::new()),
+    ]), std::collections::HashMap::new()] {
+        client.set_session_env("session-1", env.clone()).expect("set env");
+        let wire = rx.recv_timeout(Duration::from_secs(5)).expect("wire");
+        assert_eq!(wire["req"], "set_session_env");
+        assert_eq!(wire["session_id"], "session-1");
+        assert_eq!(wire["env"], serde_json::to_value(env).unwrap());
+    }
+    drop(client);
+    server.join().expect("server thread");
+}
+
+#[test]
 fn run_retains_abnormal_stop_and_filters_other_sessions() {
     use jcode_sdk::TurnStopReason;
     let client = fake_harness(|frame, writer| {

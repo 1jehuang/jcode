@@ -425,6 +425,7 @@ fn clear_headed_startup_message(session_id: &str) {
 }
 
 fn cleanup_prepared_visible_spawn_session(session_id: &str) {
+    crate::session_env::remove_session_env(session_id);
     clear_headed_startup_message(session_id);
     if let Ok(path) = crate::session::session_path(session_id) {
         let _ = std::fs::remove_file(path);
@@ -668,6 +669,7 @@ pub(super) async fn spawn_swarm_agent(
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
+                crate::session_env::inherit_session_env(req_session_id, session_id);
                 if let Some(lane_id) = lane_id.as_deref() {
                     let brief = super::swarm_todo_link::seed_spawn_lane(
                         req_session_id,

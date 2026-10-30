@@ -7,6 +7,8 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     let _guard = crate::storage::lock_test_env();
 
     let old_session_id = "session_before_clear";
+    let session_env = HashMap::from([("CLEAR_SESSION_SECRET".into(), "test-only".into())]);
+    crate::session_env::set_session_env(old_session_id, session_env.clone())?;
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider.clone()).await;
     let agent = Arc::new(Mutex::new(build_test_agent_with_id(
@@ -115,6 +117,12 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     .await;
 
     assert_ne!(client_session_id, old_session_id);
+    assert_eq!(
+        crate::session_env::session_env(&client_session_id),
+        session_env
+    );
+    assert!(crate::session_env::session_env(old_session_id).is_empty());
+    crate::session_env::remove_session_env(&client_session_id);
     let members = swarm_members.read().await;
     assert!(members.get(old_session_id).is_none());
     let replacement_member = members

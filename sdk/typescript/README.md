@@ -362,6 +362,7 @@ discovery pass only.
 | `clear(id)` / `rewind(id, index)` | Edit history |
 | `respondToPermission(id, requestId, decision)` | Answer a permission prompt |
 | `listModels(id)` / `setModel(id, model)` | List and choose the session's model |
+| `setContextCap(id, maxContextTokens)` | Set a context budget override, or pass `null`/`0` to clear it. Returns the effective budget |
 | `getRuntimeInfo(id)` | Provider, model route, protocol, capability, and health metadata |
 | `setApiKey(provider, key)` / `clearApiKey(provider)` | Atomically provision or remove owner-only API-key files |
 | `readFile(id, path, maxBytes?)` | Read bounded UTF-8 text under the session root |

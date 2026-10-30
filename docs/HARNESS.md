@@ -1,5 +1,42 @@
 # Harness details
 
+## Session subprocess environment
+
+Clients can replace the current session's subprocess environment overrides using
+`SetSessionEnv` (or the SDK's `setSessionEnv` / `set_session_env` helper). The map
+replaces, rather than merges with, previous overrides. An empty map clears it.
+Keys must be nonempty and contain neither `=` nor NUL, values cannot contain NUL,
+and `JCODE_*` keys are reserved (case-insensitively).
+
+These overrides apply to session-owned Bash subprocess launches, including queued
+background launches. Each accepted job keeps its own snapshot. Updating or
+clearing a session's map does not alter already accepted jobs or running
+processes. Overrides do not mutate the daemon's process environment. They are
+not a general override of provider authentication/configuration, shared MCP
+servers, or unrelated daemon services.
+
+Forks, transfers, and swarm children receive independent copies of their parent's
+current overrides. Subsequent parent updates do not update existing children.
+Clearing conversation history carries overrides to the replacement session ID.
+Attaching an existing session uses that target's overrides, never the temporary
+connecting session's map.
+Session teardown removes the live registry entry, not environment copies already
+held by running jobs. Independent sessions do not receive another session's map.
+
+**Overrides are ephemeral and are explicitly lost on daemon restart or reload.**
+They are not saved in session JSON, journals, reload recovery, or conversation
+history. Loading a saved session does not restore them. Clients must reapply
+overrides before submitting resumed work, including after reconnecting to a
+restarted daemon. Automatic recovery may run without them: this feature adds no
+fail-closed recovery barrier and must not be treated as one.
+
+This is environment isolation, not a security sandbox or secret-redaction system.
+The registry does not intentionally log or persist values, but a command can print
+its environment into tool output, write it to disk, or transmit it elsewhere.
+Subprocesses inherit ordinary daemon environment variables unless overridden,
+and OS process inspection or another program running as the same user may expose
+secrets. Only supply credentials to trusted commands and trusted child agents.
+
 ## Token optimization
 
 `agentgrep` is jcode's grep tool, built for agents. Matches include file structure, such as functions and their locations, so an agent can understand the surrounding code without reading an entire file. Results are adaptively trimmed based on what the agent has already seen to reduce repeated context.

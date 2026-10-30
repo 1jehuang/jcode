@@ -83,6 +83,7 @@ fn token_usage_preserves_cache_creation_and_missing_counters() {
                 output: 5,
                 cache_read_input: Some(2),
                 cache_creation_input,
+                effective_budget: None,
             }
         );
     }
@@ -1645,6 +1646,43 @@ fn set_session_saved_forwards_flag_and_label() {
         }
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+#[test]
+fn set_session_env_requires_attachment_and_forwards_replacement() {
+    let mut state = state_with_session();
+    for env in [json!({"TOKEN": "private-secret", "EMPTY": ""}), json!({})] {
+        let output = state.api_request_to_legacy(&json!({
+            "id": 7, "req": "set_session_env", "env": env,
+        }));
+        let [Outbound::Legacy(legacy)] = &output[..] else {
+            panic!("expected legacy setter");
+        };
+        assert_eq!(legacy["type"], "set_session_env");
+        assert_eq!(legacy["env"], env);
+    }
+    for env in [Value::Null, json!([]), json!({"TOKEN": 42})] {
+        let output = state.api_request_to_legacy(&json!({
+            "id": 8, "req": "set_session_env", "env": env,
+        }));
+        assert!(matches!(
+            &output[..],
+            [Outbound::Reply(ServerFrame {
+                event: ApiEvent::Error { .. },
+                ..
+            })]
+        ));
+    }
+    let output = BridgeState::default().api_request_to_legacy(&json!({
+        "id": 9, "req": "set_session_env", "env": {},
+    }));
+    assert!(matches!(
+        &output[..],
+        [Outbound::Reply(ServerFrame {
+            event: ApiEvent::Error { .. },
+            ..
+        })]
+    ));
 }
 
 /// Clearing a title is distinct from setting an empty one, so an absent title
@@ -4196,4 +4234,50 @@ fn todo_state_is_served_from_the_session_home_and_acked() {
         None => unsafe { std::env::remove_var("JCODE_HOME") },
     }
     let _ = std::fs::remove_dir_all(&home);
+}
+#[test]
+fn context_cap_requests_reply_broadcast_and_validate() {
+    let mut state = state_with_session();
+    for cap in [json!(100_000), json!(0), Value::Null] {
+        let out = state.api_request_to_legacy(&json!({
+            "id": 1971, "req": "set_context_cap", "session_id": "s1",
+            "max_context_tokens": cap,
+        }));
+        let [Outbound::Legacy(request)] = &out[..] else {
+            panic!("{out:?}")
+        };
+        assert_eq!(request["type"], "set_context_cap");
+        assert_eq!(request["session_id"], "s1");
+        assert_eq!(request["max_context_tokens"], cap);
+        let frames = state.legacy_event_to_api(&json!({
+            "type": "context_cap_changed", "id": request["id"], "session_id": "s1",
+            "max_context_tokens": cap, "effective_budget": 90_000,
+        }));
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().any(|f| f.reply_to == Some(1971)));
+        assert!(frames.iter().any(|f| f.reply_to.is_none()));
+        for frame in frames {
+            assert!(
+                matches!(frame.event, ApiEvent::ContextCapChanged { effective_budget: 90_000, max_context_tokens, .. }
+                if max_context_tokens == cap.as_u64().map(|n| n as usize).filter(|n| *n != 0))
+            );
+        }
+    }
+    for cap in [json!(-1), json!(1.5), json!("1000")] {
+        let out = state.api_request_to_legacy(&json!({
+            "id": 4, "req": "set_context_cap", "session_id": "s1", "max_context_tokens": cap,
+        }));
+        assert!(
+            matches!(&out[..], [Outbound::Reply(frame)] if matches!(frame.event, ApiEvent::Error { code: ErrorCode::InvalidRequest, .. }))
+        );
+    }
+    let frames =
+        state.legacy_event_to_api(&json!({ "type": "tokens", "effective_budget": 90_000 }));
+    assert!(matches!(
+        frames[0].event,
+        ApiEvent::TokenUsage {
+            effective_budget: Some(90_000),
+            ..
+        }
+    ));
 }

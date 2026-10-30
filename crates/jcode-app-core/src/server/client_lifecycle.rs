@@ -1995,6 +1995,18 @@ pub(super) async fn handle_client(
                     label,
                     &agent,
                     &client_session_id,
+            Request::SetSessionEnv { id, env } => {
+                let result = crate::session_env::set_session_env(&client_session_id, env);
+                let _ = client_event_tx.send(match result {
+                    Ok(()) => ServerEvent::Done { id },
+                    Err(_) => ServerEvent::Error {
+                        id,
+                        message: "Invalid session environment".to_string(),
+                        retry_after_secs: None,
+                    },
+                });
+            }
+
                     &swarm_members,
                     &client_event_tx,
                 )

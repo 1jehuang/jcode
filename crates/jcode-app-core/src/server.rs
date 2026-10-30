@@ -190,6 +190,7 @@ pub(super) async fn remove_session_entry<T>(
     let removed = sessions.write().await.remove(session_id);
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
+        crate::session_env::remove_session_env(session_id);
     }
     removed
 }
