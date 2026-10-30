@@ -1410,6 +1410,8 @@ pub struct App {
     runtime_mode: AppRuntimeMode,
     // Remote rewind/undo request waiting for the server's replacement History payload.
     pending_remote_rewind_notice: Option<PendingRemoteRewindNotice>,
+    // Opaque server-owned SSH session navigation and child-creation state.
+    ssh_sessions: remote::ssh_sessions::State,
     // History-recovery watchdog for the "stuck on loading session…" bug. When a
     // remote (re)connect never receives the bootstrap `History` event, every
     // prompt path is gated behind `has_loaded_history()` and the session is

@@ -2227,6 +2227,25 @@ pub(super) async fn handle_client(
 
             Request::RuntimeCommand { id, command, args } => {
                 let result: anyhow::Result<(serde_json::Value, String)> = async {
+                    // Supplemental SSH/cloud commands intentionally precede the shared
+                    // enum parser so new host workflows do not require a wire-enum release.
+                    if super::runtime_ssh_sessions::handles(&command)
+                        || super::runtime_ssh_loops::handles(&command)
+                        || super::runtime_ssh_accounts::handles(&command)
+                        || super::runtime_ssh_host::handles(&command)
+                    {
+                        let mut guard = agent.try_lock().map_err(|_| anyhow::anyhow!("Session is busy. Retry this command after the current turn."))?;
+                        if super::runtime_ssh_sessions::handles(&command) {
+                            return super::runtime_ssh_sessions::execute(&mut guard, &command, &args).await;
+                        }
+                        if super::runtime_ssh_loops::handles(&command) {
+                            return super::runtime_ssh_loops::execute(&mut guard, &command, &args).await;
+                        }
+                        if super::runtime_ssh_accounts::handles(&command) {
+                            return super::runtime_ssh_accounts::execute(&mut guard, &command, &args).await;
+                        }
+                        return super::runtime_ssh_host::execute(&mut guard, &command, &args).await;
+                    }
                     let parsed: jcode_harness_api::RuntimeCommand = serde_json::from_value(serde_json::json!(command))?;
                     if parsed == jcode_harness_api::RuntimeCommand::ServerReload {
                         if !args.is_empty() { anyhow::bail!("Server reload accepts no arguments. Forced reload is intentionally not exposed."); }
