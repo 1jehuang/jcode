@@ -65,20 +65,24 @@ fn offline_git_branch_tag_sha_and_subdir_have_exact_bytes() {
             if index == 4 { &second } else { &first }.as_str()
         );
     }
-    assert!(acquire_git(
-        repo.to_str().unwrap(),
-        &temp.path().join("bad-ref"),
-        Some("missing"),
-        None
-    )
-    .is_err());
-    assert!(acquire_git(
-        repo.to_str().unwrap(),
-        &temp.path().join("bad-sha"),
-        None,
-        Some("0000000000000000000000000000000000000000")
-    )
-    .is_err());
+    assert!(
+        acquire_git(
+            repo.to_str().unwrap(),
+            &temp.path().join("bad-ref"),
+            Some("missing"),
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        acquire_git(
+            repo.to_str().unwrap(),
+            &temp.path().join("bad-sha"),
+            None,
+            Some("0000000000000000000000000000000000000000")
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -218,10 +222,12 @@ fn standalone_validation_rejects_component_escape_and_unsupported_dependency_ran
         r#"{"name":"demo","dependencies":["missing@market@^1"]}"#,
     )
     .unwrap();
-    assert!(PluginManager::validate(&root)
-        .unwrap_err()
-        .to_string()
-        .contains("dependency"));
+    assert!(
+        PluginManager::validate(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("dependency")
+    );
 }
 
 #[test]
@@ -249,10 +255,12 @@ fn remote_source_options_do_not_silently_checkout_wrong_revision() {
     let (t, _, market) = fixture();
     for key in ["path", "directory", "subdir"] {
         let source = serde_json::json!({"source":"github","repo":"owner/repo",key:"alternate"});
-        assert!(plugin_source(&market, &source, &t.path().join("clone"))
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported"));
+        assert!(
+            plugin_source(&market, &source, &t.path().join("clone"))
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
     }
     for (key, value) in [("ref", "--upload-pack=bad"), ("sha", "alternate")] {
         let source = serde_json::json!({"source":"github","repo":"owner/repo",key:value});
@@ -364,11 +372,12 @@ fn component_path_escape_and_dependencies_explicitly_rejected() {
     assert!(m.install("demo", PluginScope::User).is_err());
     fs::write(market.join(".claude-plugin/marketplace.json"),r#"{"name":"fixture","plugins":[{"name":"demo","source":"./demo","dependencies":["other@fixture"]}]}"#).unwrap();
     m.update_marketplace("fixture").unwrap();
-    assert!(m
-        .install("demo", PluginScope::User)
-        .unwrap_err()
-        .to_string()
-        .contains("dependency"));
+    assert!(
+        m.install("demo", PluginScope::User)
+            .unwrap_err()
+            .to_string()
+            .contains("dependency")
+    );
 }
 #[test]
 fn uninstall_ambiguous_registry_preserves_all_records() {

@@ -51,9 +51,13 @@ const FEEDBACK_LIMIT: usize = 8 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     Allow,
-    Block { reason: String },
+    Block {
+        reason: String,
+    },
     /// A plugin supplied replacement tool input; native policy gates still run.
-    Rewrite { input: Value },
+    Rewrite {
+        input: Value,
+    },
 }
 
 /// A lifecycle event to deliver to a hook.
@@ -152,8 +156,7 @@ pub fn hook_configured(event: &str) -> bool {
 /// Scope-aware fast path for lifecycle callers. Plugin discovery never executes commands.
 pub fn hook_configured_for_dir(event: &str, cwd: Option<&str>) -> bool {
     hook_configured(event)
-        || (!hooks_suppressed()
-            && cwd.is_some_and(|cwd| plugin_hooks::configured(event, cwd)))
+        || (!hooks_suppressed() && cwd.is_some_and(|cwd| plugin_hooks::configured(event, cwd)))
 }
 
 /// Run configured tool-input transformers in declaration order. Transformers
@@ -437,7 +440,9 @@ pub async fn run_pre_tool_gate(
     }
     for command_line in command_lines {
         let current = run_pre_tool_command(&command_line, &event, tool_name, tool_input_json).await;
-        if matches!(current, GateDecision::Block { .. }) && !matches!(decision, GateDecision::Block { .. }) {
+        if matches!(current, GateDecision::Block { .. })
+            && !matches!(decision, GateDecision::Block { .. })
+        {
             decision = current;
         }
     }

@@ -10,10 +10,12 @@ use crate::tui::{
 
 impl App {
     pub(crate) fn open_agents_picker(&mut self) {
-        if !self.is_remote && crate::tui::app::commands_dispatch::ssh_local_action_blocked(
-            self,
-            "Agent model configuration",
-        ) {
+        if !self.is_remote
+            && crate::tui::app::commands_dispatch::ssh_local_action_blocked(
+                self,
+                "Agent model configuration",
+            )
+        {
             return;
         }
         let mut models: Vec<PickerEntry> = [

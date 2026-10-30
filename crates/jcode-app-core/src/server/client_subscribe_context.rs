@@ -121,7 +121,9 @@ pub(super) fn new_session_agent_profile(
         return Ok(None);
     };
     if !provisional_session || target_session_id.is_some() {
-        anyhow::bail!("Agent profiles can only be selected when creating a new session, not when resuming or attaching");
+        anyhow::bail!(
+            "Agent profiles can only be selected when creating a new session, not when resuming or attaching"
+        );
     }
     crate::agent_profile::load(name, Path::new(working_dir)).map(Some)
 }
@@ -132,11 +134,19 @@ mod agent_profile_tests {
 
     #[test]
     fn profile_selection_is_creation_only() {
-        for (provisional, target) in [(false, None), (true, Some("existing")), (false, Some("existing"))] {
-            let error = new_session_agent_profile(provisional, target, Some("reviewer"), "/")
-                .unwrap_err();
+        for (provisional, target) in [
+            (false, None),
+            (true, Some("existing")),
+            (false, Some("existing")),
+        ] {
+            let error =
+                new_session_agent_profile(provisional, target, Some("reviewer"), "/").unwrap_err();
             assert!(error.to_string().contains("only be selected when creating"));
-            assert!(new_session_agent_profile(provisional, target, None, "/").unwrap().is_none());
+            assert!(
+                new_session_agent_profile(provisional, target, None, "/")
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
@@ -147,12 +157,26 @@ mod agent_profile_tests {
         let profiles = workspace.path().join(".jcode/agents");
         std::fs::create_dir_all(&profiles).unwrap();
         std::fs::write(profiles.join("reviewer.md"), "Review with care.\n").unwrap();
-        let profile = new_session_agent_profile(true, None, Some("reviewer"), workspace.path().to_str().unwrap())
-            .unwrap().unwrap();
+        let profile = new_session_agent_profile(
+            true,
+            None,
+            Some("reviewer"),
+            workspace.path().to_str().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(profile.name, "reviewer");
         assert_eq!(profile.instructions, "Review with care.\n");
         for name in ["../reviewer", "/reviewer.md", "", "missing-profile-728199"] {
-            assert!(new_session_agent_profile(true, None, Some(name), workspace.path().to_str().unwrap()).is_err());
+            assert!(
+                new_session_agent_profile(
+                    true,
+                    None,
+                    Some(name),
+                    workspace.path().to_str().unwrap()
+                )
+                .is_err()
+            );
         }
     }
 }

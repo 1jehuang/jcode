@@ -107,7 +107,9 @@ fn client_reload_safety_pending_auto_reload_writes_no_request() {
             assert_eq!(app.server_auto_reload_attempts, 0);
             drop(remote);
             let mut bytes = Vec::new();
-            peer.read_to_end(&mut bytes).await.expect("read closed peer");
+            peer.read_to_end(&mut bytes)
+                .await
+                .expect("read closed peer");
             assert!(bytes.is_empty(), "automatic path must write no request");
         }
     });
@@ -137,7 +139,9 @@ fn client_reload_safety_explicit_reload_still_writes_forced_reload() {
         .expect("explicit reload");
         drop(remote);
         let mut bytes = Vec::new();
-        peer.read_to_end(&mut bytes).await.expect("read closed peer");
+        peer.read_to_end(&mut bytes)
+            .await
+            .expect("read closed peer");
         let wire = String::from_utf8(bytes).expect("JSON request");
         let requests: Vec<Request> = wire
             .lines()

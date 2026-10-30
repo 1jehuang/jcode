@@ -1,6 +1,6 @@
+use super::persist_swarm_state_for;
 use super::state::{MAX_EVENT_HISTORY, fanout_session_event};
 use super::{SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
-use super::persist_swarm_state_for;
 use crate::agent::Agent;
 use crate::plan::{PlanItem, newly_ready_item_ids};
 use crate::protocol::{NotificationType, ServerEvent};

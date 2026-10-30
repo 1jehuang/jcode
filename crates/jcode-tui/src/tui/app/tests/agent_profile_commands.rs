@@ -4,8 +4,17 @@ use crate::tui::app::agent_profiles::agent_profile_args;
 #[test]
 fn agent_profile_tokens_do_not_capture_agents_or_paths() {
     assert_eq!(agent_profile_args("/agent"), Some(vec![]));
-    assert_eq!(agent_profile_args(" /agent\tresearch "), Some(vec!["research".into()]));
-    for input in ["/agents", "/agents review", "/agent.md", "/agent/research", "hello /agent"] {
+    assert_eq!(
+        agent_profile_args(" /agent\tresearch "),
+        Some(vec!["research".into()])
+    );
+    for input in [
+        "/agents",
+        "/agents review",
+        "/agent.md",
+        "/agent/research",
+        "hello /agent",
+    ] {
         assert!(agent_profile_args(input).is_none(), "{input}");
     }
 }
@@ -15,11 +24,24 @@ fn agent_profile_registry_completion_help_and_offline_dispatch() {
     let mut app = create_test_app();
     assert!(crate::tui::app::registered_command_names().any(|name| name == "/agent"));
     assert!(App::command_accepts_args("/agent"));
-    assert!(app.get_suggestions_for("/agent re").iter().any(|(name, _)| name == "/agent reload"));
+    assert!(
+        app.get_suggestions_for("/agent re")
+            .iter()
+            .any(|(name, _)| name == "/agent reload")
+    );
     assert!(app.command_help("agent").unwrap().contains("next turn"));
     assert!(app.command_help("agents").unwrap().contains("role"));
-    assert!(crate::tui::app::commands_dispatch::dispatch_local_command(&mut app, "/agent research"));
-    assert!(app.display_messages().last().unwrap().content.contains("connected jcode server"));
+    assert!(crate::tui::app::commands_dispatch::dispatch_local_command(
+        &mut app,
+        "/agent research"
+    ));
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("connected jcode server")
+    );
     assert!(!app.pending_turn);
 }
 
@@ -35,35 +57,52 @@ fn remote_agent_profile_commands_are_control_traffic_even_while_busy() {
     app.current_message_id = Some(999);
     app.input = "/agent research".into();
     app.cursor_pos = app.input.len();
-    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)).unwrap();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .unwrap();
     assert_eq!(app.agent_profile_request_ids.len(), 1);
     assert!(!app.pending_turn);
     let id = *app.agent_profile_request_ids.iter().next().unwrap();
-    app.handle_server_event(crate::protocol::ServerEvent::Error {
-        id,
-        message: "Session is busy. Retry after the current turn.".into(),
-        retry_after_secs: None,
-        server_resumes: false,
-    }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id,
+            message: "Session is busy. Retry after the current turn.".into(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
     assert!(app.agent_profile_request_ids.is_empty());
     assert!(app.is_processing);
     assert_eq!(app.current_message_id, Some(999));
-    assert!(app.display_messages().last().unwrap().content.contains("busy"));
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("busy")
+    );
 
     app.input = "/agent".into();
     app.cursor_pos = app.input.len();
-    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)).unwrap();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .unwrap();
     let id = *app.agent_profile_request_ids.iter().next().unwrap();
-    app.handle_server_event(crate::protocol::ServerEvent::RuntimeCommandResult {
-        id,
-        command: "agent".into(),
-        data: serde_json::json!({"current": "research", "available": ["research"]}),
-        message: "Current agent profile: research".into(),
-    }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::RuntimeCommandResult {
+            id,
+            command: "agent".into(),
+            data: serde_json::json!({"current": "research", "available": ["research"]}),
+            message: "Current agent profile: research".into(),
+        },
+        &mut remote,
+    );
     assert!(app.agent_profile_request_ids.is_empty());
     assert!(app.is_processing);
     assert_eq!(app.current_message_id, Some(999));
-    assert_eq!(app.display_messages().last().unwrap().content, "Current agent profile: research");
+    assert_eq!(
+        app.display_messages().last().unwrap().content,
+        "Current agent profile: research"
+    );
 }
 
 #[test]
@@ -84,22 +123,36 @@ fn prepared_agent_profile_input_uses_runtime_not_a_prompt() {
             expanded: "/agent off".into(),
             images: vec![],
         },
-    )).unwrap();
+    ))
+    .unwrap();
     assert_eq!(app.agent_profile_request_ids.len(), 1);
     assert!(!app.pending_turn);
     assert!(!app.is_processing);
 }
 
 fn profile_reply(id: u64, current: Option<&str>, names: &[&str]) -> crate::protocol::ServerEvent {
-    profile_reply_with_sources(id, current, names, vec![
-        serde_json::json!({"id":"file:/workspace/AGENTS.md", "kind":"agents_md", "label":"Project AGENTS.md", "path":"/workspace/AGENTS.md", "available":true, "included":false}),
-        serde_json::json!({"id":"file:/home/test/AGENTS.md", "kind":"agents_md", "label":"Home AGENTS.md", "path":"/home/test/AGENTS.md", "available":true, "included":false}),
-    ])
+    profile_reply_with_sources(
+        id,
+        current,
+        names,
+        vec![
+            serde_json::json!({"id":"file:/workspace/AGENTS.md", "kind":"agents_md", "label":"Project AGENTS.md", "path":"/workspace/AGENTS.md", "available":true, "included":false}),
+            serde_json::json!({"id":"file:/home/test/AGENTS.md", "kind":"agents_md", "label":"Home AGENTS.md", "path":"/home/test/AGENTS.md", "available":true, "included":false}),
+        ],
+    )
 }
 
-fn profile_reply_with_sources(id: u64, current: Option<&str>, names: &[&str], sources: Vec<serde_json::Value>) -> crate::protocol::ServerEvent {
-    let included: Vec<_> = sources.iter().filter(|source| source["included"] == true)
-        .map(|source| source["id"].clone()).collect();
+fn profile_reply_with_sources(
+    id: u64,
+    current: Option<&str>,
+    names: &[&str],
+    sources: Vec<serde_json::Value>,
+) -> crate::protocol::ServerEvent {
+    let included: Vec<_> = sources
+        .iter()
+        .filter(|source| source["included"] == true)
+        .map(|source| source["id"].clone())
+        .collect();
     crate::protocol::ServerEvent::RuntimeCommandResult {
         id,
         command: "agent".into(),
@@ -110,21 +163,46 @@ fn profile_reply_with_sources(id: u64, current: Option<&str>, names: &[&str], so
     }
 }
 
-async fn open_profiles_from_agents(app: &mut App, remote: &mut crate::tui::backend::RemoteConnection) -> u64 {
+async fn open_profiles_from_agents(
+    app: &mut App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+) -> u64 {
     app.input = "/agents".into();
     app.cursor_pos = app.input.len();
-    app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote).await.unwrap();
+    app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote)
+        .await
+        .unwrap();
     let picker = app.inline_interactive_state.as_mut().expect("agents root");
-    assert!(picker.entries.iter().any(|entry| matches!(entry.action, crate::tui::PickerAction::AgentTarget(_))));
-    picker.selected = picker.entries.iter().position(|entry| matches!(entry.action, crate::tui::PickerAction::AgentProfiles)).unwrap();
-    app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote).await.unwrap();
-    app.agent_profile_picker_request_id.expect("server discovery request")
+    assert!(
+        picker
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.action, crate::tui::PickerAction::AgentTarget(_)))
+    );
+    picker.selected = picker
+        .entries
+        .iter()
+        .position(|entry| matches!(entry.action, crate::tui::PickerAction::AgentProfiles))
+        .unwrap();
+    app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote)
+        .await
+        .unwrap();
+    app.agent_profile_picker_request_id
+        .expect("server discovery request")
 }
 
-async fn read_profile_wire(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> serde_json::Value {
+async fn read_profile_wire(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+) -> serde_json::Value {
     use tokio::io::AsyncBufReadExt;
     let mut line = String::new();
-    tokio::time::timeout(std::time::Duration::from_secs(2), reader.read_line(&mut line)).await.unwrap().unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reader.read_line(&mut line),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let request: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(request["type"], "runtime_command");
     assert_eq!(request["command"], "agent");
@@ -136,10 +214,20 @@ fn render_profiles(app: &App) -> String {
 }
 
 fn render_profiles_at(app: &App, width: u16, height: u16) -> String {
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-    terminal.draw(|frame| crate::tui::ui::draw(frame, app as &dyn crate::tui::TuiState)).unwrap();
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, app as &dyn crate::tui::TuiState))
+        .unwrap();
     let buffer = terminal.backend().buffer();
-    (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -153,10 +241,22 @@ fn agents_profiles_render_none_and_apply_only_explicit_runtime_choice() {
         remote.mark_history_loaded();
         let mut reader = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
         let id = open_profiles_from_agents(&mut app, &mut remote).await;
-        assert_eq!(read_profile_wire(&mut reader).await["args"], serde_json::json!([]));
-        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
-        assert_eq!(app.agent_profile_request_ids.len(), 1, "loading Enter is inert");
-        app.handle_server_event(profile_reply(id, None, &["reviewer", "research"]), &mut remote);
+        assert_eq!(
+            read_profile_wire(&mut reader).await["args"],
+            serde_json::json!([])
+        );
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.agent_profile_request_ids.len(),
+            1,
+            "loading Enter is inert"
+        );
+        app.handle_server_event(
+            profile_reply(id, None, &["reviewer", "research"]),
+            &mut remote,
+        );
         let picker = app.inline_interactive_state.as_ref().unwrap();
         assert_eq!(picker.entries[0].name, "None");
         assert_eq!(picker.selected, 0);
@@ -167,24 +267,67 @@ fn agents_profiles_render_none_and_apply_only_explicit_runtime_choice() {
         let rendered = render_profiles(&app);
         assert!(rendered.contains("None"), "{rendered}");
         assert!(rendered.contains("research"), "{rendered}");
-        app.handle_remote_key(KeyCode::Down, KeyModifiers::empty(), &mut remote).await.unwrap();
-        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
-        assert!(app.agent_profile_request_ids.is_empty(), "choosing a profile only opens a draft");
+        app.handle_remote_key(KeyCode::Down, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        assert!(
+            app.agent_profile_request_ids.is_empty(),
+            "choosing a profile only opens a draft"
+        );
         assert!(app.showing_agent_profile_sources());
         let rendered = render_profiles(&app);
-        for text in ["Instruction sources: research", "Profile alone by default", "Jcode-loaded Markdown", "Base instructions, tool protocol", "Provider-native", "[ ] Project AGENTS.md", "[ ] Home AGENTS.md", "Apply", "Cancel"] {
+        for text in [
+            "Instruction sources: research",
+            "Profile alone by default",
+            "Jcode-loaded Markdown",
+            "Base instructions, tool protocol",
+            "Provider-native",
+            "[ ] Project AGENTS.md",
+            "[ ] Home AGENTS.md",
+            "Apply",
+            "Cancel",
+        ] {
             assert!(rendered.contains(text), "missing {text}: {rendered}");
         }
-        assert_eq!(app.inline_interactive_state.as_ref().unwrap().selected_entry().unwrap().name, "Apply");
-        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
+        assert_eq!(
+            app.inline_interactive_state
+                .as_ref()
+                .unwrap()
+                .selected_entry()
+                .unwrap()
+                .name,
+            "Apply"
+        );
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
         let request = read_profile_wire(&mut reader).await;
-        assert_eq!(request["args"], serde_json::json!(["--select", "research", "[]"]));
-        assert!(app.showing_agent_profile_sources(), "wait for authoritative success");
-        app.handle_server_event(profile_reply(request["id"].as_u64().unwrap(), Some("research"), &["research"]), &mut remote);
+        assert_eq!(
+            request["args"],
+            serde_json::json!(["--select", "research", "[]"])
+        );
+        assert!(
+            app.showing_agent_profile_sources(),
+            "wait for authoritative success"
+        );
+        app.handle_server_event(
+            profile_reply(
+                request["id"].as_u64().unwrap(),
+                Some("research"),
+                &["research"],
+            ),
+            &mut remote,
+        );
         assert!(app.inline_interactive_state.is_none());
         assert!(!app.pending_turn);
         assert!(!app.is_processing);
-        assert!(app.session.agent_profile.is_none(), "no optimistic local mutation");
+        assert!(
+            app.session.agent_profile.is_none(),
+            "no optimistic local mutation"
+        );
     });
 }
 
@@ -201,34 +344,58 @@ fn agents_profiles_saved_current_is_session_only_and_none_sends_off_while_busy()
         let mut reader = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
         let id = open_profiles_from_agents(&mut app, &mut remote).await;
         read_profile_wire(&mut reader).await;
-        app.handle_server_event(profile_reply(id, Some("deleted-snapshot"), &["research"]), &mut remote);
+        app.handle_server_event(
+            profile_reply(id, Some("deleted-snapshot"), &["research"]),
+            &mut remote,
+        );
         let picker = app.inline_interactive_state.as_ref().unwrap();
         assert_eq!(picker.selected_entry().unwrap().name, "deleted-snapshot");
         assert!(picker.selected_entry().unwrap().is_current);
         assert!(!picker.schema().shows_default_shortcut_hint);
         app.agent_models_global_scope = true;
-        app.handle_remote_key(KeyCode::Char('g'), KeyModifiers::CONTROL, &mut remote).await.unwrap();
+        app.handle_remote_key(KeyCode::Char('g'), KeyModifiers::CONTROL, &mut remote)
+            .await
+            .unwrap();
         assert!(app.agent_models_global_scope);
         assert!(app.showing_agent_profiles());
         // Selecting current edits its sources without implicitly reloading a deleted snapshot.
-        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
         assert!(app.agent_profile_request_ids.is_empty());
         assert!(app.showing_agent_profile_sources());
-        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote).await.unwrap();
-        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote).await.unwrap();
+        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
         assert!(app.inline_interactive_state.is_none());
 
         let id = open_profiles_from_agents(&mut app, &mut remote).await;
         read_profile_wire(&mut reader).await;
-        app.handle_server_event(profile_reply(id, Some("deleted-snapshot"), &[]), &mut remote);
-        app.handle_remote_key(KeyCode::Home, KeyModifiers::empty(), &mut remote).await.unwrap();
-        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
+        app.handle_server_event(
+            profile_reply(id, Some("deleted-snapshot"), &[]),
+            &mut remote,
+        );
+        app.handle_remote_key(KeyCode::Home, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
         let request = read_profile_wire(&mut reader).await;
         assert_eq!(request["args"], serde_json::json!(["off"]));
         let id = request["id"].as_u64().unwrap();
-        app.handle_server_event(crate::protocol::ServerEvent::Error {
-            id, message: "Session is busy".into(), retry_after_secs: None, server_resumes: false,
-        }, &mut remote);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id,
+                message: "Session is busy".into(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
         assert!(app.is_processing);
         assert_eq!(app.current_message_id, Some(999));
         assert!(!app.pending_turn);
@@ -245,20 +412,40 @@ fn agents_profiles_cancel_stale_discovery_and_session_switch_do_not_mutate() {
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         remote.mark_history_loaded();
         let first = open_profiles_from_agents(&mut app, &mut remote).await;
-        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote).await.unwrap();
+        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
         assert!(app.agent_profile_picker_request_id.is_none());
         assert!(app.inline_interactive_state.is_none());
         let second = open_profiles_from_agents(&mut app, &mut remote).await;
         app.handle_server_event(profile_reply(first, Some("old"), &["old"]), &mut remote);
         assert_eq!(app.agent_profile_picker_request_id, Some(second));
-        assert!(!app.inline_interactive_state.as_ref().unwrap().entries.iter().any(|entry| entry.name == "old"));
-        app.handle_server_event(crate::protocol::ServerEvent::SessionId { session_id: "different-session".into() }, &mut remote);
+        assert!(
+            !app.inline_interactive_state
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.name == "old")
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::SessionId {
+                session_id: "different-session".into(),
+            },
+            &mut remote,
+        );
         assert!(app.agent_profile_picker_request_id.is_none());
         app.is_processing = true;
         app.current_message_id = Some(999);
-        app.handle_server_event(crate::protocol::ServerEvent::Error {
-            id: second, message: "Unknown runtime command".into(), retry_after_secs: None, server_resumes: false,
-        }, &mut remote);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: second,
+                message: "Unknown runtime command".into(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
         assert!(app.is_processing);
         assert_eq!(app.current_message_id, Some(999));
         assert!(app.inline_interactive_state.is_none());
@@ -279,9 +466,15 @@ fn agents_profiles_old_server_error_stays_visible_without_ending_turn() {
         let id = open_profiles_from_agents(&mut app, &mut remote).await;
         app.is_processing = true;
         app.current_message_id = Some(999);
-        app.handle_server_event(crate::protocol::ServerEvent::Error {
-            id, message: "Unknown runtime command: agent".into(), retry_after_secs: None, server_resumes: false,
-        }, &mut remote);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id,
+                message: "Unknown runtime command: agent".into(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
         assert!(app.showing_agent_profiles());
         let picker = app.inline_interactive_state.as_ref().unwrap();
         assert_eq!(picker.entries[0].name, "Instruction profiles unavailable");
@@ -292,16 +485,26 @@ fn agents_profiles_old_server_error_stays_visible_without_ending_turn() {
         let rendered = render_profiles(&app);
         assert!(rendered.contains("Instruction profiles unavailable"));
         assert!(rendered.contains("Server upgrade required"), "{rendered}");
-        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
         assert!(app.showing_agent_profiles());
         assert!(app.agent_profile_request_ids.is_empty());
         assert!(app.session.agent_profile.is_none());
-        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote).await.unwrap();
+        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
         assert!(app.inline_interactive_state.is_none());
         let id = open_profiles_from_agents(&mut app, &mut remote).await;
-        app.handle_server_event(crate::protocol::ServerEvent::Error {
-            id, message: "Agent is busy; try again".into(), retry_after_secs: None, server_resumes: false,
-        }, &mut remote);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id,
+                message: "Agent is busy; try again".into(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
         let rendered = render_profiles(&app);
         assert!(rendered.contains("Reopen /agents to retry"), "{rendered}");
         assert!(!rendered.contains("Server upgrade required"), "{rendered}");
@@ -311,14 +514,28 @@ fn agents_profiles_old_server_error_stays_visible_without_ending_turn() {
     });
 }
 
-async fn profile_key(app: &mut App, remote: &mut crate::tui::backend::RemoteConnection, code: KeyCode) {
-    app.handle_remote_key(code, KeyModifiers::empty(), remote).await.unwrap();
+async fn profile_key(
+    app: &mut App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+    code: KeyCode,
+) {
+    app.handle_remote_key(code, KeyModifiers::empty(), remote)
+        .await
+        .unwrap();
 }
 
 async fn assert_no_profile_wire(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) {
     use tokio::io::AsyncBufReadExt;
     let mut line = String::new();
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(25), reader.read_line(&mut line)).await.is_err(), "unexpected wire request: {line}");
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            reader.read_line(&mut line)
+        )
+        .await
+        .is_err(),
+        "unexpected wire request: {line}"
+    );
 }
 
 #[test]
@@ -384,15 +601,27 @@ fn agent_profile_sources_apply_error_retry_and_session_stale_reply_preserve_stat
         profile_key(&mut app, &mut remote, KeyCode::Up).await;
         profile_key(&mut app, &mut remote, KeyCode::Enter).await;
         let first = read_profile_wire(&mut reader).await;
-        assert_eq!(first["args"], serde_json::json!(["--select", "research", "[\"file:/workspace/AGENTS.md\"]"]));
+        assert_eq!(
+            first["args"],
+            serde_json::json!(["--select", "research", "[\"file:/workspace/AGENTS.md\"]"])
+        );
         profile_key(&mut app, &mut remote, KeyCode::Enter).await;
         assert_no_profile_wire(&mut reader).await;
         let first_id = first["id"].as_u64().unwrap();
-        app.handle_server_event(crate::protocol::ServerEvent::Error {
-            id: first_id, message: "Session is busy; try again".into(), retry_after_secs: None, server_resumes: false,
-        }, &mut remote);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: first_id,
+                message: "Session is busy; try again".into(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
         let rendered = render_profiles(&app);
-        assert!(rendered.contains("Session is busy; try again"), "{rendered}");
+        assert!(
+            rendered.contains("Session is busy; try again"),
+            "{rendered}"
+        );
         assert!(rendered.contains("[x] Project AGENTS.md"));
         assert!(app.is_processing);
         assert_eq!(app.current_message_id, Some(999));
@@ -401,17 +630,31 @@ fn agent_profile_sources_apply_error_retry_and_session_stale_reply_preserve_stat
         let second_id = second["id"].as_u64().unwrap();
         assert_eq!(second["args"], first["args"]);
         app.handle_server_event(profile_reply(first_id, Some("old"), &["old"]), &mut remote);
-        assert!(app.showing_agent_profile_sources(), "a stale success cannot close a newer Apply");
-        app.handle_server_event(crate::protocol::ServerEvent::SessionId { session_id: "other-session".into() }, &mut remote);
+        assert!(
+            app.showing_agent_profile_sources(),
+            "a stale success cannot close a newer Apply"
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::SessionId {
+                session_id: "other-session".into(),
+            },
+            &mut remote,
+        );
         assert!(app.inline_interactive_state.is_none());
         let next = open_profiles_from_agents(&mut app, &mut remote).await;
         read_profile_wire(&mut reader).await;
         app.handle_server_event(profile_reply(next, None, &["reviewer"]), &mut remote);
         profile_key(&mut app, &mut remote, KeyCode::Down).await;
         profile_key(&mut app, &mut remote, KeyCode::Enter).await;
-        app.handle_server_event(profile_reply(second_id, Some("research"), &["research"]), &mut remote);
+        app.handle_server_event(
+            profile_reply(second_id, Some("research"), &["research"]),
+            &mut remote,
+        );
         let rendered = render_profiles(&app);
-        assert!(rendered.contains("Instruction sources: reviewer"), "{rendered}");
+        assert!(
+            rendered.contains("Instruction sources: reviewer"),
+            "{rendered}"
+        );
         assert!(app.showing_agent_profile_sources());
         assert!(app.agent_profile_request_ids.is_empty());
         assert!(app.is_processing);
@@ -476,9 +719,15 @@ fn agent_profile_sources_old_additive_daemon_metadata_fails_closed() {
         let mut reader = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
         let id = open_profiles_from_agents(&mut app, &mut remote).await;
         read_profile_wire(&mut reader).await;
-        app.handle_server_event(crate::protocol::ServerEvent::RuntimeCommandResult {
-            id, command: "agent".into(), data: serde_json::json!({"current":null,"available":["research"]}), message:"legacy list".into(),
-        }, &mut remote);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::RuntimeCommandResult {
+                id,
+                command: "agent".into(),
+                data: serde_json::json!({"current":null,"available":["research"]}),
+                message: "legacy list".into(),
+            },
+            &mut remote,
+        );
         let rendered = render_profiles(&app);
         assert!(rendered.contains("Server upgrade required"), "{rendered}");
         assert!(rendered.contains("Instruction profiles unavailable"));

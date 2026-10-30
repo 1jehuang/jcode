@@ -135,8 +135,8 @@ pub fn inferred_reasoning_efforts(
         || model.starts_with("o3")
         || model.starts_with("o4")
         || model.starts_with("o5");
-    if provider.contains("openai-compatible") {
-        return if is_openai_model {
+    if provider.contains("openai-compatible") || provider.contains("vsllm") {
+        return if is_openai_model || provider.contains("vsllm") {
             OPENAI_SELECTABLE_EFFORTS.to_vec()
         } else {
             Vec::new()
@@ -189,6 +189,11 @@ mod tests {
             inferred_reasoning_efforts(Some("openai-compatible:custom"), Some("gpt-5.6")),
             OPENAI_SELECTABLE_EFFORTS,
             "direct OpenAI-compatible runtimes use the OpenAI reasoning_effort vocabulary"
+        );
+        assert_eq!(
+            inferred_reasoning_efforts(Some("VSLLM"), Some("claude-sonnet-4-6")),
+            OPENAI_SELECTABLE_EFFORTS,
+            "VSLLM exposes its OpenAI-compatible reasoning_effort ladder even for non-OpenAI model IDs"
         );
     }
 

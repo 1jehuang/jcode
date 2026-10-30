@@ -31,9 +31,9 @@ pub mod backend;
 pub(crate) mod color_support;
 mod core;
 pub(crate) mod dialog;
-pub(crate) mod plugin_command;
 pub(crate) mod fuzzy;
 pub mod herdr;
+pub(crate) mod plugin_command;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.
@@ -1981,11 +1981,18 @@ fn estimate_picker_entry_bytes(entry: &PickerEntry) -> usize {
 
 impl InlineInteractiveState {
     pub fn is_agent_profile_sources(&self) -> bool {
-        self.entries.iter().any(|entry| matches!(entry.action, PickerAction::AgentProfileApply(_)))
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry.action, PickerAction::AgentProfileApply(_)))
     }
 
     pub fn schema(&self) -> InlineInteractiveSchema {
-        if self.is_agent_profile_sources() || self.entries.iter().any(|entry| matches!(entry.action, PickerAction::AgentProfileChoice(_))) {
+        if self.is_agent_profile_sources()
+            || self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.action, PickerAction::AgentProfileChoice(_)))
+        {
             InlineInteractiveSchema {
                 layout: InlineInteractiveLayout::ThreeColumn,
                 primary_label: "INSTRUCTION PROFILE [SESSION]",
@@ -2031,10 +2038,12 @@ impl InlineInteractiveState {
     pub fn is_agent_target_picker(&self) -> bool {
         self.kind == PickerKind::Model
             && !self.entries.is_empty()
-            && self
-                .entries
-                .iter()
-                .all(|entry| matches!(entry.action, PickerAction::AgentTarget(_) | PickerAction::AgentProfiles))
+            && self.entries.iter().all(|entry| {
+                matches!(
+                    entry.action,
+                    PickerAction::AgentTarget(_) | PickerAction::AgentProfiles
+                )
+            })
     }
 
     pub fn uses_compact_navigation(&self) -> bool {

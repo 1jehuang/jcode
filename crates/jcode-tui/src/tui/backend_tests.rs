@@ -4,8 +4,14 @@ use std::time::Duration;
 #[tokio::test]
 async fn named_profile_rejects_resume_before_connecting() {
     let result = RemoteConnection::connect_with_session_and_profile(
-        Some("existing-session"), None, false, false, None, Some("reviewer"),
-    ).await;
+        Some("existing-session"),
+        None,
+        false,
+        false,
+        None,
+        Some("reviewer"),
+    )
+    .await;
     let error = match result {
         Ok(_) => panic!("resume with a creation-only profile must fail"),
         Err(error) => error,

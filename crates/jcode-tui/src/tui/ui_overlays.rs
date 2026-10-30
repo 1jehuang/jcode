@@ -280,8 +280,14 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/provider-test-coverage",
         "Show live-test evidence for the current provider/model",
     ));
-    lines.push(help_entry("/agents", "Choose session instructions or configure role models"));
-    lines.push(help_entry("/agent [NAME|off|reload]", "List or select an additive Markdown profile"));
+    lines.push(help_entry(
+        "/agents",
+        "Choose session instructions or configure role models",
+    ));
+    lines.push(help_entry(
+        "/agent [NAME|off|reload]",
+        "List or select an additive Markdown profile",
+    ));
     lines.push(help_entry(
         "/swarm-prompt",
         "Open the active swarm routing prompt in your editor",
@@ -690,10 +696,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
     lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
-    lines.push(key_entry(
-        "Ctrl+R",
-        "Search this session's prompt history",
-    ));
+    lines.push(key_entry("Ctrl+R", "Search this session's prompt history"));
     lines.push(key_entry(
         &format!("Ctrl+V / {}", alt("V")),
         "Paste clipboard (text or image)",

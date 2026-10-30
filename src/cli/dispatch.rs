@@ -72,7 +72,8 @@ fn arm_debug_client_parent_death_signal() {
 fn arm_debug_client_parent_death_signal() {}
 
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
-    args.validate_agent_profile_selection().map_err(anyhow::Error::msg)?;
+    args.validate_agent_profile_selection()
+        .map_err(anyhow::Error::msg)?;
     arm_debug_client_parent_death_signal();
     // Plugin management is filesystem-only and must not bootstrap providers or a daemon.
     if matches!(args.command, Some(Command::Plugin(_))) {

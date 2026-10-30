@@ -4152,9 +4152,13 @@ impl App {
         }
         if self.showing_agent_profiles()
             && modifiers.contains(KeyModifiers::CONTROL)
-            && ['g', 'o', 'n'].into_iter().any(|key| key_char_eq_ignore_ascii_case(code, key))
+            && ['g', 'o', 'n']
+                .into_iter()
+                .any(|key| key_char_eq_ignore_ascii_case(code, key))
         {
-            self.set_status_notice("Instruction profiles are session-only; no global default or favorites");
+            self.set_status_notice(
+                "Instruction profiles are session-only; no global default or favorites",
+            );
             return Ok(());
         }
         // `/agents` pickers: Ctrl+G switches between editing this session and
@@ -4417,13 +4421,17 @@ impl App {
                 }
 
                 match entry.action {
-                    PickerAction::AgentProfiles | PickerAction::AgentProfileChoice(_)
-                    | PickerAction::AgentProfileSource(_) | PickerAction::AgentProfileApply(_)
+                    PickerAction::AgentProfiles
+                    | PickerAction::AgentProfileChoice(_)
+                    | PickerAction::AgentProfileSource(_)
+                    | PickerAction::AgentProfileApply(_)
                     | PickerAction::AgentProfileCancel => {
                         // Remote key handling owns discovery and application. Never
                         // apply instructions from the local session snapshot.
                         self.inline_interactive_state = None;
-                        self.set_status_notice("Instruction profiles require a connected jcode server");
+                        self.set_status_notice(
+                            "Instruction profiles require a connected jcode server",
+                        );
                     }
                     PickerAction::Account(selection) => {
                         self.inline_interactive_state = None;

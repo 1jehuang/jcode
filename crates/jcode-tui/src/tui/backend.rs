@@ -343,9 +343,14 @@ impl RemoteConnection {
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
         Self::connect_with_session_and_profile(
-            resume_session, client_instance_id, client_has_local_history,
-            allow_session_takeover, remote_working_dir, None,
-        ).await
+            resume_session,
+            client_instance_id,
+            client_has_local_history,
+            allow_session_takeover,
+            remote_working_dir,
+            None,
+        )
+        .await
     }
 
     pub async fn connect_with_session_and_profile(

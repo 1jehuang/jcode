@@ -118,15 +118,22 @@ fn entering_selected_agent_queues_resume_and_return_queues_parent() {
 
     app.enter_selected_swarm_agent();
     assert_eq!(
-        app.workspace_client.take_pending_resume_session().as_deref(),
+        app.workspace_client
+            .take_pending_resume_session()
+            .as_deref(),
         Some("worker-session")
     );
-    assert_eq!(app.swarm_parent_session_id.as_deref(), Some("parent-session"));
+    assert_eq!(
+        app.swarm_parent_session_id.as_deref(),
+        Some("parent-session")
+    );
     assert!(!app.swarm_panel_focused);
 
     app.return_to_swarm_parent();
     assert_eq!(
-        app.workspace_client.take_pending_resume_session().as_deref(),
+        app.workspace_client
+            .take_pending_resume_session()
+            .as_deref(),
         Some("parent-session")
     );
     assert_eq!(app.swarm_parent_session_id, None);

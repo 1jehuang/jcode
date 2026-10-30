@@ -53,7 +53,10 @@ impl Drop for LeaderGuard {
         let name = std::mem::take(&mut self.name);
         runtime.spawn(async move {
             let mut map = connecting.lock().await;
-            if map.get(&name).is_some_and(|current| Arc::ptr_eq(current, &notify)) {
+            if map
+                .get(&name)
+                .is_some_and(|current| Arc::ptr_eq(current, &notify))
+            {
                 map.remove(&name);
             }
             drop(map);

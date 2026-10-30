@@ -289,7 +289,9 @@ async fn handle_remote_key_internal(
     }
 
     if app.showing_agent_profile_sources() {
-        return app.handle_agent_profile_sources_key(code, modifiers, remote).await;
+        return app
+            .handle_agent_profile_sources_key(code, modifiers, remote)
+            .await;
     }
 
     if let Some(ref picker) = app.inline_interactive_state
@@ -299,7 +301,9 @@ async fn handle_remote_key_internal(
             if app.agent_profile_picker_request_id.is_some() && app.showing_agent_profiles() {
                 return Ok(());
             }
-            let action = picker.filtered.get(picker.selected)
+            let action = picker
+                .filtered
+                .get(picker.selected)
                 .and_then(|index| picker.entries.get(*index))
                 .filter(|entry| entry.active_option().is_some_and(|option| option.available))
                 .map(|entry| entry.action.clone());
@@ -316,8 +320,11 @@ async fn handle_remote_key_internal(
                     }
                     app.inline_interactive_state = None;
                     app_mod::agent_profiles::send_agent_profile_command(
-                        app, remote, vec!["off".into()],
-                    ).await;
+                        app,
+                        remote,
+                        vec!["off".into()],
+                    )
+                    .await;
                     return Ok(());
                 }
                 _ => {}
