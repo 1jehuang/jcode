@@ -102,10 +102,36 @@ pub(crate) async fn handle_account_command_remote(
     trimmed: &str,
     remote: &mut crate::tui::backend::RemoteConnection,
 ) -> anyhow::Result<bool> {
+    if crate::tui::is_ssh_remote() {
+        let words: Vec<_> = trimmed.split_whitespace().collect();
+        if words.get(0..2) == Some(&["/auth", "doctor"][..]) {
+            let args = std::iter::once("doctor".to_string())
+                .chain(words[2..].iter().map(|word| word.to_string()))
+                .collect();
+            remote.runtime_command("ssh_account", args).await?;
+            return Ok(true);
+        }
+    }
     let Some(parsed) = parse_account_command(trimmed) else {
         return Ok(false);
     };
     match parsed {
+        Ok(AccountCommand::Remove { provider_id, label })
+            if crate::tui::is_ssh_remote() && label.ends_with(" confirm") =>
+        {
+            let target = label.strip_suffix(" confirm").unwrap();
+            remote
+                .runtime_command(
+                    "ssh_account",
+                    vec![
+                        "remove".into(),
+                        provider_id,
+                        target.to_string(),
+                        "confirm".into(),
+                    ],
+                )
+                .await?;
+        }
         Ok(command) => execute_account_command_remote(app, command, remote).await?,
         Err(message) => app.push_display_message(DisplayMessage::error(message)),
     }
@@ -209,6 +235,10 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             },
             "settings" => AccountCommand::ShowSettings {
                 provider_id: provider.id.to_string(),
+            },
+            "login" if !value.is_empty() => AccountCommand::Add {
+                provider_id: provider.id.to_string(),
+                label: Some(value.to_string()),
             },
             "login" => AccountCommand::Login {
                 provider_id: provider.id.to_string(),
@@ -456,9 +486,8 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
     }
 }
 
-/// Remote account commands must never fall through to laptop auth or config.
-/// The wire protocol supports switching named OAuth accounts, but has no
-/// account removal, doctor, settings persistence, or account creation request.
+/// SSH account commands execute on the runtime host without reading laptop
+/// auth/config. Normal local shared-daemon clients keep their local behavior.
 pub(crate) async fn execute_account_command_remote(
     app: &mut App,
     command: AccountCommand,
@@ -512,6 +541,10 @@ pub(crate) async fn execute_account_command_remote(
             }
             // Sending is not acknowledgement. The daemon publishes the actual
             // account/provider state or an error asynchronously.
+            app.pending_account_switch_target = Some(crate::tui::AccountPickerAction::Switch {
+                provider_id,
+                label: label.clone(),
+            });
             app.set_status_notice(format!("Account switch requested: {label}"));
         }
         AccountCommand::SwitchShorthand { label } => {
@@ -560,9 +593,111 @@ pub(crate) async fn execute_account_command_remote(
         } if crate::tui::is_ssh_remote() => {
             app.handle_ssh_login_command(&format!("/login {provider_id}"));
         }
+        AccountCommand::Add {
+            provider_id,
+            label: Some(label),
+        } if crate::tui::is_ssh_remote() => {
+            app.start_ssh_account_login(&provider_id, &label);
+        }
+        other if crate::tui::is_ssh_remote() => {
+            if let Some(args) = ssh_account_runtime_args(&other) {
+                remote.runtime_command("ssh_account", args).await?;
+            } else {
+                app.remote_account_management_notice();
+            }
+        }
         _ => app.remote_account_management_notice(),
     }
     Ok(())
+}
+
+fn ssh_account_runtime_args(command: &AccountCommand) -> Option<Vec<String>> {
+    let args = match command {
+        AccountCommand::Doctor { provider_id } => std::iter::once("doctor".to_string())
+            .chain(provider_id.clone())
+            .collect(),
+        AccountCommand::ShowSettings { provider_id } => {
+            vec!["settings".into(), provider_id.clone()]
+        }
+        AccountCommand::Remove { provider_id, label } => {
+            vec!["remove".into(), provider_id.clone(), label.clone()]
+        }
+        AccountCommand::SetDefaultProvider(v) => vec![
+            "default-provider".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetDefaultModel(v) => vec![
+            "default-model".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiTransport(v) => vec![
+            "openai".into(),
+            "transport".into(),
+            v.clone().unwrap_or_else(|| "auto".into()),
+        ],
+        AccountCommand::SetOpenAiEffort(v) => vec![
+            "openai".into(),
+            "effort".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiFast(v) => vec![
+            "openai".into(),
+            "fast".into(),
+            if *v { "on" } else { "off" }.into(),
+        ],
+        AccountCommand::SetCopilotPremium(v) => vec![
+            "copilot".into(),
+            "premium".into(),
+            v.clone().unwrap_or_else(|| "normal".into()),
+        ],
+        AccountCommand::SetOpenAiCompatApiBase(v) => vec![
+            "compat".into(),
+            "api-base".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiCompatApiKeyName(v) => vec![
+            "compat".into(),
+            "api-key-name".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiCompatEnvFile(v) => vec![
+            "compat".into(),
+            "env-file".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiCompatDefaultModel(v) => vec![
+            "compat".into(),
+            "default-model".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        _ => return None,
+    };
+    Some(args)
+}
+
+pub(crate) async fn handle_ssh_usage_command_remote(
+    _app: &mut App,
+    input: &str,
+    remote: &mut crate::tui::backend::RemoteConnection,
+) -> anyhow::Result<bool> {
+    if !crate::tui::is_ssh_remote() {
+        return Ok(false);
+    }
+    let mut words = input.split_whitespace();
+    let operation = match words.next() {
+        Some("/usage") => "usage",
+        Some("/reset") => "reset",
+        _ => return Ok(false),
+    };
+    remote
+        .runtime_command(
+            "ssh_account",
+            std::iter::once(operation.to_string())
+                .chain(words.map(str::to_string))
+                .collect(),
+        )
+        .await?;
+    Ok(true)
 }
 
 fn execute_account_add_local(app: &mut App, provider_id: &str, label: Option<&str>) {
@@ -1198,6 +1333,44 @@ mod tests {
                 provider_filter: None
             }))
         ));
+    }
+
+    #[test]
+    fn named_provider_login_does_not_discard_label() {
+        assert!(
+            matches!(parse_account_command("/account openai login work team"), Some(Ok(AccountCommand::Add { provider_id, label: Some(label) })) if provider_id == "openai" && label == "work team")
+        );
+    }
+
+    #[test]
+    fn ssh_account_runtime_arguments_preserve_labels_and_clear_values() {
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::Remove {
+                provider_id: "openai".into(),
+                label: "work confirm".into()
+            })
+            .unwrap(),
+            vec!["remove", "openai", "work confirm"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::SetDefaultModel(None)).unwrap(),
+            vec!["default-model", "clear"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::SetOpenAiFast(true)).unwrap(),
+            vec!["openai", "fast", "on"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::Doctor { provider_id: None }).unwrap(),
+            vec!["doctor"]
+        );
+        assert!(
+            ssh_account_runtime_args(&AccountCommand::Add {
+                provider_id: "openai".into(),
+                label: Some("work".into())
+            })
+            .is_none()
+        );
     }
 
     #[test]
