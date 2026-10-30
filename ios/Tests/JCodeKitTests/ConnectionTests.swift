@@ -13,6 +13,7 @@ actor FakeTransport: WebSocketTransport {
 
     let behavior: Behavior
     private(set) var sentLines: [String] = []
+    private(set) var connectedURL: URL?
     private var incoming: [String] = []
     private var waiters: [CheckedContinuation<String?, Never>] = []
     private var closed = false
@@ -22,6 +23,7 @@ actor FakeTransport: WebSocketTransport {
     }
 
     func connect(url: URL, authToken: String) async throws {
+        connectedURL = url
         if behavior == .failConnect {
             throw TransportError.notConnected
         }
@@ -97,6 +99,24 @@ private func makeConnection(transport: FakeTransport) -> Connection {
     #expect(sent[0].contains("\"type\":\"subscribe\""))
     #expect(sent[1].contains("\"type\":\"get_history\""))
 
+    await connection.stop()
+}
+
+@Test func secureGatewayConnectsUsingWSS() async throws {
+    let transport = FakeTransport()
+    let connection = Connection(
+        configuration: .init(
+            gateway: Gateway(host: "test.local", secure: true),
+            authToken: "tok",
+            maxReconnectAttempts: 1
+        ),
+        makeTransport: { transport }
+    )
+    let stream = await connection.start()
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == .phase(.connecting))
+    #expect(await iterator.next() == .phase(.connected))
+    #expect(await transport.connectedURL?.absoluteString == "wss://test.local:7643/ws")
     await connection.stop()
 }
 

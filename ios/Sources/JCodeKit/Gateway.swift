@@ -2,31 +2,30 @@ import Foundation
 
 /// Describes a jcode server gateway endpoint.
 ///
-/// The server exposes:
-/// - `GET  http://host:port/health`  reachability + version probe
-/// - `POST http://host:port/pair`    pairing-code -> auth-token exchange
-/// - `ws://host:port/ws`             newline-delimited JSON protocol over WebSocket
+/// Endpoints use HTTP/WS by default, or HTTPS/WSS when `secure` is enabled.
 public struct Gateway: Hashable, Sendable {
     public static let defaultPort: UInt16 = 7643
 
     public var host: String
     public var port: UInt16
+    public var secure: Bool
 
-    public init(host: String, port: UInt16 = Gateway.defaultPort) {
+    public init(host: String, port: UInt16 = Gateway.defaultPort, secure: Bool = false) {
         self.host = host
         self.port = port
+        self.secure = secure
     }
 
     public var healthURL: URL {
-        url(scheme: "http", path: "/health")
+        url(scheme: secure ? "https" : "http", path: "/health")
     }
 
     public var pairURL: URL {
-        url(scheme: "http", path: "/pair")
+        url(scheme: secure ? "https" : "http", path: "/pair")
     }
 
     public var webSocketURL: URL {
-        url(scheme: "ws", path: "/ws")
+        url(scheme: secure ? "wss" : "ws", path: "/ws")
     }
 
     private func url(scheme: String, path: String) -> URL {
@@ -49,10 +48,12 @@ public enum PairURI {
     public struct Payload: Equatable, Sendable {
         public var gateway: Gateway
         public var code: String
+        public var scheme: String?
 
-        public init(gateway: Gateway, code: String) {
+        public init(gateway: Gateway, code: String, scheme: String? = nil) {
             self.gateway = gateway
             self.code = code
+            self.scheme = scheme
         }
     }
 
@@ -70,6 +71,14 @@ public enum PairURI {
             let code = value("code"), !code.isEmpty
         else { return nil }
         let port = value("port").flatMap(UInt16.init) ?? Gateway.defaultPort
-        return Payload(gateway: Gateway(host: host, port: port), code: code)
+        let scheme = value("scheme")
+        guard scheme.map({ ["http", "https", "ws", "wss"].contains($0) }) ?? true,
+            items.filter({ $0.name == "scheme" }).count <= 1
+        else { return nil }
+        return Payload(
+            gateway: Gateway(host: host, port: port, secure: scheme == "https" || scheme == "wss"),
+            code: code,
+            scheme: scheme
+        )
     }
 }

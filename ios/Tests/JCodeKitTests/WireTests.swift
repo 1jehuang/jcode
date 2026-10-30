@@ -12,6 +12,13 @@ import Testing
     #expect(gateway.webSocketURL.absoluteString == "ws://devbox.tailnet.ts.net:7643/ws")
 }
 
+@Test func secureGatewayBuildsSecureEndpoints() {
+    let gateway = Gateway(host: "devbox.tailnet.ts.net", secure: true)
+    #expect(gateway.healthURL.absoluteString == "https://devbox.tailnet.ts.net:7643/health")
+    #expect(gateway.pairURL.absoluteString == "https://devbox.tailnet.ts.net:7643/pair")
+    #expect(gateway.webSocketURL.absoluteString == "wss://devbox.tailnet.ts.net:7643/ws")
+}
+
 @Test func pairURIParsesQRPayload() {
     let payload = PairURI.parse("jcode://pair?host=mybox.ts.net&port=7643&code=123456")
     #expect(payload?.gateway.host == "mybox.ts.net")
@@ -22,6 +29,50 @@ import Testing
 @Test func pairURIDefaultsPort() {
     let payload = PairURI.parse("jcode://pair?host=mybox&code=987654")
     #expect(payload?.gateway.port == Gateway.defaultPort)
+}
+
+@Test func pairURIDefaultsToHTTPAndParsesOptionalScheme() {
+    let legacy = PairURI.parse("jcode://pair?host=mybox&code=987654")
+    #expect(legacy?.gateway.secure == false)
+    #expect(legacy?.scheme == nil)
+    let secure = PairURI.parse("jcode://pair?host=mybox&code=987654&scheme=https")
+    #expect(secure?.gateway.secure == true)
+    #expect(secure?.scheme == "https")
+    let ws = PairURI.parse("jcode://pair?host=mybox&code=987654&scheme=wss")
+    #expect(ws?.gateway.secure == true)
+}
+
+@Test func pairURIRejectsUnsupportedSchemes() {
+    #expect(PairURI.parse("jcode://pair?host=mybox&code=1&scheme=ftp") == nil)
+    #expect(PairURI.parse("jcode://pair?host=mybox&code=1&scheme=http&scheme=https") == nil)
+}
+
+@Test func serverCredentialRoundTripsSecureGatewayAndDecodesLegacyJSON() throws {
+    let credential = ServerCredential(
+        host: "mybox", port: 7643, token: "token", serverName: "jcode",
+        serverVersion: "1", secure: true
+    )
+    let decoded = try JSONDecoder().decode(
+        ServerCredential.self,
+        from: JSONEncoder().encode(credential)
+    )
+    #expect(decoded == credential)
+    #expect(decoded.gateway.secure)
+
+    let legacyJSON = """
+        {
+          "host": "oldbox",
+          "port": 7643,
+          "token": "token",
+          "serverName": "jcode",
+          "serverVersion": "1",
+          "pairedAt": 0
+        }
+        """
+    let legacy = Data(legacyJSON.utf8)
+    let oldCredential = try JSONDecoder().decode(ServerCredential.self, from: legacy)
+    #expect(oldCredential.secure == false)
+    #expect(oldCredential.gateway.healthURL.scheme == "http")
 }
 
 @Test func pairURIRejectsGarbage() {
