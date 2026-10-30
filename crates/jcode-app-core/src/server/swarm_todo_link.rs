@@ -514,6 +514,42 @@ mod tests {
     }
 
     #[test]
+    fn worker_item_save_unblocks_consumer_while_worker_lane_is_unfinished() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let mut consumer = laned("consumer", 2, "consumer");
+        consumer.lane_after = Some(vec!["contract".into()]);
+        let todos = vec![
+            laned("contract", 1, "api"),
+            laned("implementation", 1, "api"),
+            laned("unrelated", 1, "docs"),
+            consumer,
+        ];
+        crate::todo::save_todos("early-coordinator", &todos).unwrap();
+        let before = plan_items_from_todos(&todos);
+        seed_spawn_lane("early-coordinator", "early-worker", "lane:1:api").unwrap();
+        let mut worker = crate::todo::load_todos("early-worker").unwrap();
+        worker[0].status = "completed".into();
+        crate::todo::save_todos("early-worker", &worker).unwrap();
+        let updated = crate::todo::load_todos("early-coordinator").unwrap();
+        let after = resync_lane_plan(&updated, &before).unwrap();
+        assert!(
+            crate::plan::summarize_plan_graph(&after)
+                .ready_ids
+                .contains(&"lane:2:consumer".into())
+        );
+        assert_eq!(updated[1].status, "pending");
+        assert_eq!(updated[2].status, "pending");
+        if let Some(previous_home) = previous_home {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
     fn sequential_todos_chain() {
         let items =
             plan_items_from_todos(&[todo("a", "pending", None), todo("b", "pending", None)]);
