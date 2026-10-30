@@ -166,4 +166,3 @@ async fn streaming_ask_user_wait_is_not_automatically_backgrounded() {
         assert!(!wait_for_tool_handoff(&bg, &shutdown, false).await);
     }
 }
-

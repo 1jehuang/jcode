@@ -5,8 +5,7 @@ const TOOL_FOREGROUND_BUDGET: Duration = Duration::from_secs(3);
 pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
     // Human decisions belong to the live turn that owns the response channel.
     name != "ask_user"
-        && !(name == "bg"
-            && input.get("action").and_then(|value| value.as_str()) == Some("wait"))
+        && !(name == "bg" && input.get("action").and_then(|value| value.as_str()) == Some("wait"))
 }
 
 /// SDK callbacks and nonstreaming turns use the same policy as TUI turns.
