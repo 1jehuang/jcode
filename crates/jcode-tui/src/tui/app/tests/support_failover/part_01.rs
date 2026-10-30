@@ -462,8 +462,27 @@ impl Drop for EnvRestoreGuard {
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
+    let _env_guard = EnvRestoreGuard::capture([
+        "JCODE_HOME",
+        // Named-profile and openrouter env decides which providers count as
+        // configured. On daemon shells these can be exported globally, and a
+        // leaked profile flips openai-compatible models onto the profile
+        // route before copilot fallback, breaking copilot picker tests the
+        // same way auth_tests guard their OPENAI_COMPAT family.
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+    ]);
     crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
+    crate::env::remove_var("JCODE_OPENROUTER_API_BASE");
+    crate::env::remove_var("JCODE_OPENROUTER_ALLOW_NO_AUTH");
+    crate::env::remove_var("JCODE_OPENROUTER_STATIC_MODELS");
     // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
     // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
     // opt-out must keep blocking delivery for tests that exercise onboarding.

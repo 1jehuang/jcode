@@ -1,6 +1,10 @@
 #[test]
 fn test_reset_available_hint_renders_and_keeps_redrawing_at_deep_idle() {
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
+    // Clear leaked sibling flicker notices so the final assert is deterministic.
+    clear_flicker_frame_history_for_tests();
+
     let mut state = TestState {
         display_messages: vec![DisplayMessage::system("seed")],
         time_since_activity: Some(crate::tui::REDRAW_DEEP_IDLE_AFTER + Duration::from_secs(1)),
@@ -47,6 +51,11 @@ fn test_reset_available_hint_renders_and_keeps_redrawing_at_deep_idle() {
 
 #[test]
 fn test_redraw_interval_uses_low_frequency_during_remote_startup_phase() {
+    // The lock keeps the clear+read pair safe against parallel sibling recordings.
+    let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
+    clear_flicker_frame_history_for_tests();
+
     let idle = TestState {
         anim_elapsed: 10.0,
         display_messages: vec![DisplayMessage::system("seed".to_string())],
@@ -68,11 +77,14 @@ fn test_redraw_interval_uses_low_frequency_during_remote_startup_phase() {
 
 #[test]
 fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
-    // Regression: the notification line renders a `🧊 cache cold` warning once
-    // the prompt cache TTL expires, but the cache only goes cold long after the
-    // 30s deep-idle cutoff. Without a dedicated wakeup the idle loop short-
-    // circuits to `false` and never repaints to reveal the warning before the
-    // user submits their next prompt.
+    // A leaked sibling flicker notice would keep redraws alive and break the deep-idle assert.
+    let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
+    clear_flicker_frame_history_for_tests();
+
+    // Regression: the cache goes cold long after the 30s deep-idle cutoff, so
+    // without a dedicated wakeup the idle loop never repaints to reveal the
+    // `🧊 cache cold` warning before the next prompt.
     let deep_idle = crate::tui::REDRAW_DEEP_IDLE_AFTER + Duration::from_secs(1);
 
     let idle = TestState {
@@ -169,10 +181,12 @@ fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
 
 #[test]
 fn test_active_swarm_spinner_keeps_redrawing_at_deep_idle() {
-    // Regression: the swarm strip/dock animates a 12.5 fps status spinner for
-    // active agents off the wall clock. A coordinator that is just watching
-    // its agents goes deep-idle itself, and without a dedicated wakeup the
-    // idle loop stops repainting, freezing every agent's spinner mid-frame.
+    let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
+    clear_flicker_frame_history_for_tests();
+
+    // Regression: the swarm dock animates a 12.5 fps spinner off the wall
+    // clock; without a dedicated wakeup a deep-idle coordinator freezes it.
     fn swarm_member(status: &str) -> crate::protocol::SwarmMemberStatus {
         crate::protocol::SwarmMemberStatus {
             session_id: format!("session-{status}"),
@@ -1002,6 +1016,7 @@ fn test_flicker_frame_history_ignores_manual_scroll_feedback() {
 #[test]
 fn test_cache_retention_estimates_never_create_proactive_expiry_ui() {
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     for ttl_secs in [300, 1800, 86400] {
         for remaining_secs in [ttl_secs, 180, 30, 0] {
             let info = crate::tui::CacheTtlInfo {
