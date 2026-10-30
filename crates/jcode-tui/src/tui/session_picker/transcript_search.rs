@@ -54,7 +54,10 @@ impl TranscriptSearch {
         for session in sessions {
             let missing_tokens: Vec<_> = tokens
                 .iter()
-                .filter(|token| !session.search_index.contains(token.as_str()))
+                .filter(|token| {
+                    !jcode_fuzzy::PreparedTokenQuery::new(token)
+                        .matches_search_text(&session.search_index)
+                })
                 .cloned()
                 .collect();
             if missing_tokens.is_empty() {
@@ -176,7 +179,7 @@ impl Scan<'_> {
         }
         let lower = text.to_lowercase();
         for (token, found) in self.tokens.iter().zip(&mut self.found) {
-            *found |= lower.contains(token);
+            *found |= jcode_fuzzy::PreparedTokenQuery::new(token).matches_search_text(&lower);
         }
         if self.complete() {
             return Err(E::custom("search complete"));

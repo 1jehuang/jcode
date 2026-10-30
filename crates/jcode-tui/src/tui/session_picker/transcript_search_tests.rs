@@ -52,6 +52,27 @@ fn wait_for_search(picker: &mut SessionPicker) {
 }
 
 #[test]
+fn transcript_search_tolerates_transposed_query_words() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("session.json");
+    std::fs::write(
+        &path,
+        r#"{"messages":[{"text":"cloud acceptance"},{"text":"todo list"}]}"#,
+    )
+    .unwrap();
+    assert!(paths_match(
+        &[path.clone()],
+        &search_query_tokens("clodu tood"),
+        &AtomicBool::new(false),
+    ));
+    assert!(!paths_match(
+        &[path],
+        &search_query_tokens("clodu absent"),
+        &AtomicBool::new(false),
+    ));
+}
+
+#[test]
 fn full_text_matches_tokens_in_any_order_across_snapshot_and_journal() {
     let temp = tempfile::tempdir().unwrap();
     let snapshot = temp.path().join("snapshot.json");

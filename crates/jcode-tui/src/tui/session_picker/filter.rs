@@ -50,22 +50,17 @@ impl SessionPicker {
             return self.all_session_refs();
         }
 
-        let can_narrow_cached = !self.cached_search_query.is_empty()
-            && normalized.starts_with(&self.cached_search_query);
-        // When narrowing, reuse the previous match set in place via mem::take
-        // instead of cloning it into `candidates` and then cloning the new
-        // matches back into the cache (two full-list clones per keystroke).
-        let candidates = if can_narrow_cached {
-            std::mem::take(&mut self.cached_search_refs)
-        } else {
-            self.all_session_refs()
-        };
+        // Fuzzy matches are not monotonic: adding a character can increase the
+        // error budget or turn a short literal query into a typo-tolerant one.
+        // Reconsider every session rather than narrowing the previous results.
+        let candidates = self.all_session_refs();
+        let fuzzy = jcode_fuzzy::PreparedTokenQuery::new(&normalized);
 
         let matches = candidates
             .into_iter()
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
-                    Self::session_matches_search(session, &normalized)
+                    fuzzy.matches_search_text(&session.search_index)
                         || self.transcript_search.contains(&session.id)
                 })
             })
@@ -121,6 +116,16 @@ impl SessionPicker {
                 .unwrap_or_default();
             b.cmp(&a)
         });
+        // Preserve recency within each tier, but literal matches should not
+        // be buried beneath newer sessions matching only through a typo.
+        if !self.search_query.trim().is_empty() {
+            filtered.sort_by_cached_key(|session_ref| {
+                !self.session_by_ref(*session_ref).is_some_and(|session| {
+                    Self::session_matches_search(session, &self.search_query)
+                        || self.transcript_search.contains(&session.id)
+                })
+            });
+        }
         if filter_mode == SessionFilterMode::Active {
             // Triage order for the active sessions manager: sessions that are
             // ready for input (done streaming) float above ones still working,

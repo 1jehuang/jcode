@@ -1108,6 +1108,41 @@ fn test_filter_matches_recent_message_content() {
 }
 
 #[test]
+fn resume_search_recovers_matches_as_typo_query_grows() {
+    let mut session = make_session("typo_target", "target", false, SessionStatus::Closed);
+    session.search_index = "config deploy".into();
+    let mut picker = SessionPicker::new(vec![session]);
+    for query in ["c", "co", "coo", "coon", "coonf", "coonfig"] {
+        picker.search_query = query.into();
+        picker.rebuild_items();
+    }
+    assert_eq!(picker.visible_sessions.len(), 1);
+    picker.search_query = "deply conifg".into();
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), 1);
+}
+
+#[test]
+fn resume_search_ranks_literal_matches_before_newer_typo_matches() {
+    let mut exact = make_session("literal", "literal", false, SessionStatus::Closed);
+    exact.search_index = "config deploy".into();
+    let mut typo = make_session("typo", "typo", false, SessionStatus::Closed);
+    typo.search_index = "conifg deploy".into();
+    typo.last_message_time = exact.last_message_time + chrono::Duration::seconds(10);
+    let mut picker = SessionPicker::new(vec![typo, exact]);
+    picker.search_query = "config".into();
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), 2);
+    assert_eq!(
+        picker
+            .session_by_ref(picker.visible_sessions[0])
+            .unwrap()
+            .id,
+        "literal"
+    );
+}
+
+#[test]
 fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");

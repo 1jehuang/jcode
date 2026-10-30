@@ -526,6 +526,15 @@ pub struct PreparedTokenQuery {
     scratch: std::cell::RefCell<ScoreScratch>,
 }
 
+#[test]
+fn search_text_tolerates_typos_without_dropping_query_words() {
+    assert!(PreparedTokenQuery::new("clodu todo").matches_search_text("cloud acceptance todo"));
+    assert!(PreparedTokenQuery::new("cloud tood").matches_search_text("todo cloud"));
+    assert!(!PreparedTokenQuery::new("clodu todo").matches_search_text("cloud acceptance"));
+    assert!(!PreparedTokenQuery::new("api").matches_search_text("apt"));
+    assert!(PreparedTokenQuery::new("café").matches_search_text("café deployment"));
+}
+
 struct PreparedWord {
     chars: Vec<char>,
     meaningful: usize,
@@ -560,6 +569,23 @@ impl PreparedTokenQuery {
             words,
             scratch: std::cell::RefCell::new(ScoreScratch::default()),
         }
+    }
+
+    /// Fast boolean search for lowercased text indexes. Short queries remain
+    /// literal, while longer words tolerate typos within individual tokens.
+    pub fn matches_search_text(&self, haystack: &str) -> bool {
+        let mut scratch = self.scratch.borrow_mut();
+        self.words.iter().all(|word| {
+            let literal: String = word.chars.iter().collect();
+            haystack.contains(&literal)
+                || (word.meaningful >= 4
+                    && word.chars.iter().all(|c| c.is_alphabetic())
+                    && haystack.split_whitespace().any(|token| {
+                        // Bound DP work for pasted URLs and minified data.
+                        token.chars().count() <= 128
+                            && score_prepared_word(word, token, &mut scratch).is_some()
+                    }))
+        })
     }
 
     /// Equivalent to [`fuzzy_score_tokens`] for this query.
@@ -670,6 +696,22 @@ pub fn command_fuzzy_match_positions(needle: &str, haystack: &str) -> Vec<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_text_tolerates_typos_without_short_query_noise() {
+        for query in ["conifg", "coonfig", "confg", "confug", "CONFIG"] {
+            assert!(
+                PreparedTokenQuery::new(query).matches_search_text("edit config settings"),
+                "{query}"
+            );
+        }
+        assert!(PreparedTokenQuery::new("deply conifg").matches_search_text("config then deploy"));
+        assert!(PreparedTokenQuery::new("café").matches_search_text("café settings"));
+        assert!(!PreparedTokenQuery::new("cfx").matches_search_text("config"));
+        assert!(!PreparedTokenQuery::new("config missing").matches_search_text("config deploy"));
+        assert!(!PreparedTokenQuery::new("conifg").matches_search_text("con ifg"));
+        assert!(PreparedTokenQuery::new("   ").matches_search_text("anything"));
+    }
 
     #[test]
     fn free_form_matching_tolerates_common_typos() {
