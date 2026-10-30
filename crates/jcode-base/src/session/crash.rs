@@ -624,6 +624,43 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
         anyhow::bail!("No session found matching '{}'", name_or_id);
     }
 
+    // Generated session filenames already contain their memorable name. Read
+    // metadata only for matching candidates, rather than parsing every transcript
+    // just to discover that its name does not match. Keep updated_at (including
+    // journal metadata) authoritative when the same name has been reused.
+    let sessions_dir = storage::jcode_dir()?.join("sessions");
+    if sessions_dir.exists() {
+        let mut newest: Option<(String, DateTime<Utc>)> = None;
+        for entry in std::fs::read_dir(&sessions_dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if extract_session_name(stem).is_none_or(|name| name != name_or_id) {
+                continue;
+            }
+            if let Ok(session) = Session::load_startup_stub(stem).or_else(|_| Session::load(stem)) {
+                if newest
+                    .as_ref()
+                    .is_none_or(|(_, updated)| session.updated_at > *updated)
+                {
+                    newest = Some((stem.to_string(), session.updated_at));
+                }
+            }
+        }
+        if let Some((id, _)) = newest {
+            return Ok(id);
+        }
+    }
+
+    find_session_by_metadata(name_or_id)
+}
+
+// Compatibility fallback for titles and legacy short names not encoded in IDs.
+fn find_session_by_metadata(name_or_id: &str) -> Result<String> {
     // Otherwise, search for a session with matching short name or title.
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     if !sessions_dir.exists() {
@@ -867,6 +904,77 @@ mod batch_crash_tests {
                 new_us[4],
                 new_us[8],
                 first_baseline_us
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn short_resume_selects_latest_update_not_latest_filename() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        let older_id = "session_resumeprobe_1770000000000_aaaaaaaaaaaaaaaa";
+        let newer_id = "session_resumeprobe_1770000000001_bbbbbbbbbbbbbbbb";
+        let mut older = Session::create_with_id(older_id.to_string(), None, None);
+        let mut newer = Session::create_with_id(newer_id.to_string(), None, None);
+        for session in [&mut older, &mut newer] {
+            session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "Resume regression fixture".into(),
+                    cache_control: None,
+                }],
+            );
+            session.save()?;
+            assert!(session_path(&session.id)?.is_file());
+        }
+        // Saving the older-created session makes it the most recently updated.
+        older.custom_title = Some("Most recently used".into());
+        older.save()?;
+        assert_eq!(find_session_by_name_or_id("resumeprobe")?, older_id);
+        assert_eq!(find_session_by_metadata("resumeprobe")?, older_id);
+        assert_eq!(find_session_by_name_or_id("most recently used")?, older_id);
+        Ok(())
+    }
+
+    #[test]
+    fn short_resume_ignores_unrelated_snapshot_contents() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = HomeGuard::set(temp.path());
+        let id = "session_resumeprobe_1770000000000_aaaaaaaaaaaaaaaa";
+        let mut session = Session::create_with_id(id.to_string(), None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "Resume regression fixture".into(),
+                cache_control: None,
+            }],
+        );
+        session.save()?;
+        std::fs::write(
+            session_path("session_unrelated_1770000000000")?,
+            b"not json",
+        )?;
+        assert_eq!(find_session_by_name_or_id("resumeprobe")?, id);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "read-only local corpus benchmark, requires JCODE_RESUME_BENCH_NAME"]
+    fn benchmark_short_resume_resolution_real_corpus() -> anyhow::Result<()> {
+        let name = std::env::var("JCODE_RESUME_BENCH_NAME")?;
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            let baseline = find_session_by_metadata(&name)?;
+            let baseline_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            let optimized = find_session_by_name_or_id(&name)?;
+            let optimized_ms = start.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(baseline, optimized);
+            println!(
+                "short_resume baseline_ms={baseline_ms:.3} optimized_ms={optimized_ms:.3} cache=uncontrolled_no_eviction"
             );
         }
         Ok(())
