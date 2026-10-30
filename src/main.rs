@@ -14,14 +14,14 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(all(feature = "jemalloc", not(feature = "jemalloc-prof")))]
 // jemalloc reads this exact exported symbol name at startup.
 #[allow(non_upper_case_globals)]
-#[unsafe(no_mangle)]
+#[unsafe(export_name = "_rjem_malloc_conf")]
 pub static malloc_conf: Option<&'static [u8; 50]> =
     Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4\0");
 
 #[cfg(feature = "jemalloc-prof")]
 // jemalloc reads this exact exported symbol name at startup.
 #[allow(non_upper_case_globals)]
-#[unsafe(no_mangle)]
+#[unsafe(export_name = "_rjem_malloc_conf")]
 pub static malloc_conf: Option<&'static [u8; 78]> =
     Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4,prof:true,prof_active:false\0");
 
