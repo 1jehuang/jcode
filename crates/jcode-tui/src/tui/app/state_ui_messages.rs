@@ -740,11 +740,11 @@ impl App {
         );
         if remaining_messages > 0 {
             self.set_status_notice(format!(
-                "Loaded {} compacted messages · {} older hidden",
+                "Loaded {} older messages · {} still hidden",
                 visible_messages, remaining_messages
             ));
         } else if total_messages > 0 {
-            self.set_status_notice(format!("Loaded all {} compacted messages", total_messages));
+            self.set_status_notice(format!("Loaded all {} older messages", total_messages));
         }
     }
 
@@ -920,7 +920,7 @@ impl App {
         if self.is_remote {
             self.compacted_history_lazy.pending_request_visible = Some(next_visible);
             self.set_status_notice(format!(
-                "Loading older compacted history… {} of {}",
+                "Loading older history… {} of {}",
                 next_visible, self.compacted_history_lazy.total_messages
             ));
         } else {
@@ -1024,7 +1024,12 @@ fn parse_compacted_history_marker(message: &DisplayMessage) -> Option<CompactedH
     }
     let rest = message
         .content
-        .strip_prefix(COMPACTED_HISTORY_MARKER_PREFIX)?;
+        .strip_prefix(COMPACTED_HISTORY_MARKER_PREFIX)
+        .or_else(|| {
+            message
+                .content
+                .strip_prefix("Earlier conversation history - ")
+        })?;
 
     if let Some(rest) = rest.strip_prefix("showing all ") {
         let (total, _) = parse_leading_usize(rest)?;

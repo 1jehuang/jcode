@@ -18,6 +18,8 @@ use std::collections::HashMap;
 /// the transcript should retain recent continuity instead of replacing the
 /// entire compacted prefix with a marker.
 pub const DEFAULT_VISIBLE_COMPACTED_HISTORY_MESSAGES: usize = 64;
+/// Keep a recent active tail visible while older display-only history is paged.
+const UI_ACTIVE_HISTORY_TAIL_MESSAGES: usize = 256;
 
 /// Format persisted reasoning/thinking text into the dim+italic markdown used
 /// by the live streaming path. Each line is wrapped via the shared `reasoning_line_markup` so resumed
@@ -370,6 +372,31 @@ pub fn render_messages_and_images_with_compacted_history(
     Vec<RenderedImage>,
     Option<RenderedCompactedHistoryInfo>,
 ) {
+    render_history_window(session, compacted_history_visible, false)
+}
+
+/// Render a bounded UI history without changing the provider's active context.
+/// The existing scroll-back protocol requests progressively larger prefixes.
+pub fn render_ui_history_window(
+    session: &Session,
+    older_visible: usize,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+) {
+    render_history_window(session, older_visible, true)
+}
+
+fn render_history_window(
+    session: &Session,
+    compacted_history_visible: usize,
+    page_active: bool,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+) {
     let mut rendered: Vec<RenderedMessage> = Vec::new();
     let mut images: Vec<RenderedImage> = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
@@ -381,14 +408,36 @@ pub fn render_messages_and_images_with_compacted_history(
         .as_ref()
         .map(|state| state.compacted_count.min(session.messages.len()))
         .unwrap_or(0);
+    let window_prefix = if page_active {
+        compacted_count.max(
+            session
+                .messages
+                .len()
+                .saturating_sub(UI_ACTIVE_HISTORY_TAIL_MESSAGES),
+        )
+    } else {
+        compacted_count
+    };
     let (render_start_idx, compacted_info) = compacted_history_render_window(
         &session.messages,
-        compacted_count,
+        window_prefix,
         compacted_history_visible,
     );
-    let compacted_info = (compacted_count > 0).then_some(compacted_info);
+    let compacted_info = (window_prefix > 0
+        && (compacted_count > 0 || compacted_info.remaining_messages > 0))
+        .then_some(compacted_info);
 
-    if compacted_count > 0 {
+    if let Some(info) = compacted_info.as_ref() {
+        let marker = if window_prefix > compacted_count {
+            "Earlier conversation history - "
+        } else {
+            "Earlier conversation compacted - "
+        };
+        let kind = if window_prefix > compacted_count {
+            "historical"
+        } else {
+            "compacted"
+        };
         let visible_compacted = compacted_info
             .as_ref()
             .map(|info| info.visible_messages)
@@ -403,29 +452,27 @@ pub fn render_messages_and_images_with_compacted_history(
             .unwrap_or(0);
         let mut content = if remaining_compacted == 0 {
             format!(
-                "Earlier conversation compacted - showing all {} compacted historical messages. Redraw may be slower while this view is open.",
-                total_compacted
+                "{}showing all {} {} historical messages. Redraw may be slower while this view is open.",
+                marker, total_compacted, kind
             )
         } else if visible_compacted == 0 {
             format!(
-                "Earlier conversation compacted - {} historical messages hidden from the UI. Scroll to the top to load older history.",
-                remaining_compacted
+                "{}{} historical messages hidden from the UI. Scroll to the top to load older history.",
+                marker, remaining_compacted
             )
         } else {
             format!(
-                "Earlier conversation compacted - {} older historical messages hidden. Showing {} of {} compacted messages. Scroll to the top to load more.",
-                remaining_compacted, visible_compacted, total_compacted
+                "{}{} older historical messages hidden. Showing {} of {} {} messages. Scroll to the top to load more.",
+                marker, remaining_compacted, visible_compacted, total_compacted, kind
             )
         };
         // History can hydrate a remote client with only a metadata stub. Carry
         // the authoritative prompt offset alongside the existing lazy-window
         // marker rather than asking that client to count its stale local copy.
-        if let Some(info) = &compacted_info {
-            content.push_str(&format!(
-                " Hidden user prompts: {}.",
-                info.hidden_user_prompts
-            ));
-        }
+        content.push_str(&format!(
+            " Hidden user prompts: {}.",
+            info.hidden_user_prompts
+        ));
         rendered.push(RenderedMessage {
             response_stats: None,
             tool_duration_ms: None,

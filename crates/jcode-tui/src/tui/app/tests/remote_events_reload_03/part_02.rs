@@ -248,6 +248,29 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
 }
 
 #[test]
+fn test_active_history_marker_scroll_queues_lazy_load() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.replace_display_messages(vec![DisplayMessage::system(
+        "Earlier conversation history - 128 older historical messages hidden. Showing 64 of 192 historical messages. Scroll to the top to load more. Hidden user prompts: 12.",
+    )]);
+    let state = app.compacted_history_lazy_state();
+    assert_eq!(
+        (
+            state.total_messages,
+            state.visible_messages,
+            state.remaining_messages,
+            state.hidden_user_prompts
+        ),
+        (192, 64, 128, 12)
+    );
+    app.auto_scroll_paused = true;
+    app.scroll_offset = 0;
+    app.scroll_up(1);
+    assert_eq!(app.take_pending_compacted_history_load(), Some(128));
+}
+
+#[test]
 fn test_compacted_history_marker_scroll_queues_lazy_load() {
     let mut app = create_test_app();
     app.is_remote = true;
@@ -499,10 +522,7 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     assert_eq!(app.display_messages().len(), before + 1);
     assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
     let badge = app.info_widget_data().service_tier.unwrap();
-    assert_eq!(
-        badge,
-        "default ← Ultrafast"
-    );
+    assert_eq!(badge, "default ← Ultrafast");
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
     assert!(
@@ -578,33 +598,42 @@ fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
     app.is_remote = true;
     app.remote_service_tier = Some("fast".into());
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Fast ?"));
+    assert_eq!(
+        app.info_widget_data().service_tier.as_deref(),
+        Some("Fast ?")
+    );
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
-            requested: Some("priority".into()), tier: "default".into(),
-        }, &mut remote,
+            requested: Some("priority".into()),
+            tier: "default".into(),
+        },
+        &mut remote,
     );
     let badge = app.info_widget_data().service_tier.unwrap();
-    assert_eq!(
-        badge,
-        "default ← Fast"
-    );
+    assert_eq!(badge, "default ← Fast");
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
-            requested: Some("priority".into()), tier: "priority".into(),
-        }, &mut remote,
+            requested: Some("priority".into()),
+            tier: "priority".into(),
+        },
+        &mut remote,
     );
     assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("fast"));
     app.remote_service_tier = None;
     app.remote_reported_service_tier = None;
     app.remote_service_tier_confirmation_pending = true;
-    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Standard ?"));
+    assert_eq!(
+        app.info_widget_data().service_tier.as_deref(),
+        Some("Standard ?")
+    );
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
-            requested: None, tier: "default".into(),
-        }, &mut remote,
+            requested: None,
+            tier: "default".into(),
+        },
+        &mut remote,
     );
     assert_eq!(app.info_widget_data().service_tier, None);
 }
@@ -656,7 +685,8 @@ fn check_history_panel_snapshot(authoritative: bool, session_changed: bool) {
         provider_model,
         available_models,
         ..
-    } = &mut event {
+    } = &mut event
+    {
         // False still counts as a present identity field on full History.
         *is_canary = authoritative.then_some(false);
         *provider_name = Some("openai".to_string());
@@ -800,7 +830,10 @@ fn test_delta_history_without_prefix_requests_full_history() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.handle_server_event(delta_history_event("ses_delta", vec![], Some(5)), &mut remote);
+    app.handle_server_event(
+        delta_history_event("ses_delta", vec![], Some(5)),
+        &mut remote,
+    );
     assert!(app.idle_hibernation.history_reload_needed);
     assert!(!remote.has_loaded_history());
 }

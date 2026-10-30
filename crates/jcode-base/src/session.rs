@@ -49,7 +49,7 @@ pub use render::{
     RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
     RenderedMessage, has_rendered_images, is_attached_image_label_text, render_images,
     render_messages, render_messages_and_images, render_messages_and_images_with_compacted_history,
-    summarize_tool_calls,
+    render_ui_history_window, summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) mod resume_cache;

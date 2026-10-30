@@ -1399,8 +1399,8 @@ impl App {
         // Narrow scope so render intermediates (rendered messages, display
         // message buffers) drop before we strip and retain the session.
         {
-            let (rendered_messages, rendered_images) =
-                crate::session::render_messages_and_images(&session);
+            let (rendered_messages, rendered_images, _) =
+                crate::session::render_ui_history_window(&session, 64);
             let display_messages =
                 jcode_tui_messages::display_messages_from_rendered_messages(rendered_messages);
             self.replace_display_messages(display_messages);
@@ -1554,8 +1554,8 @@ impl App {
                         let Ok(session) = Session::load_for_remote_startup(&id) else {
                             return;
                         };
-                        let (rendered, images) =
-                            crate::session::render_messages_and_images(&session);
+                        let (rendered, images, _) =
+                            crate::session::render_ui_history_window(&session, 64);
                         drop(session);
                         // Same shape as server History messages, so the
                         // server can verify this prefix and send only the

@@ -1351,7 +1351,7 @@ impl Agent {
     pub fn get_history_and_rendered_images(
         &self,
     ) -> (Vec<HistoryMessage>, Vec<crate::session::RenderedImage>) {
-        let (messages, images) = crate::session::render_messages_and_images(&self.session);
+        let (messages, images, _) = crate::session::render_ui_history_window(&self.session, 64);
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
@@ -1378,10 +1378,7 @@ impl Agent {
         Option<crate::session::RenderedCompactedHistoryInfo>,
     ) {
         let (messages, images, compacted_info) =
-            crate::session::render_messages_and_images_with_compacted_history(
-                &self.session,
-                compacted_history_visible,
-            );
+            crate::session::render_ui_history_window(&self.session, compacted_history_visible);
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {

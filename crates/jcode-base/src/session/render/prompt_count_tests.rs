@@ -35,6 +35,38 @@ fn compacted_tool_session(turns: usize) -> Session {
 }
 
 #[test]
+fn active_ui_history_pages_without_changing_full_history_or_prompt_numbers() {
+    let mut session = compacted_tool_session(60);
+    session.compaction = None;
+    let full = render_messages(&session);
+    let original_count = session.messages.len();
+    let (initial, _, info) = render_ui_history_window(&session, 64);
+    let info = info.expect("long active history should have a window");
+    assert!(info.remaining_messages > 0);
+    assert!(initial.len() < full.len());
+    assert!(
+        initial[0]
+            .content
+            .starts_with("Earlier conversation history - ")
+    );
+    assert_eq!(
+        info.hidden_user_prompts + initial.iter().filter(|m| m.role == "user").count(),
+        61
+    );
+    let (expanded, _, _) = render_ui_history_window(&session, usize::MAX);
+    assert_eq!(expanded.len(), full.len());
+    assert_eq!(
+        expanded.first().unwrap().content,
+        full.first().unwrap().content
+    );
+    assert_eq!(
+        expanded.last().unwrap().content,
+        full.last().unwrap().content
+    );
+    assert_eq!(session.messages.len(), original_count);
+}
+
+#[test]
 fn compacted_tool_results_are_not_hidden_user_prompts_or_turn_boundaries() {
     let session = compacted_tool_session(10);
     for window in [0, 1, 64, usize::MAX] {

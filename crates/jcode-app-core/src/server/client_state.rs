@@ -425,10 +425,7 @@ pub(super) async fn handle_get_compacted_history(
             let session = crate::session::Session::load_for_remote_startup(session_id)
                 .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
             let (rendered_messages, images, info) =
-                crate::session::render_messages_and_images_with_compacted_history(
-                    &session,
-                    visible_messages,
-                );
+                crate::session::render_ui_history_window(&session, visible_messages);
             (
                 rendered_messages
                     .into_iter()
@@ -718,7 +715,7 @@ async fn send_history_from_persisted_session(
         Err(error) => return Err(error),
     };
     let token_usage_totals = session.token_usage_totals();
-    let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
+    let (rendered_messages, images, _) = crate::session::render_ui_history_window(&session, 64);
     // Extract the small metadata fields we need, then drop the full Session
     // (including its message transcript) before building and serializing the
     // large History event, so we do not hold Session + rendered payload +
