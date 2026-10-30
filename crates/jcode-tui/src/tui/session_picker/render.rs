@@ -195,9 +195,14 @@ impl SessionPicker {
         let same_dir_clr: Color = rgb(120, 200, 140);
         let highlight_tokens = self.active_highlight_tokens();
 
+        let recently_closed = self.session_recently_closed(session);
         let name_style = if is_selected {
             Style::default()
                 .fg(rgb(140, 220, 160))
+                .add_modifier(Modifier::BOLD)
+        } else if recently_closed {
+            Style::default()
+                .fg(rgb(255, 193, 7))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
@@ -221,7 +226,11 @@ impl SessionPicker {
         // working on a response from ones ready for input, which the stored
         // `SessionStatus::Active` alone cannot.
         let is_current = self.session_is_current(session);
-        let live_badge = if self.session_is_live(session) {
+        let live_badge = if recently_closed {
+            // A detached agent can still have a PID/streaming marker. The
+            // actual last-client EOF is more useful for recovering its window.
+            Some(("↩", rgb(255, 193, 7), "just closed".to_string()))
+        } else if self.session_is_live(session) {
             if session.source == SessionSource::ClaudeCode {
                 Some(("●", rgb(120, 210, 255), "live Claude".to_string()))
             } else if self.session_is_streaming(session) {

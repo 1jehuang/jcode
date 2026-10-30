@@ -46,6 +46,7 @@ mod transcript_search;
 
 #[cfg(test)]
 use loading::collect_recent_session_stems;
+pub(crate) use loading::send_session_list_updates;
 use loading::{
     build_messages_preview, build_messages_preview_with_offset, build_search_index,
     crashed_sessions_from_all_sessions,
@@ -62,7 +63,7 @@ const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
 type GroupedSessionList = (Vec<ServerGroup>, Vec<SessionInfo>);
 
-enum SessionListUpdate {
+pub(crate) enum SessionListUpdate {
     Cached(GroupedSessionList),
     Fresh(Result<GroupedSessionList>),
 }
@@ -323,6 +324,8 @@ pub struct SessionPicker {
     /// membership. Refreshed on load/reseed and periodically while the Active
     /// view is on screen.
     live_presence: std::collections::HashMap<String, crate::session::SessionPresence>,
+    /// Actual final-client disconnect timestamps, independent of message time.
+    recent_window_closures: HashMap<String, chrono::DateTime<chrono::Utc>>,
     /// When `live_presence` was last snapshotted (throttles periodic refresh).
     live_presence_refreshed_at: Option<std::time::Instant>,
     /// ID of the session the picker was opened from, labeled "current" in the
@@ -382,6 +385,7 @@ impl SessionPicker {
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
             live_presence: std::collections::HashMap::new(),
+            recent_window_closures: HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
@@ -432,6 +436,7 @@ impl SessionPicker {
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
             live_presence: std::collections::HashMap::new(),
+            recent_window_closures: HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
@@ -514,6 +519,7 @@ impl SessionPicker {
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
             live_presence: std::collections::HashMap::new(),
+            recent_window_closures: HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
@@ -1456,12 +1462,8 @@ impl SessionPicker {
             return;
         }
 
-        let inner = preview_chrome::draw(
-            frame,
-            inner,
-            &session,
-            self.preview_extras.get(&session.id),
-        );
+        let inner =
+            preview_chrome::draw(frame, inner, &session, self.preview_extras.get(&session.id));
 
         // Build (or reuse) the fully-wrapped preview content. The expensive
         // markdown render + wrap only runs on a cache miss; scrolling, focus
@@ -2543,20 +2545,7 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
     std::thread::Builder::new()
         .name("jcode-session-list-loader".to_string())
         .spawn(move || {
-            // Even the cache can be tens of MB on long-lived installations.
-            // Read it off the UI thread, then refresh without resetting the
-            // user's selection, search, or explicitly chosen filter.
-            if let Some(cached) = load_cached_sessions_grouped()
-                && sender.send(SessionListUpdate::Cached(cached)).is_err()
-            {
-                return;
-            }
-            if sender
-                .send(SessionListUpdate::Fresh(load_sessions_grouped()))
-                .is_err()
-            {
-                crate::logging::debug("Session picker closed before session scan finished");
-            }
+            send_session_list_updates(sender);
         })?;
 
     let mut picker = SessionPicker::loading();

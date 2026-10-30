@@ -124,6 +124,88 @@ fn test_current_session_row_is_labeled() {
 }
 
 #[test]
+fn test_recent_window_close_boosts_old_transcript_above_newer_messages_and_saved_rows() {
+    let mut old = make_session("closure_old", "old", false, SessionStatus::Active);
+    old.last_message_time = Utc::now() - ChronoDuration::days(10);
+    old.saved = true;
+    let newer = make_session("closure_new", "newer", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![newer, old]);
+    picker
+        .recent_window_closures
+        .insert("closure_old".into(), Utc::now());
+    picker
+        .live_presence
+        .insert("closure_old".into(), live_presence("closure_old", true));
+    picker.rebuild_items();
+    let ids: Vec<_> = picker
+        .visible_session_iter()
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(ids, ["closure_old", "closure_new"]);
+    let closed = picker.visible_session_iter().next().unwrap();
+    let text = picker
+        .render_session_item_lines(closed, false)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("just closed"), "{text}");
+    assert!(!picker.session_recently_closed(picker.visible_session_iter().nth(1).unwrap()));
+}
+
+#[test]
+fn test_recent_window_close_promotes_orphan_above_server_group_without_duplicates() {
+    let grouped = make_session("closure_group", "group", false, SessionStatus::Closed);
+    let old = make_session(
+        "closure_orphan",
+        "orphan",
+        false,
+        SessionStatus::Crashed { message: None },
+    );
+    let mut picker = SessionPicker::new_grouped(
+        vec![ServerGroup {
+            name: "server".into(),
+            icon: "server".into(),
+            version: "v1".into(),
+            git_hash: String::new(),
+            is_running: true,
+            sessions: vec![grouped],
+        }],
+        vec![old],
+    );
+    picker
+        .recent_window_closures
+        .insert("closure_orphan".into(), Utc::now());
+    picker.rebuild_items();
+    let ids: Vec<_> = picker
+        .visible_session_iter()
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(ids, ["closure_orphan", "closure_group"]);
+}
+
+#[test]
+fn test_recent_window_close_expires_and_rejects_future_timestamps_and_current_session() {
+    let session = make_session("closure_expiry", "expiry", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![session.clone()]);
+    for time in [
+        Utc::now() - ChronoDuration::seconds(31),
+        Utc::now() + ChronoDuration::seconds(10),
+    ] {
+        picker
+            .recent_window_closures
+            .insert(session.id.clone(), time);
+        assert!(!picker.session_recently_closed(&session));
+    }
+    picker
+        .recent_window_closures
+        .insert(session.id.clone(), Utc::now());
+    assert!(picker.session_recently_closed(&session));
+    picker.set_current_session_id(Some(session.id.clone()));
+    assert!(!picker.session_recently_closed(&session));
+}
+
+#[test]
 fn test_maybe_refresh_live_presence_throttles_and_detects_changes() {
     let session = make_session("session_live", "live", false, SessionStatus::Active);
     let mut picker = SessionPicker::new(vec![session]);

@@ -3093,6 +3093,13 @@ pub(super) async fn handle_client(
 
     drop(_sdk_connection_guard);
 
+    super::client_disconnect_cleanup::record_transport_closed(
+        &client_session_id,
+        &client_connection_id,
+        &client_connections,
+    )
+    .await;
+
     // Cleanup serializes the successor decision against live attachment claims.
     // A successor must inherit the active owner, including its completion receiver,
     // rather than just an Agent whose processing task was already aborted.

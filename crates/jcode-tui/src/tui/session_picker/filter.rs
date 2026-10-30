@@ -126,6 +126,15 @@ impl SessionPicker {
                 })
             });
         }
+        if filter_mode != SessionFilterMode::Active && self.search_query.trim().is_empty() {
+            filtered.sort_by_key(|session_ref| {
+                std::cmp::Reverse(self.session_by_ref(*session_ref).and_then(|session| {
+                    self.session_recently_closed(session)
+                        .then(|| self.recent_window_closures.get(&session.id).copied())
+                        .flatten()
+                }))
+            });
+        }
         if filter_mode == SessionFilterMode::Active {
             // Triage order for the active sessions manager: sessions that are
             // ready for input (done streaming) float above ones still working,
@@ -256,10 +265,25 @@ impl SessionPicker {
         let mut saved_sessions: Vec<SessionRef> = Vec::new();
         let mut saved_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+        // Put genuinely closed windows ahead of saved and server sections.
+        // They still obey search, project, and debug visibility filters. Use
+        // the same exclusion set as saved rows to avoid duplicate entries.
+        if self.search_query.trim().is_empty() {
+            for session_ref in &filtered_refs {
+                if let Some(session) = self.session_by_ref(*session_ref)
+                    && self.session_recently_closed(session)
+                {
+                    saved_ids.insert(session.id.clone());
+                    self.push_visible_session(*session_ref);
+                }
+            }
+        }
+
         let placement = saved_placement::SavedPlacement::load();
         let now = chrono::Utc::now();
         for session_ref in &filtered_refs {
             if let Some(session) = self.session_by_ref(*session_ref)
+                && !saved_ids.contains(&session.id)
                 && placement.boosted(session, now)
             {
                 saved_ids.insert(session.id.clone());

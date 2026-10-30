@@ -125,6 +125,10 @@ pub struct DisplayConfig {
     /// Resume is intentionally global by default; `s` cycles filters either way.
     #[serde(default)]
     pub resume_project_scope: bool,
+    /// Highlight and prioritize sessions whose last client transport closed
+    /// within this many seconds in Resume (default: 30). Zero disables it.
+    /// This uses socket-disconnect events, never transcript/message activity.
+    pub resume_recent_close_seconds: u64,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
 }
@@ -166,6 +170,7 @@ impl Default for DisplayConfig {
             active_sessions_manager: false,
             external_sessions: true,
             resume_project_scope: false,
+            resume_recent_close_seconds: 30,
             usage_display: "left".to_string(),
         }
     }
@@ -221,6 +226,19 @@ impl DisplayConfig {
 mod tests {
     use super::DisplayConfig;
     use crate::ReasoningDisplayMode;
+
+    #[test]
+    fn recent_close_window_defaults_to_thirty_and_is_configurable() {
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.resume_recent_close_seconds, 30);
+        for seconds in [0, 5, 120] {
+            let config: DisplayConfig = serde_json::from_value(serde_json::json!({
+                "resume_recent_close_seconds": seconds
+            }))
+            .unwrap();
+            assert_eq!(config.resume_recent_close_seconds, seconds);
+        }
+    }
 
     #[test]
     fn thinking_is_shown_in_full_by_default() {

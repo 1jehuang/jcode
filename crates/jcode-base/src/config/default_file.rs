@@ -255,6 +255,13 @@ prompt_entry_animation = true
 # (default: false). Resume is global by default. Press `s` to cycle filters.
 # resume_project_scope = false
 
+# Highlight just-closed sessions and put them first in Resume for this many
+# seconds (default: 30). Set 0 to disable. Uses the final client socket closing,
+# not the last message time. Reattaching clears it. Explicit detach/switch and
+# server reload are excluded. Applies to local native sessions, including a
+# disconnected SDK client, since the server cannot observe OS windows directly.
+# resume_recent_close_seconds = 30
+
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.

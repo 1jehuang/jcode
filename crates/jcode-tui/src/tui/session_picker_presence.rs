@@ -22,6 +22,10 @@ impl SessionPicker {
                 );
             }
         }
+        self.recent_window_closures =
+            crate::session::recent_window_closures(std::time::Duration::from_secs(
+                crate::config::config().display.resume_recent_close_seconds,
+            ));
         self.live_presence_refreshed_at = Some(std::time::Instant::now());
     }
 
@@ -41,12 +45,32 @@ impl SessionPicker {
             return false;
         }
         let before = std::mem::take(&mut self.live_presence);
+        let closures_before = std::mem::take(&mut self.recent_window_closures);
         self.refresh_live_presence();
-        let changed = before != self.live_presence;
-        if changed && self.filter_mode == SessionFilterMode::Active {
+        let closures_changed = closures_before != self.recent_window_closures;
+        let changed = before != self.live_presence || closures_changed;
+        if closures_changed || (changed && self.filter_mode == SessionFilterMode::Active) {
             self.rebuild_items();
         }
         changed
+    }
+
+    /// A recent final-client EOF, not recent messages or a daemon-owned Agent.
+    pub(in crate::tui) fn session_recently_closed(&self, session: &SessionInfo) -> bool {
+        if self.session_is_current(session) {
+            return false;
+        }
+        let seconds = crate::config::config().display.resume_recent_close_seconds;
+        seconds > 0
+            && self
+                .recent_window_closures
+                .get(&session.id)
+                .is_some_and(|at| {
+                    chrono::Utc::now()
+                        .signed_duration_since(*at)
+                        .to_std()
+                        .is_ok_and(|age| age <= std::time::Duration::from_secs(seconds))
+                })
     }
 
     /// Whether the session has a live process right now.

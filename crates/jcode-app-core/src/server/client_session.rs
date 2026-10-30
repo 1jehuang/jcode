@@ -292,6 +292,7 @@ pub(super) async fn handle_clear_session(
     {
         let mut connections = client_connections.write().await;
         if let Some(info) = connections.get_mut(client_connection_id) {
+            crate::session::clear_window_closed(&new_id);
             info.session_id = new_id.clone();
             info.last_seen = Instant::now();
         }
@@ -1387,6 +1388,7 @@ async fn claim_live_target_agent(
     }
 
     let info = connections.get_mut(client_connection_id)?;
+    crate::session::clear_window_closed(session_id);
     info.session_id = session_id.to_string();
     info.client_instance_id = client_instance_id.map(str::to_string);
     info.last_seen = Instant::now();
@@ -1883,6 +1885,7 @@ pub(super) async fn handle_resume_session(
             {
                 let mut connections = client_connections.write().await;
                 if let Some(info) = connections.get_mut(client_connection_id) {
+                    crate::session::clear_window_closed(&session_id);
                     info.session_id = session_id.clone();
                     info.client_instance_id = incoming_client_instance_id.clone();
                     info.last_seen = Instant::now();

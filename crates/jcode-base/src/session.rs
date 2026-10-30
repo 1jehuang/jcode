@@ -8,11 +8,13 @@ pub use crate::storage::{
 use crate::storage::{active_pids_dir, register_active_pid, unregister_active_pid};
 
 mod streaming;
+mod window_closures;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 pub use streaming::StreamingGuard;
+pub use window_closures::{clear_window_closed, recent_window_closures, record_window_closed};
 
 mod agent_models;
 mod crash;
