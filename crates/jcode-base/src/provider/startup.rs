@@ -338,6 +338,7 @@ impl MultiProvider {
         }
 
         result.spawn_anthropic_catalog_refresh_if_needed();
+        crate::auth::oauth::prefetch_missing_claude_subscription_metadata();
         let runtimes_ms = runtimes_start.elapsed().as_millis();
         let route_start = std::time::Instant::now();
         result.spawn_openai_catalog_refresh_if_needed();

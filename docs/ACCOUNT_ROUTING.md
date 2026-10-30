@@ -28,6 +28,17 @@ Manual priority overrides take precedence over detected subscription metadata.
 Resetting an account's priority to automatic removes only its override, not its
 pool membership. Setting a priority never enrolls an account in automatic routing.
 
+In `/account`, select a credential and press `[` for higher priority, `]` for
+lower priority, or `Ctrl+R` to restore automatic plan-based priority. The picker
+shows the plan when known and labels unknown plans explicitly. Priority badges
+and normalized brightness make lower-priority identities subtly dimmer while
+status dots and usage-limit colors keep their existing meaning.
+
+Missing Claude plan metadata is backfilled asynchronously through the normal
+profile endpoint at startup. At most two requests run concurrently. Each account
+is attempted no more than once per fifteen minutes per process, including failed
+attempts, and no network request blocks startup routing or rendering.
+
 Preferences are stored in `~/.jcode/account-pool.json`. Its optional `priorities`
 object maps account keys such as `openai:openai-fox` or `openai-api` to zero-based
 priority values. Older files without this object continue to load.
