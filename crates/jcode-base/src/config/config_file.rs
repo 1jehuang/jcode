@@ -17,6 +17,7 @@ impl Config {
     /// Load config from file, with environment variable overrides
     pub fn load() -> Self {
         let mut config = Self::load_from_file().unwrap_or_default();
+        Self::apply_global_agent_defaults(&mut config);
         config.apply_env_overrides();
         config
     }
@@ -27,6 +28,7 @@ impl Config {
     /// to distinguish a malformed config from an absent config.
     pub fn load_strict() -> anyhow::Result<Self> {
         let mut config = Self::load_from_file_strict()?.unwrap_or_default();
+        Self::apply_global_agent_defaults(&mut config);
         config.apply_env_overrides();
         Ok(config)
     }
@@ -102,7 +104,7 @@ impl Config {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
+        let path = Self::global_path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
         let parent = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("No config directory"))?;
@@ -130,7 +132,7 @@ impl Config {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-        let mut cfg = Self::load_for_update()?;
+        let mut cfg = Self::load_from_path(&path)?.unwrap_or_default();
         #[cfg(test)]
         role_transaction_tests::loaded();
         match target {
@@ -155,6 +157,44 @@ impl Config {
         replacement.persist(&path)?;
         Self::invalidate_cache();
         Ok(())
+    }
+
+    /// The config file that owns global agent defaults.
+    ///
+    /// Private SDK instances keep an isolated config for ordinary settings but
+    /// point agent defaults at the user's home so `/agents global` is shared by
+    /// every instance. Normal processes have no override and use their local
+    /// config as before.
+    pub(crate) fn global_path() -> Option<PathBuf> {
+        std::env::var_os("JCODE_GLOBAL_HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("config.toml"))
+            .or_else(Self::path)
+    }
+
+    fn apply_global_agent_defaults(config: &mut Self) {
+        let Some(global_home) = std::env::var_os("JCODE_GLOBAL_HOME") else {
+            return;
+        };
+        let path = PathBuf::from(global_home).join("config.toml");
+        let Ok(Some(global)) = Self::load_from_path(&path) else {
+            return;
+        };
+        config.agents.swarm_model = global.agents.swarm_model;
+        config.agents.memory_model = global.agents.memory_model;
+        config.autoreview.model = global.autoreview.model;
+        config.autojudge.model = global.autojudge.model;
+        config.ambient.model = global.ambient.model;
+    }
+
+    fn load_from_path(path: &std::path::Path) -> anyhow::Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(path)?;
+        let mut config = toml::from_str::<Self>(&content)?;
+        config.display.apply_legacy_compat();
+        Ok(Some(config))
     }
 
     /// Persist a named OpenAI-compatible model's default reasoning effort.
@@ -968,5 +1008,36 @@ reasoning_effort = "max"
 
         assert!(error.to_string().contains("Failed to parse config file"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn global_agent_defaults_override_private_instance_config() {
+        let _lock = crate::storage::lock_test_env();
+        let instance = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        std::fs::write(
+            instance.path().join("config.toml"),
+            "[agents]\nswarm_model = \"private\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            global.path().join("config.toml"),
+            "[agents]\nswarm_model = \"shared\"\n",
+        )
+        .unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", instance.path());
+        let _global_home = EnvGuard::set("JCODE_GLOBAL_HOME", global.path());
+
+        assert_eq!(Config::load().agents.swarm_model.as_deref(), Some("shared"));
+        Config::set_agent_model_default("swarm", Some("updated")).unwrap();
+        let saved = std::fs::read_to_string(global.path().join("config.toml")).unwrap();
+        assert_eq!(
+            toml::from_str::<Config>(&saved)
+                .unwrap()
+                .agents
+                .swarm_model
+                .as_deref(),
+            Some("updated")
+        );
     }
 }

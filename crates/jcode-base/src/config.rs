@@ -269,6 +269,9 @@ struct ConfigCacheFingerprint {
     path: Option<PathBuf>,
     modified: Option<SystemTime>,
     len: Option<u64>,
+    global_path: Option<PathBuf>,
+    global_modified: Option<SystemTime>,
+    global_len: Option<u64>,
     env: Vec<(String, String)>,
 }
 
@@ -276,12 +279,21 @@ impl ConfigCacheFingerprint {
     fn current() -> Self {
         let path = Config::path();
         let metadata = path.as_ref().and_then(|path| std::fs::metadata(path).ok());
+        let global_path = Config::global_path();
+        let global_metadata = global_path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok());
         Self {
             path,
             modified: metadata
                 .as_ref()
                 .and_then(|metadata| metadata.modified().ok()),
             len: metadata.as_ref().map(std::fs::Metadata::len),
+            global_path,
+            global_modified: global_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok()),
+            global_len: global_metadata.as_ref().map(std::fs::Metadata::len),
             env: config_env_fingerprint(),
         }
     }
@@ -413,6 +425,25 @@ fn describe_config_reload(
     }
     if previous.len != next.len {
         parts.push(format!("len={:?}->{:?}", previous.len, next.len));
+    }
+    if previous.global_path != next.global_path {
+        parts.push(format!(
+            "global_path={:?}->{:?}",
+            previous
+                .global_path
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            next.global_path.as_ref().map(|p| p.display().to_string())
+        ));
+    }
+    if previous.global_modified != next.global_modified {
+        parts.push("global_modified_changed=true".to_string());
+    }
+    if previous.global_len != next.global_len {
+        parts.push(format!(
+            "global_len={:?}->{:?}",
+            previous.global_len, next.global_len
+        ));
     }
     let env_changes = describe_env_changes(&previous.env, &next.env);
     if !env_changes.is_empty() {
