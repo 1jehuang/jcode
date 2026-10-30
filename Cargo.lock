@@ -3300,6 +3300,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "toml",
  "url",
  "urlencoding",
  "uuid",
