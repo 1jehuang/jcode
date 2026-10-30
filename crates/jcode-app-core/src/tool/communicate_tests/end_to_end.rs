@@ -240,6 +240,96 @@ async fn communicate_await_members_background_returns_immediately_and_notifies()
 }
 
 #[tokio::test]
+async fn communicate_await_members_does_not_complete_when_worker_disconnects() {
+    let _env_lock = crate::storage::lock_test_env();
+    let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+    let repo_dir = std::env::current_dir().expect("repo cwd");
+    let socket_path = runtime_dir.path().join("jcode.sock");
+    let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
+    let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
+    let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "communicate-e2e-disconnect-swarm");
+
+    let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
+        delay: Duration::from_secs(3),
+    });
+    let server = Arc::new(Server::new(provider));
+    let mut server_task = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move { server.run().await })
+    };
+    wait_for_server_socket(&socket_path, &mut server_task)
+        .await
+        .expect("server socket should be ready");
+
+    let mut watcher = RawClient::connect(&socket_path)
+        .await
+        .expect("watcher should connect");
+    let mut peer = RawClient::connect(&socket_path)
+        .await
+        .expect("peer should connect");
+    watcher
+        .subscribe(&repo_dir)
+        .await
+        .expect("watcher subscribe");
+    peer.subscribe(&repo_dir).await.expect("peer subscribe");
+    let watcher_session = watcher.session_id().await.expect("watcher session id");
+    let peer_session = peer.session_id().await.expect("peer session id");
+
+    peer.send_message("This reply should not finish before disconnect.")
+        .await
+        .expect("peer message request should send");
+    wait_for_member_status(&mut watcher, &watcher_session, &peer_session, "running")
+        .await
+        .expect("peer should enter running state");
+
+    let request_id = watcher.next_id;
+    watcher.next_id += 1;
+    watcher
+        .send_request(Request::CommAwaitMembers {
+            id: request_id,
+            session_id: watcher_session,
+            target_status: vec!["completed".to_string(), "stopped".to_string()],
+            session_ids: vec![peer_session],
+            mode: None,
+            timeout_secs: Some(1),
+            background: false,
+            notify: false,
+            wake: false,
+        })
+        .await
+        .expect("await request should send");
+    drop(peer);
+
+    let event = watcher
+        .read_until(Duration::from_secs(3), |event| {
+            matches!(event, ServerEvent::CommAwaitMembersResponse { id, .. } if *id == request_id)
+        })
+        .await
+        .expect("await should resolve at its timeout");
+    let ServerEvent::CommAwaitMembersResponse {
+        completed,
+        members,
+        summary,
+        ..
+    } = event
+    else {
+        panic!("expected CommAwaitMembersResponse, got {event:?}");
+    };
+    assert!(!completed, "a disconnected worker must not count as done");
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].status, "unknown");
+    assert!(!members[0].done);
+    assert!(
+        summary.contains("unknown"),
+        "unexpected timeout summary: {summary}"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn communicate_run_plan_with_empty_plan_returns_inline_even_in_background_mode() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
